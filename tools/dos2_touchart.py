@@ -25,7 +25,7 @@ ASSETS = {
     'btn_character': (210, 210), 'ico_inventory': (118, 108), 'ico_charsheet': (118, 108), 'ico_skills': (118, 108), 'ico_craft': (118, 108),
     'ico_journal': (118, 108), 'icon_map': (118, 108),
     'pan_close': (100, 100), 'pan_helmet': (128, 128), 'pan_list': (128, 128), 'pan_multi': (128, 128), 'pan_plus': (68, 68), 'pan_minus': (68, 68),
-    'pan_balance': (130, 170),
+    'pan_balance': (130, 170), 'pan_info': (80, 56),
 }
 ARROW_RGB = (150, 141, 120)   # the hot bar arrows' flat khaki (the iPad's own arrow is a vector of this colour)
 

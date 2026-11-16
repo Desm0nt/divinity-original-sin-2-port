@@ -31,7 +31,7 @@ DefineBitsLossless2 + bitmap-filled DefineShape, polygon shapes, a `$Title` text
 | tab prev / next | panels `dmPanPrev/Next_mc` | characterSheet_t `selectorBtnLeft/Right` 32x39 | **sw** | Switch characterSheet.swf `selectorBtnLeft/Right` |
 | helmet | equipmentPanel_d | equipmentPanel_t `SwitchHelmetVisibilityButton` 71x71 | png | `pan_helmet` |
 | item menu | panels `dmPanList_mc` | partyInventory_t `sortButton` 64x64 | png | `pan_list` (an actions-list icon: the button opens the item menu) |
-| info | panels `dmPanInfo_mc` | uiCraft_t `searchBtn` | **sw** | Switch uiCraft.swf `searchBtn` |
+| info | panels `dmPanInfo_mc` | uiCraft_t `searchBtn` | png | `pan_info` (5b; 5a took Switch uiCraft.swf `searchBtn`: same bitmaps, not the same drawing, see below) |
 | multi | panels `dmPanMulti_mc` | skills_t `filterAllBtn` 67x67 | png | `pan_multi` (stacked cards + check) |
 | plus / minus | statsPanel_d | characterSheet_t `IncreaseAttriburePlusButton` / uiCraft_t `minusBtn` 34x34 | png | `pan_plus`, `pan_minus` |
 | ok | panels `dmPanOk_mc` | partyInventory_t `okBtn` 78x30 | **sw** | Switch partyInventory.swf `okBtn` |
@@ -45,17 +45,17 @@ Rendered both (tools/dos2_swf_render.py), scaled to the same height as the panel
 | tab prev | characterSheet_t selectorBtnLeft 32x39 | characterSheet.swf selectorBtnLeft 32x39 | 0.00 / 255 | 1.0000 | 3 of 3 pixel-equal |
 | tab next | characterSheet_t selectorBtnRight | characterSheet.swf selectorBtnRight | 0.00 | 1.0000 | 3 of 3 pixel-equal |
 | ok | partyInventory_t okBtn 78x32 | partyInventory.swf okBtn 78x32 | 0.00 | 1.0000 | 4 of 4 pixel-equal |
-| info | uiCraft_t searchBtn | uiCraft.swf searchBtn | 8.44 | 0.878 | 3 of 3 pixel-equal (frame 40x28 x2 + glass 16x16); the iPad's shape draws the glass ~20 % larger |
+| info (rejected) | uiCraft_t searchBtn | uiCraft.swf searchBtn | 8.44 | 0.878 | 3 of 3 pixel-equal, but the iPad's shape draws the glass ~20 % larger: not the same drawing, so owner's rule -> our `pan_info` (pack 5b) |
 Close / plus / minus / balance / column icons have Switch look-alikes (uiElements ButtonCrossIconmc 43x43, uiCraft plusBtn 19x19,
 trade balanceBtn_27, panelSelect_c iconDeselected 80x80 frames) but no equal bitmap and other sizes: drawn by us. The sneak / sheathe atlas of the
 iPad build is not in the IPA's local data (on-demand resources), and the iPad has no such buttons: drawn by us.
 
-## Checks (16.11, pack `packs/5a/TouchUI.pak`, built with no iPad path)
+## Checks (16.11, pack `packs/5b/TouchUI.pak` = 5a + own info button, built with no iPad path)
 - `dos2_hud_touch.py check`, `dos2_column_touch.py check`, `dos2_panel_touch.py check`: all pass (geometry as before: options 1480,20..1554,94,
   tactical under it, cancel / sneak / weapon centres on y 963, 81.4 px; the column's right side on stage x 308; panel rows 64 px high).
 - `dos2_touchui_pak.py hints`: 24 movies = GOOD-last's 24, self-check "every movie of the host tables k_def + k_hint is in the package".
 - ExternalInterface / invoke names per movie (dmPadBtn, dmPanel, dmColumnPoll, dmHudRects, addWatermarkText, setActiveInCombat ...): the same set as
   GOOD-last in all 24 movies.
-- Bitmap scan: GOOD-last holds 103 iPad-only bitmaps, 5a none; 36 bitmaps of 5a are in neither edition (ours).
-- `dos2_touchui_check.py main.raw packs/5a/TouchUI.pak`: all sites match; DM_DOS2_TOUCHUI_SET=hints served.
+- Bitmap scan: GOOD-last holds 103 iPad-only bitmaps, 5b none; 44 bitmap tags of 5b are in neither edition (ours).
+- `dos2_touchui_check.py main.raw packs/5b/TouchUI.pak`: all sites match; DM_DOS2_TOUCHUI_SET=hints served.
 Not run on a phone.

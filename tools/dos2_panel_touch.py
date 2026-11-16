@@ -9,9 +9,9 @@ over the panel's top border. A press dims the button, the release on it runs its
             UICompareItems / UIToggleMultiselection / UIMarkWares / UITradeSwitchWindow c:rightstick, UIAddPoints c:a, UIRemovePoints c:x,
             UITradeBalance c:x, Combine c:a) reaches onEventDown / onEventUp of the movie and the native class as always;
     ei name ExternalInterface name() of the movie's own class - where the pad needs a HOLD (trade: hold A -> confirmOffer; reward: hold A -> acceptClicked).
-Art (owner 16.11, ART below, docs/dos2/TOUCH_ART.md): our own drawings (assets/touchui: close, helmet, list, multi, plus, minus, balance) and,
+Art (owner 16.11, ART below, docs/dos2/TOUCH_ART.md): our own drawings (assets/touchui: close, helmet, list, info, multi, plus, minus, balance) and,
 where the iPad's button is the very drawing of a Switch movie, that symbol from the player's dump at setup time (tab arrows = characterSheet.swf
-selectorBtnLeft / Right, info = uiCraft.swf searchBtn, ok = partyInventory.swf okBtn; frozen to their normal frame, no class).
+selectorBtnLeft / Right, ok = partyInventory.swf okBtn; frozen to their normal frame, no class).
 ABC: 4 methods appended to the document class, onEventInit re-pointed to a wrapper (original kept as dmPanInitOrig). No original body changes.
 
 Static only: positions come from the SWF matrices, nothing was run on a phone.
@@ -31,7 +31,7 @@ H, GAP, RISE = 64, 8, 46          # button height on the stage, gap, how far the
 # ('sw', movie, symbol) = a symbol of the player's Switch Game.pak, only where the iPad's button IS that drawing (same bitmaps, renders equal)
 ART = {
     'close': ('png', 'pan_close'), 'prev': ('sw', 'characterSheet.swf', 'selectorBtnLeft'), 'next': ('sw', 'characterSheet.swf', 'selectorBtnRight'),
-    'helmet': ('png', 'pan_helmet'), 'list': ('png', 'pan_list'), 'info': ('sw', 'uiCraft.swf', 'searchBtn'),
+    'helmet': ('png', 'pan_helmet'), 'list': ('png', 'pan_list'), 'info': ('png', 'pan_info'),
     'multi': ('png', 'pan_multi'), 'plus': ('png', 'pan_plus'), 'minus': ('png', 'pan_minus'),
     'ok': ('sw', 'partyInventory.swf', 'okBtn'), 'balance': ('png', 'pan_balance')}
 SWART = sorted({v[1] for v in ART.values() if v[0] == 'sw'})
