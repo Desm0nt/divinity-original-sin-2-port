@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- [TL2] Divinity: Original Sin 2 touch layouts (Tl2Touch.java, after D2R Mobile) -->
+<resources>
+    <string name="tl2_layout_touch">Touch: two sticks + skill fan (D2R Mobile style)</string>
+    <string name="tl2_layout_side">Touch: quick-access buttons on the sides</string>
+    <string name="tl2_layout_note">Both touch layouts: the move stick appears under your left thumb in the lower left, the aim stick (right stick) under your right thumb anywhere free in the lower right. Fan: A primary, B X Y R around it, ZR above, II = second skill set (holds the modifier while a skill is used); bottom row = d-pad and +, top = ZL L L3, − R3. Side layout: every Switch button as its own cell: right edge A B X Y R ZR and modifier + each of them, left edge L ZL and the d-pad, top L3 − + R3. Menus are driven with the buttons (the game has no touch of its own).</string>
+    <!-- [DOS2] the gear's layout list: the Switch pad first -->
+    <string name="dos2_layout_switch">Switch gamepad (Joy-Con, default)</string>
+    <string name="dos2_layout_note">Switch gamepad: the game\'s own controls as on the Switch: left stick (appears under the thumb on the left) with the d-pad below it, A B X Y and the right stick on the right, L ZL / R ZR in the top corners, − ⚙ + on top. Its editor (gear → Edit the layout): drag a control, a second finger resizes it, Grouped / Separate (the d-pad and the ABXY diamond as one or as four buttons), Hide takes a control out of the game, Save keeps the changes. The two touch layouts are Torchlight II\'s (D2R Mobile style).</string>
+    <string name="tl2_touch">Touch layout</string>
+    <string name="tl2_iso">Diagonal correction: %1$d%%</string>
+    <string name="tl2_iso_note">Makes the hero walk (and aim) the way the finger points. Push the stick at 45 degrees: if the hero walks flatter than the finger, raise it.</string>
+    <string name="tl2_mod">Second skill set modifier (II / the inner side column)</string>
+    <string name="tl2_mod_note">The button the game holds for its second set of skills; it goes down a moment before the skill button.</string>
+    <string name="tl2_extras">Extras (off by default)</string>
+    <string name="tl2_tap">Tap on the world (outside the sticks)</string>
+    <string name="tl2_tap_a">A (attack / pick up / talk)</string>
+    <string name="tl2_tap_face">Turn toward the point, then A</string>
+    <string name="tl2_hold_walk">Touch and hold the world = walk toward the finger</string>
+    <string name="tl2_aim">Dragging a fan skill aims with</string>
+    <string name="tl2_aim_right">right stick</string>
+    <string name="tl2_aim_left">left stick</string>
+</resources>

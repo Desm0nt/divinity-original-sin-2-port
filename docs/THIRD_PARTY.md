@@ -1,0 +1,128 @@
+# Third-party code in the Divinity: Original Sin 2 port
+
+The tree in `dm/` is a fork of d2r-mobile (MIT, Copyright (c) 2026 jhaizhou, kept in the root `LICENSE`; its Java package is
+`com.xiaoboluo.d2r`), extended first for DOOM Mobile and then for DOOM Eternal, Xenoblade 2, Diablo III, Torchlight II and Divinity: Original Sin 2; the third-party
+code d2r-mobile brought is listed in [DEPENDENCIES.md](DEPENDENCIES.md) and its contributors in
+[upstream/README-d2r-mobile.md](upstream/README-d2r-mobile.md). Code was also ported from other MIT-licensed projects.
+Each ported file says so in a comment and keeps the original copyright line.
+
+| Project | License / copyright | Source |
+|---|---|---|
+| d2r-mobile | MIT, Copyright (c) 2026 jhaizhou | https://github.com/jhaizhou-ops/d2r-mobile — the base of `dm/` |
+| nxnative | MIT, Copyright (c) 2026 seedds | https://github.com/seedds/nxnative |
+| nx2android | MIT, Copyright (c) 2026 seedds (its embedded `nxnative/LICENSE`) | https://github.com/shirai91/nx2android (the source comments cite it as `seedds/nx2android`) |
+| nx2android gamepad themes | MIT, Copyright (c) 2026 seedds (`dm/android/front-assets/LICENSE-nx2android-themes.txt`) | https://github.com/shirai91/nx2android — the on-screen gamepad skins (`themes/`) and the default layout (`overlay_default.tsv`) in `dm/android/front-assets`, unmodified |
+| BOTWRecompAndroid | MIT, Copyright (c) 2026 Peiikai + notice mamcjr | https://github.com/mamcjr/BOTWRecompAndroid (studied at 5675618) — ideas only, see below |
+| D3CPKUnpack (`cpklib.py`) | MIT, Copyright (c) 2026 Krzysztof Janiszewski (RedMadKnight) — `tools/d3cpklib.LICENSE` | https://github.com/RedMadKnight/D3CPKUnpack at 9fa02146e33d3ef38b2ea6ec5dfdb3aebceba10e — vendored unmodified (below a two-line header) as `tools/d3cpklib.py`; `tools/d3_cpk.py` is our front-end |
+| libadrenotools | BSD-2-Clause, bylaws | https://github.com/bylaws/libadrenotools — `third_party/libadrenotools` (git submodule, with its own `lib/linkernsbypass`) |
+| Ryujinx shader translator 1.3.2 | MIT, Ryujinx Team and Contributors | vendored by d2r-mobile in `dm/third_party/ryujinx` (unmodified); built into `dmsh_xlate` on the player's PC |
+| AMD FidelityFX Super Resolution 1.0 (RCAS) | MIT, Copyright (c) 2021 Advanced Micro Devices, Inc. | https://github.com/GPUOpen-Effects/FidelityFX-FSR — `dm/android/shaders/rcas.comp` |
+| deko3d (layout size algorithm) | zlib, Copyright (C) 2018-2020 fincs | https://github.com/devkitPro/deko3d — `dm/gfx/nvn/nvn_tex.c` (inherited from d2r-mobile, see DEPENDENCIES.md) |
+| Mesa Turnip (adrenotools build by The412Banner) | MIT | https://github.com/The412Banner/Banners-Turnip — **not stored here**; `tools/fetch_turnip.py` downloads v27.0.0-20261029 at build time with a pinned SHA-256 and the APK bundles it as its default driver |
+| Granite (texture decode shaders) | MIT, Copyright (c) 2017-2026 Hans-Kristian Arntzen (shader headers: 2020-2026) | https://github.com/Themaister/Granite at 69f450c62dc3, `assets/shaders/decode/{bc6.comp,bc7.comp,bitextract.h}` — ported (modified) into `dm/gfx/vulkan/engine/xbg_bc_gpu.glsl` by the DOOM 2016 port (GPU BC decode, `DM_GFX_BC_DECODE=gpu`); licence and hashes in `dm/gfx/vulkan/engine/third_party/granite_decode/` |
+| DOOM Mobile (DOOM 2016 port) | MIT (this host) | https://github.com/Desm0nt/doom-port — logs and crash reports, driver choice and verification, non-Adreno fallbacks, GPU BC decode, ARMv8.0 thunks, Android 10 build: [d3/DOOM_PORTS.md](d3/DOOM_PORTS.md) |
+
+Only the parts that Diablo III (and the sibling ports sharing this host) use were ported, on an Adreno 750 target.
+Diablo III code is behind `DM_GAME_D3`; the DOOM / DOOM Eternal / Xenoblade 2 code behind `DM_GAME_DOOM` / `DM_GAME_ETERNAL` /
+`DM_GAME_XC2` (Diablo III builds `DM_GAME_DOOM` + `DM_GAME_D3`, see [d3/D3_GATES.md](d3/D3_GATES.md)).
+
+## Host (dm/host)
+
+| Our file | Ported from | What |
+|---|---|---|
+| `hle_thread.c` | nxnative `dm/host/hle_thread.c` | Thread scheduling and sync: same-core wake handoffs, native HLE waits, ideal core / affinity rules, `WaitForAddress` / `SignalToAddress` variants, per-object WaitSynchronization wakes, yield back-off, precise sleeps, SystemEvent binding lifetimes, free thread count |
+| `hle_svc.c` | nxnative `dm/host/hle_svc.c` | Memory SVCs: SetHeapSize result, MapMemory checks, QueryMemory over the alias page bitmap and module segments, MapPhysicalMemory page bitmap with zeroing, GetInfo 16 / 17 / 20 / 24 |
+| `hle_guestthread.c` | nxnative `dm/host/hle_guestthread.c` | Host-created guest threads are marked as host-owned |
+| `hle_audren.c` | nxnative `dm/host/hle_audren.c` | The SDK's own audio renderer runs on the CPU and plays through AAudio |
+| `hle_audio.c` | nxnative `dm/host/hle_audio.c` | `dm_pcmout_*` host PCM output |
+| `hle_sf.c` | nxnative `dm/host/hle_sf.c` | `nn::sf::hipc` client takeover |
+| `hle_oe.c` | nxnative `dm/host/hle_oe.c` | Focus handling mode, language mapping |
+| `hle_fs.c` | nxnative `dm/host/hle_fs.c` | Path normalisation, EFAULT retry on ReadFile, directory entry count filter, Delete/RenameDirectory |
+| `hle_net.c` | nxnative `dm/host/hle_net.c` | nifm request on hold, Poll/Select idle wait |
+| `hle_haptics.c`, `hle_haptics.h` | nxnative `dm/host/hle_haptics.{c,h}` | Vibration state |
+| `hle_hid.c` | nxnative `dm/host/hle_hid.c` | Vibration handles and send, SixAxis layout and handles |
+| `hle_xc2.c` | nxnative `dm/host/hle_fs.c`, `hle_hid.c`, `hle_account.c`, `hle_sdk16.c`, … | Account / fs / oe / SDK entry points of newer SDKs (Xenoblade 2; Diablo III reuses the pattern) |
+| `hle_d3.c` | nxnative `dm/host/hle_sdk16.c` ("nfp: amiibo"), `dm/host/hle_offline.c` ("ldn: local wireless") | The amiibo and local-wireless stubs Diablo III's SDK 8.2 client needs; the rest of the file is our own |
+| `hle_os.c` (`guest_clock_read_wait`), `hle_hold.c` | nx2android `hle_os.c` guest_clock_read_wait, hold_sync (design) | Freezing guest time and threads while the pause menu holds the game (re-implemented) |
+
+## Graphics (dm/gfx)
+
+| Our file | Ported from | What |
+|---|---|---|
+| `gfx/nvn/hle_nvn.c` | nxnative `dm/gfx/nvn/hle_nvn.c` | NVN entry points (binds, draws, clears, raster state, fence sync, texture swizzle, depth-stencil mode, sampler reduction, getters); the sparse-pool design (`vpool_*`, used by DOOM Eternal) |
+| `gfx/nvn/hle_nvn.c` (window acquire sync) | nx2android commit 1c6177d | The acquire sync is fenced at the texture's last present |
+| `gfx/nvn/nvn_obj.h` | layouts follow nxnative `dm/gfx/nvn/nvn_obj.h` (ideas, no code copied); NVN 55 sizes also from BOTWRecompAndroid | Record ops and fields |
+| `gfx/vulkan/engine/xbg_shader_key.c` | nxnative `dm/gfx/nvn/hle_nvn.c` keys_hash / `shader_split.py` skey | The shader program key (control section + code area) the Diablo III bundles are named by |
+| `gfx/vulkan/engine/xbg_game.cpp` (LRZ touch) | nx2android `lrz_touch` | Optional (`DM_GFX_LRZ_TOUCH=1`) |
+| `gfx/tools/dmsh_xlate_doom/Program.cs`, `dmsh_xlate_eternal/Program.cs`, `dmsh_xlate_xc2/Program.cs` | nxnative `dm/gfx/tools/dmsh_xlate/Program.cs` | Shader translators (Diablo III uses the XC2 variant): stage linking, translator messages, c2 image handle decode, FP64 lowering, image query retry |
+| `gfx/tools/dmsh_vk_xc2.py` | nxnative `dm/gfx/nvn/dmsh_abi.h` (the c2 handle layout) | Offline SPIR-V bundle builder used for Diablo III |
+
+## Tools
+
+| Our file | Ported from | What |
+|---|---|---|
+| `dm/tools/patch_nso.py` | nxnative `dm/tools/patch_nso.py` | Jump-table recognizers and x18 site kinds (`blr` / `br` calls, sp writes, `sub sp` alignment, exclusive-window rules) |
+| `dm/tools/nso_code.py` | nxnative `dm/tools/nso_code.py` | Code / data block analysis (copied unchanged) |
+| `tools/d3_shader_jobs.py` | nx2android `nxnative/dm/android/tools/shader_vk.py` (`xfb_layout`); nxnative `shader_split.py` (the key) | Transform-feedback layout reader and the program key, re-implemented for the `.shd` files |
+| `tools/d3cpklib.py` | D3CPKUnpack `cpklib.py` | The CPK archive reader, vendored unmodified |
+| `tools/content_reader.py`, `tools/ncz2nsp.py`, `tools/extract_exefs_nsz.py`, `tools/setup_d3.py`, `tools/bootstrap.ps1` | DOOM Mobile (same author, MIT) | Package / NCA / BKTR / IVFC readers, NSZ expansion, the setup |
+
+## Android (dm/android)
+
+| Our file | Ported from | What |
+|---|---|---|
+| `haptics_android.c` | nx2android `nxnative/dm/android/haptics_android.c` | Controller and phone rumble |
+| `perf_android.c` | nx2android `nxnative/dm/android/perf_android.c` | ADPF hint session, thermal status, display rate vote |
+| `front_android.c` | nx2android `nxnative/dm/android/front_android.c` | Gamepad button mapping, pad publish |
+| `app/.../PadTheme.java`, `PadSkin.java`, `DoomPadView.java` | nx2android's overlay drawing model (`overlay_layout.h`, `overlay_theme.c`, `ov_theme_draw`, `dm_overlay_scale`) | Drawing the theme packs and the ergonomic Switch layout (re-implemented in Java) |
+| `app/.../SaveTransfer.java` | nx2android `saves_android.c` (design) | Save export / import (re-implemented) |
+
+## Ideas from BOTWRecompAndroid (MIT)
+
+Studied on 28.10.2026 for DOOM Mobile. No files were copied; the ideas below were re-implemented in our code, which names
+the source in a comment.
+
+| Our code | Idea from | What |
+|---|---|---|
+| `dm/android/vk_driver.c`, `vk_tramp.S` / `vk_tramp_names.h` | BOTWRecompAndroid `runtime/nvn/vulkan/android_driver.c` (adrenotools + volk) | Vulkan driver chosen at run time (system driver or Turnip through libadrenotools, `DM_VK_DRIVER`); we use trampolines instead of volk |
+| `gfx/nvn/hle_nvn.c` `nvnSyncWait` (`DM_NVN_SYNC_LAG=1`, off by default) | BOTWRecompAndroid 82b71e2 "sync lag" | Wait for the fence of frame N-1 instead of N |
+| `gfx/nvn/nvn_obj.h` `FITS55` limits | BOTWRecompAndroid NVN object writes | Size limits of NVN 55 objects (DOOM Eternal) |
+
+No code or idea from LASRecomp / LASRecompAndroid (Peiikai, mamcjr) is in this tree; they are credited in the DOOM Mobile
+repository, where they apply.
+
+## Not redistributed
+
+- Khronos Vulkan validation layers (Apache-2.0): optional for debugging (`build.bat -Validation`), you download them yourself.
+- Mesa Turnip: downloaded at build time (see above).
+- The .NET SDK, Python and its packages (cryptography, zstandard, lz4, capstone, unicorn, astc-encoder-py, numpy): installed by
+  setup into `tools/.runtime` on the player's PC from their official sources.
+- The iPad / iPhone version's interface movies: read by setup from the player's own `.ipa` on the player's PC, never stored here.
+
+## Torchlight II additions
+
+Torchlight II Mobile is a fork of Diablo III Mobile (https://github.com/Desm0nt/diablo3-port, same license and authors);
+everything above applies to it unchanged. Torchlight II code is behind `DM_GAME_TL2` (the build is `DM_GAME_DOOM` + `DM_GAME_D3`
++ `DM_GAME_TL2`). What came from elsewhere:
+
+| Our file | Ported from | What |
+|---|---|---|
+| `dm/host/hle_tl2.c` | nxnative (MIT, seedds) `dm/host/hle_offline.c`, `hle_audio.c`, `hle_account.c`; the fs save hooks of our `hle_xc2.c` (from nxnative, above) | fs save-data existence by program id, ldn after Initialize, nifm IP config, socket overloads, AudioIn getters (re-checked against the TL2 imports) |
+| `dm/android/stall_android.c`, `dm/host/hle_hold.c` | DOOM Mobile / DOOM Eternal Mobile (this host family, MIT) | frame stall watch, save-safe quit |
+| `dm/android/app/.../Tl2Touch.java` | d2r-mobile (MIT) touch layout; DOOM Mobile `DoomPadView` editor UX | floating stick, skill fan, layout editor (re-implemented for TL2) |
+| `tools/tl2_mod.py`, `dm/android/app/.../Tl2ModConv.java` | format notes of Awkward-im/Torchlight (`TL2Lib/rgmod.pas`, `rgpak.pas`) | `.MOD` / PAK / MAN layout only; the code is our own |
+
+## Divinity: Original Sin 2 additions
+
+Divinity Original Sin 2 Mobile is a fork of Torchlight II Mobile (https://github.com/Desm0nt/torchlight2-port, same license
+and authors); everything above applies to it unchanged. Divinity: Original Sin 2 code is behind `DM_GAME_DOS2` (the build is
+`DM_GAME_DOOM` + `DM_GAME_D3` + `DM_GAME_TL2` + `DM_GAME_DOS2`; the Torchlight II address-bound code is behind `DM_TL2_MAIN`
+and not built). What came from elsewhere:
+
+| Our file | Ported from | What |
+|---|---|---|
+| `dm/host/hle_dos2.c` | nxnative (MIT, seedds) `dm/host/hle_fs.c`, `hle_hid.c`, `hle_account.c` and the SDK service bodies there | fs save data size / extension, error applet, vibration values, keyboard map, profanity filter, local network mode, profile image |
+| `dm/third_party/astcenc` | [ARM astc-encoder](https://github.com/ARM-software/astc-encoder) 5.7.0 (Apache-2.0, Copyright Arm Limited; `LICENSE.txt` in that folder), taken unmodified from the Diablo III port | the ASTC encoder of the lazy texture cache on the phone (`dm/gfx/vulkan/engine/xbg_astc_lazy.cpp`) |
+| `tools/dos2_astc_cache.py` | the Torchlight II port's `tools/tl2_astc_cache.py` (this host family, MIT); [astc-encoder-py](https://pypi.org/project/astc-encoder-py/) (MIT) at run time | the setup ASTC texture pack |
+| `dm/android/present_thread.h`, `dm/host/pc.h` and other `port-common` modules | the shared module set of these ports (DOOM 2016 / DOOM Eternal Mobile, this host family, MIT) | present thread, runtime report and the other shared fixes named in their comments |
+| `tools/lspk.py`, `tools/dos2_touchui_pak.py`, `tools/dos2_swf_*.py`, `tools/dos2_*_touch.py` | our own code; the LSPK v13 layout follows the public format knowledge of the Larian modding community (no code copied) | package reader / writer, SWF / ABC patching of the console interface movies |

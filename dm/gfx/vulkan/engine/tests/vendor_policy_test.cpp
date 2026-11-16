@@ -1,0 +1,163 @@
+// [nonadreno] Calls the production GPU-family detection, per-family defaults and DM_GFX_SIM_GPU masks (xbg_vendor_policy.h)
+// directly; integer / struct work only, no device. Build (WSL or any host with the Vulkan headers, e.g. the NDK sysroot):
+//   g++ -std=c++17 -Wall -idirafter <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include -o vendor_policy_test vendor_policy_test.cpp
+#include "../xbg_vendor_policy.h"
+#include "../xbg_vertex_retype.h"
+#include <stdio.h>
+
+static int failures;
+#define CHECK(expression) do { if(!(expression)){printf("FAIL line %d: %s\n",__LINE__,#expression);++failures;} } while(0)
+
+int main(){
+    // Families by vendor ID, and by name where the ID says nothing (RADV on Xclipse = AMD).
+    CHECK(xbg_gpu_family(0x5143,"Adreno (TM) 750")==XBG_GPU_ADRENO);
+    CHECK(xbg_gpu_family(0x5143,"Turnip Adreno (TM) 750")==XBG_GPU_ADRENO);
+    CHECK(xbg_gpu_family(0x13B5,"Mali-G720 MC7")==XBG_GPU_MALI);
+    CHECK(xbg_gpu_family(0x1010,"PowerVR B-Series BXM-8-256")==XBG_GPU_POWERVR);
+    CHECK(xbg_gpu_family(0x144D,"Samsung Xclipse 940")==XBG_GPU_XCLIPSE);
+    CHECK(xbg_gpu_family(0x1002,"AMD Xclipse 940 (RADV)")==XBG_GPU_XCLIPSE);
+    CHECK(xbg_gpu_family(0x19E5,"Maleoon 910")==XBG_GPU_MALEOON);
+    CHECK(xbg_gpu_family(0x10005,"llvmpipe")==XBG_GPU_OTHER);
+    CHECK(xbg_gpu_family(0,nullptr)==XBG_GPU_OTHER);
+
+    // Adreno keeps every old default: zero-copy on, no serial builds, no graphics guard, dynamic UBOs, no colour mask.
+    CHECK(xbg_zero_copy_default(XBG_GPU_ADRENO));
+    CHECK(!xbg_pipe_serial_default(XBG_GPU_ADRENO));
+    CHECK(!xbg_pipe_guard_default(XBG_GPU_ADRENO));
+    CHECK(xbg_ubo_dynamic_default(XBG_GPU_ADRENO));
+    CHECK(!xbg_noout_mask_default(XBG_GPU_ADRENO));
+    // Mali: copy path, guard, colour mask; PowerVR also serial builds and no dynamic UBOs.
+    CHECK(!xbg_zero_copy_default(XBG_GPU_MALI));
+    CHECK(xbg_pipe_guard_default(XBG_GPU_MALI));
+    CHECK(xbg_noout_mask_default(XBG_GPU_MALI));
+    CHECK(!xbg_pipe_serial_default(XBG_GPU_MALI));
+    CHECK(xbg_ubo_dynamic_default(XBG_GPU_MALI));
+    CHECK(xbg_pipe_serial_default(XBG_GPU_POWERVR));
+    CHECK(!xbg_ubo_dynamic_default(XBG_GPU_POWERVR));
+    CHECK(!xbg_zero_copy_default(XBG_GPU_OTHER));
+
+    // Switch precedence: "0" / "1" win, empty / unset falls back.
+    CHECK(xbg_env_or("1",false));
+    CHECK(!xbg_env_or("0",true));
+    CHECK(xbg_env_or(nullptr,true));
+    CHECK(!xbg_env_or("",false));
+
+    // DM_GFX_SIM_GPU parsing.
+    char unknown[32];
+    CHECK(xbg_sim_parse(nullptr)==0);
+    CHECK(xbg_sim_parse("")==0);
+    CHECK(xbg_sim_parse("0")==0);
+    CHECK(xbg_sim_parse("mali")==XBG_SIM_PROFILE_MALI);
+    CHECK(xbg_sim_parse("powervr")==XBG_SIM_PROFILE_POWERVR);
+    CHECK(xbg_sim_parse("pvr")==XBG_SIM_PROFILE_POWERVR);
+    CHECK(xbg_sim_parse("\"mali,nogs\"")==(XBG_SIM_PROFILE_MALI|XBG_SIM_NOGS));
+    CHECK(xbg_sim_parse("nobc nodepthbounds")==(XBG_SIM_NOBC|XBG_SIM_NODEPTHBOUNDS));
+    CHECK(xbg_sim_parse("nobc,bogus",unknown,sizeof unknown)==XBG_SIM_NOBC && !strcmp(unknown,"bogus"));
+    CHECK(xbg_sim_parse("nobc",unknown,sizeof unknown)==XBG_SIM_NOBC && !*unknown);
+    CHECK(xbg_effective_family(XBG_GPU_ADRENO,0)==XBG_GPU_ADRENO);
+    CHECK(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_NOBC)==XBG_GPU_ADRENO);
+    CHECK(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_PROFILE_MALI)==XBG_GPU_MALI);
+    CHECK(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_PROFILE_POWERVR)==XBG_GPU_POWERVR);
+    CHECK(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_PROFILE_XCLIPSE)==XBG_GPU_XCLIPSE);
+
+    // Format masks: no profile = untouched; BC gone; 16-bit unorm loses linear filtering only; depth stand-ins.
+    const VkFormatFeatureFlags all=0x1ffffu;VkFormatProperties p;
+    p={all,all,all};xbg_sim_format_features(0,VK_FORMAT_BC1_RGB_UNORM_BLOCK,&p);CHECK(p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_BC1_RGB_UNORM_BLOCK,&p);CHECK(!p.optimalTilingFeatures && !p.bufferFeatures);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_BC7_SRGB_BLOCK,&p);CHECK(!p.optimalTilingFeatures);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R8G8B8A8_UNORM,&p);CHECK(p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R16G16_UNORM,&p);
+    CHECK(!(p.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) && (p.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) && (p.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT));
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R16G16B16A16_UNORM,&p);CHECK(!(p.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_D24_UNORM_S8_UINT,&p);CHECK(p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_BC1_RGB_UNORM_BLOCK,&p);CHECK(p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_BC4_UNORM_BLOCK,&p);CHECK(!p.optimalTilingFeatures);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_D24_UNORM_S8_UINT,&p);CHECK(!p.optimalTilingFeatures);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_POWERVR,VK_FORMAT_D16_UNORM,&p);CHECK(p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_POWERVR,VK_FORMAT_D32_SFLOAT,&p);
+    CHECK(!(p.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) && (p.optimalTilingFeatures&VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT));
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_POWERVR,VK_FORMAT_R8G8B8A8_SRGB,&p);CHECK(!(p.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT));
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_POWERVR,VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,&p);CHECK(!(p.optimalTilingFeatures&VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT));
+
+    // Features / subgroup / limits.
+    VkPhysicalDeviceFeatures f;memset(&f,0xff,sizeof f);for(VkBool32 *b=&f.robustBufferAccess;b<=&f.inheritedQueries;++b)*b=VK_TRUE;
+    VkPhysicalDeviceFeatures g=f;xbg_sim_features(0,&g);CHECK(!memcmp(&f,&g,sizeof f));
+    g=f;xbg_sim_features(XBG_SIM_PROFILE_MALI,&g);CHECK(!g.textureCompressionBC && !g.depthBounds && !g.fillModeNonSolid && !g.shaderClipDistance && g.geometryShader && g.shaderImageGatherExtended);
+    g=f;xbg_sim_features(XBG_SIM_PROFILE_MALI|XBG_SIM_NOGS,&g);CHECK(!g.geometryShader);
+    g=f;xbg_sim_features(XBG_SIM_NOGATHER|XBG_SIM_NOANISO,&g);CHECK(!g.shaderImageGatherExtended && !g.samplerAnisotropy && g.textureCompressionBC);
+    // [pvr] DM_GFX_ANISO_FALLBACK (DOOM 2016 2.47): the PowerVR profile has no anisotropy; the sampler anisotropy a device can take
+    // (moto g64: feature off, the game asked 4 -> 1; with the feature: unchanged up to the limit, clamped above).
+    g=f;xbg_sim_features(XBG_SIM_PROFILE_POWERVR,&g);CHECK(!g.samplerAnisotropy);
+    CHECK(xbg_aniso_allowed(4,false,16)==1);CHECK(xbg_aniso_allowed(16,false,1)==1);
+    CHECK(xbg_aniso_allowed(4,true,16)==4);CHECK(xbg_aniso_allowed(16,true,16)==16);CHECK(xbg_aniso_allowed(16,true,8)==8);
+    CHECK(xbg_aniso_allowed(1,false,16)==1);CHECK(xbg_aniso_allowed(1,true,16)==1);
+    {const float bad=xbg_aniso_allowed(0.5f,true,16);CHECK(bad==0.5f);}   // invalid values reach the converter unchanged (its -5 stays)
+    VkPhysicalDeviceSubgroupProperties s{};s.subgroupSize=64;s.supportedStages=VK_SHADER_STAGE_ALL;s.supportedOperations=0xff;s.quadOperationsInAllStages=VK_TRUE;
+    VkPhysicalDeviceSubgroupProperties t=s;xbg_sim_subgroup(XBG_SIM_PROFILE_MALI,&t);
+    CHECK(t.subgroupSize==16 && t.supportedStages==(VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT) && !t.quadOperationsInAllStages && t.supportedOperations==0xff);
+    t=s;xbg_sim_subgroup(XBG_SIM_PROFILE_POWERVR,&t);CHECK(t.subgroupSize==1);
+    t=s;xbg_sim_subgroup(0,&t);CHECK(t.subgroupSize==64 && t.quadOperationsInAllStages);
+    VkPhysicalDeviceLimits l{};l.maxTexelBufferElements=1u<<27;xbg_sim_limits(XBG_SIM_PROFILE_MALI,&l);CHECK(l.maxTexelBufferElements==1u<<27);
+    xbg_sim_limits(XBG_SIM_PROFILE_POWERVR,&l);CHECK(l.maxTexelBufferElements==65536);
+
+    // Texel buffer ranges: unchanged when they fit (Adreno's 2^27 covers any DOOM buffer), cut to whole texels otherwise.
+    CHECK(xbg_texel_range_clamp(64ull<<20,1,1u<<27)==64ull<<20);
+    CHECK(xbg_texel_range_clamp(1u<<20,16,65536)==1u<<20);
+    CHECK(xbg_texel_range_clamp(2u<<20,16,65536)==1u<<20);
+    CHECK(xbg_texel_range_clamp(1000000,0,65536)==1000000);
+    CHECK(xbg_vk_texel_bytes(VK_FORMAT_R32G32B32A32_SFLOAT)==16 && xbg_vk_texel_bytes(VK_FORMAT_R8_UNORM)==1 && xbg_vk_texel_bytes(VK_FORMAT_BC1_RGB_UNORM_BLOCK)==0);
+
+    // Vertex widening (only reached without VERTEX_BUFFER support) and its simulation.
+    CHECK(xbg_vertex_widen(VK_FORMAT_R16G16B16_SNORM)==VK_FORMAT_R16G16B16A16_SNORM);
+    CHECK(xbg_vertex_widen(VK_FORMAT_R8G8B8_UNORM)==VK_FORMAT_R8G8B8A8_UNORM);
+    CHECK(xbg_vertex_widen(VK_FORMAT_R32G32B32_SFLOAT)==VK_FORMAT_R32G32B32A32_SFLOAT);
+    CHECK(xbg_vertex_widen(VK_FORMAT_R8G8B8A8_UNORM)==VK_FORMAT_UNDEFINED);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_R16G16B16_SNORM,&p);CHECK(!(p.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) && p.optimalTilingFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,VK_FORMAT_R32G32B32_SFLOAT,&p);CHECK(p.bufferFeatures==all);
+    p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,VK_FORMAT_R16G16B16_SNORM,&p);CHECK(p.bufferFeatures==all);
+    CHECK(xbg_sim_parse("novertex3")==XBG_SIM_NOVERTEX3);
+
+    // [vtxscaled] scaled vertex formats: the simulation takes VERTEX_BUFFER off every *_USCALED / *_SSCALED format and nothing else;
+    // the integer stand-in (xbg_vertex_scaled_int) is the *_UINT / *_SINT format of the same layout.
+    CHECK(xbg_sim_parse("noscaled")==XBG_SIM_NOSCALED && (XBG_SIM_PROFILE_XCLIPSE&XBG_SIM_NOSCALED) && !(XBG_SIM_PROFILE_MALI&XBG_SIM_NOSCALED) && !(XBG_SIM_PROFILE_POWERVR&XBG_SIM_NOSCALED));
+    {static const struct {VkFormat scaled,integer;uint32_t kind;} pairs[]={
+        {VK_FORMAT_R8_USCALED,VK_FORMAT_R8_UINT,2},{VK_FORMAT_R8_SSCALED,VK_FORMAT_R8_SINT,1},{VK_FORMAT_R8G8_USCALED,VK_FORMAT_R8G8_UINT,2},{VK_FORMAT_R8G8_SSCALED,VK_FORMAT_R8G8_SINT,1},
+        {VK_FORMAT_R8G8B8_USCALED,VK_FORMAT_R8G8B8_UINT,2},{VK_FORMAT_R8G8B8_SSCALED,VK_FORMAT_R8G8B8_SINT,1},{VK_FORMAT_B8G8R8_USCALED,VK_FORMAT_B8G8R8_UINT,2},{VK_FORMAT_B8G8R8_SSCALED,VK_FORMAT_B8G8R8_SINT,1},
+        {VK_FORMAT_R8G8B8A8_USCALED,VK_FORMAT_R8G8B8A8_UINT,2},{VK_FORMAT_R8G8B8A8_SSCALED,VK_FORMAT_R8G8B8A8_SINT,1},{VK_FORMAT_B8G8R8A8_USCALED,VK_FORMAT_B8G8R8A8_UINT,2},{VK_FORMAT_B8G8R8A8_SSCALED,VK_FORMAT_B8G8R8A8_SINT,1},
+        {VK_FORMAT_A8B8G8R8_USCALED_PACK32,VK_FORMAT_A8B8G8R8_UINT_PACK32,2},{VK_FORMAT_A8B8G8R8_SSCALED_PACK32,VK_FORMAT_A8B8G8R8_SINT_PACK32,1},
+        {VK_FORMAT_A2R10G10B10_USCALED_PACK32,VK_FORMAT_A2R10G10B10_UINT_PACK32,2},{VK_FORMAT_A2R10G10B10_SSCALED_PACK32,VK_FORMAT_A2R10G10B10_SINT_PACK32,1},
+        {VK_FORMAT_A2B10G10R10_USCALED_PACK32,VK_FORMAT_A2B10G10R10_UINT_PACK32,2},{VK_FORMAT_A2B10G10R10_SSCALED_PACK32,VK_FORMAT_A2B10G10R10_SINT_PACK32,1},
+        {VK_FORMAT_R16_USCALED,VK_FORMAT_R16_UINT,2},{VK_FORMAT_R16_SSCALED,VK_FORMAT_R16_SINT,1},{VK_FORMAT_R16G16_USCALED,VK_FORMAT_R16G16_UINT,2},{VK_FORMAT_R16G16_SSCALED,VK_FORMAT_R16G16_SINT,1},
+        {VK_FORMAT_R16G16B16_USCALED,VK_FORMAT_R16G16B16_UINT,2},{VK_FORMAT_R16G16B16_SSCALED,VK_FORMAT_R16G16B16_SINT,1},{VK_FORMAT_R16G16B16A16_USCALED,VK_FORMAT_R16G16B16A16_UINT,2},{VK_FORMAT_R16G16B16A16_SSCALED,VK_FORMAT_R16G16B16A16_SINT,1}};
+     unsigned scaled=0;for(int v=0;v<256;v++)if(xbg_vk_format_scaled(VkFormat(v))){++scaled;CHECK(xbg_vertex_scaled_int(v)!=0);}else CHECK(xbg_vertex_scaled_int(v)==0);
+     CHECK(scaled==sizeof pairs/sizeof *pairs);
+     for(const auto &k:pairs){uint32_t kind=9;
+        CHECK(xbg_vertex_scaled_int(int(k.scaled),&kind)==int(k.integer) && kind==k.kind && xbg_vk_format_scaled(k.scaled)==k.kind);
+        CHECK(xbg_vertex_format_class(int(k.integer))==k.kind && xbg_vertex_format_class(int(k.scaled))==0);   // the stand-in is an integer-class format
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_XCLIPSE,k.scaled,&p);CHECK(!(p.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) && p.optimalTilingFeatures==all);
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_NOSCALED,k.integer,&p);CHECK(p.bufferFeatures==all);
+        p={all,all,all};xbg_sim_format_features(XBG_SIM_PROFILE_MALI,k.scaled,&p);CHECK(p.bufferFeatures==all);}
+     // the widened integer stand-in of a 3-component scaled format (AMD lacks the 3-component integer ones too)
+     CHECK(xbg_vertex_widen(VkFormat(xbg_vertex_scaled_int(int(VK_FORMAT_R16G16B16_SSCALED))))==VK_FORMAT_R16G16B16A16_SINT);}
+
+    // [R14] driver quirks: Turnip and the Arm / Samsung stock drivers keep the old behaviour; unknown driverID 0 = nothing.
+    CHECK(xbg_depth_bias_x2_default(VK_DRIVER_ID_MESA_PANVK) && xbg_depth_bias_x2_default(VK_DRIVER_ID_MESA_RADV));
+    CHECK(!xbg_depth_bias_x2_default(VK_DRIVER_ID_ARM_PROPRIETARY) && !xbg_depth_bias_x2_default(VK_DRIVER_ID_MESA_TURNIP) && !xbg_depth_bias_x2_default(0));
+    CHECK(xbg_clear_rebind_default(VK_DRIVER_ID_QUALCOMM_PROPRIETARY) && xbg_clear_rebind_default(VK_DRIVER_ID_IMAGINATION_PROPRIETARY));
+    CHECK(!xbg_clear_rebind_default(VK_DRIVER_ID_MESA_TURNIP) && !xbg_clear_rebind_default(VK_DRIVER_ID_ARM_PROPRIETARY) && !xbg_clear_rebind_default(0));
+    CHECK(xbg_reversed_depth_broken(VK_DRIVER_ID_QUALCOMM_PROPRIETARY) && !xbg_reversed_depth_broken(VK_DRIVER_ID_MESA_TURNIP));
+
+    // [tile] render-pass policy (DM_GFX_CLEAR_FOLD / STORE_HIST / TILE_BARRIER / NOLOAD): Adreno and unknown GPUs keep the old behaviour.
+    CHECK(!xbg_clear_fold_default(XBG_GPU_ADRENO) && !xbg_store_hist_default(XBG_GPU_ADRENO) && !xbg_tile_barrier_default(XBG_GPU_ADRENO) && !xbg_noload_default(XBG_GPU_ADRENO));
+    CHECK(!xbg_clear_fold_default(XBG_GPU_OTHER) && !xbg_store_hist_default(XBG_GPU_OTHER));
+    CHECK(xbg_clear_fold_default(XBG_GPU_MALI)==1 && xbg_store_hist_default(XBG_GPU_MALI)==1 && xbg_tile_barrier_default(XBG_GPU_MALI) && xbg_noload_default(XBG_GPU_MALI));
+    CHECK(xbg_clear_fold_default(XBG_GPU_POWERVR)==1 && xbg_store_hist_default(XBG_GPU_POWERVR)==1 && xbg_tile_barrier_default(XBG_GPU_POWERVR));
+    CHECK(xbg_clear_fold_default(XBG_GPU_XCLIPSE)==1 && !xbg_store_hist_default(XBG_GPU_XCLIPSE) && !xbg_tile_barrier_default(XBG_GPU_XCLIPSE));
+    CHECK(xbg_clear_fold_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==1);   // DM_GFX_SIM_GPU=mali on the Mi 14 takes the Mali defaults
+    // [DOS2] DM_NB_RP (NB-06): off on every family until the phone confirms it (then 1 on Mali / PowerVR / Xclipse).
+    for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++)CHECK(xbg_nb_rp_default(XbgGpuFamily(f))==0);
+    CHECK(xbg_nb_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==0);
+
+    if(failures){printf("%d failure(s)\n",failures);return 1;}
+    printf("vendor_policy_test: all checks passed\n");return 0;
+}

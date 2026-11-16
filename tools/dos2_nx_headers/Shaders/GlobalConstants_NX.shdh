@@ -1,0 +1,31 @@
+// [DOS2] Reconstructed: the game ships no .shdh headers. Block names, NVN bindings, member names, offsets, types and row-major flags
+// are taken from the GLSLC reflection sections of the NX .bshd files (tools/dos2_native_shaders.py, reflection()).
+#ifndef DOS2_GLOBALCONSTANTS_NX
+#define DOS2_GLOBALCONSTANTS_NX
+layout(binding = 11, std140) uniform EoCGlobalConstantData
+{
+	vec3 global_SeeThroughPosition;      // 0
+	float global_SeeThroughRadius;       // 12
+	vec3 global_GameCameraPosition;      // 16
+	float EoCGlobalConstantData_PADDING0; // 28
+	vec4 global_PlayerPosition0;         // 32
+	vec4 global_PlayerPosition1;         // 48
+	vec4 global_PlayerPosition2;         // 64
+	vec4 global_PlayerPosition3;         // 80
+};
+layout(binding = 12, std140) uniform PerView
+{
+	layout(row_major) mat4x4 global_View;           // 0
+	layout(row_major) mat4x4 global_Projection;     // 64
+	layout(row_major) mat4x4 global_ViewProjection; // 128
+	vec4 global_ViewPos;                            // 192
+	vec4 global_ViewInfo;                           // 208
+	vec4 global_ScaleAndBias;                       // 224
+};
+layout(binding = 13, std140) uniform PerFrame
+{
+	layout(row_major) mat4x4 global_LightPropertyMatrix; // 0
+	layout(row_major) mat4x3 global_FogPropertyMatrix;   // 64 (3 rows of vec4)
+	vec4 global_Data;                                    // 112
+};
+#endif

@@ -1,0 +1,30 @@
+// [DOS2] Reconstructed from the translated Maxwell code (Engine_Color_Unlit_AlphaBlend_SK_DEF_NX, Engine_Default_Decal_Lit_Opaque_SK_DEF_NX):
+//   rt0 = (Emissive, 0); rt1 = (stereographic view normal n.xy / (1 + n.z) * 0.2812623 + 0.5, 0, 0);
+//   rt2 = (saturate(BaseColor), FadeOpacity); rt3 = (saturate(Roughness, Reflectance, MetalMask), (FXEmissive + 2 * ShadingModel) / 255)
+//   (the clamps and FXEmissive = false -> 0 from RS3_FX_ST_Undead_Arm_SK_DEF_NX; Emissive, normal and FadeOpacity are not clamped).
+// Custom is vec4(0) in every shipped material; where it lands is not known (rt0.w / rt1.zw are 0 in all of them).
+// The forward-lighting helpers of the real PBR.shdh (RemapReflectance, DirectionLight) are NOT reconstructed: stages calling them
+// do not compile and keep their translated bundles.
+#ifndef DOS2_PBR_NX
+#define DOS2_PBR_NX
+struct GBufferData
+{
+	vec3 Emissive;
+	vec3 ViewSpaceNormal;
+	vec3 BaseColor;
+	float FadeOpacity;
+	float Roughness;
+	float Reflectance;
+	float MetalMask;
+	bool FXEmissive;
+	int ShadingModel;
+	vec4 Custom;
+};
+void EncodeGBufferData(GBufferData g, out vec4 o0, out vec4 o1, out vec4 o2, out vec4 o3)
+{
+	o0 = vec4(g.Emissive, 0.0);
+	o1 = vec4(g.ViewSpaceNormal.xy * (1.0 / (g.ViewSpaceNormal.z + 1.0)) * uintBitsToFloat(0x3e90019du) + vec2(0.5), 0.0, 0.0);
+	o2 = vec4(clamp(g.BaseColor, 0.0, 1.0), g.FadeOpacity);
+	o3 = vec4(clamp(vec3(g.Roughness, g.Reflectance, g.MetalMask), 0.0, 1.0), float((g.FXEmissive ? 1 : 0) + 2 * g.ShadingModel) * (1.0 / 255.0));
+}
+#endif

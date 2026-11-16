@@ -1,0 +1,17 @@
+// [DOS2] Reconstructed from the translated Maxwell code of the matching .bshd stages (no headers ship with the game).
+#ifndef DOS2_COMMONHELPERS_NX
+#define DOS2_COMMONHELPERS_NX
+// Used as `if(clip(x)) discard;` (HLSL clip semantics: reject when x < 0).
+bool clip(float x) { return x < 0.0; }
+// Packed tangent frame: inNormal0 is a quaternion. Columns: tangent (rotated X), binormal (rotated Y), normal = cross(T, B) * sign(w),
+// sign = -1 only for w < 0 (w = +-0 and NaN count as +1). Matches the translated VS of Engine_Default_Decal_Lit_Opaque_SK_DEF_NX and
+// Engine_Default_Mesh_Lit_AlphaBlend_SK_DEF_NX (only the normal is multiplied by the sign).
+mat3x3 GetTangentFrame(vec4 q)
+{
+	q = q * inversesqrt(dot(q, q));
+	vec3 t = vec3(1.0 - 2.0 * (q.y * q.y + q.z * q.z), 2.0 * (q.x * q.y + q.z * q.w), 2.0 * (q.x * q.z - q.y * q.w));
+	vec3 b = vec3(2.0 * (q.x * q.y - q.z * q.w), 1.0 - 2.0 * (q.x * q.x + q.z * q.z), 2.0 * (q.y * q.z + q.x * q.w));
+	float s = q.w < 0.0 ? -1.0 : 1.0;
+	return mat3x3(t, b, cross(t, b) * s);
+}
+#endif

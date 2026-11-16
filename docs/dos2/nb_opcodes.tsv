@@ -1,0 +1,67 @@
+# kind: evidence  DOS2 main 4979b200d53bb282, ExecuteRenderCommand 0x93e5f0 codes (tools/dos2_nb_check.py --depth 3)
+# nvn_dK: NVN slots first reached at call depth K (0 = the case code itself, 1 = its direct callees, ...; tail calls count as calls; imports named, not walked; blr/br not followed: blr_other = blr not loading an NVN slot; br_open/switch: register branches left unfollowed (tail calls through a register) / jump tables resolved and followed). Names drop the nvnCommandBuffer prefix. len_static: hint, last x0 write per path.
+code	handler	len_static	direct_calls	nvn_d0	nvn_d1	nvn_d2	nvn_d3	tap_points	blr_other	br_open/switch	functions	plan_diff
+0	0x93fc90	add x0, x8, #8		-	-	-	-	-	0	0/0	0	-
+1	0x93fc9c	add x0, x0, #0x18		-	-	-	-	-	1	0/0	0	plan NVN missing: BindImage,BindStorageBuffer,SetRenderEnable,BindPolygonState
+2	0x93fa88	0x20		-	-	-	-	-	1	0/0	0	-
+3	0x93f268	0x30	0x928ab0	-	ClearTexture,nvnTextureGetHeight,nvnTextureGetWidth,nvnTextureViewSetDefaults,nvnTextureViewSetLayers,nvnTextureViewSetLevels	-	-	ClearTexture	0	0/0	1	-
+4	0x93f70c	0x40		ClearTexture,nvnTextureViewSetDefaults,nvnTextureViewSetLayers,nvnTextureViewSetLevels	-	-	-	ClearTexture	0	0/0	0	-
+5	0x93f630	0x20	0x928be0	-	ClearDepthStencil,SetRenderTargets,SetScissor,SetViewport,nvnTextureGetHeight,nvnTextureGetWidth	-	-	ClearDepthStencil,SetRenderTargets,SetScissor,SetViewport	0	1/0	3	-
+6	0x93f468	0x18	0x9284e0	-	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,SetScissor	-	-	BindBlendState,BindColorState,SetScissor	0	1/0	1	-
+7	0x93f480	0x10		BindPolygonState	-	-	-	BindPolygonState	0	0/0	0	-
+8	0x93f504	0x18		BindDepthStencilState,SetStencilMask,SetStencilRef,SetStencilValueMask	-	-	-	BindDepthStencilState	0	0/0	0	-
+9	0x93f454	0x10	0x9283a0	-	BindProgram	-	-	BindProgram	0	1/0	1	-
+10	0x93eb44	0x10		BindVertexAttribState,BindVertexStreamState	-	-	-	BindVertexAttribState,BindVertexStreamState	0	0/0	0	-
+11	0x93ebf0	0x18		BindVertexBuffer	-	-	-	BindVertexBuffer	0	0/0	0	-
+12	0x93eaf0	0x10		-	-	-	-	-	0	0/0	0	-
+13	0x93eacc	0x2		-	-	-	-	-	0	0/0	0	-
+14	0x93f980	0x18	0x93fd30	-	-	BindImage,nvnDeviceGetImageHandle	-	BindImage	0	1/0	10	-
+15	0x93e684	0x20	0x9243d0	-	-	-	-	-	0	0/0	1	plan NVN missing: BindTexture
+16	0x93fa94	0x18	0x93fd70	-	-	BindStorageBuffer	-	BindStorageBuffer	0	0/0	11	-
+17	0x93e698	0x18	0x801dd0	-	-	-	-	-	0	0/1	10	-
+18	0x93f17c	0x14		SetScissor,SetViewport	-	-	-	SetScissor,SetViewport	0	0/0	0	-
+19	0x93faa8	0x14		SetScissor	-	-	-	SetScissor	0	0/0	0	-
+20	0x93f6d8	0x14		-	-	-	-	-	0	0/0	0	-
+21	0x93e6ac	0x70	0x9283a0 0x9284e0	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,SetAlphaRef,SetRenderEnable,SetRenderEnableConditional,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,SetScissor	-	-	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,SetRenderEnable,SetRenderEnableConditional,SetScissor	0	2/0	2	plan NVN missing: SetRenderTargets
+22	0x93efa8	add x0, x8, #0x20	0x9279a0	-	nvnChannelMaskStateSetChannelMask,nvnChannelMaskStateSetDefaults,BindChannelMaskState,SetRenderTargets,SetScissor,SetViewport,nvnTextureGetHeight,nvnTextureGetWidth,nvnTextureViewSetDefaults,nvnTextureViewSetLayers,nvnTextureViewSetLevels	nvnTextureGetFormat	-	BindChannelMaskState,SetRenderTargets,SetScissor,SetViewport	0	1/1	5	-
+23	0x93f2c8	0x98	0x8e2970	-	-	-	-	-	0	0/0	1	-
+24	0x93f608	0x4c	0x92af30	-	-	-	-	-	0	0/0	1	-
+25	0x93f290	0x10	0x801dd0 0x925130	-	-	-	-	-	0	0/1	11	plan NVN missing: BindUniformBuffer
+26	0x93faf0	0x10	0x93fda0	-	-	-	-	-	0	0/0	10	-
+27	0x93f430	0x1	0x927310	-	-	-	-	-	0	0/0	3	plan NVN missing: SetRenderEnable
+28	0x93e648	add x0, x8, #0x30/ret	0x924bb0	-	-	-	-	-	0	0/0	1	plan NVN missing: BindTexture
+29	0x93f9a4	mov w0, #0x20/ret	0x917630	-	nvnBufferBuilderSetDefaults,nvnBufferBuilderSetDevice,nvnBufferBuilderSetStorage,nvnBufferGetAddress,nvnBufferInitialize,nvnBufferMap	-	nvnMemoryPoolBuilderSetDefaults,nvnMemoryPoolBuilderSetDevice,nvnMemoryPoolBuilderSetFlags,nvnMemoryPoolBuilderSetStorage,nvnMemoryPoolFinalize,nvnMemoryPoolInitialize,nvnMemoryPoolMap	-	0	0/1	29	len plan 0x20
+30	0x93fa5c	mov w0, #0x20/ret	0x9179d0	-	nvnBufferBuilderSetDefaults,nvnBufferBuilderSetDevice,nvnBufferBuilderSetStorage,nvnBufferGetAddress,nvnBufferInitialize,nvnBufferMap	-	nvnMemoryPoolBuilderSetDefaults,nvnMemoryPoolBuilderSetDevice,nvnMemoryPoolBuilderSetFlags,nvnMemoryPoolBuilderSetStorage,nvnMemoryPoolFinalize,nvnMemoryPoolInitialize,nvnMemoryPoolMap	-	0	0/1	29	len plan 0x20
+31	0x93fa48	0x10	0x91db40	-	nvnBufferFinalize	-	nvnMemoryPoolFinalize	-	0	0/2	33	-
+32	0x93fa34	0x10	0x91d890	-	nvnBufferFinalize	-	nvnMemoryPoolFinalize	-	0	0/2	33	-
+33	0x93fa24	0x1	0x924730	-	BindTexture,nvnDeviceGetTextureHandle	-	-	BindTexture	0	0/0	1	-
+34	0x93e660	0x1		-	-	-	-	-	0	0/0	0	-
+35	0x93f0c0	0xc	0x924730 0x925740 0x926f90	DrawArrays,SetRenderEnable	BindTexture,BindUniformBuffer,nvnDeviceGetTextureHandle	-	-	BindTexture,BindUniformBuffer,DrawArrays,SetRenderEnable	0	0/0	7	-
+36	0x93e870	0x14	0x928e80	-	DrawElements,SetRenderEnable	BindTexture,BindUniformBuffer,nvnDeviceGetTextureHandle	-	BindTexture,BindUniformBuffer,DrawElements,SetRenderEnable	0	0/0	8	plan NVN missing: SetRenderEnableConditional
+37	0x93eaa4	0x1c	0x928fb0	-	DrawElementsInstanced,SetRenderEnable	BindTexture,BindUniformBuffer,nvnDeviceGetTextureHandle	-	BindTexture,BindUniformBuffer,DrawElementsInstanced,SetRenderEnable	0	0/0	8	-
+38	0x93fc50	0x50	0x93fea0	-	-	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,BindTexture,BindUniformBuffer,SetScissor,nvnDeviceGetTextureHandle	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindTexture,BindUniformBuffer,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetScissor	0	2/0	14	-
+39	0x93fc3c	0x90	0x93fee0	-	-	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,BindTexture,BindUniformBuffer,SetScissor,nvnDeviceGetTextureHandle	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindTexture,BindUniformBuffer,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetScissor	0	2/0	16	-
+40	0x93f944	0x40	0x92f730	-	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,BindTexture,BindUniformBuffer,SetScissor,nvnDeviceGetTextureHandle	-	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindTexture,BindUniformBuffer,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetScissor	0	2/0	11	-
+41	0x93fc28	0x40	0x93ff20	-	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,BindTexture,BindUniformBuffer,SetScissor,nvnDeviceGetTextureHandle	-	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindTexture,BindUniformBuffer,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawArrays,SetRenderEnable,SetScissor	0	2/0	12	-
+42	0x93fc14	0xa0	0x930210	-	BindDepthStencilState,BindPolygonState,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawElements,SetRenderEnable,SetStencilMask,SetStencilRef,SetStencilValueMask	nvnBlendStateSetBlendTarget,nvnBlendStateSetDefaults,nvnColorStateSetAlphaTest,nvnColorStateSetBlendEnable,nvnColorStateSetDefaults,BindBlendState,BindColorState,BindProgram,BindTexture,BindUniformBuffer,SetScissor,nvnDeviceGetTextureHandle	-	BindBlendState,BindColorState,BindDepthStencilState,BindPolygonState,BindProgram,BindTexture,BindUniformBuffer,BindVertexAttribState,BindVertexBuffer,BindVertexStreamState,DrawElements,SetRenderEnable,SetScissor	0	2/0	15	-
+43	0x93f968	0x10	0x9290f0	-	DispatchCompute,SetRenderEnable	BindTexture,BindUniformBuffer,nvnDeviceGetTextureHandle	-	BindTexture,BindUniformBuffer,DispatchCompute,SetRenderEnable	0	0/0	8	-
+44	0x93f828	add x0, x8, #0x2f	memcpy	nvnTextureGetStride	-	-	-	-	0	0/0	1	-
+45	0x93f7f8	0x18		-	-	-	-	-	0	0/0	0	-
+46	0x93ee04	add x0, x8, #0x2f	0x83cc00 memcpy	-	-	-	-	-	0	0/0	12	-
+47	0x93fb64	0x18	memcpy	-	-	-	-	-	0	0/0	1	-
+48	0x93ef48	0x10	0x9218c0 0x921bf0	-	nvnBufferBuilderSetDefaults,nvnBufferBuilderSetDevice,nvnBufferBuilderSetStorage,nvnBufferFinalize,nvnBufferGetAddress,nvnBufferGetSize,nvnBufferInitialize,CopyBufferToBuffer,SetDebugLabel,nvnQueueBuilderSetDefaults,nvnQueueBuilderSetFlags	-	-	CopyBufferToBuffer	0	0/1	11	plan NVN missing: SetRenderEnable
+49	0x93fb38	add x0, x8, #0x2f/ret	0x921c60 memcpy	-	-	-	-	-	0	0/0	11	-
+50	0x93fb24	0x10	0x921dc0	-	-	nvnBufferBuilderSetDefaults,nvnBufferBuilderSetDevice,nvnBufferBuilderSetStorage,nvnBufferFinalize,nvnBufferGetAddress,nvnBufferGetSize,nvnBufferInitialize,CopyBufferToBuffer,SetDebugLabel,nvnQueueBuilderSetDefaults,nvnQueueBuilderSetFlags	-	CopyBufferToBuffer	0	0/0	7	-
+51	0x93fb0c	0x18	0x921b10	-	-	-	-	-	0	0/0	2	-
+52	0x93f654	0x18	0x920b00	-	CopyTextureToTexture,nvnTextureGetDepth,nvnTextureGetFormat,nvnTextureGetHeight,nvnTextureGetLevels,nvnTextureGetWidth,nvnTextureViewSetDefaults,nvnTextureViewSetLevels	-	-	CopyTextureToTexture	0	0/0	1	-
+53	0x93fb04	0x28		-	-	-	-	-	0	0/0	0	-
+54	0x93f908	0x14		-	-	-	-	-	0	0/0	0	-
+55	0x93edac	0x10 | 0x20	0x80f560	Barrier,BindVertexStreamState	-	-	-	Barrier,BindVertexStreamState	0	0/0	2	plan NVN missing: SetRenderEnableConditional
+56	0x93f9e0	0xc		-	-	-	-	-	0	0/0	0	callee 0x1bf44e0 not reached
+57	0x93eae8	0x2		-	-	-	-	-	0	0/0	0	-
+58	0x93eae8	0x2		-	-	-	-	-	0	0/0	0	-
+59	0x93f9e0	0xc		-	-	-	-	-	0	0/0	0	callee 0x1bf44e0 not reached
+60	0x93f210	0x18		-	-	-	-	-	0	0/0	0	-
+61	0x93e8d8	0x10		ReportCounter	-	-	-	ReportCounter	0	0/0	0	plan NVN missing: BindVertexBuffer
+62	0x93e8b8	0x10		ReportCounter	-	-	-	ReportCounter	0	0/0	0	-
+63	0x93ecac	0x10		SetRenderEnable,SetRenderEnableConditional	-	-	-	SetRenderEnable,SetRenderEnableConditional	0	0/0	0	plan NVN missing: BindDepthStencilState

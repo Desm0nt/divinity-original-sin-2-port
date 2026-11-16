@@ -1,0 +1,2 @@
+// [DOS2] Reconstructed (see GlobalConstants_NX.shdh): the pixel stages see the same blocks at the same NVN bindings.
+#include "Shaders/GlobalConstants_NX.shdh"
