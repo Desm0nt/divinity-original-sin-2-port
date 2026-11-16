@@ -75,4 +75,3 @@ dm/gfx/tools/dmsh_xlate_*/obj/
 /put-game-files-here/*
 !/put-game-files-here/README.txt
 dm/android/tl2/icon.png
-dm/android/dos2/icon.png
