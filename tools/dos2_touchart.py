@@ -171,6 +171,11 @@ class Art:
         if k not in self._png: self._png[k] = bitmap_shape(self.g, asset(name), centre)
         return self._png[k]
 
+    def clip(self, cid):
+        """a 1-frame sprite holding one shape at 0,0: what a NAMED root instance must be (the engine's movies only name sprites; a bare
+        DefineShape placed with a name gives the ActionScript no MovieClip - pack 5c: panel buttons, fold and hot bar arrows dead, 16.11)"""
+        return self.g.sprite([(cid, 1, (0, 0), None)])
+
     def arrow(self, right=False):
         k = ('arrow', right)
         if k not in self._png: self._png[k] = arrow_shape(self.g, right)

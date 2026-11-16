@@ -117,7 +117,7 @@ def graft(swf, sm, panel):
         if src not in todo: continue
         g = gr.Graft(swf, srcs[src] if src != 'png' else None); art = ta.Art(g)
         for k, name, key, px, py, s, box in sorted(todo[src]):
-            cid = g.copy(ART[key][2]) if src != 'png' else art.png(ART[key][1])[0]
+            cid = g.copy(ART[key][2]) if src != 'png' else art.clip(art.png(ART[key][1])[0])   # a png: a sprite around the shape (a bare named Shape gets no instance in Iggy)
             g.place(cid, px, py, inst(name), s); rep['placed'].append((k, inst(name)) + box)
         rep['frozen'] += len(g.frozen); rep['dropped'] += g.dropped; g.finish(); rep['defs'] += len(g.new_defs)
     rep['placed'].sort(); rep['stage'] = (sw, sh); rep['anchor'] = (ax0, ay0, ax1, ay1)

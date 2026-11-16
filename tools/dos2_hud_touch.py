@@ -223,7 +223,7 @@ def graft(swf, icons):
     rep['placed'].append(('dmVisTac_mc', 20, tx + b[0], ty + b[1], tx + b[2], ty + b[3])); rep['tac_off'] = tx - OPT_XY[0]
     # hot bar row arrows (vector, the iPad's flat khaki)
     for name, right, (x, y) in (('dmVisPrev_mc', False, PREV_XY), ('dmVisNext_mc', True, NEXT_XY)):
-        c, ab = art.arrow(right); g.place(c, x, y, name, ARROW_SCALE)
+        c, ab = art.arrow(right); g.place(art.clip(c), x, y, name, ARROW_SCALE)   # a sprite around the shape (a bare named Shape gets no instance in Iggy)
         rep['placed'].append((name, 11 if right else 10, x + ab[0] * ARROW_SCALE, y + ab[1] * ARROW_SCALE, x + ab[2] * ARROW_SCALE, y + ab[3] * ARROW_SCALE))
     # cancel: the round steel plate + the cancel cross, centred on 0,0 (scaled BTN_SCALE about its centre)
     k = BTN_SCALE

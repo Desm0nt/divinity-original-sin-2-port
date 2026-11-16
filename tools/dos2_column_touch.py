@@ -77,7 +77,7 @@ def graft(swf):
         y = TOP + STEP * k
         g.place(btn, x, y, name, SCALE); rep['placed'].append((name, code, x, y, x + BTN * SCALE, y + BTN * SCALE))
     for name, right, (cx, cy) in FOLDS:
-        c, b = art.arrow(right); k = FOLD_SCALE
+        c, b = art.arrow(right); c = art.clip(c); k = FOLD_SCALE   # a sprite around the shape (a bare named Shape gets no instance in Iggy)
         px, py = cx - (b[0] + b[2]) / 2.0 * k, cy - (b[1] + b[3]) / 2.0 * k; g.place(c, px, py, name, k)
         rep['placed'].append((name, 16, px + b[0] * k, py + b[1] * k, px + b[2] * k, py + b[3] * k))
     rep['frozen'] += len(g.frozen); g.finish(); rep['defs'] += len(g.new_defs)
