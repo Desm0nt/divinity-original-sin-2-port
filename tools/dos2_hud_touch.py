@@ -9,8 +9,10 @@ game icon is read; inventory and proofs: docs/dos2/TOUCH_ART.md). Every original
   dmVisPrev/Next_mc vector arrows (flat khaki), x ARROW_SCALE      ExternalInterface prevHotbar / nextHotbar (+ PlaySound)
   dmVisCancel_mc    plate_round_steel + glyph_cancel, 69 px        dmPadBtn(1) = pad B
   dmVisEnd_mc       plate_endturn + a "$Title" text field          ExternalInterface endTurn; shown only while setActiveInCombat(true)
-  dmVisSneak_mc     plate_round_steel + icon_sneak                 dmPadBtn(22) = d-pad down (ToggleSneak)
-  dmVisDestr_mc     plate_round_steel + icon_sheath                dmPadBtn(24) = d-pad right (DestructionToggle = weapon drawn)
+  dmVisSneak_mc     plate_round_steel + the game's Action_Sneak    dmPadBtn(22) = d-pad down (ToggleSneak)
+  dmVisDestr_mc     plate_round_steel + the game's Action_Sheath   dmPadBtn(24) = d-pad right (DestructionToggle = weapon drawn)
+  (the hot bar's own icons: the engine draws them from the skill atlas Ability_Skill_Status_Icons, Icons.pak + Shared.pak next to the Switch
+  Game.pak; atlas_icons cuts them at setup time from the player's dump, bitmap_disc shows them as a disc ICON_D px - owner 16.11)
   cancel / sneak / destruction BTN_SCALE larger, on the cancel button's centre line, DPAD_GAP apart, DPAD_PAD px invisible hit margin;
   "(Y) quick access" under the hot bar (bottombar_mc.yHint_mc, bottomBar_c's own hint text): its own mouseDown listener + an invisible fill
       YHINT_PAD px around its text (dmYPad) -> dmPadBtn(4) = Y.
@@ -21,7 +23,7 @@ dmVisCombatOrig); a press dims the button (alpha 0.6), the release of the stage 
   python -I tools/dos2_hud_touch.py build <Switch Game.pak | bottomBar_c.swf> <out.swf>
   python -I tools/dos2_hud_touch.py check <Switch Game.pak | bottomBar_c.swf> [bottomBar_d.swf]
 """
-import hashlib, os, sys
+import hashlib, os, struct, sys, zlib
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC, OPS, u30
@@ -46,6 +48,9 @@ DPAD_ICON, DPAD_PAD, YHINT_PAD = 42, 10, 12            # borrowed icon's larger 
 # (CANCEL_XY y), right of it in that order, DPAD_GAP stage px between the scaled plates; the destruction button with its hit margin stays
 # inside the 1920 stage (x <= 1920 = window 2160 on 2400x1080). The centres follow from the plate's size (graft: dpad_centres).
 BTN_SCALE, DPAD_GAP = 1.18, 26
+ICON_D = 46                                            # atlas icon: a disc this wide on the 69 px plate (own px; the square icon's corners cut)
+ICONS = {'dmVisSneak_mc': 'Action_Sneak', 'dmVisDestr_mc': 'Action_Sheath'}   # the hot bar's own action skill icons (owner 16.11: the game's icons)
+ATLAS_TEX, ATLAS_UV = 'Public/Shared/Assets/Textures/Icons/Ability_Skill_Status_Icons.dds', 'Public/Shared/GUI/Ability_Skill_Status_Icons.lsx'
 # map (owner 15.11, pack 2z: "how else than '-' to open the map / '+' for the menu? compare with the iPad"): the iPad column's ico_map button under the
 # journal (next slot of the column) -> dmPadBtn(27) = pad '-' (controller_1.json ToggleMap <- c:back); the iPad's btnOptions -> dmPadBtn(28) = pad '+'
 # (ToggleInGameMenu <- c:start). btnOptions sits top right on the iPad (1348,20 of 1440); our top right is the minimap (minimap_c 357x500 anchored
@@ -81,6 +86,116 @@ def _read(path, name):
 def source(path): return _read(path, 'bottomBar_c.swf')
 
 
+def _bc3(raw):
+    """BC3 blocks -> (blocks, 16, 4) RGBA uint8, pixels row-major in the block (dm/tools/astc_pack.py bc3_decode)"""
+    import numpy as np
+    b = np.frombuffer(raw, np.uint8).reshape(-1, 16); n = len(b)
+    a0 = b[:, 0].astype(np.int32); a1 = b[:, 1].astype(np.int32)
+    abits = np.zeros(n, np.uint64)
+    for i in range(6): abits |= b[:, 2 + i].astype(np.uint64) << np.uint64(8 * i)
+    k = np.arange(8, dtype=np.int32)
+    p8 = np.where(k == 0, a0[:, None], np.where(k == 1, a1[:, None], ((8 - k) * a0[:, None] + (k - 1) * a1[:, None] + 3) // 7))
+    p6 = np.where(k == 0, a0[:, None], np.where(k == 1, a1[:, None], np.where(k == 6, 0, np.where(k == 7, 255, ((6 - k) * a0[:, None] + (k - 1) * a1[:, None] + 2) // 5))))
+    apal = np.where((a0 > a1)[:, None], p8, p6)
+    alpha = np.take_along_axis(apal, ((abits[:, None] >> (np.uint64(3) * np.arange(16, dtype=np.uint64))) & np.uint64(7)).astype(np.int64), 1)
+    c0 = b[:, 8].astype(np.int32) | (b[:, 9].astype(np.int32) << 8); c1 = b[:, 10].astype(np.int32) | (b[:, 11].astype(np.int32) << 8)
+    def rgb(c): r, g, bl = (c >> 11) & 31, (c >> 5) & 63, c & 31; return np.stack([(r << 3) | (r >> 2), (g << 2) | (g >> 4), (bl << 3) | (bl >> 2)], -1)
+    e0, e1 = rgb(c0), rgb(c1)
+    cpal = np.stack([e0, e1, (2 * e0 + e1 + 1) // 3, (e0 + 2 * e1 + 1) // 3], 1)
+    cbits = b[:, 12].astype(np.uint32) | (b[:, 13].astype(np.uint32) << 8) | (b[:, 14].astype(np.uint32) << 16) | (b[:, 15].astype(np.uint32) << 24)
+    cidx = ((cbits[:, None] >> (np.uint32(2) * np.arange(16, dtype=np.uint32))) & np.uint32(3)).astype(np.int64)
+    col = np.take_along_axis(cpal, cidx[:, :, None].repeat(3, 2), 1)
+    return np.concatenate([col, alpha[:, :, None]], -1).astype(np.uint8)
+
+
+def _nvn_tex(d):
+    """an NVN texture of the Switch packs ('DFvN' + 'HBvN' blocks; a .dds in the LSPK is this, docs/dos2/DOS2_PORT.md): -> (w, h, fmt, level 0
+    linear bytes) or None. Block 2 = info (w, h, format, mips), block 3 = the image (Tegra block-linear: 64-byte x 8-row GOBs, GOB block height
+    of level 0 = next power of two of its GOB rows, at most 16)"""
+    import numpy as np
+    if d[:4] != b'DFvN': return None
+    o = struct.unpack_from('<I', d, 4)[0]; info = img = None
+    while o + 0x24 <= len(d) and d[o:o + 4] == b'HBvN':
+        _, size, off, typ, _, _ = struct.unpack_from('<IQQIII', d, o + 4); p = d[o + off:o + off + size]
+        if typ == 2: info = p
+        elif typ == 3: img = p
+        o += off + size
+    if info is None or img is None: return None
+    _, _, w, h, _, _, fmt, _, _ = struct.unpack_from('<QIIIIIIII', info, 0)
+    bpb, bs = {0x42: (8, 4), 0x43: (16, 4), 0x44: (16, 4), 0x25: (4, 1)}.get(fmt, (0, 0))
+    if not bpb: return None
+    cd = lambda a, b: (a + b - 1) // b
+    wb, hb = cd(w, bs), cd(h, bs); bh = 1
+    while bh < cd(hb, 8) and bh < 16: bh *= 2
+    pitch = cd(wb * bpb, 64)
+    x = np.arange(wb * bpb, dtype=np.int64)[None, :]; y = np.arange(hb, dtype=np.int64)[:, None]
+    gob = ((x % 64) // 32) * 256 + ((y % 8) // 2) * 64 + ((x % 32) // 16) * 32 + (y % 2) * 16 + (x % 16)
+    idx = (y // (8 * bh)) * (pitch * bh * 512) + (x // 64) * (bh * 512) + ((y % (8 * bh)) // 8) * 512 + gob
+    src = np.frombuffer(img, np.uint8)
+    if idx.max() >= len(src): return None
+    return w, h, fmt, src[idx].tobytes()
+
+
+def atlas_icons(sw, names=None):
+    """pack 4b: {icon name: (w, h, RGBA bytes)} cut from the game's skill icon atlas - the very pixels the hot bar draws for those actions.
+    sw = the Switch Game.pak (or anything in that Data directory): Icons.pak there holds the NVN texture (DFvN, BC3, block-linear: _nvn_tex),
+    Shared.pak its UV list. None when they are not there (the caller keeps the borrowed iPad art)."""
+    import re
+    import numpy as np
+    import lspk
+    names = list(names or sorted(set(ICONS.values())))
+    d = os.path.dirname(os.path.abspath(sw)) if not os.path.isdir(sw) else sw
+    ip, sp = os.path.join(d, 'Icons.pak'), os.path.join(d, 'Shared.pak')
+    if not (os.path.exists(ip) and os.path.exists(sp)): return None
+    def one(pak, name):
+        p = lspk.Pak(pak); e = [e for e in p.entries if e[0] == name]
+        return p.read(e[0]) if e else None
+    tex, uv = one(ip, ATLAS_TEX), one(sp, ATLAS_UV)
+    if tex is None or uv is None: return None
+    t = _nvn_tex(tex)
+    if not t or t[2] != 0x44 or t[0] % 4 or t[1] % 4: return None   # BC3 only (what the Switch atlas is: 1536x1536)
+    W, H = t[0], t[1]
+    img = _bc3(t[3]).reshape(H // 4, W // 4, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(H, W, 4)
+    uv = uv.decode('utf-8', 'replace'); out = {}
+    for n in names:
+        m = re.search(r'value="%s" type="22" />\s*<attribute id="U1" value="([^"]+)"[^>]*>\s*<attribute id="U2" value="([^"]+)"[^>]*>\s*'
+                      r'<attribute id="V1" value="([^"]+)"[^>]*>\s*<attribute id="V2" value="([^"]+)"' % re.escape(n), uv)
+        if not m: return None
+        u1, u2, v1, v2 = map(float, m.groups())
+        x0, y0, x1, y1 = int(round(u1 * W)), int(round(v1 * H)), int(round(u2 * W)), int(round(v2 * H))
+        out[n] = (x1 - x0, y1 - y0, np.ascontiguousarray(img[y0:y1, x0:x1]).tobytes())
+    return out
+
+
+def bitmap_disc(g, icon, d):
+    """a DefineBitsLossless2 of the icon (premultiplied ARGB) + a DefineShape: a disc d px wide centred on 0,0 (8 quadratic arcs) filled with
+    the bitmap stretched over its box (clipped, smoothed: fill 0x41, as the iPad's own icons). Returns (shape id, its box)."""
+    import math
+    w, h, rgba = icon
+    px = bytearray(w * h * 4)
+    for i in range(w * h):
+        r, gg, b, a = rgba[i * 4:i * 4 + 4]
+        px[i * 4:i * 4 + 4] = bytes((a, r * a // 255, gg * a // 255, b * a // 255))
+    bid = g._alloc(); g.new_defs.append([36, struct.pack('<HBHH', bid, 5, w, h) + zlib.compress(bytes(px), 9)]); g._made[bid] = len(g.new_defs) - 1
+    R = d * 10.0                                         # radius in twips (d px / 2 * 20)
+    pts = [(int(round(R * math.cos(k * math.pi / 4))), int(round(R * math.sin(k * math.pi / 4)))) for k in range(9)]
+    ctl = [(int(round(R / math.cos(math.pi / 8) * math.cos((k + 0.5) * math.pi / 4))), int(round(R / math.cos(math.pi / 8) * math.sin((k + 0.5) * math.pi / 4)))) for k in range(8)]
+    pts[8] = pts[0]
+    def nb(*v): return max(2, max(abs(int(x)).bit_length() for x in v) + 1)
+    rec = []
+    # style change: TypeFlag 0, StateNewStyles 0, StateLineStyle 0, StateFillStyle1 1, StateFillStyle0 0, StateMoveTo 1; move to the start;
+    # FillStyle1 = 1 (the right side of the path: the arcs run clockwise on screen)
+    n = nb(*pts[0]); rec += [(0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (1, 1), (n, 5), (pts[0][0], n), (pts[0][1], n), (1, 1)]
+    for k in range(8):
+        dv = (ctl[k][0] - pts[k][0], ctl[k][1] - pts[k][1], pts[k + 1][0] - ctl[k][0], pts[k + 1][1] - ctl[k][1]); n = nb(*dv)
+        rec += [(1, 1), (0, 1), (n - 2, 4)] + [(v, n) for v in dv]
+    rec += [(0, 1), (0, 5)]
+    box = gr.wbits([(nb(int(R), -int(R)) , 5)] + [(v, nb(int(R), -int(R))) for v in (-int(R), int(R), -int(R), int(R))])
+    fill = b'\x01\x41' + struct.pack('<H', bid) + gr.matrix_bytes(-d / 2.0, -d / 2.0, 20.0 * d / w, 20.0 * d / h)
+    sid = g._alloc(); g.new_defs.append([2, struct.pack('<H', sid) + box + fill + b'\x00' + bytes([0x10]) + gr.wbits(rec)]); g._made[sid] = len(g.new_defs) - 1
+    return sid, (-d / 2.0, -d / 2.0, d / 2.0, d / 2.0)
+
+
 def dpad_centres(pb):
     """centres (stage px) of the sneak / destruction plates (own box pb, scaled BTN_SCALE): on the cancel button's centre line, right of it,
     DPAD_GAP apart (the cancel button is the same 69 px plate)"""
@@ -89,8 +204,9 @@ def dpad_centres(pb):
     return (sx, CANCEL_XY[1]), (sx + w + DPAD_GAP, CANCEL_XY[1])
 
 
-def graft(swf):
-    """the visuals (owner 16.11: our own art, tools/dos2_touchart.py - no iPad file, no game icon); returns the report"""
+def graft(swf, icons):
+    """the visuals (owner 16.11: our own art, tools/dos2_touchart.py - no iPad file; the sneak / weapon icons are the game's own hot bar icons,
+    icons = atlas_icons(Switch data), cut from the player's dump at setup time); returns the report"""
     assert not COLUMN_HERE, 'the column lives in dmColumn_d (tools/dos2_column_touch.py)'
     rep = {'placed': [], 'frozen': 0, 'defs': 0, 'dropped': [], 'icons': {}}
     g = gr.Graft(swf); art = ta.Art(g)
@@ -122,11 +238,14 @@ def graft(swf):
     lab = ta.edit_text(g, (5, 0, 202, 32), '<p align="center"><font size="28" color="#ffffff" letterSpacing="0.00" kerning="1">End turn</font></p>')
     g.place(g.sprite([(ep, 1, (0, 0), None), (lab, 3, (0, 3), 'label_txt')]), END_XY[0], END_XY[1], 'dmVisEnd_mc')
     rep['placed'].append(('dmVisEnd_mc', 13, END_XY[0] + eb[0], END_XY[1] + eb[1], END_XY[0] + eb[2], END_XY[1] + eb[3]))
-    # sneak / destruction (d-pad down / right): the steel plate + our sneak / sheathe icons, right of the cancel button on its centre line
+    # sneak / destruction (d-pad down / right): our steel plate + the hot bar's own icons (Action_Sneak / Action_Sheath of the game's skill atlas, the
+    # player's dump; pack 4b look) as a disc ICON_D px, right of the cancel button on its centre line
     sneak_xy, destr_xy = dpad_centres(pb); rep['centres'] = (sneak_xy, destr_xy)
-    for name, code, icon, xy in (('dmVisSneak_mc', 18, 'icon_sneak', sneak_xy), ('dmVisDestr_mc', 19, 'icon_sheath', destr_xy)):
-        g.place(on_steel(icon), xy[0], xy[1], name, k)
-        rep['placed'].append((name, code, xy[0] + pb[0] * k, xy[1] + pb[1] * k, xy[0] + pb[2] * k, xy[1] + pb[3] * k)); rep['icons'][name] = icon
+    for name, code, xy in (('dmVisSneak_mc', 18, sneak_xy), ('dmVisDestr_mc', 19, destr_xy)):
+        did, db = bitmap_disc(g, icons[ICONS[name]], ICON_D)   # centred on 0,0 like the plate
+        g.place(g.sprite([(sp, 1, (0, 0), None), (did, 2, (0, 0), None)]), xy[0], xy[1], name, k)
+        rep['placed'].append((name, code, xy[0] + pb[0] * k, xy[1] + pb[1] * k, xy[0] + pb[2] * k, xy[1] + pb[3] * k))
+        rep['icons'][name] = '%s (game atlas %dx%d -> disc %d px)' % (ICONS[name], icons[ICONS[name]][0], icons[ICONS[name]][1], ICON_D)
     rep['frozen'] += len(g.frozen); rep['dropped'] += g.dropped; g.finish(); rep['defs'] += len(g.new_defs)
     return rep
 
@@ -385,17 +504,17 @@ def set_layout(data, value):
     return swf.write()
 
 
-def patch(data):
-    """bottomBar_c bytes -> (bottomBar_d bytes, report)"""
-    swf = Swf(data); rep = graft(swf); wire(swf, rep)
+def patch(data, icons):
+    """bottomBar_c bytes + atlas_icons(Switch data) -> (bottomBar_d bytes, report)"""
+    swf = Swf(data); rep = graft(swf, icons); wire(swf, rep)
     return swf.write(), rep
 
 
-def check(src, built=None):
+def check(src, icons, built=None):
     bad = 0
     def say(ok, text):
         nonlocal bad; bad += not ok; print('%-4s %s' % ('ok' if ok else 'FAIL', text))
-    out, rep = patch(src)
+    out, rep = patch(src, icons)
     if built is not None: say(built == out, 'the given %s is what this tool builds from these sources (%d B)' % (MOVIE, len(built)))
     a, b = Swf(src), Swf(out); (ta, pa, A), = a.abcs(); (tb, pb, B), = b.abcs()
     print('%s -> %s: %d B -> %d B, +%d definition tags, +%d root instances, %d sprites frozen to one frame, +%d methods, sha256 %s' % (
@@ -445,7 +564,7 @@ def check(src, built=None):
         'the destruction button with its %.1f px hit margin ends at stage x %.1f <= 1920 (window %.0f on 2400x1080)' % (
             (BTN_SCALE - 1) * 100, sz[0][0], cyy[0], trio[1][2] - trio[0][4], trio[2][2] - trio[1][4], m, trio[2][4] + m, trio[2][4] + m + 240))
     print('       icons: %s' % '; '.join('%s = %s' % kv for kv in sorted(rep['icons'].items())))
-    say(len([1 for c, d, _ in b.tags if c == 36]) - len([1 for c, d, _ in a.tags if c == 36]) == 8, 'our art went in as 8 DefineBitsLossless2 (round bronze + steel plates, menu bars, tactical, cross, end turn plate, sneak, sheathe)')
+    say(len([1 for c, d, _ in b.tags if c == 36]) - len([1 for c, d, _ in a.tags if c == 36]) == 8, '8 DefineBitsLossless2: our round bronze + steel plates, menu bars, tactical, cross, end turn plate + the game icons %s' % ' / '.join(sorted(set(ICONS.values()))))
     for p in boxes: print('       %-15s code %2d  stage %7.1f,%6.1f .. %7.1f,%6.1f  window %7.1f,%6.1f .. %7.1f,%6.1f%s' % (p[0], p[1], p[2], p[3], p[4], p[5], p[2] + 240, p[3], p[4] + 240, p[5],
                                                                                            '  panel ' + PANEL_NAMES[p[1]] if p[1] < 6 else ''))
     return bad
@@ -454,12 +573,13 @@ def check(src, built=None):
 def main():
     a = sys.argv[1:]
     if len(a) < 2 or a[0] not in ('build', 'check'): sys.exit(__doc__)
-    src = source(a[1])
+    src = source(a[1]); icons = atlas_icons(a[1])
+    if icons is None: sys.exit('%s: no skill icon atlas next to it (Icons.pak / Shared.pak)' % a[1])
     if a[0] == 'build':
         if len(a) < 3: sys.exit(__doc__)
-        out, rep = patch(src); os.makedirs(os.path.dirname(os.path.abspath(a[2])), exist_ok=True); open(a[2], 'wb').write(out)
+        out, rep = patch(src, icons); os.makedirs(os.path.dirname(os.path.abspath(a[2])), exist_ok=True); open(a[2], 'wb').write(out)
         print('%s: %d B, sha256 %s' % (a[2], len(out), hashlib.sha256(out).hexdigest())); return
-    bad = check(src, open(a[2], 'rb').read() if len(a) > 2 else None)
+    bad = check(src, icons, open(a[2], 'rb').read() if len(a) > 2 else None)
     print('FAILED: %d' % bad if bad else 'HUD touch elements: all static checks pass')
     sys.exit(1 if bad else 0)
 

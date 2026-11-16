@@ -18,10 +18,10 @@ DefineBitsLossless2 + bitmap-filled DefineShape, polygon shapes, a `$Title` text
 | options | bottomBar_d `dmVisOpt_mc` | rightSideButtons_t `btnOptions` 74x74 | png | `plate_round_copper` + `icon_menu` |
 | tactical camera | bottomBar_d `dmVisTac_mc` | minimap_t `tacticalCamera_mc` (plate 67 + `ico_tacticalCamera` 52x54) | png | `plate_round_copper` + `icon_tactical` |
 | hot bar row arrows | bottomBar_d `dmVisPrev/Next_mc` | hotBar_t `btnSkillSetLeft/RightFrames` (vector, 88x85) | vec | `ARROW_LEFT`, flat (150,141,120) |
-| cancel | bottomBar_d `dmVisCancel_mc` | statusConsole_t `cancelBtn` 69x69 (5 layers) | png | `plate_round_steel` + `glyph_cancel` |
+| cancel | bottomBar_d `dmVisCancel_mc` | statusConsole_t `cancelBtn` 69x69 (5 layers) | png | `plate_round_steel` + `glyph_cancel` (5c: redrawn closer to the original - light silver ring, mid-grey knot disc, bold white star X ~37 % of the width; tone matched in the HUD render) |
 | end turn | bottomBar_d `dmVisEnd_mc` | statusConsole_t `endTurnBtn` 207x44 + label | png | `plate_endturn` + own DefineEditText (`$Title`, "End turn") |
-| sneak / weapon plates | bottomBar_d `dmVisSneak/Destr_mc` | cancelBtn plate (4 layers) | png | `plate_round_steel` |
-| sneak / weapon icons | same | iPad none (4b: Switch atlas `Action_Sneak` / `Action_Sheath`; 4a: iPad possessIco / combatIcon) | png | `icon_sneak`, `icon_sheath` (the iPad has no such button; the atlas is not used) |
+| sneak / weapon plates | bottomBar_d `dmVisSneak/Destr_mc` | cancelBtn plate (4 layers) | png | `plate_round_steel` (the same light backing as cancel) |
+| sneak / weapon icons | same | not iPad: the game's own hot bar icons (pack 4b) | **game** | Switch skill atlas `Action_Sneak` / `Action_Sheath` (Icons.pak `Ability_Skill_Status_Icons` + Shared.pak UVs, cut at setup time from the dump, a 46 px disc; owner 16.11: the game's own icons where the game has them; 5b's own drawings dropped) |
 | (unused copies) | bottomBar_d | rightSideButtons_t `cmnTabButtonBg_9`, `btnSidePanelBg_6` copied but never placed | - | dropped |
 | character | dmColumn_d `dmVis1_mc` | rightSideButtons_t `btnSidePanelBg_6` 105x105 | png | `btn_character` |
 | column plate | dmColumn_d `dmVis0/2..5_mc`, map | rightSideButtons_t `cmnTabButtonBg_9` 74x74 | png | `plate_square_copper` |
@@ -47,15 +47,15 @@ Rendered both (tools/dos2_swf_render.py), scaled to the same height as the panel
 | ok | partyInventory_t okBtn 78x32 | partyInventory.swf okBtn 78x32 | 0.00 | 1.0000 | 4 of 4 pixel-equal |
 | info (rejected) | uiCraft_t searchBtn | uiCraft.swf searchBtn | 8.44 | 0.878 | 3 of 3 pixel-equal, but the iPad's shape draws the glass ~20 % larger: not the same drawing, so owner's rule -> our `pan_info` (pack 5b) |
 Close / plus / minus / balance / column icons have Switch look-alikes (uiElements ButtonCrossIconmc 43x43, uiCraft plusBtn 19x19,
-trade balanceBtn_27, panelSelect_c iconDeselected 80x80 frames) but no equal bitmap and other sizes: drawn by us. The sneak / sheathe atlas of the
-iPad build is not in the IPA's local data (on-demand resources), and the iPad has no such buttons: drawn by us.
+trade balanceBtn_27, panelSelect_c iconDeselected 80x80 frames) but no equal bitmap and other sizes: drawn by us. The sneak / sheathe buttons have no iPad
+counterpart; since 5c they show the game's own hot bar icons from the player's dump (owner 16.11).
 
-## Checks (16.11, pack `packs/5b/TouchUI.pak` = 5a + own info button, built with no iPad path)
+## Checks (16.11, pack `packs/5c/TouchUI.pak` = 5b + game sneak / weapon icons + redrawn cancel, built with no iPad path)
 - `dos2_hud_touch.py check`, `dos2_column_touch.py check`, `dos2_panel_touch.py check`: all pass (geometry as before: options 1480,20..1554,94,
   tactical under it, cancel / sneak / weapon centres on y 963, 81.4 px; the column's right side on stage x 308; panel rows 64 px high).
 - `dos2_touchui_pak.py hints`: 24 movies = GOOD-last's 24, self-check "every movie of the host tables k_def + k_hint is in the package".
 - ExternalInterface / invoke names per movie (dmPadBtn, dmPanel, dmColumnPoll, dmHudRects, addWatermarkText, setActiveInCombat ...): the same set as
   GOOD-last in all 24 movies.
-- Bitmap scan: GOOD-last holds 103 iPad-only bitmaps, 5b none; 44 bitmap tags of 5b are in neither edition (ours).
-- `dos2_touchui_check.py main.raw packs/5b/TouchUI.pak`: all sites match; DM_DOS2_TOUCHUI_SET=hints served.
+- Bitmap scan: GOOD-last holds 103 iPad-only bitmaps, 5b / 5c none.
+- `dos2_touchui_check.py main.raw packs/5c/TouchUI.pak`: all sites match; DM_DOS2_TOUCHUI_SET=hints served.
 Not run on a phone.

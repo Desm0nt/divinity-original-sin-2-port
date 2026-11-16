@@ -21,7 +21,7 @@ PX = 0.5   # stage px per PNG px
 # name -> (w, h) PNG px; the passes rely on these sizes (layout = the iPad's)
 ASSETS = {
     'plate_round_copper': (148, 148), 'plate_round_steel': (138, 138), 'glyph_cancel': (80, 80), 'icon_menu': (80, 80), 'icon_tactical': (104, 108),
-    'plate_square_copper': (148, 148), 'plate_endturn': (414, 88), 'icon_sneak': (92, 92), 'icon_sheath': (92, 92),
+    'plate_square_copper': (148, 148), 'plate_endturn': (414, 88),
     'btn_character': (210, 210), 'ico_inventory': (118, 108), 'ico_charsheet': (118, 108), 'ico_skills': (118, 108), 'ico_craft': (118, 108),
     'ico_journal': (118, 108), 'icon_map': (118, 108),
     'pan_close': (100, 100), 'pan_helmet': (128, 128), 'pan_list': (128, 128), 'pan_multi': (128, 128), 'pan_plus': (68, 68), 'pan_minus': (68, 68),

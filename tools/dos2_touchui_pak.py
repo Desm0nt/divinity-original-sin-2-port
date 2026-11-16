@@ -137,8 +137,11 @@ def main():
             # the HUD with on-screen buttons laid out as the iPad's, in our own art (tools/dos2_hud_touch.py + assets/touchui, owner 16.11); --no-vis = the stock bottomBar_c
             if '--no-vis' not in a:
                 hsrc = dos2_hud_touch.source(sw)
-                if dos2_hud_touch.check(hsrc): sys.exit('%s: static checks failed, package not written' % dos2_hud_touch.MOVIE)
-                made[dos2_hud_touch.MOVIE] = dos2_hud_touch.patch(hsrc)[0]
+                # the sneak / weapon buttons show the hot bar's own icons, cut from the game's skill atlas (Icons.pak + Shared.pak next to --sw)
+                hic = dos2_hud_touch.atlas_icons(sw)
+                if hic is None: sys.exit('%s: no skill icon atlas next to %s (Icons.pak / Shared.pak); package not written' % (dos2_hud_touch.MOVIE, sw))
+                if dos2_hud_touch.check(hsrc, hic): sys.exit('%s: static checks failed, package not written' % dos2_hud_touch.MOVIE)
+                made[dos2_hud_touch.MOVIE] = dos2_hud_touch.patch(hsrc, hic)[0]
                 # the button column in its own movie, anchored by the game to the right screen edge under the minimap (owner 15.11; tools/dos2_column_touch.py,
                 # host: hle_dos2_touchui.c type 0x8d watermark.swf -> GUI/dmColumn_d.swf, created next to bottomBar_c)
                 csrc = dos2_column_touch.source(sw)
