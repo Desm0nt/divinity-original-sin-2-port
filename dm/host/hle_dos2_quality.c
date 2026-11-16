@@ -165,6 +165,7 @@ static volatile uint8_t *dq_gs(void) {   // GraphicSettings, checked by its vtab
     if (!g || *(uint8_t *volatile *)g != g_main->base + DQ_GS_VT) return NULL;
     return g;
 }
+__attribute__((weak)) double xbg_recent_gpu_ms(void);   // the Vulkan backend's GPU ms a frame over its last report window (-1: none yet)
 static float dq_gpu_ms(void) {
     uint8_t *r = *(uint8_t *volatile *)(g_main->base + DQ_RENDERER_PTR);
     return r ? *(volatile float *)(r + DQ_GPU_MS) : NAN;
@@ -244,6 +245,10 @@ static void dq_aa_watch(void) {
 static void *dq_monitor(void *arg) {
     (void)arg;
     int seen = 0, tick = 0, pct_logged = 100; uint64_t next_log = 0; float tgt_logged = 0;
+    int size_w = 0, size_h = 0, insane = 0; uint64_t size_at = 0;   // NB-18b-11: the size the game set (SetSize), reported once it settled
+    // NB-18b-12: every 10 s the game's GPU frame time (renderer +0x18f0, sampled at 4 Hz: what its dynamic-resolution controller reads)
+    // next to the backend's own (xbg_recent_gpu_ms = the "NVN PERF gpu_ms" of its last 60 frames) - one run proves they agree.
+    double gs_sum = 0, gs_min = 1e30, gs_max = 0, hs_sum = 0; int gs_n = 0, hs_n = 0; uint64_t gs_next = 0;
     for (;;) {
         usleep(250 * 1000);
         if (g_tgt_mode == 1) {   // the host's frame budget
@@ -267,6 +272,30 @@ static void *dq_monitor(void *arg) {
                 d->up_w, d->up_h, d->dn_w, d->dn_h, d->cur_w, d->cur_h, d->off ? "off" : "on", g_q ? (double)g_q[0] : 31.5,
                 g_q ? (double)g_q[1] : 30.0, (double)dq_gpu_ms());
         }
+        // NB-18b-11: always in the log (not only with DM_DOS2_DRS_LOG): the maximum the game set for the window (the first sighting above is
+        // the constructor's 1920x1080), 8 s later what the controller made of it, and a red line when the GPU frame time it reads is
+        // not a frame time (then it sits at the minimum: the TIMESTAMP_TOP bug, xbg_game.cpp OP_REPORT_COUNTER).
+        if (d->max_w != size_w || d->max_h != size_h) { size_w = d->max_w; size_h = d->max_h; size_at = now_ns() + 8000000000ull; }
+        else if (size_at && now_ns() >= size_at) {
+            size_at = 0;
+            LOG("[quality] DRS size: max %dx%d (the 3D targets), min %dx%d, current %.0fx%.0f = %.1f %% of the max, GPU %.2f ms%s", d->max_w, d->max_h,
+                d->min_w, d->min_h, d->cur_w, d->cur_h, d->max_h ? 100.0 * d->cur_h / d->max_h : 0.0, (double)dq_gpu_ms(), d->off ? ", off" : "");
+        }
+        { const float g = dq_gpu_ms();
+          if (g == g && (g > 2000.f || g < 0.f) && insane < 3 && seen) { insane++;
+              LOG("\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91[quality] the game's GPU frame time reads %.2f ms: not a frame time - its dynamic resolution will sit at the minimum "
+                  "(current %.0fx%.0f of %dx%d)", (double)g, d->cur_w, d->cur_h, d->max_w, d->max_h); } }
+        { const float g = dq_gpu_ms(); const double h = xbg_recent_gpu_ms ? xbg_recent_gpu_ms() : -1; const uint64_t t = now_ns();
+          if (g == g && g >= 0.f && g < 2000.f) { gs_sum += g; gs_n++; if (g < gs_min) gs_min = g; if (g > gs_max) gs_max = g; }
+          if (h >= 0) { hs_sum += h; hs_n++; }
+          if (!gs_next) gs_next = t + 10000000000ull;
+          else if (t >= gs_next) {
+              gs_next = t + 10000000000ull;
+              if (gs_n) LOG("[quality] GPU frame time (10 s): the game reads %.2f ms (min %.2f, max %.2f, %d samples), the backend measured %.2f ms; DRS current %.0fx%.0f = "
+                            "%.1f %% of %dx%d, target %.2f ms, step up under %.2f ms%s", gs_sum / gs_n, gs_min, gs_max, gs_n, hs_n ? hs_sum / hs_n : -1.0, d->cur_w, d->cur_h,
+                            d->max_h ? 100.0 * d->cur_h / d->max_h : 0.0, d->max_w, d->max_h, g_q ? (double)g_q[0] : 31.5, g_q ? (double)g_q[1] : 30.0, d->off ? ", off" : "");
+              gs_sum = hs_sum = 0; gs_n = hs_n = 0; gs_min = 1e30; gs_max = 0;
+          } }
         if (g_thermal && ++tick % 4 == 0) dq_ladder(d);
         int pct = dq_eff_pct();
         if (g_cave) {

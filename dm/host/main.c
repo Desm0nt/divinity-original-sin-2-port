@@ -177,6 +177,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_wide_install(void); dm_dos2_wide_install(); }   // [DOS2] DM_DOS2_WIDE: the renderer's display modes at the screen's shape before the guest runs (hle_dos2_wide.c)
     { void dm_dos2_native_install(void); dm_dos2_native_install(); }   // [DOS2] DM_NATIVE_RC / DM_NATIVE_DRAW: render command census, engine draws as one record (hle_dos2_native.c)
     { void dm_dos2_nb_install(void); dm_dos2_nb_install(); }   // [DOS2] DM_NB: native backend front end, frame counters for now (hle_dos2_nb.c, NATIVE_BACKEND_PLAN.md NB-03)
+    { void dm_dos2_nr_install(void); dm_dos2_nr_install(); }   // [DOS2] DM_NR: engine object registry of the native renderer, default off (hle_dos2_nr.c, NR-01)
     { void dm_dos2_quality_install(void); dm_dos2_quality_install(); }   // [DOS2] DM_DOS2_DRS: dynamic resolution limits, console quality block logged (hle_dos2_quality.c)
     { void dm_dos2_touchui_install(void); dm_dos2_touchui_install(); }   // [DOS2] DM_DOS2_TOUCHUI: iPad touch movies under the Switch UI types; before the touch hook, it turns DM_DOS2_TOUCH / _KBM on (hle_dos2_touchui.c)
     { void dm_dos2_touchui_ei_install(void); dm_dos2_touchui_ei_install(); }   // [DOS2] DM_DOS2_TOUCHUI_EI: ExternalInterface / invoke log + host EI handlers (hle_dos2_touchui_ei.c)

@@ -104,6 +104,10 @@ repository, where they apply.
   (`Qualcomm_*_adpkg.zip`) are closed source.
 - The .NET SDK, Python and its packages (cryptography, zstandard, lz4, capstone, unicorn, astc-encoder-py, numpy): installed by
   setup into `tools/.runtime` on the player's PC from their official sources.
+- shaderc `glslc` and SPIRV-Tools `spirv-as` / `spirv-dis` / `spirv-opt` / `spirv-val` (Apache-2.0, Google / The Khronos
+  Group; with LLVM libc++, Apache-2.0 WITH LLVM-exception, on Linux / macOS): the Android NDK r29 builds, read by setup out of
+  Google's NDK archive (`dl.google.com/android/repository`, pinned SHA-256s) into `tools/.runtime/spirv-tools` on the
+  player's PC, to make the fused post-processing shaders; not stored here.
 - The iPad / iPhone version's interface movies: read by setup from the player's own `.ipa` on the player's PC, never stored here.
 
 ## Torchlight II additions

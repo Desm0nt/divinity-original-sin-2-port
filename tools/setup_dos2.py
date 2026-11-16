@@ -4,19 +4,22 @@
   setup                     (no file arguments, e.g. a double-click on setup.bat)
       Looks for the base game, the update v786432 and prod.keys in
       put-game-files-here/ (next to the setup scripts) and in the current directory, under any file names, and prepares everything.
-  setup FILE_OR_FOLDER... [--work DIR] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-verify] [--skip-astc]
-        [--steps exefs,patch,verify,romfs,shaders,touchui,astc]
+  setup FILE_OR_FOLDER... [--work DIR] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-verify] [--skip-post]
+        [--skip-astc] [--steps exefs,patch,verify,romfs,shaders,post,touchui,astc]
       The same with explicit files (or folders to search), in any order. Packages: NSP, NSZ, XCI, XCZ, also split dumps
       (a folder of 00, 01, ... parts, or name.xc0 / name.ns0 with .xc1 ... next to it); one package may hold several titles.
       Base and update are told apart by the title id in their content meta (CNMT), not by the name.
       Then: ExeFS of the update -> offline patch (dm/tools/patch_nso.py, DM_TARGET=android) -> per-site equivalence check of the
       patch (dm/verify/equiv.py) -> RomFS (base + BKTR update, 47 files, ~11.4 GB) -> shader jobs from the game's packages and its
       program (tools/dos2_shader_jobs.py), offline translation to Vulkan (dm/gfx/tools/dmsh_vk_xc2.py) and one shader pack
-      (dm/gfx/tools/xgs_pack.py) -> the touch interface package romfs/Data/TouchUI.pak (tools/dos2_touchui_pak.py) -> the ASTC
+      (dm/gfx/tools/xgs_pack.py) -> the fused post-processing shaders dm/shaders/native-post.xgspack (tools/dos2_post_fuse.py,
+      from five bundles of that pack; SPIR-V tools of the Android NDK r29, fetched into tools/.runtime/spirv-tools when missing)
+      -> the touch interface package romfs/Data/TouchUI.pak (tools/dos2_touchui_pak.py) -> the ASTC
       texture pack for phones without BC textures (tools/dos2_astc_cache.py) -> the phone folder
       <work>/DivinityOriginalSin2Mobile/{romfs, dm/out, dm/shaders, astc, drivers}. Every step is skipped when its output is
       already complete; delete an output to redo its step. --dry-run identifies the inputs, checks the tools and the free space
-      and prints the plan. --yes answers yes to every question (download .NET, copy to the phone).
+      and prints the plan. --yes answers yes to every question (download .NET and the SPIR-V
+      tools, copy to the phone).
   setup check [FILE_OR_FOLDER...] [--work DIR]
       Report the tools, the game files found, what has been prepared and the next step. Changes nothing.
   setup push [SERIAL] [--work DIR]
@@ -36,7 +39,7 @@ The .NET 10 SDK (shader translator build) is taken from DOTNET, tools/.runtime/d
 setup offers to install it into tools/.runtime/dotnet with Microsoft's dotnet-install script (no admin rights, nothing
 system-wide). setup.bat / setup.sh provide Python and its packages the same way (tools/.runtime).
 """
-import argparse, hashlib, json, os, re, shutil, struct, subprocess, sys, time
+import argparse, hashlib, json, os, re, shutil, struct, subprocess, sys, time, zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +89,7 @@ STAGES = [('Finding and checking your game files', 'a few seconds'),
           ('Checking the patch (per-site equivalence)', '2-10 min'),
           ('Extracting the game data (RomFS, ~11.4 GB)', '5-15 min, longer with NSZ / XCZ'),
           ('Translating the shaders (12 329 shaders)', '5-20 min; the first run also downloads build packages from NuGet'),
+          ('Fusing the post-processing shaders (native-post.xgspack)', '1-2 min; the first time also a ~7 MB download of the SPIR-V tools'),
           ('Making the touch interface package (TouchUI.pak)', 'under a minute'),
           ('Preparing textures for phones without BC (ASTC pack, ~1.5 GB)', '5-20 min')]
 
@@ -186,6 +190,8 @@ class Layout:
         self.romfs_manifest = self.work / 'romfs-manifest.json'
         self.equiv = self.work / 'equiv.json'
         self.touchui_stamp = self.work / 'touchui.json'
+        self.postpack = self.shaders / 'native-post.xgspack'
+        self.postwork, self.postpack_stamp = self.work / 'native-post', self.work / 'native-post.json'
 
     def exefs_ok(self):
         return build_id(self.exefs / 'main') == BUILD_ID and build_id(self.exefs / 'sdk') == SDK_BUILD_ID and (self.exefs / 'main.raw').is_file()
@@ -229,6 +235,14 @@ class Layout:
         if not self.touchui.is_file() or rec.get('sha256') != sha256_file(self.touchui) or rec.get('tools') != touchui_tools_hash(): return None
         return rec.get('mode')
 
+    def postpack_ok(self):
+        """native-post.xgspack is there and was made by this checkout's fusion tools from the bundles now in shaders.xgspack."""
+        try: rec = json.loads(self.postpack_stamp.read_text())
+        except (OSError, ValueError): return False
+        if not self.postpack.is_file() or rec.get('sha256') != sha256_file(self.postpack) or rec.get('tools') != postpack_tools_hash(): return False
+        try: return rec.get('inputs') == postpack_inputs(self)[1]
+        except (Fail, ImportError): return False   # no shader pack yet / numpy missing (setup check)
+
     def astc_ok(self):
         try: man = json.loads((self.astc / 'manifest.json').read_text(encoding='utf-8'))
         except (OSError, ValueError): return False
@@ -246,6 +260,42 @@ def touchui_tools_hash():
             sorted((ROOT / 'assets' / 'touchui').glob('*.png')):
         if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
     return h.hexdigest()
+
+
+POST_TOOLS = ('tools/dos2_post_fuse.py', 'tools/spv_splice.py', 'tools/spv_interp.py', 'tools/dos2_native_shaders.py', 'dm/gfx/tools/xgs_pack.py')
+
+
+def postpack_tools_hash():
+    """SHA-256 over the fusion tools, their GLSL helpers and the pinned SPIR-V tools (a release with new fused shaders rebuilds the pack)."""
+    h = hashlib.sha256(NDK_REL.encode() + b'\0')
+    for p in [ROOT / n for n in POST_TOOLS] + sorted((TOOLS / 'dos2_post' / 'fused_a').glob('*')):
+        if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
+    return h.hexdigest()
+
+
+def postpack_inputs(L):
+    """({key: bundle bytes}, sha256) of the translated bundles the fused shaders are made from (tools/dos2_post_fuse.py K), read from
+    dm/shaders/shaders.xgspack: the same bytes the phone checks the fused bundles' host heads against."""
+    from dos2_post_fuse import K
+    want = sorted(set(K.values()))
+    try:
+        with open(L.pack, 'rb') as f:
+            magic, ver, n, _ = struct.unpack('<4I', f.read(16))
+            if magic != 0x50534758 or ver != 1: raise OSError('not an xgspack v1')
+            idx = f.read(56 * n); got = {}
+            for i in range(n):
+                k, o, size, _, crc = struct.unpack_from('<32sQIIQ', idx, 56 * i)
+                k = k.rstrip(b'\0').decode('ascii', 'replace')
+                if k in want:
+                    f.seek(o); got[k] = f.read(size)
+                    if len(got[k]) != size or zlib.crc32(got[k]) != crc: raise OSError(f'bundle {k} damaged')
+    except (OSError, struct.error) as e:
+        raise Fail(f'{L.pack}: cannot read the post-processing shaders ({e}); delete it and run setup again')
+    miss = [k for k in want if k not in got]
+    if miss: raise Fail(f'{L.pack} lacks the post-processing shaders {", ".join(miss)}; delete it and run setup again')
+    h = hashlib.sha256()
+    for k in want: h.update(k.encode() + b'\0' + hashlib.sha256(got[k]).digest())
+    return got, h.hexdigest()
 
 
 def build_id(nso):
@@ -723,6 +773,193 @@ def step_shaders(L, dn):
     if L.shader_count() != n: raise Fail(f'{L.pack} holds {L.shader_count()} bundles, expected {n}')
 
 
+# ---------------------------------------------------------------- SPIR-V tools (the post-processing fusion)
+# glslc + spirv-as / -dis / -opt / -val of the Android NDK r29 (29.0.14206865: shaderc v2022.3, SPIRV-Tools v2022.4 "ndk-r28b"), the
+# build the development pack was made with. Taken from a local NDK r29 when one is installed, else only these files are read out of
+# Google's NDK archive with HTTP range requests (~7-10 MB of its 0.8-1 GB) into tools/.runtime/spirv-tools; every file is checked
+# against its SHA-256. The Linux / macOS builds load the NDK's libc++, which is fetched with them into the same folder.
+NDK_REL = 'r29'
+NDK_URL = 'https://dl.google.com/android/repository/android-ndk-r29-{host}.zip'
+SPV_DIR = RUNTIME / 'spirv-tools'
+SPV_FILES = {   # host -> [(path in the archive below android-ndk-r29/, sha256)]; each file keeps its name in SPV_DIR
+    'windows': [
+        ('shader-tools/windows-x86_64/glslc.exe', '73700734b25dbf4a707f8406d6154e956733885d6e546dc7cb8e66e81bd285c1'),
+        ('shader-tools/windows-x86_64/spirv-as.exe', 'd4304ed9c504793e1d3f3e4bd91fc1b269ac18c4059141f392255527c45a621c'),
+        ('shader-tools/windows-x86_64/spirv-dis.exe', '91285ebdab71c65b1326c38a166bb51bb872c1bc5827d22cd5956e46dea2a438'),
+        ('shader-tools/windows-x86_64/spirv-opt.exe', 'bf9ebc64dbe5fca3af481c98240c355017169dbb87503e779236d4851aae8084'),
+        ('shader-tools/windows-x86_64/spirv-val.exe', 'de0a8bc39c233027cad7b07da20af1c93a6f0851f5692ca3162483e5f0443724')],
+    'linux': [
+        ('shader-tools/linux-x86_64/glslc', 'dbf3c1539fca04c560c542f1eb78497b6d37c8db01f32803165c1a0483d82ffe'),
+        ('shader-tools/linux-x86_64/spirv-as', '814ae86243465a6672be8422af450f5f7cfb5d928f886bf924a8f0bfe0757e97'),
+        ('shader-tools/linux-x86_64/spirv-dis', '5253ed93c26fdd541d0ec8ce5eac54a0bce50744e45ad5707692a6d5852448e1'),
+        ('shader-tools/linux-x86_64/spirv-opt', '66e970d8fb43095225b42813f93a5edcd5f46c37beb53f9f9df839c93d23dc64'),
+        ('shader-tools/linux-x86_64/spirv-val', 'b9535e36cfe55b2d9e9c096f4c85ed81f1a7962388d39005d733f3cce958e0ad'),
+        ('toolchains/llvm/prebuilt/linux-x86_64/lib/x86_64-unknown-linux-gnu/libc++.so', '6cfe9f991a987260c5670204aa1e59615d70b4ffb8f43a547d15921142f09f95')],
+    'darwin': [     # universal x86_64 + arm64
+        ('shader-tools/darwin-x86_64/glslc', '915dda520ea705c7dc45ef1e7e759ee91d23511cbea12bef58b81b33db98049b'),
+        ('shader-tools/darwin-x86_64/spirv-as', '31c39f5d3f8669fbbac5ede86ab0c551b2806b0b8e7a053eeae7a93c056b20d8'),
+        ('shader-tools/darwin-x86_64/spirv-dis', 'fd8b69a785a36cd062be4b0bc12e5d10f944b8d6685e3d8cf548dc617a591155'),
+        ('shader-tools/darwin-x86_64/spirv-opt', 'e607b4fd4f4ffdea15bcc753d7ebdae1203b4939735ea3768ffb5ceab6d494d6'),
+        ('shader-tools/darwin-x86_64/spirv-val', '1d3436c303e62f0f1cf447503fda5486360d9deb9e257653d351b7f137f17212'),
+        ('toolchains/llvm/prebuilt/darwin-x86_64/lib/libc++.dylib', 'd5654866a07d79e7310062977f1ed856864b9e31c6ebfb01cb2ca996da905b8d')]}
+SPV_TOOLS = ('glslc', 'spirv-as', 'spirv-dis', 'spirv-opt', 'spirv-val')
+POSTPACK_N = 20     # tools/dos2_post_fuse.py --n: random cases per equivalence check (its default 60 takes ~3x longer; the pack is the same)
+
+
+def spv_host():
+    import platform
+    if WIN: return 'windows'                     # x64 (also through the x64 emulation of Windows on ARM)
+    if sys.platform == 'darwin': return 'darwin'
+    if sys.platform.startswith('linux') and platform.machine().lower() in ('x86_64', 'amd64'): return 'linux'
+    return None
+
+
+def spv_env(d, base=None):
+    env = dict(base or os.environ, DOS2_SHADER_TOOLS=str(d))
+    if sys.platform == 'darwin':                 # the tools want @rpath/libc++.dylib and carry no rpath: it sits next to them
+        env['DYLD_FALLBACK_LIBRARY_PATH'] = os.pathsep.join([str(d)] + [p for p in (env.get('DYLD_FALLBACK_LIBRARY_PATH'),) if p])
+    return env
+
+
+def spv_runs(d):
+    exe = Path(d) / ('spirv-opt.exe' if WIN else 'spirv-opt')
+    try:
+        return subprocess.run([str(exe), '--version'], capture_output=True, timeout=60, env=spv_env(d)).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def spv_tools(fetch=False, yes=False):
+    """The folder with glslc / spirv-as / -dis / -opt / -val for tools/dos2_post_fuse.py: DOS2_SHADER_TOOLS (your own, used as it is), else
+    tools/.runtime/spirv-tools with the pinned NDK r29 files (copied from a local NDK r29, or with fetch=True downloaded after asking).
+    None: not there."""
+    own = os.environ.get('DOS2_SHADER_TOOLS')
+    if own: return Path(own)
+    host = spv_host()
+    if not host: return None
+    name = lambda m: m.rsplit('/', 1)[1]
+    todo = [(m, sha) for m, sha in SPV_FILES[host] if not ((SPV_DIR / name(m)).is_file() and sha256_file(SPV_DIR / name(m)) == sha)]
+    if not todo: return SPV_DIR
+    ndks = [os.environ.get('ANDROID_NDK_HOME'), os.environ.get('ANDROID_NDK_ROOT')]
+    for home in (os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT')):
+        if home: ndks += [str(p) for p in sorted(Path(home).glob('ndk/29.*'), reverse=True)]
+    for m, sha in list(todo):                    # a local NDK r29 has the same files
+        for nd in filter(None, ndks):
+            src = Path(nd) / m
+            if src.is_file() and sha256_file(src) == sha:
+                put_spv(name(m), src.read_bytes()); todo.remove((m, sha)); break
+    if not todo: return SPV_DIR
+    if not fetch: return None
+    url = NDK_URL.format(host=host)
+    print(f'  The fused post-processing shaders need the SPIR-V tools (glslc, spirv-opt, ...). Setup can read just these {len(todo)} files\n'
+          f'  out of Google\'s Android NDK {NDK_REL} ({url}, ~{10 if host == "darwin" else 7} MB of it, each file checked against its SHA-256)\n'
+          f'  into {SPV_DIR}. Nothing is installed system-wide.')
+    if not ask('  Download them there now?', yes):
+        raise Fail('the SPIR-V tools were not downloaded (run setup again and answer Y, or set DOS2_SHADER_TOOLS to a folder with '
+                   + ', '.join(SPV_TOOLS) + ')')
+    ents = zip_directory(url)
+    for m, sha in todo:
+        e = ents.get('android-ndk-r29/' + m)
+        if not e: raise Fail(f'{url} has no {m}')
+        data = zip_member(url, e)
+        if hashlib.sha256(data).hexdigest() != sha: raise Fail(f'{m} from {url}: SHA-256 mismatch (not the pinned NDK {NDK_REL} file)')
+        put_spv(name(m), data)
+    return SPV_DIR
+
+
+def put_spv(name, data):
+    SPV_DIR.mkdir(parents=True, exist_ok=True)
+    dst = SPV_DIR / name; tmp = dst.with_name(name + '.tmp')
+    tmp.write_bytes(data)
+    if not WIN: os.chmod(tmp, 0o755)
+    os.replace(tmp, dst)
+
+
+def http_range(url, first, last=None):
+    """Bytes first..last of url (last None: its last `first` bytes); Python, else curl."""
+    import urllib.request
+    r = f'{first}-{last}' if last is not None else f'-{first}'
+    want = None if last is None else last - first + 1
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={'Range': 'bytes=' + r}), timeout=120) as f:
+            if f.status != 206: raise OSError(f'HTTP {f.status} instead of a partial answer')
+            data = f.read()
+        if want is None or len(data) == want: return data
+        err = f'{len(data)} bytes instead of {want}'
+    except Exception as e:
+        err = e
+    if shutil.which('curl'):
+        p = subprocess.run(['curl', '-fsSL', '-r', r, url], capture_output=True)
+        if p.returncode == 0 and (want is None or len(p.stdout) == want): return p.stdout
+    raise Fail(f'download failed: {url} ({err}); check the internet connection and run setup again')
+
+
+def zip_directory(url):
+    """{name: (method, crc, compressed size, size, local header offset)} of a remote zip (no zip64: the NDK r29 archives need none)."""
+    tail = http_range(url, 65558)
+    i = tail.rfind(b'PK\x05\x06')
+    if i < 0: raise Fail(f'{url}: not a zip archive')
+    n, size, off = struct.unpack_from('<HII', tail, i + 10)
+    cd, o, ents = http_range(url, off, off + size - 1), 0, {}
+    while o + 46 <= len(cd) and cd[o:o + 4] == b'PK\x01\x02':
+        meth, _, _, crc, csize, usize, nl, el, cl, _, _, _, lho = struct.unpack_from('<HHHIIIHHHHHII', cd, o + 10)
+        ents[cd[o + 46:o + 46 + nl].decode('utf-8', 'replace')] = (meth, crc, csize, usize, lho)
+        o += 46 + nl + el + cl
+    if len(ents) != n: raise Fail(f'{url}: unexpected zip directory ({len(ents)} of {n} entries)')
+    return ents
+
+
+def zip_member(url, e):
+    meth, crc, csize, usize, lho = e
+    head = http_range(url, lho, lho + 29)
+    if head[:4] != b'PK\x03\x04': raise Fail(f'{url}: bad local header at {lho}')
+    nl, el = struct.unpack_from('<HH', head, 26)
+    raw = http_range(url, lho + 30 + nl + el, lho + 30 + nl + el + csize - 1)
+    data = raw if meth == 0 else zlib.decompressobj(-15).decompress(raw) if meth == 8 else None
+    if data is None or len(data) != usize or zlib.crc32(data) != crc: raise Fail(f'{url}: a member did not unpack (method {meth})')
+    return data
+
+
+def step_postpack(L, yes=False):
+    """dm/shaders/native-post.xgspack: the fused post-processing shaders drawn by the engine's post-tail fusion (DM_NB_POST, xbg_nb_post.inc):
+    PPApplyLUT o EoCSight (F1), FXAA o LUT o EoCSight (F1A, F1AS, F1AR), PPVignette o CombineUI_NoFetch (F2), F3 / F3V - spliced from five
+    translated bundles of shaders.xgspack by tools/dos2_post_fuse.py, which validates every module (spirv-val) and checks it against the
+    chain of translated shaders in its SPIR-V interpreter. Without the pack the game draws those passes one by one, as recorded."""
+    if L.postpack_ok(): print('  already done'); return
+    from dos2_post_fuse import K, RECIPES
+    bundles, inputs = postpack_inputs(L)
+    d = spv_tools(fetch=True, yes=yes)
+    if not d:
+        raise Fail(f'no prebuilt SPIR-V tools for this machine ({sys.platform}); set DOS2_SHADER_TOOLS to a folder with '
+                   + ', '.join(SPV_TOOLS) + ' (Vulkan SDK / shaderc)')
+    if not spv_runs(d): raise Fail(f'the SPIR-V tools in {d} do not start on this machine')
+    src = L.postwork / 'bundles'
+    if L.postwork.exists(): shutil.rmtree(L.postwork)
+    src.mkdir(parents=True)
+    for k, b in bundles.items(): (src / f'{k}.xgs').write_bytes(b)
+    print(f'  splicing and checking {len(RECIPES)} fused shaders (tools/dos2_post_fuse.py; SPIR-V tools: {d})', flush=True)
+    r = subprocess.run([sys.executable, str(TOOLS / 'dos2_post_fuse.py'), '--bundles', str(src), '--out', str(L.postwork), '--n', str(POSTPACK_N)],
+                       env=spv_env(d, dict(os.environ, PYTHONUTF8='1')), capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if r.returncode:
+        print(r.stdout[-4000:] + r.stderr[-4000:])
+        raise Fail('tools/dos2_post_fuse.py failed (see above)')
+    pack = L.postwork / 'fused.xgspack'
+    want = sorted(f'{n}.{K[rc[0]]}' for n, rc in RECIPES.items())
+    try:
+        data = pack.read_bytes(); magic, ver, n, _ = struct.unpack_from('<4I', data, 0)
+        have = sorted(struct.unpack_from('<32s', data, 16 + 56 * i)[0].rstrip(b'\0').decode() for i in range(n)) if magic == 0x50534758 and ver == 1 else []
+    except (OSError, struct.error, UnicodeDecodeError):
+        have = []
+    if have != want: raise Fail(f'{pack}: holds {have}, expected {want}')
+    L.shaders.mkdir(parents=True, exist_ok=True)
+    tmp = L.postpack.with_name(L.postpack.name + '.tmp'); shutil.copyfile(pack, tmp); os.replace(tmp, L.postpack)
+    L.postpack_stamp.write_text(json.dumps(dict(sha256=sha256_file(L.postpack), tools=postpack_tools_hash(), inputs=inputs,
+                                                spirv_tools=str(d), bundles=want), indent=1))
+    eq = L.postwork / 'equivalence.txt'
+    print(f'  {len(want)} fused shaders ({", ".join(w.split(".")[0] for w in want)}), {L.postpack.stat().st_size // 1024} KB -> '
+          f'{L.postpack.relative_to(L.phone).as_posix()} (checks: {eq.relative_to(L.work).as_posix()})')
+
+
 def step_touchui(L):
     """romfs/Data/TouchUI.pak: the console menus with touch handling and the on-screen buttons of the HUD and the panels (tools/dos2_touchui_pak.py,
     set "hints"), made from the Switch Game.pak alone; the buttons' art is the port's own (assets/touchui). The game mounts every *.pak in Data itself."""
@@ -900,6 +1137,9 @@ def check(L, files):
     item(bool(dn) or L.shaders_ok(), f'.NET 10 SDK: {dn or "not found (setup offers to install a private copy into tools/.runtime/dotnet)"}')
     for t in ('spirv-opt', 'spirv-val'):
         print(f"  {'OK ' if spirv_tool(t) else '.. '} {t}: {spirv_tool(t) or 'not found (optional: only checks the translated shaders)'}")
+    sd = spv_tools()
+    print(f"  {'OK ' if sd else '.. '} SPIR-V tools for the post-processing fusion: "
+          f"{sd or f'not there yet (setup downloads them: Android NDK {NDK_REL}, ~7 MB, into {SPV_DIR})'}")
     adb = adb_exe()
     print(f"  {'OK ' if adb else '.. '} adb: {adb or 'not found (optional: only for copying to the phone over USB debugging)'}")
     say('3. Game files')
@@ -927,6 +1167,7 @@ def check(L, files):
     print(f"  {'OK ' if L.verify_ok() else '.. '} patch equivalence check (dm/verify/equiv.py){'' if L.verify_ok() else ': not run yet'}")
     item(L.romfs_ok(), 'romfs: extracted and verified', RUN_SETUP)
     item(L.shaders_ok(), f'dm/shaders: {L.shader_count()} SPIR-V bundles in shaders.xgspack', RUN_SETUP)
+    item(L.shaders_ok() and L.postpack_ok(), 'dm/shaders/native-post.xgspack: fused post-processing shaders', RUN_SETUP)
     mode = L.touchui_mode()
     item(mode is not None, f'romfs/Data/TouchUI.pak: {"made" if mode else "not made yet"}', RUN_SETUP)
     print(f"  {'OK ' if L.astc_ok() else '.. '} astc/dos2-astc.pack (phones without BC){'' if L.astc_ok() else ': not made yet'}")
@@ -943,6 +1184,7 @@ def prepare(a, L):
     steps = set(a.steps.split(','))
     shaders_needed = 'shaders' in steps and not a.skip_shaders and not L.shaders_ok()
     astc_wanted = 'astc' in steps and not a.skip_astc
+    post_wanted = 'post' in steps and not a.skip_post
     miss = missing_packages()
     if sys.version_info < (3, 10) or miss:
         raise Fail(f'Python 3.10+ with {", ".join(miss) or "the packages"} is needed; start setup through setup.bat / '
@@ -983,11 +1225,14 @@ def prepare(a, L):
     elif shaders_needed: print('  .NET 10 SDK: not found; setup will offer to install it (tools/.runtime/dotnet)')
     else: print('  .NET 10 SDK: not needed (shaders done or skipped)')
     print(f"  SPIRV-Tools: {spirv_tool('spirv-val') or 'not found (optional)'}")
+    if post_wanted and not L.postpack_ok():
+        print(f"  SPIR-V tools for the post-processing fusion: {spv_tools() or f'downloaded at stage 8 (Android NDK {NDK_REL}, ~7 MB, into {SPV_DIR})'}")
     verify = 'verify' in steps and not a.skip_verify
     plan = [('ExeFS', L.exefs_ok() or 'exefs' not in steps), ('patch', L.out_ok() or 'patch' not in steps),
             ('patch check', not verify or L.verify_ok()),
             ('RomFS' + (' (compressed input is expanded first)' if base.compressed or upd.compressed else ''),
              L.romfs_ok() or 'romfs' not in steps), ('shaders', not shaders_needed),
+            ('post-processing fusion', not post_wanted or L.postpack_ok()),
             ('touch UI', 'touchui' not in steps or L.touchui_mode() == 'full'),
             ('ASTC textures', not astc_wanted or L.astc_ok())]
     print('  plan: ' + ', '.join(f"{n} {'(done/skipped)' if d else ''}".strip() for n, d in plan))
@@ -1011,11 +1256,22 @@ def prepare(a, L):
         step_shaders(L, dn or find_dotnet() or install_dotnet(a.yes)); print(f'  done in {took(t0)}')
     else: print(f'  already done ({L.shader_count()} shaders)' if L.shaders_ok() else '  skipped')
     t0 = stage(8)
+    post_err = None
+    if post_wanted and L.shaders_ok():
+        try:
+            step_postpack(L, a.yes); print(f'  done in {took(t0)}')
+        except Fail as e:                        # optional: the game runs without it, so the remaining stages still run
+            post_err = str(e)
+            print(f'  NOT MADE: {e}\n  The game runs without it (the post-processing passes are drawn one by one, a little slower); '
+                  'run setup again to retry.')
+    else: print('  skipped' + (' (--skip-post / --steps)' if not post_wanted else ' (no shader pack yet)'))
+    t0 = stage(9)
     if 'touchui' in steps and L.romfs_ok(): step_touchui(L); print(f'  done in {took(t0)}')
     else: print('  skipped' + ('' if L.romfs_ok() else ' (no RomFS yet)'))
-    t0 = stage(9)
+    t0 = stage(10)
     if astc_wanted and L.romfs_ok(): step_astc(L); print(f'  done in {took(t0)}')
     else: print('  skipped' + (' (--skip-astc / --steps)' if not astc_wanted else ' (no RomFS yet)'))
+    if post_err: say(f'note: dm/shaders/native-post.xgspack was not made ({post_err}); run setup again to retry')
     if not L.complete():
         say(f'finished the requested steps; the folder is not complete yet: {L.phone}'); return 0
     make_drivers_folder(L)
@@ -1050,10 +1306,12 @@ def main(argv=None):
     ap.add_argument('--keep-nsp', action='store_true')
     ap.add_argument('--skip-shaders', action='store_true')
     ap.add_argument('--skip-verify', action='store_true', help='do not run the patch equivalence check (dm/verify/equiv.py)')
+    ap.add_argument('--skip-post', action='store_true', help='no fused post-processing shaders (dm/shaders/native-post.xgspack); '
+                    'the game then draws those passes one by one')
     ap.add_argument('--skip-astc', action='store_true', help='no ASTC texture pack (phones with BC textures, i.e. Adreno, do not use it)')
     ap.add_argument('--ipa', default=None, help=argparse.SUPPRESS)   # accepted and ignored: the touch interface no longer reads the iPad edition
     ap.add_argument('--no-dlc', action='store_true', help=argparse.SUPPRESS)
-    ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,touchui,astc', help='comma list of steps to run (default: all)')
+    ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,post,touchui,astc', help='comma list of steps to run (default: all)')
     a = ap.parse_args(argv)
     L = Layout(a.work)
     start_log(Path(a.work))

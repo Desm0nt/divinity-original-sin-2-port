@@ -8323,6 +8323,25 @@ void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
 #endif
             need(type==NVN_COUNTER_TYPE_SAMPLES_PASSED,"Unsupported pipeline counter reset");state.samples_passed=0;end_occlusion_query();++counter_epoch;state.count_samples=true;++counter_ops[0];break;}   // the open run belongs to the old epoch
         case OP_REPORT_COUNTER:{need(n>=16,"Truncated counter report");uint64_t type,addr;memcpy(&type,p,8);memcpy(&addr,p+8,8);need(addr,"Null counter output");
+            VkPipelineStageFlagBits ts_stage=VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;bool ts_slot=false;
+#ifdef DM_GAME_DOS2
+            // [DOS2] NB-18b-11: NVN_COUNTER_TYPE_TIMESTAMP_TOP (16) is a timestamp, not a pipeline statistic. The engine stamps the start of
+            // its frame with it and the end with TIMESTAMP (main+0x9217b4 / +0x921784: GPU ms = (end - start) / 1e6 -> renderer +0x18f0, the
+            // input of its dynamic-resolution controller 0xc05c80). Written as {0, 0} (the [XC2] branch below) the start was 0, GPU ms =
+            // the absolute clock (1.34e9 ms in the logs) and the controller sat at its minimum for good: the 3D was drawn at 75 % of its
+            // target (1620x729 of 2160x972) in every frame, whatever DM_DOS2_DRS said. Now a top-of-pipe GPU timestamp through the
+            // TIMESTAMP path (never below the report before it: ts_mode 2). DM_GFX_TS_TOP=0: the old zeros (A/B only).
+            // NB-18b-12: DM_GFX_TS_TOP=2 = the stamp the backend writes itself at the start of this submission (Slot::timestamps query 0,
+            // top of pipe, outside any pass - the start of the "NVN PERF gpu_ms" interval) instead of one at the report's place in the
+            // stream: the same value while the report is the frame's first record (it is: main+0x9217b4 right after BeginRecording),
+            // and independent of a driver that delays an in-pass stamp to the end of that pass. Default 1; the 10 s line
+            // "[quality] GPU frame time" (hle_dos2_quality.c) shows the game's reading next to the backend's.
+            {static int top=-1;if(top<0){const char *e=getenv("DM_GFX_TS_TOP");top=e && e[0]>='0' && e[0]<='2' && !e[1]?e[0]-'0':1;
+                    xbg_logf("NVN counter report TIMESTAMP_TOP: DM_GFX_TS_TOP=%d (%s)",top,top==1?"a top-of-pipe GPU timestamp: the game's GPU frame time is real":
+                        top==2?"the backend's own stamp at the start of the submission: the game's GPU frame time starts where NVN PERF gpu_ms does":
+                        "written as 0: the game's GPU frame time is garbage, its dynamic resolution stays at the minimum");}
+                if(type==NVN_COUNTER_TYPE_TIMESTAMP_TOP && top){type=NVN_COUNTER_TYPE_TIMESTAMP;ts_stage=VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;ts_slot=top==2;}}
+#endif
 #if defined(DM_GAME_XC2) || defined(DM_GAME_D3)
             // [XC2] pipeline statistics reports (profiling): {count 0, timestamp 0} written in order on the CPU
             if(type!=NVN_COUNTER_TYPE_TIMESTAMP && type!=NVN_COUNTER_TYPE_SAMPLES_PASSED){static uint32_t told=0;if(!(told>>(type&31)&1)){told|=1u<<(type&31);xbg_logf("NVN counter report type %llu written as 0 (XC2)",(unsigned long long)type);}
@@ -8337,12 +8356,13 @@ void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
                 r.ts_value=uint64_t(double(std::chrono::steady_clock::now().time_since_epoch().count())/period);
                 if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED){Commands c;c.finish();}
                 pending_reports.push_back(r);++hit_pend_gen;condr::report_pending(addr);break;}
-            if(type==NVN_COUNTER_TYPE_TIMESTAMP && !heavy_timestamps && !ab_off("timestamps")){
+            if(ts_slot && recording_slot().timestamps){Slot &ss=recording_slot();r.ts=ss.timestamps;r.ts_index=0;r.slot=&ss;r.ts_mode=2;}   // [DOS2] DM_GFX_TS_TOP=2: the submission's own start stamp
+            else if(type==NVN_COUNTER_TYPE_TIMESTAMP && !heavy_timestamps && !ab_off("timestamps")){
                 // A bottom-of-pipe timestamp already waits for all earlier work and may be written inside a render pass: no pass
                 // end and no full barriers, so a timestamp report no longer splits a pass on a tiling GPU (4 per D2R frame).
                 // Samples reports keep the pass end below: it closes the occlusion run they sum.
                 timestamp_query(r.ts,r.ts_index,r.slot);   // a new pool is reset outside the pass first
-                Slot &ts=recording_slot();++ts.ops;++perf.ops;if(samplets::armed)samplets::flush(ts.cmd);   /* [DOS2] DM_GFX_SAMPLES_TS=4: earlier samples reports stay <= this one */vkCmdWriteTimestamp(ts.cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);}
+                Slot &ts=recording_slot();++ts.ops;++perf.ops;if(samplets::armed)samplets::flush(ts.cmd);   /* [DOS2] DM_GFX_SAMPLES_TS=4: earlier samples reports stay <= this one */vkCmdWriteTimestamp(ts.cmd,ts_stage,r.ts,r.ts_index);if(ts_stage==VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT)r.ts_mode=2;}
             else if(type==NVN_COUNTER_TYPE_SAMPLES_PASSED && report_inpass){
                 // [d3-perf] DM_GFX_REPORT_INPASS=1: D3 records ~16 samples-passed reports a frame between draws of one pass (reset,
                 // box draw, report); each ended the pass and cost two full barriers (NVN PERF pass_ends op5=16, barriers op5=32).
@@ -8356,7 +8376,7 @@ void execute(const uint8_t *pc,unsigned depth,uint64_t &budget){
                 else{timestamp_query(r.ts,r.ts_index,r.slot);   // a new timestamp pool still ends the pass first
                     Slot &ts=recording_slot();++ts.ops;++perf.ops;vkCmdWriteTimestamp(ts.cmd,sm==2?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);if(sm==2){r.ts_mode=2;++samplets::top;}else ++samplets::stamps;}
                 ++inpass_reports;}
-            else{Commands c;timestamp_query(r.ts,r.ts_index,r.slot);vkCmdWriteTimestamp(c.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);c.finish();}
+            else{Commands c;timestamp_query(r.ts,r.ts_index,r.slot);vkCmdWriteTimestamp(c.command,type==NVN_COUNTER_TYPE_TIMESTAMP?ts_stage:VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.ts,r.ts_index);if(type==NVN_COUNTER_TYPE_TIMESTAMP && ts_stage==VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT)r.ts_mode=2;c.finish();}
             pending_reports.push_back(r);++hit_pend_gen;condr::report_pending(addr);break;}   // [DOS2] condr: pending by address (DM_GFX_COND_RENDER)
         default:xbg_fatalf("NVN opcode %u at %#llx not implemented",h.op,(unsigned long long)uintptr_t(pc));
         }

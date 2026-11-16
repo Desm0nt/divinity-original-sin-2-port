@@ -329,10 +329,93 @@ def nb20b_ctx_check():
           'pre-included, submit / init / stop hooks in place' % (len(NB20B_CTX), len(late)))
 
 
+# NR-01 (engine object registry of the native renderer, DM_NR, default 0): the wiring that keeps "off" byte-identical.
+#   - hle_nvn.c: exactly four tap lines, one per entry point (nvnTextureInitialize, nvnProgramSetShaders, nvnSamplerInitialize,
+#     nvnBufferInitialize), each an NRT(...) = a test of g_dm_nr; the tap functions only read the host object;
+#   - hle_dos2_nr.c: g_dm_nr starts 0 and is set only inside dm_dos2_nr_install, which returns before allocating / hooking anything
+#     unless DM_NR is 1 or 2; hooks (dn_hook / dn_install_rc) are installed nowhere else; every hook is NR_HOOK (never a tail call:
+#     a sibling call would write its stack arguments into the game's caller frame), calls its own trampoline once with all 28
+#     forwarded values, and is listed once in k_nr_site;
+#   - main.c calls the install after the NB one, inside the DOS2 block; the registry core stays free of engine / host / game addresses.
+def nr01_check():
+    def code(text):   # no comments, no strings
+        text = re.sub(r'/\*.*?\*/|//[^\n]*', ' ', text, flags=re.S)
+        return re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+    def body(text, head):   # the brace-matched body after the first `head`
+        i = text.index(head); i = text.index('{', i); depth, j = 0, i
+        while True:
+            if text[j] == '{': depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if not depth: return text[i:j + 1]
+            j += 1
+    nvn = code((root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8'))
+    inc_raw = (root / 'gfx/nvn/nvn_nr_tap.inc').read_text(encoding='utf-8')
+    inc = code(inc_raw)
+    host_raw = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    host = code(host_raw)
+    # the tap
+    assert (root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8').count('#include "nvn_nr_tap.inc"') == 1, 'NR-01: hle_nvn.c includes nvn_nr_tap.inc once'
+    assert nvn.count('NRT(') == 4, 'NR-01: hle_nvn.c has exactly four NRT(...) tap lines, found %d' % nvn.count('NRT(')
+    for fn, call in (('nvnTextureInitialize', 'NRT(nrt_texture(o));'), ('nvnProgramSetShaders', 'NRT(nrt_program(o));'), ('nvnSamplerInitialize', 'NRT(nrt_sampler(o));'),
+                     ('nvnBufferInitialize', 'NRT(dm_nr_tap_buffer(o, o->size));')):
+        b = body(nvn, 'NVN(%s,' % fn)
+        assert b.count('NRT(') == 1 and call in b, 'NR-01: %s needs the one tap line `%s`' % (fn, call)
+        tail = b[b.index(call) + len(call):]
+        assert re.fullmatch(r'\s*return 1;\s*\}', tail), 'NR-01: in %s the tap line is the last statement before `return 1;` (the object is complete, the result unchanged)' % fn
+    assert '#define NRT(x) do { if (__builtin_expect(g_dm_nr != 0, 0)) { x; } } while (0)' in inc_raw, 'NR-01: NRT is a guarded line (g_dm_nr != 0)'
+    assert re.search(r'#ifdef DM_GAME_DOS2.*#define NRT\(x\) do \{ if.*#else\s*#define NRT\(x\) do \{ \} while \(0\)\s*#endif', inc_raw, flags=re.S), 'NR-01: NRT is empty outside DOS2'
+    for fn in ('nrt_texture', 'nrt_program', 'nrt_sampler'):
+        b = body(inc, 'static void %s(const ' % fn)
+        assert not re.search(r'(?<![=!<>])=(?!=)', b), 'NR-01: %s only reads the host object' % fn
+    # the front end
+    assert re.search(r'^int g_dm_nr;', host, flags=re.M), 'NR-01: g_dm_nr has no initialiser (0 = off)'
+    inst = body(host, 'void dm_dos2_nr_install(void) {')
+    gate = 'if (mode != 1 && mode != 2) return;'
+    assert 'getenv("DM_NR")' in body(host_raw, 'void dm_dos2_nr_install(void) {') and gate in inst and 'const int mode = e ? atoi(e) : 0;' in inst, 'NR-01: DM_NR unset / 0 / anything but 1, 2 returns at once (default 0)'
+    for later in ('nr_reg_new(', 'dn_hook(', 'dn_install_rc(', 'g_dm_nr = mode', 'dn_main('):
+        assert later in inst and inst.index(gate) < inst.index(later), 'NR-01: `%s` only after the DM_NR gate' % later
+    rest = host.replace(inst, '')
+    assert 'dn_hook(' not in rest.replace('int dn_hook(module_t', '') and 'dn_install_rc(' not in rest.replace('int dn_install_rc(const', ''), 'NR-01: hooks are installed only by dm_dos2_nr_install'
+    assert len(re.findall(r'\bg_dm_nr\s*=(?!=)', host)) == 2 and len(re.findall(r'\bg_dm_nr\s*=(?!=)', rest)) == 0, 'NR-01: g_dm_nr is set only inside the install'
+    assert '#define NR_HOOK static __attribute__((disable_tail_calls)) uint64_t' in host_raw, 'NR-01: NR_HOOK forbids tail calls'
+    hooks = re.findall(r'^NR_HOOK (nr_h_\w+)\(NR_A\)', host, flags=re.M)
+    assert len(hooks) >= 18 and len(set(hooks)) == len(hooks) and not re.search(r'^static\s+uint64_t\s+nr_h_', host, flags=re.M), 'NR-01: every hook is declared NR_HOOK'
+    table = body(host, 'k_nr_site[] =')
+    for h in hooks:
+        b = body(host, 'NR_HOOK %s(NR_A)' % h)
+        orig = 'g_o_' + h[len('nr_h_'):]
+        assert b.count(orig + '(NR_F)') == 1 and len(re.findall(r'\bg_o_\w+\(', b)) == 1, 'NR-01: %s calls its own trampoline %s once with the forwarded arguments' % (h, orig)
+        assert table.count('(void *)%s, &%s}' % (h, orig)) == 1, 'NR-01: %s is listed once in k_nr_site with %s' % (h, orig)
+    assert table.count('(void *)nr_h_') == len(hooks), 'NR-01: k_nr_site rows = hooks'
+    assert len(set(re.findall(r'\{(0x[0-9a-f]+), \{', table))) == len(hooks), 'NR-01: one site per hook, no address twice'
+    assert 'if (!dn_words_ok(m, s->off, s->pro))' in inst and inst.index('if (!dn_words_ok(m, s->off, s->pro))') < inst.index('dn_hook('), 'NR-01: prologue words are compared before a site is patched'
+    assert re.search(r'if \(op != 55 \|\| !pkt\) return;', body(host, 'static void nr_rc_pre(')), 'NR-01: the render-command handler leaves every opcode but 55 at once'
+    assert 'malloc(' not in host and 'calloc(' not in host, 'NR-01: the front end allocates nothing itself (nr_reg_new at install only)'
+    # main.c
+    main_c = (root / 'host/main.c').read_text(encoding='utf-8')
+    a, b_ = main_c.find('dm_dos2_nb_install(); }'), main_c.find('{ void dm_dos2_nr_install(void); dm_dos2_nr_install(); }')
+    dos2 = main_c.rfind('#ifdef DM_GAME_DOS2', 0, b_)
+    assert 0 < a < b_ and main_c.count('dm_dos2_nr_install();') == 1 and dos2 > 0 and '#endif' not in main_c[dos2:b_], 'NR-01: main.c calls dm_dos2_nr_install once, after the NB install, inside the DOS2 block'
+    # the registry core: host-testable
+    sites = set(re.findall(r'\{(0x[0-9a-f]+), \{', table))
+    for name in ('nr_reg.h', 'nr_reg.c'):
+        core_raw = (root / 'gfx/nr' / name).read_text(encoding='utf-8'); core = code(core_raw)
+        assert 'vulkan' not in core.lower() and 'hle.h' not in core_raw and 'pthread' not in core and 'getenv' not in core, 'NR-01: %s stays free of the engine, the host and the environment' % name
+        assert not any(s in core for s in sites), 'NR-01: %s holds no game address' % name
+    rows = re.findall(r'^    \{"\w+", 0x[0-9a-f]+, 0x[0-9a-f]+, \d+, \d+, \d+\},$', (root / 'gfx/nr/nr_reg.c').read_text(encoding='utf-8'), flags=re.M)
+    assert len(rows) == 63, 'NR-01: the engine format table has 63 rows (found %d)' % len(rows)
+    for cm in ('android/CMakeLists.txt', 'harmony/native/CMakeLists.txt'):
+        assert '${DM}/gfx/nr/*.c' in (root / cm).read_text(encoding='utf-8'), 'NR-01: %s builds dm/gfx/nr' % cm
+    print('PASS: NR-01: 4 guarded tap lines (last statement before return), DM_NR default 0 gate before any hook / allocation, %d hooks (NR_HOOK, own trampoline once, '
+          'listed once), opcode 55 only, registry core engine-free, 63 format rows' % len(hooks))
+
+
 nb20a_check()
 nb19_check()
 nb20b_check()
 nb20b_ctx_check()
 storehist_check()
+nr01_check()
 _bad=delimiter_gate()
 assert not _bad,_bad

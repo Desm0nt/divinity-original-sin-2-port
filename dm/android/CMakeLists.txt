@@ -107,7 +107,7 @@ if(NOT parse_result EQUAL 0)
 endif()
 include(${CMAKE_CURRENT_BINARY_DIR}/host_sources.cmake)
 file(GLOB HLE_SRCS CONFIGURE_DEPENDS ${HOST}/hle_*.c)
-file(GLOB GFX_SRCS CONFIGURE_DEPENDS ${DM}/gfx/*.c ${DM}/gfx/nvn/*.c ${DM}/gfx/tex/*.c ${DM}/gfx/nb/*.c)
+file(GLOB GFX_SRCS CONFIGURE_DEPENDS ${DM}/gfx/*.c ${DM}/gfx/nvn/*.c ${DM}/gfx/tex/*.c ${DM}/gfx/nb/*.c ${DM}/gfx/nr/*.c)
 if(DM_GAME_DOOM)
   # [DOOM] Lean core: explicit allowlist instead of the Makefile list (diag.c, dm_*.c game features, ios touch-game bridge are D2R-only).
   set(HOST_SRCS

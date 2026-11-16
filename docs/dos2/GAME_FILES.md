@@ -24,6 +24,7 @@ DivinityOriginalSin2Mobile/
   romfs/Data/TouchUI.pak                        the touch interface movies (made by setup, ~2-21 MB, see below)
   dm/out/{main,sdk}.{patched.bin,fixups.tsv,gates.tsv,sites.tsv,...}   the patched modules (15 files)
   dm/shaders/shaders.xgspack                    12 329 SPIR-V bundles in one pack (~271 MB)
+  dm/shaders/native-post.xgspack                7 fused post-processing shaders (112 KB, the post-tail fusion DM_NB_POST)
   astc/dos2-astc.pack + manifest.json, quality.tsv   ASTC textures for GPUs without BC (~1.5 GB; not needed on Adreno)
   drivers/README.txt                            where your own Vulkan driver packages go (empty otherwise)
 ```
@@ -41,18 +42,29 @@ pack lacks, encoded on the phone) and the saves.
 | 5 | Patch check | `python dm/verify/equiv.py <out> <mod> work/exefs-update/<mod> --jobs N` | every rewritten site against the original instruction under random states, plus a 300-mutation self-check; must print `EQUIV <mod> OK`. Needs `unicorn` |
 | 6 | RomFS | `tools/romfs_d3.py extract <base> <update> <dest>` (the generic base + BKTR reader; NSZ / XCZ: program expanded first with `tools/ncz2nsp.py`) | IVFC hashes verified, BKTR applied, files + `work/romfs-manifest.json` (sha256 of every file) |
 | 7 | Shaders | `DOS2_MAIN_RAW=work/exefs-update/main.raw python tools/dos2_shader_jobs.py <romfs>/Data work/shaders-jobs` → `tools/build_dmsh_xlate_d3.py` (.NET 10 SDK, Ryujinx 1.3.2 from `dm/third_party/ryujinx`) → `XLATE=<dmsh_xlate> python dm/gfx/tools/dmsh_vk_xc2.py work/shaders-jobs work/shaders-vk` → `python dm/gfx/tools/xgs_pack.py work/shaders-vk <dm/shaders>/shaders.xgspack` | 6158 `.bshd` programs (`EngineShaders`, `Engine`, `Materials`, `CommunityMods.pak`) + 75 stages built into `main` → 12 329 unique stages (6132 vertex, 6192 pixel, 5 compute) → one pack the engine opens once |
-| 8 | Touch interface | `python tools/dos2_touchui_pak.py hints --sw <romfs>/Data/Game.pak --out <dir> [--src <iPad Game.pak> | --no-vis --no-panels]` | `romfs/Data/TouchUI.pak`: an extra LSPK package the game mounts by itself (it loads every `*.pak` in `Data`). Console movies with touch handlers (`*_d.swf`, patched from the Switch's own `*_c.swf`), and with the iPad movies the HUD column / panel buttons grafted in. Read back and compared byte for byte |
-| 9 | ASTC textures | `python tools/dos2_astc_cache.py <romfs> <astc dir> [--jobs N]` (needs `astc-encoder-py`, `numpy`) | every BC1–BC3 2D texture of the packages (25 145 unique) → ASTC 4x4 / 5x5 / 6x6 at ≥ 42 dB PSNR of mip 0 against the decoded BC, else left BC; `D3AC` pack, two index entries per texture (the file's UNORM format and its sRGB twin, which the renderer may pick at run time) |
+| 8 | Fused post-processing shaders | the five translated bundles PPApplyLUT `921728a5…`, EoCSight `91eb2d97…`, PPVignette `43e8e8ed…`, CombineUI_NoFetch `98186c22…`, PPFXAA `691768aa…` read out of `shaders.xgspack` into `work/native-post/bundles` → `DOS2_SHADER_TOOLS=<dir> python tools/dos2_post_fuse.py --bundles work/native-post/bundles --out work/native-post --n 20` → `work/native-post/fused.xgspack` copied to `<dm/shaders>/native-post.xgspack`; stamp `work/native-post.json` (pack SHA-256, tools hash, input bundles hash) | 7 bundles (F1, F1A, F1AS, F1AR, F2, F3, F3V; XGF1 format, `dm/gfx/nb/nb_fused.h`) spliced from the translated SPIR-V with `tools/spv_splice.py`, each `spirv-val`-clean, interface = the host's, checked against the chain of translated shaders in `tools/spv_interp.py` (`work/native-post/equivalence.txt`). `--n 20` instead of the tool's 60 only takes fewer random cases (same pack bytes, ~45 s instead of ~2 min). Optional: on failure setup goes on, and without the pack the engine draws the chain as recorded. `--skip-post` leaves it out |
+| 9 | Touch interface | `python tools/dos2_touchui_pak.py hints --sw <romfs>/Data/Game.pak --out <dir> [--src <iPad Game.pak> | --no-vis --no-panels]` | `romfs/Data/TouchUI.pak`: an extra LSPK package the game mounts by itself (it loads every `*.pak` in `Data`). Console movies with touch handlers (`*_d.swf`, patched from the Switch's own `*_c.swf`), and with the iPad movies the HUD column / panel buttons grafted in. Read back and compared byte for byte |
+| 10 | ASTC textures | `python tools/dos2_astc_cache.py <romfs> <astc dir> [--jobs N]` (needs `astc-encoder-py`, `numpy`) | every BC1–BC3 2D texture of the packages (25 145 unique) → ASTC 4x4 / 5x5 / 6x6 at ≥ 42 dB PSNR of mip 0 against the decoded BC, else left BC; `D3AC` pack, two index entries per texture (the file's UNORM format and its sRGB twin, which the renderer may pick at run time) |
 
 Every step is skipped when its output is complete; delete an output to redo it. `setup --steps exefs,patch,verify` (etc.)
-runs a subset, `--skip-verify` / `--skip-astc` leave those out, `--keep-nsp` keeps the expanded NSPs, `--ipa FILE` names
+runs a subset (steps `exefs,patch,verify,romfs,shaders,post,touchui,astc`), `--skip-verify` / `--skip-post` / `--skip-astc` leave those out, `--keep-nsp` keeps the expanded NSPs, `--ipa FILE` names
 the iPad version explicitly, `--work DIR` moves the whole work folder. The results are deterministic: the same dumps give
 byte-identical patched modules, RomFS files, shader pack and touch package (checked: a fresh setup run reproduces the
-files of the development phone byte for byte).
+files of the development phone byte for byte; the fused pack too: `native-post.xgspack` = the development `…fusedA`, md5
+`f357693f1eb47118414a236b7221bc67`).
 
 SPIRV-Tools are optional: without `spirv-opt` the capability trim is done in Python (same output), without `spirv-val`
 the per-shader validation is skipped. Setup finds them on `PATH`, through `SPIRV_OPT` / `SPIRV_VAL`, or in an Android NDK
 (`ANDROID_NDK_HOME`, `ANDROID_HOME/ndk/*`).
+
+Step 8 needs `glslc`, `spirv-as`, `spirv-dis`, `spirv-opt` and `spirv-val`, pinned to the Android NDK r29 (29.0.14206865)
+`shader-tools` build (shaderc v2022.3, SPIRV-Tools v2022.4 `ndk-r28b`). They live in `tools/.runtime/spirv-tools`: copied
+from a local NDK r29 when its files have the pinned SHA-256s, else (after asking) read out of
+`https://dl.google.com/android/repository/android-ndk-r29-{windows,linux,darwin}.zip` with HTTP range requests (the zip
+directory + those members, ~6.4 / 6.6 / 10.3 MB instead of 0.83 / 0.78 / 1.05 GB), each checked against the SHA-256 in
+`SPV_FILES` of `tools/setup_dos2.py`. Linux x86-64 and macOS (universal) also get the NDK's `libc++.so` / `libc++.dylib`
+next to the tools. Other machines (Linux on ARM): set `DOS2_SHADER_TOOLS` to a folder with your own builds of the five tools
+(the pack is then checked the same way, but may differ in bytes).
 
 ## The ASTC pack on the phone
 

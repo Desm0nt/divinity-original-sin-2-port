@@ -4,8 +4,8 @@ Divinity Original Sin 2 Mobile contains **no game code and no game data**: no ex
 files (LSPK `.pak` packages, `.bshd` shaders, `.swf` interface movies, textures, audio, video, texts), no translated
 `.xgs` bundles or shader packs, no textures, art, audio, video, text or fonts, nothing of the iPad / iPhone version, and
 no keys. The player supplies the game ([GAME_FILES.md](GAME_FILES.md)) and every game-derived output (ExeFS, patched
-modules, extracted RomFS, shader jobs, translated `.xgs` bundles and their pack, the touch interface package, the ASTC
-texture pack) is produced on the player's machine into the git-ignored `work/` directory. The app's launcher icon is not
+modules, extracted RomFS, shader jobs, translated `.xgs` bundles and their pack, the fused post-processing shader pack,
+the touch interface package, the ASTC texture pack) is produced on the player's machine into the git-ignored `work/` directory. The app's launcher icon is not
 in the repository (`dm/android/dos2/icon.png` is git-ignored; without it the build uses d2r-mobile's icon).
 
 To make the original code run on Android, the repository does contain *facts about* the game, found by analysing the
@@ -26,6 +26,7 @@ original instruction words before it changes anything, and setup checks the buil
 | **Shader container layout** (`.bshd`: zlib + GLSLCoutput stages, the 75 stages inside `main`), NVN depth mode set at a quoted address | `tools/dos2_shader_jobs.py` | Parser; shader identifiers (16-hex-digit keys) appear in notes |
 | **Package and texture formats**: Larian LSPK v13, the NVN texture-packager container (XTX) and its formats | `tools/lspk.py`, `tools/dos2_astc_cache.py` | Format description and readers; no game files |
 | **Reconstructed shader headers and mobile shader rewrites**: the uniform blocks recovered from the GLSLC reflection of the shaders, G-buffer encoding recovered from the translated code, and hand-written mobile versions of a few full-screen passes (same inputs and outputs as the translated ones) | `tools/dos2_nx_headers/`, `tools/dos2_post/`, `tools/dos2_pcf/` | Written for this port from the analysis (block layouts, constants); used only by the optional `DM_GFX_NATIVE_SHADERS` packs, off by default |
+| **Post-processing fusion recipes**: the keys of five post-processing shaders, which of their reads become calls of another (SPIR-V splice sites), the binding numbers and the constant-buffer layout of the FXAA pass, plus small helpers (luma proxies, a two-tap blend) for anti-aliasing before the colour LUT | `tools/dos2_post_fuse.py`, `tools/spv_splice.py`, `tools/dos2_post/fused_a/` | Written for this port; setup (stage 8) applies them to the player's own translated shaders to make `dm/shaders/native-post.xgspack` on the player's PC, never stored here |
 | **Analysis notes**: function names, addresses, call chains, measurements, plans | `docs/dos2/*.md` | Text analyses |
 
 Function and type names come from the symbols and RTTI the Switch modules carry (or are descriptive names given by the

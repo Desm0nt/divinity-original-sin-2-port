@@ -31,9 +31,9 @@ made from these Switch files alone; its button art is this project's own. No oth
 **A PC** with Windows 10/11 (64-bit), Linux or macOS:
 
 - about **20 GB of free disk space** while preparing (up to ~32 GB with NSZ / XCZ input);
-- internet on the first run: setup downloads a few helper tools (Python packages ~60 MB, Microsoft .NET ~300 MB, and
-  Python itself ~15 MB on Windows if you have none). It asks before each download and puts them only inside its own
-  folder. Later runs work offline.
+- internet on the first run: setup downloads a few helper tools (Python packages ~60 MB, Microsoft .NET ~300 MB, the
+  SPIR-V tools of Google's Android NDK ~7 MB, and Python itself ~15 MB on Windows if you have none). It asks before
+  each download and puts them only inside its own folder. Later runs work offline.
 
 **A phone:**
 
@@ -84,9 +84,10 @@ You may also put the folder from your dump tool inside it as it is (setup looks 
 
 1. **Double-click `setup.bat`.** If Windows warns about a file from the internet, choose **Run** (or **More info → Run anyway**).
 2. Answer the questions with **Y** and Enter (Enter alone also means yes): *Download a private Python?* (only when your PC
-   has no Python 3.10+), *Install the Python packages?*, *Download and install the .NET 10 SDK?* Everything goes into
-   `tools\.runtime` inside the setup folder. Nothing is installed system-wide, no admin rights are needed.
-3. **Wait.** Setup shows nine numbered stages with progress:
+   has no Python 3.10+), *Install the Python packages?*, *Download and install the .NET 10 SDK?*, *Download them there
+   now?* (the SPIR-V tools, stage 8). Everything goes into `tools\.runtime` inside the setup folder. Nothing is installed
+   system-wide, no admin rights are needed.
+3. **Wait.** Setup shows ten numbered stages with progress:
 
    | Stage | Usually takes |
    |---|---|
@@ -97,12 +98,15 @@ You may also put the folder from your dump tool inside it as it is (setup looks 
    | 5. Checking the patch | 1–10 min |
    | 6. Extracting the game data (~11.4 GB) | 1–15 min |
    | 7. Translating the shaders (12 329 of them) | 2–20 min |
-   | 8. Making the touch interface package | under a minute |
-   | 9. Preparing textures for phones without BC (ASTC) | 5–20 min |
+   | 8. Fusing the post-processing shaders (`native-post.xgspack`) | 1–2 min (first time: the ~7 MB SPIR-V tools download) |
+   | 9. Making the touch interface package | under a minute |
+   | 10. Preparing textures for phones without BC (ASTC) | 5–20 min |
 
    It checks the free space before it starts and stops early with a clear message when something is wrong. If you
-   close the window or the PC turns off, just run setup again: finished stages are skipped (stage 9 resumes where it
-   stopped). If your phone has an Adreno GPU (Snapdragon) you can skip stage 9: `setup.bat --skip-astc`.
+   close the window or the PC turns off, just run setup again: finished stages are skipped (stage 10 resumes where it
+   stopped). If your phone has an Adreno GPU (Snapdragon) you can skip stage 10: `setup.bat --skip-astc`. Stage 8 is
+   optional: if it cannot be done (no internet for its tools, say), setup says so and goes on; the game then draws its
+   post-processing passes one by one (a little slower), and the next setup run tries again.
 4. At the end it shows where the finished folder is, the adb commands to copy it, and what to do next.
 
 Instead of using `put-game-files-here` you can also drag the files onto `setup.bat`.
@@ -132,6 +136,7 @@ The finished folder is **`work/DivinityOriginalSin2Mobile`** inside the setup fo
   Internal storage/Download/DivinityOriginalSin2Mobile/romfs/...
   Internal storage/Download/DivinityOriginalSin2Mobile/dm/out/...
   Internal storage/Download/DivinityOriginalSin2Mobile/dm/shaders/shaders.xgspack
+  Internal storage/Download/DivinityOriginalSin2Mobile/dm/shaders/native-post.xgspack
   Internal storage/Download/DivinityOriginalSin2Mobile/astc/...       (only needed without BC: Mali, PowerVR, Xclipse)
   Internal storage/Download/DivinityOriginalSin2Mobile/drivers/       (your own Vulkan drivers, optional)
   ```
@@ -189,7 +194,7 @@ data* option turned on (and keep the ticket).
 (Windows) or `bash setup.sh --work /mnt/big/dos2-work`.
 
 **I set up an older release with an `.ipa`** — it is not needed any more (setup ignores it). Run setup again after
-updating: it remakes only the touch interface package (stage 8); copy `romfs/Data/TouchUI.pak` to the phone again.
+updating: it remakes only the touch interface package (stage 9); copy `romfs/Data/TouchUI.pak` to the phone again.
 
 **Where is the language setting?** — gear button → *Game settings…* → *Game language*; restart the game afterwards.
 The languages are built in.

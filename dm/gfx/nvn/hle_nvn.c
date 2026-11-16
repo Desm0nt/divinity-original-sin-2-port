@@ -535,6 +535,7 @@ static _Atomic uint64_t g_wt_id_mem[WT_IDS]; static _Atomic uint32_t g_wt_id_use
 static _Atomic uint32_t g_wt_rec_n, g_wt_cur, g_wt_evict, g_wt_sub_rec; static _Atomic int g_wt_open, g_wt_multi;
 static pthread_mutex_t g_wt_mu = PTHREAD_MUTEX_INITIALIZER;
 #include "nvn_nb_tap.inc"   // [DOS2] DM_NB: frame IR tap (NB-04), NBT(...) lines below; reads g_wt_id_mem
+#include "nvn_nr_tap.inc"   // [DOS2] DM_NR: engine object registry tap (NR-01), four NRT(...) lines below (empty outside DOS2)
 static int wt_mode(void) {
     static int m = -1;
     if (m < 0) { const char *e = getenv("DM_NVN_WT_DRAIN"); int v;
@@ -770,6 +771,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     o->serial = nvn_new_serial();
     OLOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)t, o->d.width, o->d.height, o->d.depth,
          o->d.levels, o->d.format, o->d.target, o->d.flags, o->L.size);
+    NRT(nrt_texture(o));   // [DOS2] DM_NR: what the builder held, to the engine call open on this thread
     return 1;
 }
 NVN(nvnTextureFinalize, void, NVNtexture *t) { SNAP_DROP(TX(t), tex_t); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
@@ -846,7 +848,9 @@ NVN(nvnSamplerBuilderGetWrapMode, void, const NVNsamplerBuilder *b, NVNwrapMode 
     const samp_par *o = &((const samp_builder_t *)b)->p; *s = (NVNwrapMode)o->ws; *t = (NVNwrapMode)o->wt; *r = (NVNwrapMode)o->wr;
 }
 NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b) {
-    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; return 1;
+    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p;
+    NRT(nrt_sampler(o));   // [DOS2] DM_NR
+    return 1;
 }
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
@@ -892,6 +896,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
       if (on) for (int i = 0; i < n; i++) o->sd[i].control = nvn_ctrl_intern(sd[i].control); }
 #endif
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
+    NRT(nrt_program(o));   // [DOS2] DM_NR: the program and the pack key of its control section
     return 1;
 }
 
@@ -2798,6 +2803,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 #endif
     BUF_MAGIC(o, MAGIC('B', 'U', 'F', 'F')); o->pool = s->pool; o->off = s->off; o->size = s->size; o->mem = s->pool->mem + s->off;
     OLOG("Buffer %p mem=%p size=%#llx", (void *)buf, (void *)o->mem, (unsigned long long)o->size);
+    NRT(dm_nr_tap_buffer(o, o->size));   // [DOS2] DM_NR
     return 1;
 }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *b, const char *l) { (void)b; (void)l; }

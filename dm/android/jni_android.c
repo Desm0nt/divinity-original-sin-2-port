@@ -476,6 +476,17 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // (Mi 14 Ultra, Turnip, first boot of a build): entering the main menu 99 pipelines in one window, 1891 ms, up to 102 ms each, 17.7 fps.
     // Opaque draws still build in the frame; the warm-up list (vk-pipeline-list.bin) pre-builds everything seen on the next boot.
     setenv("DM_GFX_ASYNC_PIPELINES", "1", 0);
+    // [DOS2] the native backend (docs/dos2/NATIVE_BACKEND_PLAN.md, NB-22) on by default, every step (owner 17.11: "врубай всё").
+    // Phone A/B 17.11 (Mi 14 Ultra, ship deck, uncapped, 60 s; work/logs g0base / g1all): 97.5 -> 102.2 fps, GPU median 9.01 -> 8.53 ms,
+    // NB checks differ 0 / bad 0, no fallbacks, screenshots equal. dm/env still wins: any of them = 0 there turns that step off.
+    // DM_NB_POST needs dm/shaders/native-post.xgspack (setup builds it); without the pack the post chain runs as recorded.
+    static const char *const k_nb_on[][2] = {
+        {"DM_NB", "1"}, {"DM_NB_OPS", "0x30002c0fc0"}, {"DM_NB_RP", "1"}, {"DM_NB_OPBARRIER", "1"}, {"DM_NB_PIPE", "1"},
+        {"DM_NB_DESC", "1"}, {"DM_NB_UBO", "1"}, {"DM_GFX_HIT_FAST", "1"}, {"DM_NB_UIAREA", "1"}, {"DM_NB_TRANSIENT", "1"},
+        {"DM_NB_RELOC", "1"}, {"DM_NB_ORDER", "3"}, {"DM_NB_OWN", "1"}, {"DM_NB_POST", "1"}, {"DM_NB_POST_AA", "1"},
+        {"DM_NB_MT", "3"}, {"DM_NB_MX", "1"}, {"DM_GFX_PRESENT_THREAD", "1"}, {"DM_DOS2_PARTICLES_FULL", "1"},
+    };
+    for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) setenv(k_nb_on[i][0], k_nb_on[i][1], 0);
 #endif
 #else
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);

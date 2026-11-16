@@ -3,7 +3,8 @@
 // (fs key + exact sampled reads) put in by hand for its five tail passes (the dumps predate the fs= lines).
 // Build (Windows clang):
 //   clang -std=c11 -O2 -Wall -Wextra -D_CRT_SECURE_NO_WARNINGS nb_post_test.c ../../../nb/nb_plan.c -o nb_post_test
-//   nb_post_test [<dir with nb_ir_04_f2509_p0.txt>]   (default: ../../../../../work/logs/p2b-nb, skipped when missing)
+//   nb_post_test [<dir with nb_ir_04_f2509_p0.txt> [<dir with the ship deck dumps ra1-dumps>]]
+//   (defaults: ../../../../../work/logs/p2b-nb and .../ra1-dumps, each skipped when missing)
 // NB-18b-8 (route A): nb_post_aa_plan (dm/gfx/nb/nb_post_aa.h) on the same chains - F1A + the elided FXAA pass, its readers, refusals.
 #include "../../../nb/nb_ir.h"
 #include "../../../nb/nb_post_aa.h"
@@ -14,20 +15,33 @@
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
-enum { HDR = 0x2710, LUT3D = 0x2830, D = 0x2660, O1 = 0x1300, SIGHT = 0x1290, O2 = 0x940, WIN = 0x930, UI = 0x570, X = 0x7770 };
+enum { HDR = 0x2710, LUT3D = 0x2830, D = 0x2660, O1 = 0x1300, SIGHT = 0x1290, O2 = 0x940, WIN = 0x930, UI = 0x570, X = 0x7770,
+       PH = 0x4440, PL = 0x4450, PO = 0x4460,
+       DRT = 0x1181, FM = 0x3790 };   // ship deck: the pooled RGBA8 target that holds linear depth and later the FXAA output; a fog map   // the HUD portrait's mini-pipeline: its HDR, its LUT target, its FXAA target (80x100)
 static const uint64_t K_LUT = 0x921728a5bbb1c71bull, K_SIGHT = 0x91eb2d97a304709aull, K_FXAA = 0x691768aa00000000ull, K_VIG = 0x43e8e8ed2b1df6c2ull,
-                      K_COMB = 0x98186c22a7209861ull, K_OTHER = 0x1234567800000000ull, K_COPY = 0x7b3210191abd90cdull;
+                      K_COMB = 0x98186c22a7209861ull, K_OTHER = 0x1234567800000000ull, K_COPY = 0x7b3210191abd90cdull, K_FOG = 0xe94ea226e689801cull;
 
 // NB-18b-8 variants: copy_step (AntiAliasing 0, no Vignette: a PPDefault copy instead of FXAA), no_step (AntiAliasing 0 + Vignette: it
 // reads Sight's target), outline (a step between Sight and FXAA: FXAA reads its target T), fxaa_inexact, op_reads (a copy from the
 // FXAA target after the chain), s_written (a pass draws into Sight's target after FXAA), no_3d (a loading frame: only the combine).
 typedef struct { int lut_inexact, lut_draws2, reader_after_sight, compute_between, vig_read_next, small_sight, sight_rt_size, no_vig;
-                 int copy_step, no_step, outline, fxaa_inexact, op_reads, s_written, no_3d; } variant;
+                 int copy_step, no_step, outline, fxaa_inexact, op_reads, s_written, no_3d;
+                 // NB-18b-9: portrait = the HUD portrait's own PPApplyLUT -> PPFXAA chain (80x100, nothing of the 3D tail): 1 after the
+                 // combine (the phone's ship deck), 2 between Sight and the 3D FXAA pass, 3 before the 3D (P2); fxaa_twice = an FXAA pass
+                 // over the combine's output (derived from Sight's target through the elided step, Vignette and the combine).
+                 int portrait, fxaa_twice;
+                 // NB-18b-10: fog = the ship deck's tail (dump ra1-dumps f5269): linear depth -> DRT ... LUT -> O1, Sight -> SIGHT, EoCFog
+                 // (SIGHT + DRT + fog map) -> O1, FXAA (O1) -> DRT, combine (UI + DRT). fog_* = what is wrong with the fog pass;
+                 // fog_no_aa = AntiAliasing 0 (no FXAA pass: the combine samples the fog's target).
+                 int fog, fog_inexact, fog_draws2, fog_feedback, fog_small, fog_stale_depth, fog_rewrite, fog_no_aa; } variant;
 static variant g_v;
 static int sz(void *ctx, uint64_t im, uint32_t *w, uint32_t *h) {
     (void)ctx;
     if (im == WIN || im == UI) { *w = 2400; *h = 1080; return 1; }
     if (im == LUT3D) return 0;
+    if (im == PH || im == PL || im == PO) { *w = 80; *h = 100; return 1; }
+    if (im == FM) return 0;
+    if (im == O1 && g_v.fog_small) { *w = 1080; *h = 486; return 1; }
     if (im == SIGHT && g_v.sight_rt_size) { *w = 2000; *h = 900; return 1; }
     *w = 2160; *h = 972; return 1;
 }
@@ -39,8 +53,32 @@ static void pass1(nb_frame *f, uint64_t rt, uint64_t fs, int exact, const uint64
     for (int i = 0; i < ns; i++) nb_read(f, -1, stale[i]);     // stale bindings: IR reads the program does not sample
     nb_draw_prog(f, fs, exact, sr, n);
 }
+static void portrait(nb_frame *f) {   // drawn every frame; the UI samples PO (not modelled: the combine's Tex is the UI layer)
+    { const uint64_t s[1] = { X }; pass1(f, PH, K_OTHER, 1, s, 1, NULL, 0); }
+    { const uint64_t s[2] = { PH, LUT3D }; pass1(f, PL, K_LUT, 1, s, 2, NULL, 0); }
+    { const uint64_t s[1] = { PL }; pass1(f, PO, K_FXAA, 1, s, 1, NULL, 0); }
+}
+static void build_deck(nb_frame *f, uint32_t no) {
+    nb_frame_reset(f, no);
+    const uint32_t z[4] = { 0, 0, 0, 0 };
+    if (!g_v.fog_stale_depth || no == 1) {   // LinearizeDepth: clear + draw into the pooled target (every frame on the phone)
+        nb_clear(f, DRT, NB_ASP_COLOR, NB_CLEAR_FULL, z, 0, 0);
+        const uint64_t s[1] = { D }; pass1(f, DRT, K_OTHER, 1, s, 1, NULL, 0);
+    }
+    { const uint64_t s[2] = { DRT, X }; pass1(f, HDR, K_OTHER, 1, s, 2, NULL, 0); }   // lighting samples the linear depth
+    { const uint64_t s[2] = { HDR, LUT3D }; pass1(f, O1, K_LUT, 1, s, 2, NULL, 0); }
+    nb_barrier(f);
+    { const uint64_t s[2] = { O1, DRT }; pass1(f, SIGHT, K_SIGHT, 1, s, 2, NULL, 0); }
+    { const uint64_t s[4] = { SIGHT, DRT, FM, O1 }; pass1(f, O1, K_FOG, !g_v.fog_inexact, s, g_v.fog_feedback ? 4 : 3, NULL, 0); if (g_v.fog_draws2) nb_draw(f, 0); }
+    if (g_v.fog_rewrite) { const uint64_t s[1] = { X }; pass1(f, O1, K_OTHER, 1, s, 1, NULL, 0); }   // something draws over the fog's output
+    if (!g_v.fog_no_aa) { const uint64_t s[1] = { O1 }; pass1(f, DRT, K_FXAA, 1, s, 1, NULL, 0); }
+    { const uint64_t s[2] = { UI, g_v.fog_no_aa ? (uint64_t)O1 : (uint64_t)DRT }; pass1(f, WIN, K_COMB, 1, s, 2, NULL, 0); }
+    { const uint64_t w = WIN; nb_op(f, NB_OP_PRESENT, &w, 1, NULL, 0); }
+    nb_submit(f, 1);
+}
 // One frame of the campaign tail: (full clear of O2 like P2's line 10) 3D -> LUT -> barrier -> Sight -> FXAA -> [Vignette] -> Combine -> present
 static void build(nb_frame *f, uint32_t no) {
+    if (g_v.fog) { build_deck(f, no); return; }
     nb_frame_reset(f, no);
     const uint32_t z[4] = { 0, 0, 0, 0 };
     if (g_v.no_3d) {   // a loading frame: the combine alone samples last frame's post output
@@ -48,6 +86,7 @@ static void build(nb_frame *f, uint32_t no) {
         const uint64_t s[2] = { UI, O1 }, w = WIN; pass1(f, WIN, K_COMB, 1, s, 2, NULL, 0); nb_op(f, NB_OP_PRESENT, &w, 1, NULL, 0); nb_submit(f, 1); return;
     }
     if (g_v.vig_read_next) { const uint64_t s[1] = { O2 }; pass1(f, X, K_OTHER, 1, s, 1, NULL, 0); }   // last frame's O2 sampled first
+    if (g_v.portrait == 3) portrait(f);
     nb_clear(f, O2, NB_ASP_COLOR, NB_CLEAR_FULL, z, 0, 0);
     { const uint64_t s[1] = { X }; pass1(f, HDR, K_OTHER, 1, s, 1, NULL, 0); }
     { const uint64_t s[2] = { HDR, LUT3D }, st[1] = { O2 }; pass1(f, O1, K_LUT, !g_v.lut_inexact, s, 2, st, 1); if (g_v.lut_draws2) nb_draw(f, 0); }
@@ -56,12 +95,15 @@ static void build(nb_frame *f, uint32_t no) {
     { const uint64_t s[2] = { O1, D }, st[1] = { O2 }; pass1(f, SIGHT, K_SIGHT, 1, s, 2, st, 1); }
     if (g_v.reader_after_sight) { const uint64_t s[1] = { O1 }; pass1(f, X, K_OTHER, 1, s, 1, NULL, 0); }
     if (g_v.outline) { const uint64_t s[1] = { SIGHT }; pass1(f, X, K_OTHER, 1, s, 1, NULL, 0); }
+    if (g_v.portrait == 2) portrait(f);
     if (!g_v.no_step) { const uint64_t s[1] = { g_v.outline ? (uint64_t)X : (uint64_t)SIGHT }, st[1] = { O2 };
         pass1(f, O1, g_v.copy_step ? K_COPY : K_FXAA, !g_v.fxaa_inexact, s, 1, st, 1); }
     if (g_v.s_written) { const uint64_t s[1] = { X }; pass1(f, SIGHT, K_OTHER, 1, s, 1, NULL, 0); }
     const uint64_t post = g_v.no_step ? (uint64_t)SIGHT : (uint64_t)O1;   // what the step after the AA step reads
     if (!g_v.no_vig) { const uint64_t s[1] = { post }, st[1] = { O2 }; pass1(f, O2, K_VIG, 1, s, 1, st, 1); }   // stale self binding -> feedback
     { const uint64_t s[2] = { UI, g_v.no_vig ? post : (uint64_t)O2 }; pass1(f, WIN, K_COMB, 1, s, 2, NULL, 0); }
+    if (g_v.portrait == 1) portrait(f);
+    if (g_v.fxaa_twice) { const uint64_t s[1] = { WIN }; pass1(f, X, K_FXAA, 1, s, 1, NULL, 0); }
     if (g_v.op_reads) { const uint64_t src = O1, dst = X; nb_op(f, NB_OP_COPY, &src, 1, &dst, 1); }
     { const uint64_t w = WIN; nb_op(f, NB_OP_PRESENT, &w, 1, NULL, 0); }
     nb_submit(f, 1);
@@ -181,13 +223,34 @@ static void route_a(void) {
         { "FXAA reads not exact", { .fxaa_inexact = 1 }, NB_PAW_INEXACT },
         { "a copy from the FXAA target", { .op_reads = 1 }, NB_PAW_READER },
         { "Sight's target drawn again", { .s_written = 1 }, NB_PAW_S_WRITTEN },
+        { "an FXAA pass over the combine's output (fed by Sight's target)", { .fxaa_twice = 1 }, NB_PAW_OTHER_FXAA },
+        { "a step between Sight and FXAA, with the portrait chain after the combine", { .outline = 1, .portrait = 1 }, NB_PAW_OTHER_FXAA },
     };
     for (unsigned i = 0; i < sizeof neg / sizeof neg[0]; i++) {
         g_v = neg[i].v; aa_reset(); aa_frame(1);
         int any = 0; for (int n = 0; n < F.nnode; n++) any |= P.node[n].flags & NB_NP_AA;
         CHECK(AO.f1a == 0 && AO.plain == 1 && aa_why() == neg[i].why && !any, "A %s: plain F1 + the console's FXAA, '%s' (got f1a %d plain %d '%s' aa flags %d)", neg[i].name,
               nb_post_aa_why_name(neg[i].why), AO.f1a, AO.plain, nb_post_aa_why_name(aa_why()), any);
-        CHECK(O.fused[NB_FXK_F1] == 1 && fl(node_of(K_LUT, 0)) == NB_NP_ELIDE && fl(node_of(K_SIGHT, 0)) == NB_NP_FUSE, "A %s: F1 itself stays", neg[i].name);
+        CHECK(O.fused[NB_FXK_F1] == 1 && fl(node_of(K_LUT, O1)) == NB_NP_ELIDE && fl(node_of(K_SIGHT, 0)) == NB_NP_FUSE, "A %s: F1 itself stays", neg[i].name);
+        CHECK(AO.d_host == node_of(K_SIGHT, 0) && AO.d_why == neg[i].why, "A %s: the refusal names its Sight pass and reason (%d, %d)", neg[i].name, AO.d_host, AO.d_why);
+        if (neg[i].why == NB_PAW_OTHER_FXAA) {
+            const int want = neg[i].v.fxaa_twice ? node_of(K_FXAA, X) : node_of(K_FXAA, O1);
+            CHECK(AO.d_other == want && AO.d_first >= 0, "A %s: the refusal names the FXAA pass (node %d, want %d; first reader %d)", neg[i].name, AO.d_other, want, AO.d_first);
+        }
+    }
+    // NB-18b-9: the HUD portrait's own LUT -> FXAA chain (80x100) is not fed by Sight's target: wherever it is recorded, the 3D tail is
+    // F1A with its FXAA pass elided, the portrait's passes carry no flag (before: "another FXAA pass follows" in every gameplay frame).
+    for (int where = 1; where <= 3; where++) for (int vig = 0; vig < 2; vig++) {
+        g_v = (variant){ .portrait = where, .no_vig = !vig }; aa_reset();
+        for (uint32_t i = 1; i <= 12; i++) aa_frame(i);
+        const int x = node_of(K_FXAA, O1), px = node_of(K_FXAA, PO), pl = node_of(K_LUT, PL), l = node_of(K_LUT, O1), sg = node_of(K_SIGHT, 0);
+        CHECK(AO.f1a == 1 && AO.f1a_fxaa == 1 && AO.plain == 0 && aa_why() < 0, "A portrait %d vig %d: F1A with the 3D FXAA pass elided (f1a %d fxaa %d plain %d '%s')",
+              where, vig, AO.f1a, AO.f1a_fxaa, AO.plain, nb_post_aa_why_name(aa_why()));
+        CHECK(fl(l) == (NB_NP_ELIDE | NB_NP_AA) && fl(sg) == (NB_NP_FUSE | NB_NP_AA) && fl(x) == (NB_NP_ELIDE | NB_NP_AA), "A portrait %d vig %d: flags LUT %#x Sight %#x FXAA %#x", where, vig, fl(l), fl(sg), fl(x));
+        CHECK(px >= 0 && pl >= 0 && fl(px) == 0 && fl(pl) == 0, "A portrait %d vig %d: the portrait's LUT / FXAA passes run as recorded (%#x %#x)", where, vig, fl(pl), fl(px));
+        CHECK(AO.unrelated_fxaa == (where == 3 ? 0 : 1), "A portrait %d vig %d: FXAA passes of other chains after Sight %d", where, vig, AO.unrelated_fxaa);
+        CHECK(AS.n == 1 && AS.t[0].image == O1 && !AS.t[0].bad && AO.readers == 1, "A portrait %d vig %d: only the 3D FXAA target is aliased, one reader (%d, readers %d)", where, vig, AS.n, AO.readers);
+        CHECK(AO.d_host < 0, "A portrait %d vig %d: no refusal recorded", where, vig);
     }
     {   // an operation reads the aliased target in a later frame: bad for good
         g_v = (variant){ 0 }; aa_reset(); aa_frame(1); aa_frame(2);
@@ -197,6 +260,40 @@ static void route_a(void) {
         g_v = (variant){ 0 }; aa_frame(4);
         int any = 0; for (int n = 0; n < F.nnode; n++) any |= P.node[n].flags & NB_NP_AA;
         CHECK(AO.plain == 1 && aa_why() == NB_PAW_BAD && !any, "A sticky: never aliased again ('%s')", nb_post_aa_why_name(aa_why()));
+    }
+    // NB-18b-10: the ship deck. EoCFog between Sight and FXAA carries F1A's output into its own target: the FXAA pass is elided, the
+    // combine samples the fog's target; the fog pass runs as recorded with NB_NP_AA (the backend follows F1A's output through it).
+    g_v = (variant){ .fog = 1 }; aa_reset();
+    for (uint32_t i = 1; i <= 12; i++) {
+        aa_frame(i);
+        const int l = node_of(K_LUT, 0), sg = node_of(K_SIGHT, 0), fg = node_of(K_FOG, 0), x = node_of(K_FXAA, 0), c = node_of(K_COMB, 0), lin = node_of(K_OTHER, DRT), lit = node_of(K_OTHER, HDR);
+        CHECK(AO.f1a == 1 && AO.f1a_fxaa == 1 && AO.carried == 1 && AO.plain == 0 && aa_why() < 0, "A deck frame %u: F1A, FXAA elided, the fog carries (f1a %d fxaa %d carried %d plain %d '%s')",
+              i, AO.f1a, AO.f1a_fxaa, AO.carried, AO.plain, nb_post_aa_why_name(aa_why()));
+        CHECK(fl(l) == (NB_NP_ELIDE | NB_NP_AA) && fl(sg) == (NB_NP_FUSE | NB_NP_AA) && fl(fg) == NB_NP_AA && fl(x) == (NB_NP_ELIDE | NB_NP_AA) && fl(c) == NB_NP_AA,
+              "A deck frame %u: flags LUT %#x Sight %#x Fog %#x FXAA %#x combine %#x", i, fl(l), fl(sg), fl(fg), fl(x), fl(c));
+        CHECK(fl(lin) == 0 && fl(lit) == 0 && AO.readers == 1, "A deck frame %u: LinearizeDepth rewrites the pooled target, lighting reads it as it is (%#x %#x readers %d)", i, fl(lin), fl(lit), AO.readers);
+        CHECK(AO.step[x] == sg && AS.n == 1 && AS.t[0].image == DRT && !AS.t[0].bad, "A deck frame %u: the aliased target is the FXAA pass's (the pooled depth target)", i);
+    }
+    g_v = (variant){ .fog = 1, .fog_no_aa = 1 }; aa_reset();
+    for (uint32_t i = 1; i <= 10; i++) aa_frame(i);
+    CHECK(AO.f1a == 1 && AO.f1a_nostep == 1 && AO.carried == 0 && AS.n == 0 && fl(node_of(K_FOG, 0)) == 0 && fl(node_of(K_COMB, 0)) == 0,
+          "A deck, AntiAliasing 0: F1A without a step, the fog and the combine run as recorded (f1a %d nostep %d)", AO.f1a, AO.f1a_nostep);
+    struct { const char *name; variant v; int why, frames; } fneg[] = {
+        { "fog reads not exact (program not published yet)", { .fog = 1, .fog_inexact = 1 }, NB_PAW_CARRY, 1 },
+        { "fog pass with 2 draws", { .fog = 1, .fog_draws2 = 1 }, NB_PAW_CARRY, 1 },
+        { "fog samples its own target", { .fog = 1, .fog_feedback = 1 }, -1, 1 },   // F1 itself is refused: another reader of the LUT's target
+        { "fog target of another size", { .fog = 1, .fog_small = 1 }, -1, 1 },   // F1 itself is refused by its size rule
+        { "fog output drawn over before FXAA", { .fog = 1, .fog_rewrite = 1 }, NB_PAW_CARRY, 1 },
+        { "fog samples the aliased depth target that nothing rewrote", { .fog = 1, .fog_stale_depth = 1 }, NB_PAW_CARRY, 3 },
+    };
+    for (unsigned i = 0; i < sizeof fneg / sizeof fneg[0]; i++) {
+        g_v = fneg[i].v; aa_reset();
+        for (int k = 1; k <= fneg[i].frames; k++) aa_frame((uint32_t)k);
+        const int any = (fl(node_of(K_LUT, 0)) | fl(node_of(K_SIGHT, 0)) | (fneg[i].v.fog_stale_depth ? 0u : fl(node_of(K_FOG, 0))) | fl(node_of(K_FXAA, 0))) & NB_NP_AA;   // the tail (readers of a stale depth target, the fog among them, are told to sample its alias)
+        if (fneg[i].why < 0) { CHECK(AO.f1a == 0 && !any, "A deck, %s: no F1A (f1a %d plain %d)", fneg[i].name, AO.f1a, AO.plain); continue; }
+        CHECK(AO.f1a == 0 && AO.plain == 1 && aa_why() == fneg[i].why && !any, "A deck, %s: plain F1 + the console's FXAA, '%s' (got f1a %d plain %d '%s' aa flags %d)", fneg[i].name,
+              nb_post_aa_why_name(fneg[i].why), AO.f1a, AO.plain, nb_post_aa_why_name(aa_why()), any);
+        if (!fneg[i].v.fog_rewrite) CHECK(AO.d_first == node_of(K_FOG, 0) && AO.d_other == node_of(K_FXAA, 0), "A deck, %s: the refusal names the fog and the FXAA pass (%d %d)", fneg[i].name, AO.d_first, AO.d_other);
     }
     g_v = (variant){ 0 };
 }
@@ -247,10 +344,55 @@ static void p2(const char *dir) {
     printf("P2 f2509: F1 %d F2 %d, later cover_dc %d, assumed covering %d\n", O.fused[1], O.fused[2], O.later_cover, O.assumed_cover);
 }
 
+// ---- NB-18b-10: the phone's ship deck dumps (work/logs/ra1-dumps, 17.11; fs= / sread lines as recorded): every nb_ir_*_p0.txt in argv[2]
+// order is planned in sequence with one state, like the front end does. In the deck frames (a pass fs e94ea226 = EoCFog between Sight and
+// FXAA) the tail must be: LUT elide aa, Sight fuse aa, Fog aa (carry), FXAA elide aa, combine reads aa.
+static int find_fs(uint32_t hi, int from) { for (int i = from; i < F.nnode; i++) if (F.node[i].kind == NB_NODE_PASS && (uint32_t)(F.node[i].fs >> 32) == hi) return i; return -1; }
+static void deck_dumps(const char *dir) {
+    static const char *const names[] = { "nb_ir_03_f2330_p0.txt", "nb_ir_05_f3484_p0.txt", "nb_ir_07_f4668_p0.txt", "nb_ir_08_f5269_p0.txt", "nb_ir_09_f5869_p0.txt",
+                                         "nb_ir_10_f6470_p0.txt", "nb_ir_11_f7071_p0.txt" };
+    nb_persist_reset(&PS); memset(&H, 0, sizeof H); memset(&AS, 0, sizeof AS); g_nimg = 0;
+    const nb_rules r = { NB_RULES_EXACT, 0, 0 }; const nb_post_rules pr = { 0, 8, dsz, NULL };
+    int deck = 0, ok = 0;
+    for (unsigned d = 0; d < sizeof names / sizeof names[0]; d++) {
+        char path[600]; snprintf(path, sizeof path, "%s/%s", dir, names[d]);
+        FILE *fp = fopen(path, "rb");
+        if (!fp) { printf("skip: no %s\n", path); return; }
+        static char text[1 << 20]; const size_t n = fread(text, 1, sizeof text - 1, fp); fclose(fp); text[n] = 0;
+        for (char *l = text; (l = strstr(l, "# image ")) != NULL; l++) {
+            unsigned long long im; unsigned w, h;
+            if (sscanf(l, "# image 0x%llx %ux%u", &im, &w, &h) != 3) continue;
+            int at = -1; for (int i = 0; i < g_nimg; i++) if (g_img[i].im == im) at = i;
+            if (at < 0 && g_nimg < 256) at = g_nimg++;
+            if (at >= 0) { g_img[at].im = im; g_img[at].w = w; g_img[at].h = h; }
+        }
+        CHECK(nb_parse(text, &F) == 0, "%s parses", names[d]);
+        const int fog = find_fs(0xe94ea226u, 0);
+        for (int rep = 0; rep < (fog >= 0 ? 3 : 1); rep++) {   // the same deck frame three times: the state of the frame before is the alias
+            CHECK(nb_plan(&F, &PS, &r, &P) == 0, "%s plan", names[d]);
+            CHECK(nb_post_plan(&F, &P, &pr, &H, &O) >= 0, "%s post plan", names[d]);
+            CHECK(nb_post_aa_plan(&F, &P, &O, &pr, &AS, &AO) >= 0, "%s aa plan", names[d]);
+            if (fog < 0) continue;
+            deck++;
+            const int l = find_fs(0x921728a5u, 0), sg = find_fs(0x91eb2d97u, 0), x = find_fs(0x691768aau, fog), c = find_fs(0x98186c22u, fog);
+            const int good = AO.f1a == 1 && AO.f1a_fxaa == 1 && AO.carried == 1 && AO.plain == 0 && fl(l) == (NB_NP_ELIDE | NB_NP_AA) && fl(sg) == (NB_NP_FUSE | NB_NP_AA) &&
+                             fl(fog) == NB_NP_AA && fl(x) == (NB_NP_ELIDE | NB_NP_AA) && fl(c) == NB_NP_AA && AO.readers == 1;
+            CHECK(good, "%s rep %d: F1A through the fog (f1a %d fxaa %d carried %d plain %d '%s'; flags LUT %#x Sight %#x Fog %#x FXAA %#x combine %#x; readers %d)", names[d], rep,
+                  AO.f1a, AO.f1a_fxaa, AO.carried, AO.plain, nb_post_aa_why_name(aa_why()), fl(l), fl(sg), fl(fog), fl(x), fl(c), AO.readers);
+            int extra = 0; for (int i = 0; i < F.nnode; i++) if (i != l && i != sg && i != fog && i != x && i != c && (P.node[i].flags & NB_NP_AA)) extra++;
+            CHECK(extra == 0, "%s rep %d: no other pass is told to read the alias (%d): the linear depth in the pooled target is read as it is", names[d], rep, extra);
+            ok += good && !extra;
+        }
+    }
+    { int bad = 0; for (int t = 0; t < AS.n; t++) bad += AS.t[t].bad; CHECK(bad == 0, "deck dumps: no aliased target went bad (%d of %d)", bad, AS.n); }
+    printf("ship deck dumps: %d deck plans, %d with F1A through EoCFog and the FXAA pass elided; aliased targets tracked %d\n", deck, ok, AS.n);
+}
+
 int main(int argc, char **argv) {
     synthetic();
     route_a();
     p2(argc > 1 ? argv[1] : "../../../../../work/logs/p2b-nb");
+    deck_dumps(argc > 2 ? argv[2] : "../../../../../work/logs/ra1-dumps");
     if (fails) { printf("nb_post_test: %d failed\n", fails); return 1; }
     printf("nb_post_test: all passed\n");
     return 0;

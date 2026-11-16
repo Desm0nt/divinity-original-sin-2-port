@@ -53,7 +53,31 @@ const nb_post_prog *dm_nb_post_prog(uint64_t serial) {
 static nb_post_hist g_hist; static nb_post_out g_out;
 static struct { uint64_t parts, fused[NB_FXK_KINDS], why[NB_FXK_KINDS][NB_PW_KINDS], later_cover, assumed, bad, exact_passes, passes_fs; } g_pp;
 static int g_aa; static nb_post_aa_state g_aast; static nb_post_aa_out g_aao;
-static struct { uint64_t f1a, fxaa, copy, copy_kept, nostep, plain, readers, op_reads, bad, why[NB_PAW_KINDS]; } g_pa;
+static struct { uint64_t f1a, fxaa, copy, copy_kept, nostep, plain, readers, op_reads, bad, unrelated, carried, why[NB_PAW_KINDS]; } g_pa;
+// NB-18b-9: a pair left plain names its nodes (3 lines per reason): which pass read Sight's target first, which FXAA pass refused it.
+static void nbp_node_str(const nb_frame *f, int q, char *b, size_t cap) {
+    if (q < 0 || q >= f->nnode) { snprintf(b, cap, "none"); return; }
+    const nb_node *m = &f->node[q];
+    if (m->kind != NB_NODE_PASS) { snprintf(b, cap, "node %d op %s", q, nb_kind_name(m->kind & 0xff)); return; }
+    uint32_t w = 0, h = 0; int fmt = 0; const uint64_t t = m->natt ? m->att[0].image : 0;
+    if (t) nvn_nb_tap_image(t, &w, &h, &fmt);
+    int o = snprintf(b, cap, "node %d pass fs %016llx%s%s, %u draws, %d targets, first %#llx %ux%u, samples", q, (unsigned long long)m->fs,
+                     (m->fsx & NB_FSX_EXACT) ? " exact" : " NOT exact", (m->fsx & NB_FSX_MIXED) ? " mixed" : "", m->draws, m->natt, (unsigned long long)t, w, h);
+    for (int i = 0; i < m->nsr && o > 0 && o < (int)cap - 40; i++) {
+        uint32_t sw = 0, sh = 0; nvn_nb_tap_image(m->sread[i], &sw, &sh, &fmt);
+        o += snprintf(b + o, cap - (size_t)o, " %#llx %ux%u", (unsigned long long)m->sread[i], sw, sh);
+    }
+}
+static void nbp_aa_diag(const nb_frame *f) {
+    static unsigned told[NB_PAW_KINDS];
+    const int w = g_aao.d_why;
+    if (g_aao.d_host < 0 || w >= NB_PAW_KINDS || told[w] >= 3) return;
+    told[w]++;
+    char a[420], b[420], c[420];
+    nbp_node_str(f, g_aao.d_host, a, sizeof a); nbp_node_str(f, g_aao.d_first, b, sizeof b); nbp_node_str(f, g_aao.d_other, c, sizeof c);
+    LOG("[nb] post plan aa: frame %u left as F1 + the console's FXAA (%s): Sight = %s; first reader of its target = %s; the FXAA pass that refused it = %s",
+        f->frame_no, nb_post_aa_why_name(w), a, b, c);
+}
 static int nbp_size(void *ctx, uint64_t image, uint32_t *w, uint32_t *h) { (void)ctx; int fmt; return nvn_nb_tap_image(image, w, h, &fmt); }
 
 void dm_nb_post_install(void) {
@@ -85,6 +109,8 @@ void dm_nb_post_plan(const nb_frame *f, nb_plan_out *po) {
             g_pa.f1a += (uint64_t)g_aao.f1a; g_pa.fxaa += (uint64_t)g_aao.f1a_fxaa; g_pa.copy += (uint64_t)g_aao.f1a_copy; g_pa.copy_kept += (uint64_t)g_aao.f1a_copy_kept;
             g_pa.nostep += (uint64_t)g_aao.f1a_nostep; g_pa.plain += (uint64_t)g_aao.plain; g_pa.readers += (uint64_t)g_aao.readers; g_pa.op_reads += (uint64_t)g_aao.op_reads;
             for (int w = 0; w < NB_PAW_KINDS; w++) g_pa.why[w] += (uint64_t)g_aao.why[w];
+            g_pa.unrelated += (uint64_t)g_aao.unrelated_fxaa; g_pa.carried += (uint64_t)g_aao.carried;
+            if (g_aao.plain) nbp_aa_diag(f);
         }
     }
     for (int i = 0; i < f->nnode; i++) if (f->node[i].kind == NB_NODE_PASS && (f->node[i].fsx & NB_FSX_ANY)) {
@@ -110,9 +136,10 @@ void dm_nb_post_report(double fr) {
         for (int t = 0; t < g_aast.n; t++) bad += g_aast.t[t].bad;
         LOG("[nb] post plan aa DM_NB_POST_AA=1: F1A a frame %.2f (FXAA pass elided %.2f, PPDefault copy elided %.2f / left %.2f, no AA pass after Sight %.2f); "
             "left as F1 + the console's FXAA %.2f; refusals%s; passes told to sample Sight's target %.2f a frame; aliased targets tracked %d "
-            "(read by an operation, never aliased again: %d; such reads now %llu); bad input %llu",
+            "(read by an operation, never aliased again: %d; such reads now %llu); FXAA passes of other chains after Sight (not fed by its target, ignored) "
+            "%.2f a frame; fog steps between Sight and the elided AA pass (run as recorded, carry F1A's output) %.2f a frame; bad input %llu",
             g_pa.f1a / fr, g_pa.fxaa / fr, g_pa.copy / fr, g_pa.copy_kept / fr, g_pa.nostep / fr, g_pa.plain / fr, o ? b : ": none", g_pa.readers / fr,
-            g_aast.n, bad, (unsigned long long)g_pa.op_reads, (unsigned long long)g_pa.bad);
+            g_aast.n, bad, (unsigned long long)g_pa.op_reads, g_pa.unrelated / fr, g_pa.carried / fr, (unsigned long long)g_pa.bad);
         memset(&g_pa, 0, sizeof g_pa);
     }
 }
