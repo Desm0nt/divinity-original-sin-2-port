@@ -829,3 +829,9 @@ Risks: the watermark class may not apply the HUD scale (then the rect is 357x830
 **Строки:** `[touch] placement mode: finger at x,y is the world's without a mouse press`, затем `world tap … PLACE (… preview task type 10)` —
 **тип должен остаться 10**, `[world] placement: ray from the finger … -> ground X Y Z`, `[world] placement: selector … -> X Y Z …, projected to x,y px`,
 `[touch] placement tap: pad A pressed … (preview task type 10)`, и после — `placement mode: … running task type …` без отмены.
+
+## 16. Ветка `dos2-touchart` (16.11): своё оформление вместо графики iPad
+
+Хозяин 16.11: пак касания собирается только из дампа Switch, в репозитории и APK нет графики Larian. Вся графика iPad в bottomBar_d / dmColumn_d /
+панелях заменена своей (`assets/touchui`, Codex; векторные стрелки) или символами дампа Switch там, где у iPad тот же рисунок (стрелки вкладок,
+лупа, OK). `.ipa` больше не нужен (setup его игнорирует). Инвентарь, доказательства и проверки: `TOUCH_ART.md`. Пак `packs/5a`; на телефоне не запускалось.

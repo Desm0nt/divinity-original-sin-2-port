@@ -2,7 +2,7 @@
 """Divinity Original Sin 2 Mobile: from your own Divinity: Original Sin 2 (Switch) dumps to the folder the app reads, in one command.
 
   setup                     (no file arguments, e.g. a double-click on setup.bat)
-      Looks for the base game, the update v786432 and prod.keys (and, optionally, the iPad / iPhone version's .ipa) in
+      Looks for the base game, the update v786432 and prod.keys in
       put-game-files-here/ (next to the setup scripts) and in the current directory, under any file names, and prepares everything.
   setup FILE_OR_FOLDER... [--work DIR] [--push [SERIAL]] [--dry-run] [--yes] [--keep-nsp] [--skip-verify] [--skip-astc]
         [--steps exefs,patch,verify,romfs,shaders,touchui,astc]
@@ -30,9 +30,8 @@ game has no add-on content to install. Packages and keys are only read, never co
 memory. Compressed packages (NSZ / XCZ) get their program expanded to plain NSPs in <work>/nsp (needed for the RomFS); those are
 deleted afterwards unless --keep-nsp. Default work directory: $DM_DOS2_WORK or <repository>/work.
 
-Touch interface: the default package holds the console menus with touch handling, made from the Switch files alone. If you also own
-the game for iPad / iPhone, put its .ipa next to the Switch files: setup then draws the iPad's on-screen buttons (the HUD's panel
-column, the panels' button rows) into the console HUD as well (only the iPad's interface movies are read, nothing else of it).
+Touch interface: the package holds the console menus with touch handling and the on-screen buttons (the HUD's panel column, the
+panels' button rows), made from the Switch files alone; the buttons' art is this port's own (assets/touchui). No other edition needed.
 The .NET 10 SDK (shader translator build) is taken from DOTNET, tools/.runtime/dotnet, ~/.dotnet or PATH; when it is missing,
 setup offers to install it into tools/.runtime/dotnet with Microsoft's dotnet-install script (no admin rights, nothing
 system-wide). setup.bat / setup.sh provide Python and its packages the same way (tools/.runtime).
@@ -187,7 +186,6 @@ class Layout:
         self.romfs_manifest = self.work / 'romfs-manifest.json'
         self.equiv = self.work / 'equiv.json'
         self.touchui_stamp = self.work / 'touchui.json'
-        self.ipad = self.work / 'ipad'
 
     def exefs_ok(self):
         return build_id(self.exefs / 'main') == BUILD_ID and build_id(self.exefs / 'sdk') == SDK_BUILD_ID and (self.exefs / 'main.raw').is_file()
@@ -225,7 +223,7 @@ class Layout:
         return self.shader_count() > 0
 
     def touchui_mode(self):
-        """'ipad' / 'console' when TouchUI.pak is there and made by this checkout's tools, else None."""
+        """'full' when TouchUI.pak is there and made by this checkout's tools and art, else None."""
         try: rec = json.loads(self.touchui_stamp.read_text())
         except (OSError, ValueError): return None
         if not self.touchui.is_file() or rec.get('sha256') != sha256_file(self.touchui) or rec.get('tools') != touchui_tools_hash(): return None
@@ -244,7 +242,8 @@ class Layout:
 def touchui_tools_hash():
     """SHA-256 over the touch interface tools (a new release with new movie patches rebuilds TouchUI.pak)."""
     h = hashlib.sha256()
-    for p in sorted(TOOLS.glob('dos2_*touch*.py')) + [TOOLS / n for n in ('dos2_touchui_pak.py', 'dos2_swf_graft.py', 'dos2_swf_abc.py', 'lspk.py')]:
+    for p in sorted(TOOLS.glob('dos2_*touch*.py')) + [TOOLS / n for n in ('dos2_touchui_pak.py', 'dos2_swf_graft.py', 'dos2_swf_abc.py', 'lspk.py')] + \
+            sorted((ROOT / 'assets' / 'touchui').glob('*.png')):
         if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
     return h.hexdigest()
 
@@ -297,18 +296,8 @@ def folder_bytes(path):
 
 # ---------------------------------------------------------------- finding the inputs
 def is_ipa(p):
-    """The iPad / iPhone version of the game (an .ipa: a zip with Payload/<name>.app/Data/Game.pak)."""
+    """An .ipa (the iPad / iPhone edition): no longer used - the touch interface is made from the Switch files alone."""
     return p.is_file() and p.suffix.lower() == '.ipa'
-
-
-def find_ipa(folders):
-    for d in folders:
-        try:
-            for p in sorted(Path(d).rglob('*.ipa') if Path(d) == DROP else Path(d).glob('*.ipa')):
-                if is_ipa(p): return p
-        except OSError:
-            continue
-    return None
 
 
 def looks_like_keys(p):
@@ -360,6 +349,7 @@ def gather(args):
         for a in map(Path, args):
             if not a.exists(): raise Fail(f'not found: {a}')
             if a.is_dir() and not is_package_path(a): folders.append(a)
+            elif is_ipa(a): print(f'  {a.name}: an .ipa is not needed any more (the touch interface comes from the Switch files); ignored')
             elif a.is_file() and looks_like_keys(a): keys.append(a)
             elif a.is_file() and a.name.lower() in ('title.keys', 'dev.keys'):
                 raise Fail(f'{a}: this is {a.name}; setup needs prod.keys (the console keys, with header_key in it)')
@@ -733,30 +723,15 @@ def step_shaders(L, dn):
     if L.shader_count() != n: raise Fail(f'{L.pack} holds {L.shader_count()} bundles, expected {n}')
 
 
-def step_touchui(L, ipa):
-    """romfs/Data/TouchUI.pak: the console menus with touch handling (tools/dos2_touchui_pak.py, set "hints"); with the iPad version's
-    .ipa also the iPad's on-screen buttons drawn into the HUD and the panels. The game mounts every *.pak in Data itself."""
-    want = 'ipad' if ipa else 'console'
+def step_touchui(L):
+    """romfs/Data/TouchUI.pak: the console menus with touch handling and the on-screen buttons of the HUD and the panels (tools/dos2_touchui_pak.py,
+    set "hints"), made from the Switch Game.pak alone; the buttons' art is the port's own (assets/touchui). The game mounts every *.pak in Data itself."""
+    want = 'full'
     have = L.touchui_mode()
-    if have == want: print(f'  already done ({want})'); return
+    if have == want: print('  already done'); return
     sw = L.romfs / 'Data' / 'Game.pak'
     cmd = [sys.executable, TOOLS / 'dos2_touchui_pak.py', 'hints', '--sw', sw, '--out', L.work / 'touchui']
-    if ipa:
-        src = L.ipad / 'Game.pak'
-        if not src.is_file():
-            import zipfile
-            print(f'  reading the interface movies of the iPad version: {ipa.name}', flush=True)
-            with zipfile.ZipFile(ipa) as z:
-                m = next((n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Data/Game.pak')), None)
-                if not m: raise Fail(f'{ipa.name}: no Payload/<name>.app/Data/Game.pak inside; is it Divinity: Original Sin 2 for iPad / iPhone?')
-                L.ipad.mkdir(parents=True, exist_ok=True)
-                with z.open(m) as f, open(str(src) + '.part', 'wb') as o: shutil.copyfileobj(f, o, 1 << 22)
-                os.replace(str(src) + '.part', src)
-        cmd += ['--src', src]
-        print('  console menus with touch handling + the iPad\'s on-screen buttons (HUD column, panel buttons)', flush=True)
-    else:
-        cmd += ['--no-vis', '--no-panels']
-        print('  console menus with touch handling (no .ipa of the iPad version found: no on-screen HUD column / panel buttons)', flush=True)
+    print('  console menus with touch handling + on-screen buttons (HUD column, panel buttons)', flush=True)
     env = dict(os.environ, PYTHONUTF8='1')
     r = subprocess.run([str(c) for c in cmd], env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
     if r.returncode:
@@ -940,8 +915,6 @@ def check(L, files):
         try:
             base, upd, kf = resolve(pkgs, keys)
             item(True, f'base game: {base.pkg.path.name}; update v{UPDATE_VERSION}: {upd.pkg.path.name}; keys: {kf.name}')
-            ipa = find_ipa(where)
-            print(f"  {'OK ' if ipa else '.. '} iPad / iPhone version (optional, on-screen HUD buttons): {ipa.name if ipa else 'no .ipa'}")
         except Fail as e:
             item(ok_files, str(e), 'fix the game files (see the message above), then run setup again')
     say(f'4. Work folder {L.work}')
@@ -955,7 +928,7 @@ def check(L, files):
     item(L.romfs_ok(), 'romfs: extracted and verified', RUN_SETUP)
     item(L.shaders_ok(), f'dm/shaders: {L.shader_count()} SPIR-V bundles in shaders.xgspack', RUN_SETUP)
     mode = L.touchui_mode()
-    item(mode is not None, f'romfs/Data/TouchUI.pak: {mode or "not made yet"}' + (' (no .ipa: console touch menus only)' if mode == 'console' else ''), RUN_SETUP)
+    item(mode is not None, f'romfs/Data/TouchUI.pak: {"made" if mode else "not made yet"}', RUN_SETUP)
     print(f"  {'OK ' if L.astc_ok() else '.. '} astc/dos2-astc.pack (phones without BC){'' if L.astc_ok() else ': not made yet'}")
     if L.nsp.is_dir(): print(f'  ..  temporary NSPs in {L.nsp} (removed after the RomFS step)')
     if nxt:
@@ -988,10 +961,6 @@ def prepare(a, L):
         raise Fail(f'{e}\n  (searched: ' + ', '.join(str(w) for w in where) + ')')
     print(f'  base game: {base.pkg.path.name} ({base.pkg.kind}), {GAME} v{base.version}')
     print(f'  update:    {upd.pkg.path.name} ({upd.pkg.kind}), v{upd.version} -- the supported version')
-    ipa = Path(a.ipa) if a.ipa else find_ipa(a.files and [Path(f) for f in a.files if Path(f).is_dir()] or where)
-    if a.ipa and not is_ipa(ipa): raise Fail(f'--ipa {a.ipa}: not an .ipa file')
-    if not ipa: ipa = next((Path(f) for f in a.files if is_ipa(Path(f))), None)
-    print(f'  iPad / iPhone version (optional): {ipa.name if ipa else "none (console touch menus only)"}')
     print(f'  checked in {took(t0)}')
 
     t0 = stage(2)
@@ -1019,7 +988,7 @@ def prepare(a, L):
             ('patch check', not verify or L.verify_ok()),
             ('RomFS' + (' (compressed input is expanded first)' if base.compressed or upd.compressed else ''),
              L.romfs_ok() or 'romfs' not in steps), ('shaders', not shaders_needed),
-            ('touch UI' + (' with the iPad buttons' if ipa else ''), 'touchui' not in steps or L.touchui_mode() == ('ipad' if ipa else 'console')),
+            ('touch UI', 'touchui' not in steps or L.touchui_mode() == 'full'),
             ('ASTC textures', not astc_wanted or L.astc_ok())]
     print('  plan: ' + ', '.join(f"{n} {'(done/skipped)' if d else ''}".strip() for n, d in plan))
     if a.dry_run:
@@ -1042,7 +1011,7 @@ def prepare(a, L):
         step_shaders(L, dn or find_dotnet() or install_dotnet(a.yes)); print(f'  done in {took(t0)}')
     else: print(f'  already done ({L.shader_count()} shaders)' if L.shaders_ok() else '  skipped')
     t0 = stage(8)
-    if 'touchui' in steps and L.romfs_ok(): step_touchui(L, ipa); print(f'  done in {took(t0)}')
+    if 'touchui' in steps and L.romfs_ok(): step_touchui(L); print(f'  done in {took(t0)}')
     else: print('  skipped' + ('' if L.romfs_ok() else ' (no RomFS yet)'))
     t0 = stage(9)
     if astc_wanted and L.romfs_ok(): step_astc(L); print(f'  done in {took(t0)}')
@@ -1072,7 +1041,7 @@ def main(argv=None):
         if argv[0] == 'check': return check(L, a.files)
         push(L, a.serial); return 0
     ap = argparse.ArgumentParser(prog='setup', description=f'Prepare {GAME} Mobile game files from your own dumps.')
-    ap.add_argument('files', nargs='*', help=f'base game, update v{UPDATE_VERSION}, prod.keys (and the optional .ipa) in any order '
+    ap.add_argument('files', nargs='*', help=f'base game, update v{UPDATE_VERSION}, prod.keys in any order '
                                              '(or folders to search); none: put-game-files-here/ and the current folder')
     ap.add_argument('--work', default=default_work)
     ap.add_argument('--push', metavar='SERIAL', nargs='?', const='auto')
@@ -1082,7 +1051,7 @@ def main(argv=None):
     ap.add_argument('--skip-shaders', action='store_true')
     ap.add_argument('--skip-verify', action='store_true', help='do not run the patch equivalence check (dm/verify/equiv.py)')
     ap.add_argument('--skip-astc', action='store_true', help='no ASTC texture pack (phones with BC textures, i.e. Adreno, do not use it)')
-    ap.add_argument('--ipa', default=None, help='the iPad / iPhone version\'s .ipa (found in put-game-files-here/ by itself)')
+    ap.add_argument('--ipa', default=None, help=argparse.SUPPRESS)   # accepted and ignored: the touch interface no longer reads the iPad edition
     ap.add_argument('--no-dlc', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--steps', default='exefs,patch,verify,romfs,shaders,touchui,astc', help='comma list of steps to run (default: all)')
     a = ap.parse_args(argv)

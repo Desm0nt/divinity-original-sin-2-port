@@ -1,8 +1,7 @@
 """[DOS2] Visible touch buttons in the console PANEL movies: <panel>_c.swf -> <panel>_d.swf (docs/dos2/TOUCH_VISIBLE.md section 5, owner 15.11: every touch
 function needs a visible element; the button hints at the bottom of the panels run as a marquee, so a hint tap is no answer there - do it the iPad way).
 
-Each panel gets a row of the iPad's own button art (tools/dos2_swf_graft.py: sprites frozen to their normal frame, no iPad class; every original tag
-of the console movie stays byte for byte, only DoABC grows) on its root timeline, right-aligned to the panel's right edge, 64 px high, just above /
+Each panel gets a row of buttons laid out as the iPad's (every original tag of the console movie stays byte for byte, only DoABC grows) on its root timeline, right-aligned to the panel's right edge, 64 px high, just above /
 over the panel's top border. A press dims the button, the release on it runs its action:
     pad N   ExternalInterface "dmPadBtn"(N)  = the host presses that pad button (hle_dos2_touch.c; LS controllerHelper BTN codes: B 1, A 2, X 3, Y 4,
             Back 27, right stick press 30, LB 31, RB 32), so the panel does exactly what the pad does: the engine's input event (Eoc/controller_1.json:
@@ -10,30 +9,32 @@ over the panel's top border. A press dims the button, the release on it runs its
             UICompareItems / UIToggleMultiselection / UIMarkWares / UITradeSwitchWindow c:rightstick, UIAddPoints c:a, UIRemovePoints c:x,
             UITradeBalance c:x, Combine c:a) reaches onEventDown / onEventUp of the movie and the native class as always;
     ei name ExternalInterface name() of the movie's own class - where the pad needs a HOLD (trade: hold A -> confirmOffer; reward: hold A -> acceptClicked).
-Art (iPad): close = uiElements_t mcBtnCloseTouch; tab arrows = characterSheet_t selectorBtnLeft / Right; helmet = equipmentPanel_t
-SwitchHelmetVisibilityButton; list (item menu) = partyInventory_t sortButton; info (tooltip) = uiCraft_t searchBtn; multi (select / compare / wares /
-switch window) = skills_t filterAllBtn; plus / minus = characterSheet_t IncreaseAttriburePlusButton / uiCraft_t minusBtn; ok = partyInventory_t okBtn;
-balance = trade_t balanceBtn3.
+Art (owner 16.11, ART below, docs/dos2/TOUCH_ART.md): our own drawings (assets/touchui: close, helmet, list, multi, plus, minus, balance) and,
+where the iPad's button is the very drawing of a Switch movie, that symbol from the player's dump at setup time (tab arrows = characterSheet.swf
+selectorBtnLeft / Right, info = uiCraft.swf searchBtn, ok = partyInventory.swf okBtn; frozen to their normal frame, no class).
 ABC: 4 methods appended to the document class, onEventInit re-pointed to a wrapper (original kept as dmPanInitOrig). No original body changes.
 
 Static only: positions come from the SWF matrices, nothing was run on a phone.
 
-  python -I tools/dos2_panel_touch.py build <Switch Game.pak | dir> <iPad Game.pak | dir with the _t movies> <out dir> [panel ...]
-  python -I tools/dos2_panel_touch.py check <Switch Game.pak | dir> <iPad Game.pak | dir> [panel ...]
+  python -I tools/dos2_panel_touch.py build <Switch Game.pak | dir> <out dir> [panel ...]
+  python -I tools/dos2_panel_touch.py check <Switch Game.pak | dir> [panel ...]
 """
-import hashlib, os, struct, sys
+import hashlib, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC
 import dos2_swf_graft as gr
+import dos2_touchart as ta
 
 H, GAP, RISE = 64, 8, 46          # button height on the stage, gap, how far the row stands above the panel's top edge (clamped to the stage)
-ART = {  # key: (iPad movie, symbol)
-    'close': ('uiElements_t.swf', 'mcBtnCloseTouch'), 'prev': ('characterSheet_t.swf', 'selectorBtnLeft'), 'next': ('characterSheet_t.swf', 'selectorBtnRight'),
-    'helmet': ('equipmentPanel_t.swf', 'SwitchHelmetVisibilityButton'), 'list': ('partyInventory_t.swf', 'sortButton'), 'info': ('uiCraft_t.swf', 'searchBtn'),
-    'multi': ('skills_t.swf', 'filterAllBtn'), 'plus': ('characterSheet_t.swf', 'IncreaseAttriburePlusButton'), 'minus': ('uiCraft_t.swf', 'minusBtn'),
-    'ok': ('partyInventory_t.swf', 'okBtn'), 'balance': ('trade_t.swf', 'balanceBtn3')}
-IPAD = sorted({m for m, _ in ART.values()})
+# art (owner 16.11, docs/dos2/TOUCH_ART.md): ('png', name) = our own drawing in assets/touchui (tools/dos2_touchart.py);
+# ('sw', movie, symbol) = a symbol of the player's Switch Game.pak, only where the iPad's button IS that drawing (same bitmaps, renders equal)
+ART = {
+    'close': ('png', 'pan_close'), 'prev': ('sw', 'characterSheet.swf', 'selectorBtnLeft'), 'next': ('sw', 'characterSheet.swf', 'selectorBtnRight'),
+    'helmet': ('png', 'pan_helmet'), 'list': ('png', 'pan_list'), 'info': ('sw', 'uiCraft.swf', 'searchBtn'),
+    'multi': ('png', 'pan_multi'), 'plus': ('png', 'pan_plus'), 'minus': ('png', 'pan_minus'),
+    'ok': ('sw', 'partyInventory.swf', 'okBtn'), 'balance': ('png', 'pan_balance')}
+SWART = sorted({v[1] for v in ART.values() if v[0] == 'sw'})
 B, A, X, Y, RS, LB, RB = 1, 2, 3, 4, 30, 31, 32
 TABS = [('Prev', 'prev', ('pad', LB), 'UITabPrev'), ('Next', 'next', ('pad', RB), 'UITabNext')]
 CLOSE = ('Close', 'close', ('pad', B), 'UICancel')
@@ -76,7 +77,7 @@ def _read(path, name):
 
 
 def source(path, panel): return _read(path, src_name(panel))
-def ipad(path): return {n: _read(path, n) for n in IPAD}
+def swart(path): return {n: _read(path, n) for n in SWART}   # the Switch movies the 'sw' art comes from
 
 
 def stage(swf):
@@ -96,22 +97,28 @@ def anchor_box(swf, name):
     raise KeyError('no root instance %s' % name)
 
 
-def graft(swf, ip, panel):
+def graft(swf, sm, panel):
+    """sm = swart(Switch Game.pak)"""
     cfg = CFG[panel]; rep = {'placed': [], 'frozen': 0, 'defs': 0, 'dropped': []}
     sw, sh = stage(swf); ax0, ay0, ax1, ay1 = anchor_box(swf, cfg['anchor'])
     right = min(ax1, sw); top = max(0.0, ay0 - RISE)
-    srcs = {n: Swf(ip[n]) for n in IPAD}
-    # sizes first (right to left), then one Graft per iPad movie
+    srcs = {n: Swf(sm[n]) for n in SWART}
+    def box_of(art):
+        a = ART[art]
+        if a[0] == 'png': h, w = ta.asset(a[1]).shape[:2]; return (0.0, 0.0, w * ta.PX, h * ta.PX)
+        return gr.bounds(srcs[a[1]], gr.Movie(srcs[a[1]]).resolve(a[2]))
+    # sizes first (right to left), then one Graft per source (each Switch movie; our PNGs)
     x = right; todo = {}
     for k in range(len(cfg['btns']) - 1, -1, -1):
-        name, art, act, ev = cfg['btns'][k]; mvn, sym = ART[art]
-        b = gr.bounds(srcs[mvn], gr.Movie(srcs[mvn]).resolve(sym)); s = H / (b[3] - b[1]); w = (b[2] - b[0]) * s
-        x -= w; todo.setdefault(mvn, []).append((k, name, sym, x - b[0] * s, top - b[1] * s, s, (x, top, x + w, top + H))); x -= GAP
-    for mvn in IPAD:
-        if mvn not in todo: continue
-        g = gr.Graft(swf, srcs[mvn])
-        for k, name, sym, px, py, s, box in sorted(todo[mvn]):
-            g.place(g.copy(sym), px, py, inst(name), s); rep['placed'].append((k, inst(name)) + box)
+        name, art, act, ev = cfg['btns'][k]
+        b = box_of(art); s = H / (b[3] - b[1]); w = (b[2] - b[0]) * s
+        x -= w; todo.setdefault(ART[art][1] if ART[art][0] == 'sw' else 'png', []).append((k, name, art, x - b[0] * s, top - b[1] * s, s, (x, top, x + w, top + H))); x -= GAP
+    for src in SWART + ['png']:
+        if src not in todo: continue
+        g = gr.Graft(swf, srcs[src] if src != 'png' else None); art = ta.Art(g)
+        for k, name, key, px, py, s, box in sorted(todo[src]):
+            cid = g.copy(ART[key][2]) if src != 'png' else art.png(ART[key][1])[0]
+            g.place(cid, px, py, inst(name), s); rep['placed'].append((k, inst(name)) + box)
         rep['frozen'] += len(g.frozen); rep['dropped'] += g.dropped; g.finish(); rep['defs'] += len(g.new_defs)
     rep['placed'].sort(); rep['stage'] = (sw, sh); rep['anchor'] = (ax0, ay0, ax1, ay1)
     return rep
@@ -291,25 +298,26 @@ def wire_jtabs(abc, ins, P, S, add, HEAD):
     return made, ['dmJtHook']
 
 
-def patch(data, ip, panel):
-    """<panel>_c bytes + {iPad movie name: bytes} -> (<panel>_d bytes, report)"""
-    swf = Swf(data); rep = graft(swf, ip, panel); wire(swf, rep, panel)
+def patch(data, sm, panel):
+    """<panel>_c bytes + swart(Switch Game.pak) -> (<panel>_d bytes, report)"""
+    swf = Swf(data); rep = graft(swf, sm, panel); wire(swf, rep, panel)
     return swf.write(), rep
 
 
-def check(src, ip, panel, built=None):
+def check(src, sm, panel, built=None):
     bad = 0; cfg = CFG[panel]
     def say(ok, text):
         nonlocal bad; bad += not ok; print('%-4s %s' % ('ok' if ok else 'FAIL', text))
-    out, rep = patch(src, ip, panel)
+    out, rep = patch(src, sm, panel)
     if built is not None: say(built == out, 'the given %s is what this tool builds from these sources (%d B)' % (out_name(panel), len(built)))
     a, b = Swf(src), Swf(out); (ta, pa, A_), = a.abcs(); (tb, pb, B_), = b.abcs()
     print('%s -> %s: %d B -> %d B, +%d definition tags, +%d root instances, %d sprites frozen to one frame, +%d methods, sha256 %s' % (
         src_name(panel), out_name(panel), len(src), len(out), rep['defs'], len(rep['placed']), rep['frozen'], len(rep['methods']), hashlib.sha256(out).hexdigest()[:16]))
     say(not gr.check(src, out, quiet=True), 'graft: every original tag byte for byte and in order (DoABC aside), new ids unique, every use after its definition, re-read equal')
     for art in sorted({bt[1] for bt in cfg['btns']}):
-        mvn, sym = ART[art]
-        say(not gr.selftest(ip[mvn], gr.Movie(Swf(ip[mvn])).resolve(sym), src, quiet=True), 'graft round trip %s %s: copied tree mapped back = the iPad tags byte for byte' % (mvn, sym))
+        if ART[art][0] != 'sw': continue
+        _, mvn, sym = ART[art]
+        say(not gr.selftest(sm[mvn], gr.Movie(Swf(sm[mvn])).resolve(sym), src, quiet=True), 'graft round trip Switch %s %s: copied tree mapped back = its tags byte for byte' % (mvn, sym))
     say(B_.strings[:len(A_.strings)] == A_.strings and B_.ns[:len(A_.ns)] == A_.ns and B_.nssets == A_.nssets and B_.mn[:len(A_.mn)] == A_.mn and B_.ints == A_.ints and B_.doubles == A_.doubles,
         'constant pool only appended: +%d strings, +%d multinames' % (len(B_.strings) - len(A_.strings), len(B_.mn) - len(A_.mn)))
     same = all(x.code == y.code and (x.max_stack, x.local_count, x.init_scope, x.max_scope, x.exc, x.method) == (y.max_stack, y.local_count, y.init_scope, y.max_scope, y.exc, y.method)
@@ -341,22 +349,22 @@ def check(src, ip, panel, built=None):
     print('       panel %s on the stage: %.0f,%.0f .. %.0f,%.0f' % ((cfg['anchor'],) + rep['anchor']))
     for (k, nm, x0, y0, x1, y1), (name, art, act, ev) in zip(boxes, cfg['btns']):
         print('       %-18s %-7s stage %7.1f,%6.1f .. %7.1f,%6.1f  %s -> %s' % (nm, art, x0, y0, x1, y1, 'dmPadBtn(%d)' % act[1] if act[0] == 'pad' else 'EI ' + act[1], ev))
-    print('       class links of the iPad not carried over (plain MovieClips here): %s' % ', '.join(sorted({n.split('.')[-1] for _, n in rep['dropped']})))
+    print('       class links of the Switch movies not carried over (plain MovieClips here): %s' % ', '.join(sorted({n.split('.')[-1] for _, n in rep['dropped']})))
     return bad
 
 
 def main():
     a = sys.argv[1:]
-    if len(a) < 3 or a[0] not in ('build', 'check'): sys.exit(__doc__)
-    ip = ipad(a[2]); bad = 0
+    if len(a) < 2 or a[0] not in ('build', 'check'): sys.exit(__doc__)
+    sm = swart(a[1]); bad = 0
     if a[0] == 'build':
-        if len(a) < 4: sys.exit(__doc__)
-        os.makedirs(a[3], exist_ok=True)
-        for p in a[4:] or ORDER:
-            out, rep = patch(source(a[1], p), ip, p); open(os.path.join(a[3], out_name(p)), 'wb').write(out)
+        if len(a) < 3: sys.exit(__doc__)
+        os.makedirs(a[2], exist_ok=True)
+        for p in a[3:] or ORDER:
+            out, rep = patch(source(a[1], p), sm, p); open(os.path.join(a[2], out_name(p)), 'wb').write(out)
             print('%s: %d B, sha256 %s' % (out_name(p), len(out), hashlib.sha256(out).hexdigest()))
         return
-    for p in a[3:] or ORDER: bad += check(source(a[1], p), ip, p)
+    for p in a[2:] or ORDER: bad += check(source(a[1], p), sm, p)
     print('FAILED: %d' % bad if bad else 'panel touch elements: all static checks pass')
     sys.exit(1 if bad else 0)
 

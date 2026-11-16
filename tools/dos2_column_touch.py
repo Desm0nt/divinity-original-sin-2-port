@@ -4,37 +4,37 @@ grafted into bottomBar_d could not reach the edge - Iggy draws a movie only insi
 onEventInit's anchor; its UI type 0x8d is never created on the console) with:
   - the SWF frame of minimap_c (357 px wide; height FRAME_H) and the same anchor as the minimap (setAnchor topRight / screen / topRight), so the
     game places it like the minimap: stage x 308 = the ring's right side (window 2336 on the 2400x1080 phone, minimap scale 1.3);
-  - the column art of tools/dos2_hud_touch.py (rightSideButtons_t / hotBar_t of the owner's iPad pak), scaled by SCALE, right side on x RIGHT,
-    from y TOP (just under the ring) down;
+  - the column, our own art (assets/touchui via tools/dos2_touchart.py, owner 16.11; laid out as the iPad's rightSideButtons_t: a round
+    character button, square plates with the panel icons, the map), scaled by SCALE, right side on x RIGHT, from y TOP (just under the ring) down;
   - the column's tap code: press dims, the stage's release on the same button -> ExternalInterface dmPanel(id) (0..5, hle_dos2_touchui_vis.c),
     dmPadBtn(27) = the map ('-'), the fold handles; the state shown / folded / hidden by polling ExternalInterface dmColumnPoll(state) - the
     host answers through the invoke "addWatermarkText"(100 + state) (a name the engine registered for this class; a Number there is ours,
     a String goes to the original).
 The host (hle_dos2_touchui.c) maps type 0x8d -> GUI/dmColumn_d.swf, creates it next to bottomBar_c and shows / hides it with bottomBar.
 
-  python -I tools/dos2_column_touch.py build <Switch Game.pak | watermark.swf> <iPad Game.pak | dir with the _t movies> <out.swf>
-  python -I tools/dos2_column_touch.py check <Switch Game.pak | watermark.swf> <iPad Game.pak | dir>
+  python -I tools/dos2_column_touch.py build <Switch Game.pak | watermark.swf> <out.swf>
+  python -I tools/dos2_column_touch.py check <Switch Game.pak | watermark.swf>
 """
-import hashlib, os, struct, sys
+import hashlib, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC
 import dos2_swf_graft as gr
+import dos2_touchart as ta
 
 MOVIE = 'dmColumn_d.swf'
 SRC = 'Public/Game/GUI/watermark.swf'
-IPAD = ('rightSideButtons_t.swf', 'hotBar_t.swf')
 TYPE = 0x8d                      # watermark.swf's UI type (creator main+0x10b9520: a plain UIObject + 0x20 bytes)
 FRAME_W, FRAME_H = 357, 1080     # pack 3s: the full height (the host puts the column 1.5 buttons under the ring: 7 buttons need ~470 px below it)
 RIGHT, TOP = 308, 345            # minimap_c stage: the ring's right side (measured 15.11) / just under the ring (its bottom ~335)
 SCALE, STEP = 0.97, 78           # owner 15.11 (3s): icons 10-15 % bigger; 74 px iPad buttons at 0.97 every 78 stage px (was 0.85 / 68)
 BTN = 74
-COLUMN = [('dmVis1_mc', 1, 'helmet'), ('dmVis5_mc', 5, 'ico_charsheet'), ('dmVis0_mc', 0, 'ico_inventory'), ('dmVis2_mc', 2, 'ico_skills'), ('dmVis3_mc', 3, 'ico_craft'),
-          ('dmVis4_mc', 4, 'ico_journal'), ('dmVisMap_mc', 14, 'ico_map')]
+COLUMN = [('dmVis1_mc', 1, 'btn_character'), ('dmVis5_mc', 5, 'ico_charsheet'), ('dmVis0_mc', 0, 'ico_inventory'), ('dmVis2_mc', 2, 'ico_skills'), ('dmVis3_mc', 3, 'ico_craft'),
+          ('dmVis4_mc', 4, 'ico_journal'), ('dmVisMap_mc', 14, 'icon_map')]   # (instance, code, art in assets/touchui)
 FOLD_SCALE = 0.6 * SCALE
 FOLD_PAD = 40                    # pack 3t: invisible hit margin around a fold arrow, its own px (x FOLD_SCALE ~ 20 window px)
-FOLDS = [('dmVisFoldR_mc', 'bntSkillSetRightFrames_62', (RIGHT - BTN * SCALE - 22, TOP + BTN * SCALE / 2.0)),   # fold: left of the helmet
-         ('dmVisFoldL_mc', 'btnSkillSetLeftFrames_66', (RIGHT - 16, TOP + BTN * SCALE / 2.0))]                  # unfold: at the ring's right side, while folded
+FOLDS = [('dmVisFoldR_mc', True, (RIGHT - BTN * SCALE - 22, TOP + BTN * SCALE / 2.0)),   # fold: left of the helmet
+         ('dmVisFoldL_mc', False, (RIGHT - 16, TOP + BTN * SCALE / 2.0))]                  # unfold: at the ring's right side, while folded
 COLUMN_ALL = [n for n, _, _ in COLUMN]
 PLACE_ALL = COLUMN_ALL + [n for n, _, _ in FOLDS]   # pack 3s: what dmColX / dmColY move (the host places the column by the real minimap)
 COL_POLL = 60
@@ -52,7 +52,6 @@ def _read(path, name, gui=True):
 
 
 def source(path): return _read(path, 'watermark.swf')
-def ipad(path): return {n: _read(path, n) for n in IPAD}
 
 
 def rect_bytes(w, h):
@@ -63,23 +62,22 @@ def rect_bytes(w, h):
     return bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8))
 
 
-def graft(swf, ip):
+def graft(swf):
+    """our own art (assets/touchui via tools/dos2_touchart.py, owner 16.11), laid out as the iPad column"""
     rep = {'placed': [], 'frozen': 0, 'defs': 0}
-    rsb, hot = (Swf(ip[n]) for n in IPAD)
-    g = gr.Graft(swf, rsb)
-    bg = g.copy('cmnTabButtonBg_9'); helmet = g.copy('btnSidePanelBg_6')
+    g = gr.Graft(swf); art = ta.Art(g)
+    plate, pb = art.png('plate_square_copper')                   # 74 x 74 px
     x = RIGHT - BTN * SCALE
-    for k, (name, code, art) in enumerate(COLUMN):
-        if art == 'helmet': btn = g.sprite([(helmet, 1, (0, 0, BTN / 105.0), None)])
+    for k, (name, code, icon) in enumerate(COLUMN):
+        if icon == 'btn_character':                              # the round character button, 105 px drawn, shown BTN wide (as the iPad's)
+            c, cb = art.png(icon); btn = g.sprite([(c, 1, (0, 0, BTN / (cb[2] - cb[0])), None)])
         else:
-            ico = g.copy(art); b = gr.bounds(rsb, g.sm.resolve(art))
-            btn = g.sprite([(bg, 1, (0, 0), None), (ico, 2, (37 - (b[0] + b[2]) / 2.0, 37 - (b[1] + b[3]) / 2.0), None)])
+            ic, ib = art.png(icon)
+            btn = g.sprite([(plate, 1, (0, 0), None), (ic, 2, (BTN / 2.0 - (ib[2] - ib[0]) / 2.0, BTN / 2.0 - (ib[3] - ib[1]) / 2.0), None)])
         y = TOP + STEP * k
         g.place(btn, x, y, name, SCALE); rep['placed'].append((name, code, x, y, x + BTN * SCALE, y + BTN * SCALE))
-    rep['frozen'] += len(g.frozen); g.finish(); rep['defs'] += len(g.new_defs)
-    g = gr.Graft(swf, hot)
-    for name, sym, (cx, cy) in FOLDS:
-        c = g.copy(sym); b = gr.bounds(hot, g.sm.resolve(sym)); k = FOLD_SCALE
+    for name, right, (cx, cy) in FOLDS:
+        c, b = art.arrow(right); k = FOLD_SCALE
         px, py = cx - (b[0] + b[2]) / 2.0 * k, cy - (b[1] + b[3]) / 2.0 * k; g.place(c, px, py, name, k)
         rep['placed'].append((name, 16, px + b[0] * k, py + b[1] * k, px + b[2] * k, py + b[3] * k))
     rep['frozen'] += len(g.frozen); g.finish(); rep['defs'] += len(g.new_defs)
@@ -227,16 +225,16 @@ def wire(swf, rep):
     swf.tags[tag][1] = pre + abc.write()
 
 
-def patch(data, ip):
-    swf = Swf(data); rep = graft(swf, ip); wire(swf, rep)
+def patch(data):
+    swf = Swf(data); rep = graft(swf); wire(swf, rep)
     return swf.write(), rep
 
 
-def check(src, ip):
+def check(src):
     bad = 0
     def say(ok, text):
         nonlocal bad; bad += not ok; print('%-4s %s' % ('ok' if ok else 'FAIL', text))
-    out, rep = patch(src, ip)
+    out, rep = patch(src)
     b = Swf(out); (tb, pb, B), = b.abcs()
     print('%s -> %s: %d B -> %d B, +%d definition tags, +%d root instances, +%d methods, sha256 %s' % (
         SRC.split('/')[-1], MOVIE, len(src), len(out), rep['defs'], len(rep['placed']), len(rep['methods']), hashlib.sha256(out).hexdigest()[:16]))
@@ -264,9 +262,9 @@ def check(src, ip):
 
 def main():
     a = sys.argv[1:]
-    if len(a) == 4 and a[0] == 'build':
-        out, rep = patch(source(a[1]), ipad(a[2])); open(a[3], 'wb').write(out); print('%s: %d B' % (a[3], len(out))); return
-    if len(a) == 3 and a[0] == 'check': sys.exit(1 if check(source(a[1]), ipad(a[2])) else 0)
+    if len(a) == 3 and a[0] == 'build':
+        out, rep = patch(source(a[1])); open(a[2], 'wb').write(out); print('%s: %d B' % (a[2], len(out))); return
+    if len(a) == 2 and a[0] == 'check': sys.exit(1 if check(source(a[1])) else 0)
     sys.exit(__doc__)
 
 

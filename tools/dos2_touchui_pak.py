@@ -9,10 +9,12 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
   python tools/dos2_touchui_pak.py <set> [--src <iPad Game.pak | directory of extracted *.swf>] [--out <dir>] [--store] [--name TouchUI.pak]
   sets: console (THE DEFAULT since 15.11, owner: console look with touch; only mainMenu_d.swf, no iPad file, no --src needed),
         hints (console + msgBox_d saveLoad_d optionsSettings_d mods_d characterCreation_d tutorialBox_d: tools/dos2_hint_touch.py, for DM_DOS2_TOUCHUI_SET=hints);
-               + bottomBar_d = the console HUD with the iPad's panel column / map / options / hot bar arrows / cancel / end turn drawn in (tools/dos2_hud_touch.py; --no-vis = without);
+               + bottomBar_d = the console HUD with options / tactical camera / hot bar arrows / cancel / end turn / sneak / weapon buttons and dmColumn_d =
+               the panel column + map (tools/dos2_hud_touch.py, tools/dos2_column_touch.py; --no-vis = without), laid out as the iPad's, in our
+               own art (assets/touchui, tools/dos2_touchart.py; owner 16.11: no iPad file needed, docs/dos2/TOUCH_ART.md);
                + minimap_d = tap on the minimap opens the map (tools/dos2_minimap_touch.py; --no-minimap = without);
-               + partyInventory_d equipmentPanel_d statsPanel_d inventorySkillPanel_d journal_d craftPanel_d trade_d reward_d examine_d = the panels with the
-               iPad's button row (tools/dos2_panel_touch.py; --no-panels = without);
+               + partyInventory_d equipmentPanel_d statsPanel_d inventorySkillPanel_d journal_d craftPanel_d trade_d reward_d examine_d journal_csp_d = the
+               panels with a button row as the iPad's (tools/dos2_panel_touch.py; --no-panels = without);
                characterCreation_d = hints + taps on its own elements, tools/dos2_cc_touch.py; gameMenu_d (pause menu), msgBox_d (option list +
                hints) and dialog_d (tap = that answer): tools/dos2_list_touch.py;
                + tools/dos2_taps_touch.py over msgBox_d / tutorialBox_d / bottomBar_d and playerInfo_d (prompts, hold A, hot bar slots, portraits; --no-taps = without)
@@ -23,8 +25,6 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
                + tools/dos2_hudrect_touch.py over bottomBar_d / minimap_d / playerInfo_d (ExternalInterface dmHudRects: the HUD elements' real
                stage bounds for the floating sticks; --no-hudrect = without), and overhead_d = overhead.swf + that pass (the "(X) Actions..." hint
                over the selected target as rect "hint3": a world tap there = X; --no-ohint = without);
-               minimap_d gets the iPad's tactical camera button (d-pad up) when --src has minimap_t (--no-tac = without),
-               bottomBar_d's sneak / destruction buttons get the hot bar's own icons from Icons.pak / Shared.pak next to --sw (--no-atlas = the borrowed iPad icons),
         menu1 (mainMenu_t only), menu (11 menus + uiElements_t; no mainMenu_t: the owner keeps mainMenu_c, 15.11), hud, all (every registered `_t` movie, no journal_t), list (print the sets)
   every set but menu1 gets mainMenu_d.swf = the Switch mainMenu_c.swf with touch handlers (variant D, tools/dos2_mainmenu_touch.py) and tappable
   button hints (tools/dos2_hint_touch.py), made from
@@ -60,6 +60,23 @@ def source(src):
     return {e[0][len(GUI):]: (lambda e=e: pak.read(e)) for e in pak.entries if e[0].startswith(GUI) and e[0].endswith('.swf') and '/' not in e[0][len(GUI):]}
 
 
+def host_movies():
+    """GUI/<name>.swf of the host's default and hints tables (dm/host/hle_dos2_touchui.c k_def + k_hint), or None without the source"""
+    import re
+    c = Path(__file__).resolve().parent.parent / 'dm' / 'host' / 'hle_dos2_touchui.c'
+    if not c.exists(): return None
+    src = c.read_text(encoding='utf-8'); out = set()
+    for tname in ('k_def', 'k_hint'):
+        m = re.search(r'static const tu_def %s\[\] = \{(.*?)\n\};' % tname, src, re.S)
+        out |= {GUI + mv + '.swf' for mv in re.findall(r'\{0x[0-9a-f]+, (?:0x[0-9a-f]+|0), "(\w+)", "[^"]+"\}', m.group(1))}
+    return out
+
+
+def host_missing(names):
+    want = host_movies()
+    return None if want is None else sorted(n.split('/')[-1] for n in want - set(names))
+
+
 def write_pak(path, files, store=False, priority=0):
     """files: [(package path, bytes)] in the order given. Returns the entries written."""
     entries = []
@@ -90,8 +107,8 @@ def main():
         return
     if which not in SETS: sys.exit(__doc__)
     root = Path(__file__).resolve().parent.parent.parent / 'work'
-    src = opt['--src'] or next(iter(glob.glob(str(root / 'ipa' / 'Payload' / '*' / 'Data' / 'Game.pak'))), None)
-    need_ipad = SETS[which] is None or bool(SETS[which])
+    need_ipad = SETS[which] is None or bool(SETS[which])   # only the old experiment sets (menu1 / menu / hud / all) pack iPad movies; console / hints never read one
+    src = (opt['--src'] or next(iter(glob.glob(str(root / 'ipa' / 'Payload' / '*' / 'Data' / 'Game.pak'))), None)) if need_ipad else None
     if need_ipad and (not src or not os.path.exists(src)): sys.exit('no source: give --src <iPad Game.pak or directory>')
     have = source(src) if need_ipad else {}
     names = SETS[which] if SETS[which] is not None else sorted(n for n in have if n.endswith('_t.swf') and n != 'journal_t.swf')
@@ -117,33 +134,26 @@ def main():
             for lt, data in dos2_list_touch.sources(sw, None).items():
                 if dos2_list_touch.check(lt, data): sys.exit("%s: static checks failed, package not written" % dos2_list_touch.CFG[lt]["out"])
                 made[dos2_list_touch.CFG[lt]["out"]] = dos2_list_touch.patch(data, lt)[0]
-            # the HUD with the iPad's on-screen buttons drawn in (docs/dos2/TOUCH_VISIBLE.md): needs the iPad movies for their art (--src); --no-vis leaves the stock bottomBar_c
+            # the HUD with on-screen buttons laid out as the iPad's, in our own art (tools/dos2_hud_touch.py + assets/touchui, owner 16.11); --no-vis = the stock bottomBar_c
             if '--no-vis' not in a:
-                if not src or not os.path.exists(src): sys.exit('%s needs the iPad movies (%s): give --src <iPad Game.pak or directory> (or --no-vis)' % (dos2_hud_touch.MOVIE, ' '.join(dos2_hud_touch.IPAD)))
-                hsrc, hip = dos2_hud_touch.source(sw), dos2_hud_touch.ipad(src)
-                # pack 4b: the sneak / destruction buttons show the hot bar's own icons, cut from the game's atlas (Icons.pak + Shared.pak next to --sw)
-                hic = dos2_hud_touch.atlas_icons(sw) if '--no-atlas' not in a else None
-                if hic is None: print('%s: no skill icon atlas next to %s (Icons.pak / Shared.pak) or --no-atlas: the d-pad buttons keep the borrowed iPad icons' % (dos2_hud_touch.MOVIE, sw))
-                if dos2_hud_touch.check(hsrc, hip, icons=hic): sys.exit('%s: static checks failed, package not written' % dos2_hud_touch.MOVIE)
-                made[dos2_hud_touch.MOVIE] = dos2_hud_touch.patch(hsrc, hip, hic)[0]
-                # the iPad column in its own movie, anchored by the game to the right screen edge under the minimap (owner 15.11; tools/dos2_column_touch.py,
+                hsrc = dos2_hud_touch.source(sw)
+                if dos2_hud_touch.check(hsrc): sys.exit('%s: static checks failed, package not written' % dos2_hud_touch.MOVIE)
+                made[dos2_hud_touch.MOVIE] = dos2_hud_touch.patch(hsrc)[0]
+                # the button column in its own movie, anchored by the game to the right screen edge under the minimap (owner 15.11; tools/dos2_column_touch.py,
                 # host: hle_dos2_touchui.c type 0x8d watermark.swf -> GUI/dmColumn_d.swf, created next to bottomBar_c)
-                if not dos2_hud_touch.COLUMN_HERE:
-                    csrc, cip = dos2_column_touch.source(sw), dos2_column_touch.ipad(src)
-                    if dos2_column_touch.check(csrc, cip): sys.exit('%s: static checks failed, package not written' % dos2_column_touch.MOVIE)
-                    made[dos2_column_touch.MOVIE] = dos2_column_touch.patch(csrc, cip)[0]
+                csrc = dos2_column_touch.source(sw)
+                if dos2_column_touch.check(csrc): sys.exit('%s: static checks failed, package not written' % dos2_column_touch.MOVIE)
+                made[dos2_column_touch.MOVIE] = dos2_column_touch.patch(csrc)[0]
             # tap on the minimap = the pad's '-' (open the map), as the iPad's minimap_t (tools/dos2_minimap_touch.py); --no-minimap leaves the stock minimap_c
-            # + the iPad's tactical camera button left of the ring (d-pad up; branch dos2-dpadbtns), when the iPad movies are there (--src)
+            # (the tactical camera button lives in bottomBar_d since pack 4c; minimap_d gets no art, no iPad file is read)
             if '--no-minimap' not in a:
                 msrc = dos2_minimap_touch.source(sw)
-                mip = dos2_minimap_touch.ipad(src) if src and os.path.exists(src) and '--mm-tac' in a else None   # pack 4c: the tactical camera moved to bottomBar_d (minimap_d gets no mouse buttons); --mm-tac = the 4b one
-                if mip is None: print('%s: no iPad minimap_t (--src) or --no-tac: no tactical camera button' % dos2_minimap_touch.MOVIE)
+                mip = None
                 if dos2_minimap_touch.check(msrc, mip): sys.exit('%s: static checks failed, package not written' % dos2_minimap_touch.MOVIE)
                 made[dos2_minimap_touch.MOVIE] = dos2_minimap_touch.patch(msrc, mip)[0]
-            # the panels with the iPad's button row (close, tab arrows, item menu, info, helmet ...: tools/dos2_panel_touch.py); --no-panels leaves the stock `_c` panels
+            # the panels with a button row as the iPad's (close, tab arrows, item menu, info, helmet ...: tools/dos2_panel_touch.py); --no-panels leaves the stock `_c` panels
             if '--no-panels' not in a:
-                if not src or not os.path.exists(src): sys.exit('the panel movies need the iPad movies (%s): give --src <iPad Game.pak or directory> (or --no-panels)' % ' '.join(dos2_panel_touch.IPAD))
-                pip = dos2_panel_touch.ipad(src)
+                pip = dos2_panel_touch.swart(sw)
                 for pn in dos2_panel_touch.ORDER:
                     psrc = dos2_panel_touch.source(sw, pn)
                     if dos2_panel_touch.check(psrc, pip, pn): sys.exit('%s: static checks failed, package not written' % dos2_panel_touch.out_name(pn))
@@ -187,6 +197,11 @@ def main():
     files = [(GUI + n, made[n] if n in made else have[n]()) for n in sorted(list(names) + list(made), key=str.lower)]   # Larian's lists are sorted by name, case ignored (Game.pak, Engine.pak)
     for n, d in files:
         if d[:3] not in (b'CWS', b'FWS', b'ZWS'): sys.exit('%s is not a SWF (%r)' % (n, d[:3]))
+    if which == 'hints' and not [o for o in a if o.startswith('--no-')]:   # self-check: every movie the host maps a UI type to is in the package
+        miss = host_missing({n for n, _ in files})
+        if miss is None: print('self-check skipped: dm/host/hle_dos2_touchui.c not found next to tools/')
+        elif miss: sys.exit('self-check: the host expects %s, not made; package not written' % ' '.join(miss))
+        else: print('self-check: all %d movies of the host table k_hint (and k_def) are in the package' % len(host_movies()))
     out = Path(opt['--out'] or root / 'touchui' / which); out.mkdir(parents=True, exist_ok=True)
     path = out / opt['--name']
     write_pak(path, files, store)

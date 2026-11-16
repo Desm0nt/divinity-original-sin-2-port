@@ -25,12 +25,8 @@ The game and the update can be **NSP, NSZ, XCI or XCZ**, in any combination. Spl
 (a folder with parts `00`, `01`, … or `name.xc0`, `name.xc1`, …). File names do not matter: setup recognises the files
 by their content.
 
-**Optional — the iPad / iPhone version.** If you also own *Divinity: Original Sin 2* for iPad / iPhone, its `.ipa` file
-lets setup draw the iPad's own on-screen buttons into the console HUD: the button column on the right edge (character
-panels, journal, map, options) and the panels' button rows with touch on their tabs and items. Only the interface movies
-are read from it. Without it everything is played with the console interface, touch on the menus and the on-screen pad
-(the panels are then used with the pad's buttons, as on the Switch). How to get the `.ipa` of an app you bought is up to
-you (e.g. a backup made with a tool such as ipatool from your own Apple account); it is never shared by this project.
+The touch interface (menus, the HUD's on-screen buttons, the button column on the right edge, the panels' button rows) is
+made from these Switch files alone; its button art is this project's own. No other edition of the game is needed.
 
 **A PC** with Windows 10/11 (64-bit), Linux or macOS:
 
@@ -77,8 +73,7 @@ enough free space, into a short path such as `D:\DOS2-setup`. You get a folder w
 └── put-game-files-here/
     ├── Divinity Original Sin 2 ... [010027400CDC6000][v0].nsp         (or .nsz / .xci / .xcz — the base game)
     ├── Divinity Original Sin 2 ... [010027400CDC6800][v786432].nsp    (the update)
-    ├── prod.keys
-    └── divinity-original-sin-2_<version>.ipa                          (optional: the iPad / iPhone version)
+    └── prod.keys
 ```
 
 You may also put the folder from your dump tool inside it as it is (setup looks two folders deep).
@@ -119,8 +114,7 @@ Instead of using `put-game-files-here` you can also drag the files onto `setup.b
 2. Open a terminal in the setup folder and run `bash setup.sh`. Answer the questions with **Y** and wait (same stages
    as on Windows). Python packages go into `tools/.runtime/venv`, .NET into `tools/.runtime/dotnet`.
 
-You can also give the files directly, in any order: `bash setup.sh ~/dumps/dos2-base.nsp ~/dumps/dos2-update.nsp ~/prod.keys`
-(add `--ipa ~/dos2.ipa` for the iPad version).
+You can also give the files directly, in any order: `bash setup.sh ~/dumps/dos2-base.nsp ~/dumps/dos2-update.nsp ~/prod.keys`.
 
 ### Not sure what is missing?
 
@@ -172,8 +166,8 @@ In the world a tap is a click (walk, talk, pick up, attack); a **long press** op
 your finger; drag items to move them. Swipe with one finger on the right part of the screen to turn the camera, pinch
 to zoom. The move stick appears under your left thumb anywhere in the lower left (the gear can hide it: then tap the
 floor to walk). Everything else is on the on-screen pad (d-pad, ABXY, shoulder buttons, − / +); *Edit the layout* in
-the gear dialog moves, resizes and hides its buttons. With the iPad version's movies (Step 3) the HUD also has the
-button column on the right edge.
+the gear dialog moves, resizes and hides its buttons. The HUD also has a button column on the right edge (character panels,
+journal, map) and buttons for options, tactical camera, cancel, end turn, sneak and weapon.
 
 Saves and settings stay in the app's own storage. Installing a newer APK over the old one keeps them; the pause menu can
 export and import saves.
@@ -194,12 +188,8 @@ data* option turned on (and keep the ticket).
 **"not enough free space"** — free some space, or put the work folder on another disk: `setup.bat --work D:\dos2-work`
 (Windows) or `bash setup.sh --work /mnt/big/dos2-work`.
 
-**"…ipa: no Payload/<name>.app/Data/Game.pak inside"** — the `.ipa` is not *Divinity: Original Sin 2* for iPad /
-iPhone (or it is damaged). Remove it from `put-game-files-here`: setup then makes the console touch interface without
-the iPad buttons.
-
-**I added the `.ipa` later** — run setup again: it remakes only the touch interface package (stage 8); copy
-`romfs/Data/TouchUI.pak` to the phone again.
+**I set up an older release with an `.ipa`** — it is not needed any more (setup ignores it). Run setup again after
+updating: it remakes only the touch interface package (stage 8); copy `romfs/Data/TouchUI.pak` to the phone again.
 
 **Where is the language setting?** — gear button → *Game settings…* → *Game language*; restart the game afterwards.
 The languages are built in.

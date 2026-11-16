@@ -88,16 +88,13 @@ From the Switch files alone:
 - **On-screen pad** (Joy-Con layout: d-pad, ABXY, L / R / ZL / ZR, − / +) for everything the game does with buttons, with
   the layout editor of the DOOM port (move, resize, hide); game controllers (Bluetooth / USB) and rumble work as well.
 
-With the **iPad / iPhone version's `.ipa`** given to setup as well (you need to own it; only its interface movies are
-read, see [docs/INSTALL.md](docs/INSTALL.md)), the console HUD also gets the iPad's own on-screen buttons:
+The console HUD also gets on-screen buttons (made from the Switch files alone; the button art is this project's own):
 
 - the **button column** on the right edge (character panels, journal, map, options), which can be folded or hidden and
   folds itself while a gamepad is connected;
 - the hot bar's page arrows, end turn, sneak and tactical camera buttons, taps on hot bar slots;
-- the **panels** (inventory, equipment, character, skills, journal, crafting, trade, rewards) with the iPad's button
+- the **panels** (inventory, equipment, character, skills, journal, crafting, trade, rewards) with a button
   row and taps on their tabs, items and skills.
-
-Without it these are reached with the pad's buttons (as on the Switch).
 
 **Picture**
 
@@ -125,14 +122,12 @@ Tested on **Snapdragon 8 Gen 3 / Adreno 750** (Xiaomi 14 Ultra) with Mesa Turnip
 
 - Boot, the main menu, character creation and the start of the campaign (the ship) run at the 60 fps default; with the
   higher limits the frame rate goes above 60 where the GPU allows.
-- Touch on the console interface (with the iPad movies), widescreen, the pause menu and the settings as described above.
+- Touch on the console interface, widescreen, the pause menu and the settings as described above.
 
 ### Known limitations
 
 - Only update **v786432** is supported; the patches and addresses are tied to its build id (`main` 4979b200…,
   `sdk` 230994ac…).
-- Without the iPad version's `.ipa` the HUD has no on-screen button column and the panels (inventory, character,
-  skills…) no touch handling: they are opened and used with the on-screen pad's buttons, as on the Switch.
 - The first time a scene is shown the Vulkan pipelines are built, which can stutter for a moment; later visits are
   smooth (the pipeline cache is kept).
 - No online or local multiplayer; Steam cross-save is not available.
@@ -183,8 +178,7 @@ are git-ignored; `work/` holds every build output and every game-derived file.
 Full guide: **[docs/INSTALL.md](docs/INSTALL.md)** (English) / **[docs/INSTALL.ru.md](docs/INSTALL.ru.md)** (Russian).
 
 1. Dump your own copy (base game `010027400CDC6000` + update `010027400CDC6800` **v786432**, as NSP / NSZ / XCI / XCZ)
-   and your console's `prod.keys` — e.g. with nxdumptool and Lockpick_RCM on your Switch. Optional: the iPad / iPhone
-   version's `.ipa` (for the on-screen button column).
+   and your console's `prod.keys` — e.g. with nxdumptool and Lockpick_RCM on your Switch.
 2. Put the files into `put-game-files-here/` (any names) and double-click `setup.bat`, or run `bash setup.sh` on
    Linux / macOS (explicit files in any order work too; `setup check` reports what is missing and changes nothing).
    Setup provides Python, its packages and the .NET 10 SDK in `tools/.runtime` when they are missing (it asks first),
@@ -331,11 +325,10 @@ Torchlight II Mobile.
   появляется под пальцем в левой нижней части экрана (можно выключить — тогда ходьба тапом по полу); правый стик скрыт по
   умолчанию. Экранный пад (раскладка Joy-Con) с редактором раскладки; геймпады (Bluetooth / USB) и вибрация тоже
   работают.
-- **С `.ipa` версии для iPad / iPhone** (своей; setup читает из неё только фильмы интерфейса) HUD получает и экранные
-  кнопки iPad: **колонку кнопок** справа (панели персонажа, журнал, карта, параметры; её можно свернуть или скрыть, при
+- HUD получает и экранные кнопки (только из файлов Switch; рисунки кнопок — собственные, проекта): **колонку кнопок** справа (панели персонажа, журнал, карта, параметры; её можно свернуть или скрыть, при
   подключённом геймпаде она сворачивается сама), стрелки страниц панели быстрого доступа, конец хода, скрытность,
   тактическую камеру, тапы по ячейкам, а **панели** (инвентарь, снаряжение, персонаж, навыки, журнал, крафт, торговля,
-  награды) — ряд кнопок iPad и тапы по вкладкам, предметам и навыкам. Без неё всё это — кнопками пада, как на Switch.
+  награды) — ряд кнопок и тапы по вкладкам, предметам и навыкам.
 - **Картинка:** широкий экран по форме телефона (Hor+, например 2400×1080 на 20:9); разрешение рендера 720p / 900p /
   **1080p (родное экрана, по умолчанию)**; динамическое разрешение игры (по умолчанию выкл.) с целью 30 / 45 / 60 fps;
   **лимит кадров 30 / 60 (по умолчанию) / 90 / 120 / без ограничения** (выше 60 — эксперимент: больше нагрев; скорость
@@ -347,13 +340,12 @@ Torchlight II Mobile.
   (`astc/dos2-astc.pack`, каждая не хуже 42 дБ к оригиналу); такие телефоны грузят их сразу, без распаковки BC, а
   недостающее докодируется на телефоне в фоне. Телефонам с Adreno пак не нужен.
 - Проверено на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) с драйвером Turnip из APK — **60 fps**
-  по умолчанию, с лимитом выше 60 — больше, насколько позволяет GPU. Поддерживается только обновление v786432; без
-  `.ipa` нет колонки кнопок и касания в панелях (инвентарь, навыки… — кнопками пада); при первом показе сцены возможны короткие рывки
+  по умолчанию, с лимитом выше 60 — больше, насколько позволяет GPU. Поддерживается только обновление v786432; при первом показе сцены возможны короткие рывки
   (сборка пайплайнов); сетевой игры и Steam cross-save нет (на вопрос о cross-save отвечайте «Нет»).
 - Android 12+: `DOS2-Mobile-v<версия>-arm64.apk` (minSdk 31); Android 10 и 11: `DOS2-Mobile-v<версия>-arm64-android10.apk`
   (minSdk 29; на настоящем Android 10 ещё не проверялся). Процессоры ARMv8.0 без LSE (Cortex-A53/A73, Snapdragon 6xx)
   поддерживаются. Нужно 8 ГБ ОЗУ или больше.
-- Подготовка файлов: положите базу, обновление, `prod.keys` (и по желанию `.ipa` версии для iPad) в
+- Подготовка файлов: положите базу, обновление, `prod.keys` в
   `put-game-files-here/` и дважды щёлкните `setup.bat` (Linux / macOS: `bash setup.sh`); проверка без изменений —
   `setup check`. Готовую папку `work/DivinityOriginalSin2Mobile` (~13 ГБ, из них ~1.5 ГБ ASTC-текстур, которые на Adreno
   не нужны) скопируйте в `Download` телефона (или `setup push`).
