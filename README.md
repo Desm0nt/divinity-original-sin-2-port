@@ -170,7 +170,8 @@ The script reads every tool path from the environment (`ANDROID_HOME`, `JAVA_HOM
 (`DOS2-Mobile-v<version>-arm64.apk`, `-arm64-android10.apk`); app id `org.dos2.port` ("Divinity Original Sin 2
 Mobile"). The app version comes from `dm/android/dos2/VERSION`. The launcher icon is taken from
 `dm/android/dos2/icon.png` when you have one (it is not in this repository); otherwise d2r-mobile's icon is used. The script
-downloads the default Turnip driver with a pinned SHA-256 (`tools/fetch_turnip.py`) the first time. `work/` and `dist/`
+downloads the bundled Vulkan driver packages (Turnip; PanVK and RADV-Xclipse as experimental options) with pinned SHA-256s
+(`tools/fetch_drivers.py`) the first time. `work/` and `dist/`
 are git-ignored; `work/` holds every build output and every game-derived file.
 
 ## Installing
@@ -275,9 +276,10 @@ Divinity Original Sin 2 Mobile stands on the work of others — thank you:
 - **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** RCAS (MIT).
 - **[Granite](https://github.com/Themaister/Granite)** texture decode shaders (MIT, Hans-Kristian Arntzen) — GPU BC
   decoding for GPUs without BC support.
-- **[Mesa](https://mesa3d.org) Turnip** (MIT) — the default Vulkan driver, bundled in the APK as the adrenotools build
-  by **[The412Banner](https://github.com/The412Banner/Banners-Turnip)** (Mesa main). Not stored in this repository:
-  `tools/fetch_turnip.py` downloads it at build time with a pinned SHA-256.
+- **[Mesa](https://mesa3d.org) Turnip** (MIT) — the default Vulkan driver on Adreno, bundled in the APK as the adrenotools build
+  by **[The412Banner](https://github.com/The412Banner/Banners-Turnip)** (Mesa main); **Mesa PanVK** (Mali) and **RADV** (Samsung Xclipse)
+  adrenotools builds by [JimVulkan](https://github.com/JimVulkan) and [zenithblue-oss](https://github.com/zenithblue-oss/panvk-kbase-android)
+  as experimental options (MIT). Not stored in this repository: `tools/fetch_drivers.py` downloads them at build time with pinned SHA-256s.
 - Khronos **Vulkan validation layers** (Apache-2.0) — used for debugging, not redistributed.
 
 Details per file: [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).

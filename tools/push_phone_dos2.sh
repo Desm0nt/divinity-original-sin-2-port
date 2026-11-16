@@ -5,7 +5,7 @@
 # /sdcard/Download/DivinityOriginalSin2Mobile/{romfs,dm,astc,drivers,logs}.
 # Sources (defaults = the folder tools/setup_dos2.py prepares, work/DivinityOriginalSin2Mobile):
 #   PREP=<dir> (default work/DivinityOriginalSin2Mobile) with romfs/, dm/out/, dm/shaders/, astc/; APK=<file> (default
-#   work/DOS2-port-debug.apk); DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_turnip.py).
+#   work/DOS2-port-debug.apk); DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_drivers.py).
 #   Device: ADB_SERIAL / ADB as in tools/run.sh.
 # Big files: plain adb push first, tools/push_big.sh (resumable 256 MiB chunks) when it fails or the size is wrong; files already on
 # the phone with the right size are skipped, so the script can simply be run again after an interruption. Never kills the adb server.

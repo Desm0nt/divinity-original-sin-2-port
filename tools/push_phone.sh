@@ -4,7 +4,7 @@
 # the APK) and the APK. Layout on the phone: /sdcard/Download/Torchlight2Mobile/{romfs,dm,mods,drivers}.
 # Sources (defaults = the folder tools/setup_tl2.py prepares, work/Torchlight2Mobile):
 #   PREP=<dir> (default work/Torchlight2Mobile) with romfs/, dm/out/, dm/shaders/, mods/; APK=<file> (default work/TL2-port-debug.apk);
-#   DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_turnip.py). Device: ADB_SERIAL / ADB as in tools/run.sh.
+#   DRIVER=<dir> (default work/driver-assets/drivers/turnip27, from tools/fetch_drivers.py). Device: ADB_SERIAL / ADB as in tools/run.sh.
 # Big files: plain adb push first, tools/push_big.sh (resumable 256 MiB chunks) when it fails or the size is wrong; files already on
 # the phone with the right size are skipped, so the script can simply be run again after an interruption. Never kills the adb server.
 # (setup push [serial] does the same for the data folder without the APK / driver.)

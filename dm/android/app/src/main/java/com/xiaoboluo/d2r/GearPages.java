@@ -18,8 +18,10 @@ import java.util.ArrayList;
 //   sharpen        FSR RCAS sharpening (DM_GFX_SHARPEN, vulkan_present.cpp)                                                       next launch
 //   upscale        GSR upscale to the screen (DM_GFX_UPSCALE=gsr; only DOOM 2016's vulkan_present.cpp has it so far)              next launch
 //   driver         Vulkan driver list + what runs now + "Manage drivers…" (VkDrivers, DriverManager; DM_VK_DRIVER)                 next launch
+//   safeMode       [safe-mode] safe graphics mode off / auto / on on Mali / PowerVR (pref "safe_mode", DM_SAFE_MODE; SafeMode.java)  next launch
 //   gameLanguage   the game's language (DM_LANG -> hle_oe.c GetDesiredLanguage); the codes / names are the game's                  next launch
 //   rumble         vibration (DM_RUMBLE, haptics_android.c; off by default)                                                       next launch
+//   localPlay      [mp] local co-op controllers (pref "mp_pads", DM_MP_PADS) and local wireless over the LAN (pref "mp_lan", DM_LDN)  next launch
 //   opmode         Switch mode docked / handheld (pref "front_opmode", DM_OPMODE=0; live through FrontMenu.Host.setDocked)         both
 //   pictureShape   16:9 with bars / stretched / the game's widescreen (pref "aspect"; GearDisplay.fitSurface + the port's env)      both
 //   look           look sensitivity (pad "look")                                                                                   immediately
@@ -100,6 +102,31 @@ final class GearPages {
         };
     }
 
+    // ---- [safe-mode] safe graphics mode (DOOM BUGS_AND_FIXES 2.57, SafeMode.java): off = the 0.5.x speed-ups always (DM_SAFE_MODE=0), auto
+    // (default) = steps after graphics crashes (unset), on = always at least step 1 (DM_SAFE_MODE=on: the speed-ups off by hand, for picture
+    // problems no crash reveals). Shown only on Mali / PowerVR (simulated included) and only for a port with GearHost.safeMode; the row says
+    // the step of the running game. A changed choice starts the crash count again.
+    static GearSettings.Section safeMode(GearHost h) {
+        return new GearSettings.Section() {
+            RadioGroup g; int was = SafeMode.AUTO;
+            public void build(GearSettings s, LinearLayout box) {
+                SafeMode sm = h.safeMode(); if (sm == null || !sm.eligible()) return;
+                s.heading(box, s.whenKey("gear_safe_mode", false));
+                was = s.gamePrefs().getInt("safe_mode", SafeMode.AUTO);
+                g = s.radios(box, s.keys("gear_safe_off", "gear_safe_auto", "gear_safe_on"), was, true);
+                String now = sm.nowLine(); if (now != null) s.text(box, now);
+                s.text(box, s.s("gear_safe_note"));
+            }
+            public void save(GearSettings s, SharedPreferences.Editor game, SharedPreferences.Editor pad) {
+                if (g == null) return;
+                int p = GearSettings.picked(g); game.putInt("safe_mode", p);
+                SafeMode sm = h.safeMode(); if (p != was && sm != null) sm.choiceChanged(was, p);
+                was = p;
+            }
+            public void env(GearSettings s) throws ErrnoException { if (h.safeMode() != null) SafeMode.env(s.gamePrefs()); }
+        };
+    }
+
     // ---- the Vulkan driver: the system one, or any adrenotools package under files/drivers/<name>/ (bundled, downloaded, installed in the
     // manager or imported from the data folder's drivers/), labelled with the name from its meta.json; below it, what the running game
     // actually uses. Packages that cannot run here (VkDrivers.problem: another GPU family, a glibc build, a missing library, minApi) are not
@@ -157,6 +184,33 @@ final class GearPages {
         };
     }
     // ---- vibration (haptics_android.c): off by default (DOOM 28.10: it only drains the battery); DM_RUMBLE=0 hides the vibration devices
+    // ---- [mp] multiplayer (port-kb HLE "local play"; D3 / TL2 first): local wireless play over the LAN (hle_ldn.c, nn::ldn served like ldn_mitm:
+    // pref "mp_lan", on by default -> DM_LDN=1; nothing opens until the game's local play does) and, for a game that has couch co-op on a docked
+    // Switch (pads = true), extra controllers as players 2-4 (pref "mp_pads" 0 off / 1 each controller / 2 touch = player 1 -> DM_MP_PADS,
+    // hle_hid.c npads No2..No4 + front_android.c routing). A port whose game has no local wireless play does not list this section.
+    static GearSettings.Section localPlay(boolean pads) {
+        return new GearSettings.Section() {
+            RadioGroup g; CheckBox lan;
+            public void build(GearSettings s, LinearLayout box) {
+                if (pads) {
+                    s.heading(box, s.whenKey("gear_mp_pads", false));
+                    g = s.radios(box, s.keys("gear_mp_pads_off", "gear_mp_pads_each", "gear_mp_pads_touch"), Math.max(0, Math.min(2, s.gamePrefs().getInt("mp_pads", 0))), false);
+                    s.note(box, s.s("gear_mp_pads_note"));
+                }
+                lan = s.check(box, s.whenKey("gear_mp_lan", false), s.gamePrefs().getBoolean("mp_lan", true));
+                s.note(box, s.s("gear_mp_lan_note"));
+            }
+            public void save(GearSettings s, SharedPreferences.Editor game, SharedPreferences.Editor pad) {
+                if (g != null) game.putInt("mp_pads", GearSettings.picked(g));
+                game.putBoolean("mp_lan", lan.isChecked());
+            }
+            public void env(GearSettings s) throws ErrnoException {
+                if (pads) Os.setenv("DM_MP_PADS", String.valueOf(s.gamePrefs().getInt("mp_pads", 0)), true);
+                Os.setenv("DM_LDN", s.gamePrefs().getBoolean("mp_lan", true) ? "1" : "0", true);
+            }
+        };
+    }
+
     static GearSettings.Section rumble() {
         return new GearSettings.Section() {
             CheckBox c;

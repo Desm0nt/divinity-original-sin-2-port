@@ -46,7 +46,20 @@ interface GearHost {
     default String forcedDriver() { return null; }
     // the repository files the driver code reads (null = no download): drivers/manifest.json (auto updates) and drivers/sources.json (the manager)
     default String driverManifestUrl() { return VkDrivers.MANIFEST_URL; }
+    // true: the port's onActivityResult hands the whole Intent to DriverManager.picked(host, Intent), so "Install from file" may pick several zips
+    // (EXTRA_ALLOW_MULTIPLE: the result may carry only ClipData, which picked(host, Uri) would read as "cancelled")
+    default boolean driverMultiPick() { return false; }
     default String driverSourcesUrl() { return VkDrivers.SOURCES_URL; }
     // the request code the driver manager's file picker uses; the port's onActivityResult hands it to DriverManager.picked
     default int driverZipRequest() { return DriverManager.REQ_ZIP; }
+    // ---- [safe-mode] safe graphics mode for Mali / PowerVR (DOOM BUGS_AND_FIXES 2.57; SafeMode.java, DmGuard.java, GearPages.safeMode). A port
+    // opts in: one SafeMode made in onCreate and returned here, the two natives answered, GearPages.safeMode listed in gearSections, DmGuard
+    // declared in its manifest. The defaults (null) keep a port without it exactly as before.
+    default SafeMode safeMode() { return null; }
+    // the native decision "<eligible>	<step>	<how>	<family>	<count>	<last why>	<switches set>" ("" = not decided yet), null = no such native
+    default String safeModeStatus() { return null; }
+    // the next in-process fallback message "<kind>	<detail>" (kind zc / fence / pipe; "" = none), null = no such native
+    default String safeModeEvent() { return null; }
+    // the folder with the logs for a bug report (the safe-mode notice names it), null = not named
+    default File logsDir() { return null; }
 }

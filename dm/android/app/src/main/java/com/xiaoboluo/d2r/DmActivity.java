@@ -453,10 +453,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public java.util.List<GearSettings.Section> gearSections(GearSettings g) { return Tl2Gear.sections(this, g); }
     @Override public String driverStatus() { return nativeDriverStatus(); }
     @Override public float[] frameStats() { try { nativeFrameStats(gearStats); } catch (Throwable t) { gearStats[0] = 0; } return gearStats; }
+    // [DOS2] (D3 issue #30, frontend-common other-ports.md 16.11 (2)) "Install from file" takes several zips: onActivityResult hands the whole Intent
+    @Override public boolean driverMultiPick() { return true; }
+    @Override public File logsDir() { return CrashLog.dir(this); }   // Download/DivinityOriginalSin2Mobile/logs when writable (CrashLog.dir)
     void showDoomSettings() { new GearSettings(this).show(); }   // the pad's ⚙ when there is no pause menu (D3PadView.openSettings)
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == DriverManager.REQ_ZIP) DriverManager.picked(this, result == RESULT_OK && data != null ? data.getData() : null);   // the driver manager's "Install from a file"
+        if (request == DriverManager.REQ_ZIP) DriverManager.picked(this, result == RESULT_OK ? data : null);   // the driver manager's "Install from a file": one zip (getData) or several (ClipData)
     }
     // [D3] the menu language was the gear's own pref (doom_graphics ui_lang); the shared one is the pause menu's (front ui_lang, Ui.PREFS): moved once
     private void moveUiLang() {
@@ -680,8 +683,21 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         });
     }
 
+    private static boolean driverRestart;   // [DOS2] KB DRV-07: the restart after a failed Vulkan start with a custom driver was asked for (once per process)
     private void showBootFailure() {
         releaseTouches();
+        // [DOS2] KB DRV-07 (DOOM 2.56, D3 deab687): Vulkan failed with a custom driver and the native side could not retry with the system driver
+        // in this process (VkDrivers.graphicsFailed: the saved choice is already the system driver, the message waits in files/driver-fallback):
+        // a new process (RestartActivity waits until this one is gone) starts with the system driver and says why. The in-process retry
+        // (init-failed) never gets here: the game simply starts on the system driver and VkDrivers.gameStarted shows the dialog.
+        if (bootFailure == -6 && (driverRestart || drivers.graphicsFailed())) {
+            if (!driverRestart) { driverRestart = true; crumb("restart in a new process: the Vulkan driver fell back to the system driver");
+                try { startActivity(new Intent(this, RestartActivity.class).putExtra(RestartActivity.EXTRA_PID, android.os.Process.myPid())); }
+                catch (RuntimeException e) { android.util.Log.e("dm", "[java] driver restart: " + e); driverRestart = false; showStartError(getString(R.string.dmAndroidGraphicsFailed)); return; }
+                if (DOOM) CrashLog.sessionEnd(this);   // not a crash: no crash report at the next start
+                finishAndRemoveTask(); System.exit(0); }
+            return;
+        }
         showStartError(getString(bootFailure == -6 ? R.string.dmAndroidGraphicsFailed : R.string.dmAndroidHostStopped));
     }
 

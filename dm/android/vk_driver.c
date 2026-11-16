@@ -53,6 +53,10 @@ static char g_status[768];
 const char *dm_vk_driver_status(void) { return g_status; }
 static char g_expect_lib[1024];   // [DOOM] the custom library we claim runs (checked again on the game's own instance), "" = system
 static int g_custom;              // 1 = the active driver is a custom package
+static char g_requested[160];     // [DOOM] DM_VK_DRIVER as load_driver saw it ("" = system)
+static int g_gpus_logged, g_game_verified;   // [DOOM] log_gpus / verify_game_instance once per loaded driver (again after a fallback)
+int dm_vk_driver_custom(void) { return g_custom; }
+const char *dm_vk_driver_requested(void) { return g_requested; }
 
 // [DOOM] Hardware facts for the driver choice (BUGS_AND_FIXES 2.22, 2.25). Turnip (Mesa freedreno) drives the Adreno through the Qualcomm
 // kernel driver KGSL: without /dev/kgsl-3d0 (Mali, PowerVR, Xclipse, Maleoon...) it cannot work at all, and loading it there only risks a
@@ -268,6 +272,7 @@ static void load_driver(void) {
     const int forced = force && *force == '1';
     probe_t pr; memset(&pr, 0, sizeof pr); int verified = 0; const char *vwhy = "no custom driver loaded";
     char family_s[16] = "-";
+    snprintf(g_requested, sizeof g_requested, "%s", req ? req : "");
 #ifdef DM_ADRENOTOOLS
     const char *drv = req, *hooks = getenv("DM_NATIVE_LIB_DIR"), *pkgs = getenv("DM_DRIVERS_DIR"), *direct = getenv("DM_VK_DRIVER_DIRECT");
     char path[1024] = "", pkgdir[768] = "", meta_name[256] = "", meta_lib[256] = "", meta_abi[96] = "";
@@ -319,6 +324,46 @@ static void load_driver(void) {
         if (fam == FAM_ADRENO || fam == FAM_ANY) {
             if (!getenv("TU_DEBUG")) setenv("TU_DEBUG", "sysmem", 0);
             LOG("[vk] TU_DEBUG=%s (Turnip reads it when the driver loads)", getenv("TU_DEBUG") ? getenv("TU_DEBUG") : "(unset)");
+        }
+        // [DOOM] PanVK (the JimVulkan kbase build) and the window's buffers (BUGS_AND_FIXES 2.58, issue #33: Mali-G57 MT6789, the whole
+        // picture turned into grey stripes and dots a minute or two into the game). The buffers of a swapchain come from the phone's
+        // gralloc, and ARM's gralloc may hand out AFBC ones (compressed; it decides per allocation, so the first buffers can be plain and
+        // the ones made after the window changed its size compressed). This driver cannot write AFBC window buffers: it draws into them
+        // as plain RGBA8 rows, and the compositor then decodes those rows as AFBC headers. It has a switch that makes it ask gralloc for
+        // CPU-readable buffers (SW_READ_RARELY | SW_WRITE_RARELY added in vkGetSwapchainGrallocUsage[2]ANDROID), which gralloc never
+        // compresses; the driver turns it on by itself on Samsung only. MESA_GRALLOC_LINEAR: first character not '0' = on; an empty or
+        // unset value falls back to the property debug.mesa_gralloc_linear. Read once, at the first swapchain. DM_VK_PANVK_LINEAR=0
+        // leaves the driver's own default; a MESA_GRALLOC_LINEAR from dm/env is kept.
+        if (fam == FAM_MALI) {
+            const char *pl = getenv("DM_VK_PANVK_LINEAR");
+            if (!(pl && *pl == '0')) setenv("MESA_GRALLOC_LINEAR", "1", 0);
+            LOG("[vk] MESA_GRALLOC_LINEAR=%s (PanVK: 1 = plain window buffers, no AFBC; DM_VK_PANVK_LINEAR=%s)",
+                getenv("MESA_GRALLOC_LINEAR") ? getenv("MESA_GRALLOC_LINEAR") : "(unset)", pl ? pl : "(unset: on)");
+            // D3 issue #23: PanVK zenith 26.3.1 ("P0A-V19-FULLPLANE") reads window-buffer layouts only through a stable-C IMapper
+            // (/vendor/lib64/hw/mapper.<suffix>.so; candidates PANVK_MAPPER_NAMES=a,b, ro.hardware.gralloc, "mediatek"...) and refuses to
+            // guess without one -> vkCreateSwapchainKHR -1000072003. Phones whose vendor has only the HIDL gralloc4 mapper have none.
+            // When PANVK_MAPPER_NAMES is unset or empty, every mapper.<suffix>.so the vendor has goes into it (the directory listing; if
+            // SELinux denies it, a probe of known suffixes), so a mapper with an unusual name is found too. Builds that do not read the
+            // variable ignore it. A PANVK_MAPPER_NAMES from dm/env is kept. Logged so a report says which case it is.
+            { char got[256] = "", names[256] = ""; size_t used = 0, nu = 0; int nn = 0; DIR *hd = opendir("/vendor/lib64/hw");
+              const char *cur = getenv("PANVK_MAPPER_NAMES"); const int want = !(cur && *cur);
+              #define DM_ADD_MAPPER(file) do { const char *f_ = (file); size_t l_ = strlen(f_);                                                \
+                  if (used + l_ + 2 < sizeof got) used += (size_t)snprintf(got + used, sizeof got - used, "%s%s", used ? " " : "", f_);        \
+                  if (l_ > 10 && !strcmp(f_ + l_ - 3, ".so") && !strpbrk(f_ + 7, "/,") && nn < 16 && nu + (l_ - 10) + 2 < sizeof names) {     \
+                      nu += (size_t)snprintf(names + nu, sizeof names - nu, "%s%.*s", nn ? "," : "", (int)(l_ - 10), f_ + 7); nn++; } } while (0)
+              if (hd) { struct dirent *de; while ((de = readdir(hd))) if (!strncmp(de->d_name, "mapper.", 7)) DM_ADD_MAPPER(de->d_name);
+                closedir(hd); }
+              else { static const char *const k_sfx[] = { "mali", "arm", "mediatek", "mtk", "mt6789", "mt6833", "mt6877", "mt6895", "mt6983",
+                         "mt6985", "common", "default", "imapper", "exynos", "samsung", "unisoc", "sprd", "google", "gs101", "gs201", "zuma",
+                         "minigbm", "ranchu", "rockchip", "hisi", "kirin" };
+                  for (size_t i = 0; i < sizeof k_sfx / sizeof *k_sfx; i++) { char p[96], f[64];
+                      snprintf(f, sizeof f, "mapper.%s.so", k_sfx[i]); snprintf(p, sizeof p, "/vendor/lib64/hw/%s", f);
+                      if (!access(p, F_OK)) DM_ADD_MAPPER(f); } }
+              #undef DM_ADD_MAPPER
+              if (want && nn) setenv("PANVK_MAPPER_NAMES", names, 1);
+              LOG("[vk] stable-C IMapper in /vendor/lib64/hw (%s): %s; PANVK_MAPPER_NAMES=%s (%s)", hd ? "listed" : "listing denied, probed known names",
+                  used ? got : "none", getenv("PANVK_MAPPER_NAMES") ? getenv("PANVK_MAPPER_NAMES") : "(unset)",
+                  !want ? "from dm/env, kept" : nn ? "set from what was found" : "nothing to suggest: PanVK builds that need a stable-C mapper cannot open a window here"); }
         }
         const char *slash = strrchr(drv, '/');
         char dir[1024], hookdir[1024];
@@ -463,8 +508,8 @@ static VkResult VKAPI_CALL create_instance(const VkInstanceCreateInfo *ci, const
                 strncmp(dm_vk_names[i], "vkEnumerateInstance", 19))
                 dm_vk_table[i] = NULL;
         pthread_mutex_unlock(&g_lock);
-        static int logged; if (!logged) { logged = 1; log_gpus(*out); }   // [DOOM] breadcrumbs: once per run
-        static int verified_once; if (!verified_once) { verified_once = 1; verify_game_instance(*out); }   // [DOOM] does the claimed driver run?
+        if (!g_gpus_logged) { g_gpus_logged = 1; log_gpus(*out); }   // [DOOM] breadcrumbs: once per run (per driver, after a fallback)
+        if (!g_game_verified) { g_game_verified = 1; verify_game_instance(*out); }   // [DOOM] does the claimed driver run?
     }
     return r;
 }
@@ -484,4 +529,32 @@ __attribute__((visibility("hidden"))) void *dm_vk_resolve(unsigned i) {
     }
     pthread_mutex_unlock(&g_lock);
     return p;
+}
+
+// [DOOM] BUGS_AND_FIXES 2.56 (issue #33): the in-process fallback to the system driver after the game's Vulkan initialization failed with a
+// custom driver (jni_android.c host_thread). The caller has destroyed every Vulkan object it made with that driver (vulkan_present.cpp
+// cleanup_initialization: swapchain, surface, device, instance), so nothing of the custom driver is in use any more. Here every resolved
+// trampoline slot and the loader entry points are forgotten and DM_VK_DRIVER is unset: the next vk* call runs load_driver again, which
+// opens the system loader (libvulkan.so) in the default namespace, as for a launch with the system driver. The custom driver's loader copy
+// (adrenotools' private namespace) is not dlclosed: the Android loader keeps the HAL it opened for the life of the process (it never
+// unloads a driver), and a Mesa driver's code may still be referenced by its own helper threads / atexit handlers, so unloading it could
+// only crash; the mapping stays, idle.
+void dm_vk_driver_reset_to_system(void) {
+    pthread_mutex_lock(&g_lock);
+    LOG("[vk] driver fallback: forgetting %s (requested %s), the next Vulkan call loads the system driver", g_driver_name, g_requested[0] ? g_requested : "system");
+    for (int i = 0; i < DM_VK_COUNT; i++) dm_vk_table[i] = NULL;
+    g_gipa = NULL; g_create_instance = NULL; g_instance = VK_NULL_HANDLE;
+    g_custom = 0; g_expect_lib[0] = 0; g_gpus_logged = g_game_verified = 0;
+    snprintf(g_driver_name, sizeof g_driver_name, "system");
+    unsetenv("DM_VK_DRIVER");
+    pthread_mutex_unlock(&g_lock);
+}
+// [DOOM] 2.56: the status the app reads after such a fallback: "<failed driver>\tsystem\t<reason>\terror=<the first failure>", reason
+// init-failed (the system driver started in this process), init-failed-all (the system driver failed too: the start error is shown) or
+// init-failed-restart (no in-process retry possible: the app restarts with the system driver). VkDrivers.java turns it into the message.
+void dm_vk_driver_note_fallback(const char *failed, const char *reason, const char *error) {
+    pthread_mutex_lock(&g_lock);
+    char e[400]; snprintf(e, sizeof e, "%s", error ? error : ""); for (char *c = e; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
+    snprintf(g_status, sizeof g_status, "%s\tsystem\t%s\terror=%s", failed ? failed : "", reason, e);
+    pthread_mutex_unlock(&g_lock);
 }
