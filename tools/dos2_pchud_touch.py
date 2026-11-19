@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC
 import dos2_swf_graft as gr
 import dos2_touchart as ta
+import dos2_ppanel_skills as pps   # skills_p / uiCraft_p / journal_p (+ map) in the iPad's layout: that module builds and checks them
 
 GUI = 'Public/Game/GUI/'
 # ---- hot bar (PC stage 1948 x 1000, anchored bottom: stage x = screen x - (W - 1948) / 2, stage y = screen y - 80)
@@ -464,6 +465,7 @@ def side(data):
 def _closer(name): return lambda data: closer(data, PANEL_CLOSE[name])
 MAKE = {'hotBar_p.swf': hotbar, 'minimap_p.swf': minimap, 'statusConsole_p.swf': status, 'playerInfo_p.swf': same, 'combatLog_p.swf': combatlog, 'dmSide_p.swf': side}
 MAKE.update({n + '_p.swf': _closer(n) for n in PANEL_CLOSE})
+MAKE.update(pps.MAKE)   # iPad layout instead of the close button only (tools/dos2_ppanel_skills.py)
 
 
 def build(src):
@@ -512,6 +514,7 @@ def check(src):
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
+        elif o in pps.MAKE: pps.check_one(o, data, out, say)   # tools/dos2_ppanel_skills.py
         elif o[:-6] in PANEL_CLOSE:
             import dos2_layout as lay, tempfile
             t = dis('onEventInit'); path = PANEL_CLOSE[o[:-6]]
@@ -564,6 +567,10 @@ def mock(src, path, W=2400):
     try: put(pi, 'playerInfo', 10 * 1.1, 20 * 1.1, 1.1)
     except Exception as e: print('portrait symbol not drawn: %s' % e)
     canvas.save(path); print('%s: %dx%d (computed layout, DM_DOS2_TOUCH_HUD_SCALE 1)' % (path, W, 1080))
+
+
+# trade / container / dialog / reward / waypoints / item splitter in the iPad's layout: tools/dos2_ppanel_trade.py adds its movies to sources() / build() / check()
+import dos2_ppanel_trade; dos2_ppanel_trade.install(sys.modules[__name__])
 
 
 def main():

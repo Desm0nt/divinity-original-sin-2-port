@@ -35,6 +35,36 @@ static inline int hu_side_panel(int code) {
     static const int8_t k[6] = {4, 0, 1, 2, 3, 5};
     return code >= 2 && code <= 7 ? k[code - 2] : -1;
 }
+// One window at a time, as on the iPad (owner 20.11): the panels the column opens are one group; opening one closes the others. The one pair is
+// the EQUIPMENT VIEW (dmSide 8, from the doll button of partyInventory_p / characterSheet_p): the sheet movie shows only its doll panel and the
+// inventory stands right of it (both in their state 1, tools/dos2_ppanel_inv.py). Bits of the group / the PC hot bar id that toggles each:
+enum { HU_P_SHEET = 1, HU_P_INV = 2, HU_P_SKILLS = 4, HU_P_CRAFT = 8, HU_P_JOURNAL = 16, HU_P_ALL = 31, HU_VIEW_EQUIP = 8, HU_PAIR_GRACE_MS = 400 };
+static inline int hu_panel_pc(int bit) { return bit == HU_P_SHEET ? 0 : bit == HU_P_INV ? 1 : bit == HU_P_SKILLS ? 2 : bit == HU_P_CRAFT ? 3 : bit == HU_P_JOURNAL ? 5 : -1; }
+static inline int hu_view_want(int code) {
+    return code == 3 ? HU_P_SHEET : code == 4 ? HU_P_INV : code == 5 ? HU_P_SKILLS : code == 6 ? HU_P_CRAFT : (code == 2 || code == 7) ? HU_P_JOURNAL : code == HU_VIEW_EQUIP ? HU_P_SHEET | HU_P_INV : 0;
+}
+// dmSide(code) with the panels `vis` on the screen and the host's last view (HU_VIEW_EQUIP while the pair is up, else 0): which panels get their
+// toggle to close (*close), which to open (*open), whether the code's own PC button is still to be sent as before (*press: map / journal, one
+// window with two pages - the engine switches or closes it itself), and the state the sheet / the inventory are told (*state: 1 = the pair,
+// 0 = plain, -1 = nothing to tell). Returns the new view.
+static inline int hu_view_plan(int code, int vis, int view, int *close, int *open, int *press, int *state) {
+    const int want = hu_view_want(code);
+    *close = *open = *press = 0; *state = -1;
+    if (!want) return view;
+    vis &= HU_P_ALL;
+    if (want == HU_P_JOURNAL) { *close = vis & ~want; *press = 1; return 0; }
+    const int pair = code == HU_VIEW_EQUIP;
+    if (vis == want && (want & (HU_P_SHEET | HU_P_INV)) == want && (view == HU_VIEW_EQUIP) != pair) { *state = pair; return pair ? HU_VIEW_EQUIP : 0; }   // the same windows, the other look
+    if (vis == want) { *close = want; if (want & (HU_P_SHEET | HU_P_INV)) *state = 0; return 0; }                                                       // the same view again: it closes
+    *close = vis & ~want; *open = want & ~vis;
+    if (want & (HU_P_SHEET | HU_P_INV)) *state = pair;
+    return pair ? HU_VIEW_EQUIP : 0;
+}
+// the pair lives and dies together: one of the two was closed by its own close button -> the other goes too (after the grace: an opening pair
+// is not "one closed"). 1 = close what is left of it and forget the view.
+static inline int hu_pair_broken(int view, int vis, uint64_t ms_since_plan) {
+    return view == HU_VIEW_EQUIP && ms_since_plan >= HU_PAIR_GRACE_MS && (vis & (HU_P_SHEET | HU_P_INV)) != (HU_P_SHEET | HU_P_INV);
+}
 // The aimed point for CONFIRM / cancel: the last place the cursor RESTED before it went to where it is now (a tap on the button moves the cursor
 // onto the button; the click must land where the player aimed). Fed with the cursor on every poll.
 typedef struct { float x, y; uint64_t since; float rx, ry; int have, rest; } hu_aim;

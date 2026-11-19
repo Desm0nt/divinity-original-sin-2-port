@@ -104,6 +104,9 @@
 //   DM_DOS2_TOUCH_HUD_SCALE=<f>      the one size factor, default 1 (0.5..2); 0 = class scales left to the engine
 //   DM_DOS2_TOUCHUI_HUD_SHOW=1       the host also sets the visible flag on every object it makes (if the PC classes do not show themselves)
 //   DM_DOS2_TOUCHUI_HUD_STATES / _BLOCK  see above
+//   DM_DOS2_TOUCH_ONE_PANEL=0        the PC's free windows: dmSide(2..7) only sends the button's own toggle, dmSide(8) does nothing (default 1: one
+//                                    panel window at a time as on the iPad; dmSide(8) = the equipment view: the sheet movie's doll panel + the
+//                                    inventory, both told their look 1 through setHelmetOptionState / setAnchor(1000000 + n), rules hu_view_plan)
 //   DM_DBG=1                         every switch asked / refused (state, blocking type), every object made or destroyed, timing, EI calls
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -209,6 +212,7 @@ static _Atomic int g_aim;                 // a skill is prepared (hotBar_p's dmA
 static hu_aim g_aimp;                     // the aimed point (game thread)
 static _Atomic int g_aim_set; static _Atomic uint64_t g_aim_xy;   // dm_dos2_touchui_hud_aim_at from another thread: two floats
 static struct { int kind, step; float x, y; uint64_t t; uint32_t key; } g_act;   // a host click on its way: kind 1 left, 2 right, 3 a key (raw id in key)
+static int g_one = 1;                     // DM_DOS2_TOUCH_ONE_PANEL: one panel window at a time + the equipment view (0 = the PC's free windows)
 static int g_plate = 1, g_plate_on, g_pick_mode;   // the action plate: enabled, shown now, DM_DOS2_TOUCH_T_PICK
 static hu_pick g_pick;
 
@@ -432,23 +436,65 @@ static void hu_act_step(void) {
 }
 
 // ---- ExternalInterface of the `_p` movies ----
+// the panel group of one player: which of its windows are on the screen (HU_P_* bits), the objects themselves (o[bit index])
+static const uint32_t g_panel_type[5] = {0x77, 0x74, 0x29, 0x66, 0x16};
+static int hu_panels(uint8_t *mgr, uint16_t who, uint8_t *o[5]) {
+    int vis = 0;
+    for (int b = 0; b < 5; b++) {
+        o[b] = NULL;
+        for (int i = 0; i < g_nobj && mgr; i++) if (g_obj[i].type == g_panel_type[b] && g_obj[i].player == who) {
+            uint8_t *x = hu_obj(mgr, g_obj[i].h);
+            if (x && *(volatile uint32_t *)(x + HU_OBJ_TYPE) == g_panel_type[b]) o[b] = x;
+        }
+        if (o[b] && (o[b][HU_OBJ_FLAGS] & HU_F_VISIBLE)) vis |= 1 << b;
+    }
+    return vis;
+}
+static uint8_t *hu_hotbar(uint8_t *mgr, uint16_t who) {
+    uint8_t *hb = NULL;
+    for (int i = 0; i < g_nobj && mgr; i++) if (g_obj[i].type == HU_T_HOTBAR && (!hb || g_obj[i].player == who)) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
+    return hb && g_btn_ok && (*(void ***)(void *)hb)[0] == (void *)(g_main->base + HU_HB_CALLED) ? hb : NULL;
+}
+static void hu_press(uint8_t *hb, int pc) {   // what the PC hot bar's own button sends: the engine's panel toggle
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)pc;
+    ((void (*)(void *, const char *, unsigned, const dm_ei_val *))(void *)(g_main->base + HU_HB_CALLED))(hb, "hotbarBtnPressed", 1, &v);
+}
+// the sheet / the inventory learn their look (tools/dos2_ppanel_inv.py: <name>(HU_PANEL_CMD + n), n = 0 plain, 1 the equipment view) through an
+// invoke name their engine class registers
+enum { HU_PANEL_CMD = 1000000 };
+static int hu_panel_state(uint8_t *o, int bit, int st) {
+    uint8_t *fp = o ? *(uint8_t *volatile *)(o + HU_OBJ_FP) : NULL;
+    if (!fp) return 0;
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)(HU_PANEL_CMD + st);
+    return dm_dos2_touchui_invoke(fp, bit == HU_P_SHEET ? "setHelmetOptionState" : "setAnchor", &v, 1);
+}
+static int g_view; static uint16_t g_view_who; static uint64_t g_view_t;   // the host's last view of the panel group (HU_VIEW_EQUIP while the pair is up)
 static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmSide(code)
     (void)ctx; (void)player; (void)name;
-    const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1, pc = hu_side_panel(code);
-    static const char *const k_nm[8] = {"?", "options", "map", "character", "inventory", "skills", "crafting", "journal"};
-    if (code < 1 || code > 7) { if (g_nside++ < 20) LOG("[hud] dmSide(%d): no such button (1..7)", code); return 1; }
-    if (!dm_dos2_touchui_may_press(ui)) { if (g_nside++ < 20) LOG("[hud] dmSide(%d %s): refused, the HUD is under a modal window", code, k_nm[code]); return 1; }
+    const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1;
+    static const char *const k_nm[9] = {"?", "options", "map", "character", "inventory", "skills", "crafting", "journal", "equipment"};
+    if (code < 1 || code > 8) { if (g_nside++ < 20) LOG("[hud] dmSide(%d): no such button (1..8)", code); return 1; }
+    const uint32_t from = ui ? *(const volatile uint32_t *)((const uint8_t *)ui + HU_OBJ_TYPE) : 0;
+    // a panel's own doll button is pressed while that panel has the input: the modal guard is for the HUD's buttons
+    if (from != 0x74 && from != 0x77 && !dm_dos2_touchui_may_press(ui)) { if (g_nside++ < 20) LOG("[hud] dmSide(%d %s): refused, the HUD is under a modal window", code, k_nm[code]); return 1; }
     if (code == 1) { hu_act_start(3, "dmSide(1 options)"); return 1; }
-    uint8_t *mgr = hu_mgr(), *hb = NULL;
+    uint8_t *mgr = hu_mgr(), *o[5];
     const uint16_t who = ui ? *(const volatile uint16_t *)((const uint8_t *)ui + HU_OBJ_PLAYER) : 0;
-    for (int i = 0; i < g_nobj && mgr; i++) if (g_obj[i].type == HU_T_HOTBAR && (!hb || g_obj[i].player == who)) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
-    if (!hb || !g_btn_ok) { if (g_nside++ < 20) LOG("【红】[hud] dmSide(%d %s): %s: nothing opened", code, k_nm[code], hb ? "the hot bar class's handler differs in this build" : "no PC hot bar object of the host"); return 1; }
-    void *fn = g_main->base + HU_HB_CALLED;
-    if ((*(void ***)(void *)hb)[0] != fn) { if (g_nside++ < 20) LOG("【红】[hud] dmSide(%d %s): the hot bar object's vt[0] is not main+%#x: nothing opened", code, k_nm[code], HU_HB_CALLED); return 1; }
-    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)pc;
-    if (g_dbg || g_nside++ < 12) LOG("[hud] dmSide(%d %s): \"hotbarBtnPressed\"(%d) to the PC hot bar object %p (player %u), as its own button does", code, k_nm[code], pc, (void *)hb,
-                                     (unsigned)*(volatile uint16_t *)(hb + HU_OBJ_PLAYER));
-    ((void (*)(void *, const char *, unsigned, const dm_ei_val *))fn)(hb, "hotbarBtnPressed", 1, &v);
+    uint8_t *hb = hu_hotbar(mgr, who);
+    if (!hb) { if (g_nside++ < 20) LOG("【红】[hud] dmSide(%d %s): no PC hot bar object of the host with the handler main+%#x: nothing opened", code, k_nm[code], HU_HB_CALLED); return 1; }
+    const uint16_t pl = *(volatile uint16_t *)(hb + HU_OBJ_PLAYER);
+    const int vis = g_one ? hu_panels(mgr, pl, o) : 0;
+    int cl = 0, op = 0, press = 0, st = -1, told = 0;
+    if (!g_one) { if (code == HU_VIEW_EQUIP) return 1; press = 1; }
+    else g_view = hu_view_plan(code, vis, g_view_who == pl ? g_view : 0, &cl, &op, &press, &st);
+    g_view_who = pl; g_view_t = hu_us() / 1000;
+    for (int b = 0; b < 5; b++) if (cl & (1 << b)) hu_press(hb, hu_panel_pc(1 << b));
+    for (int b = 0; b < 5; b++) if (op & (1 << b)) hu_press(hb, hu_panel_pc(1 << b));
+    if (press) hu_press(hb, hu_side_panel(code));
+    if (st >= 0) for (int b = 0; b < 2; b++) if (o[b] && ((op | (vis & ~cl)) & (1 << b) || !st)) told |= hu_panel_state(o[b], 1 << b, st) << b;
+    if (g_dbg || g_nside++ < 24) LOG("[hud] dmSide(%d %s) from type %#x, player %u: on the screen %#x -> close %#x, open %#x%s by \"hotbarBtnPressed\" to the PC hot bar %p; "
+                                     "look %d told to %#x (1 sheet, 2 inventory); view %d", code, k_nm[code], from, (unsigned)pl, vis, cl, op, press ? ", the button's own toggle" : "",
+                                     (void *)hb, st, told, g_view);
     return 1;
 }
 static int hu_ei_aim(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmAim(0 | 1)
@@ -549,6 +595,17 @@ void dm_dos2_touchui_hud_poll(void) {
         ((void (*)(void *, uint32_t))(void *)(g_main->base + (want ? HU_SETFLAGS_FN : HU_CLRFLAGS_FN)))(o, HU_F_VISIBLE);
         static unsigned n; if (n++ < 24 || g_dbg) LOG("[hud] right side (dmSide_p) %s with the hot bar (flags now %#x)", want ? "SHOWN" : "hidden", *(volatile uint32_t *)(o + HU_OBJ_FLAGS));
     }
+    // the equipment view is one window: the close button of one half takes the other half with it
+    if (g_one && g_view == HU_VIEW_EQUIP) {
+        uint8_t *o[5]; const int vis = hu_panels(mgr, g_view_who, o);
+        if (hu_pair_broken(g_view, vis, hu_us() / 1000 - g_view_t)) {
+            uint8_t *hb = hu_hotbar(mgr, g_view_who); const int left = vis & (HU_P_SHEET | HU_P_INV);
+            g_view = 0;
+            if (hb && left) hu_press(hb, hu_panel_pc(left));
+            for (int b = 0; b < 2; b++) if (o[b]) hu_panel_state(o[b], 1 << b, 0);
+            static unsigned n; if (n++ < 24 || g_dbg) LOG("[hud] equipment view: one half was closed (on the screen %#x) -> the other closed too, both back to their plain look", vis);
+        }
+    }
     // the aimed point: named by the gestures, else where the cursor rested
     if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v; float x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); hu_aim_set(&g_aimp, x, y); }
     else if (!g_act.kind) { const float *c = *(float *const volatile *)(g_main->base + HU_CURSOR); if (c) hu_aim_feed(&g_aimp, c[0], c[1], hu_us() / 1000); }
@@ -614,6 +671,7 @@ void dm_dos2_touchui_hud_install(void) {
     g_show = (v = getenv("DM_DOS2_TOUCHUI_HUD_SHOW")) && atoi(v) > 0;
     g_plate = !((v = getenv("DM_DOS2_TOUCH_T_PLATE")) && *v == '0');
     g_pick_mode = hu_pick_parse(getenv("DM_DOS2_TOUCH_T_PICK"));
+    { const char *one = getenv("DM_DOS2_TOUCH_ONE_PANEL"); if (one && *one) g_one = atoi(one) != 0; }
     LOG("[hud] action plate %s; object picking DM_DOS2_TOUCH_T_PICK=%s (auto: the tap's pick, then the engine's PC hover pick, then the short long press when the picking is dead)",
         g_plate ? "on" : "OFF (DM_DOS2_TOUCH_T_PLATE=0)", hu_pick_name(g_pick_mode));
     v = getenv("DM_DOS2_TOUCH_HUD_SCALE"); g_tune = hu_tune(v && *v ? (float)atof(v) : 0, v && *v);

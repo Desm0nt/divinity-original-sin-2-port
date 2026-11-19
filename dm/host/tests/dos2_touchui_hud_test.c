@@ -59,6 +59,26 @@ int main(void) {
       hu_pick_tap(&p, HU_PICK_AUTO, 0, 0, &died); assert(p.dead && died);
       hu_pick p2 = {0}; for (int i = 0; i < 500; i++) hu_pick_tap(&p2, HU_PICK_HYBRID, 0, -1, &died);   // hybrid / pc / hover never fall to the long rule
       assert(!p2.dead && !hu_pick_long_on(&p2, HU_PICK_HYBRID)); }
+    // one window at a time + the equipment view (dmSide 8)
+    { int c, o, pr, st;
+      assert(hu_view_plan(4, 0, 0, &c, &o, &pr, &st) == 0 && c == 0 && o == HU_P_INV && !pr && st == 0);                        // nothing open: the inventory opens, plain
+      assert(hu_view_plan(3, HU_P_INV, 0, &c, &o, &pr, &st) == 0 && c == HU_P_INV && o == HU_P_SHEET && st == 0);               // the sheet replaces the inventory
+      assert(hu_view_plan(5, HU_P_SHEET | HU_P_CRAFT, 0, &c, &o, &pr, &st) == 0 && c == (HU_P_SHEET | HU_P_CRAFT) && o == HU_P_SKILLS && st == -1);
+      assert(hu_view_plan(4, HU_P_INV, 0, &c, &o, &pr, &st) == 0 && c == HU_P_INV && o == 0 && st == 0);                        // the same button again closes it
+      assert(hu_view_plan(8, HU_P_INV, 0, &c, &o, &pr, &st) == HU_VIEW_EQUIP && c == 0 && o == HU_P_SHEET && st == 1);          // the doll button of the inventory
+      assert(hu_view_plan(8, HU_P_SKILLS, 0, &c, &o, &pr, &st) == HU_VIEW_EQUIP && c == HU_P_SKILLS && o == (HU_P_SHEET | HU_P_INV) && st == 1);
+      assert(hu_view_plan(8, HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == 0 && c == (HU_P_SHEET | HU_P_INV) && o == 0 && st == 0);   // the pair closes as one
+      assert(hu_view_plan(4, HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == 0 && c == HU_P_SHEET && o == 0 && st == 0);                // back to the plain inventory
+      assert(hu_view_plan(3, HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == 0 && c == HU_P_INV && o == 0 && st == 0);                  // back to the plain sheet
+      assert(hu_view_plan(8, HU_P_SHEET | HU_P_INV, 0, &c, &o, &pr, &st) == HU_VIEW_EQUIP && c == 0 && o == 0 && st == 1);                         // both were up some other way: only the look
+      assert(hu_view_plan(7, HU_P_INV, 0, &c, &o, &pr, &st) == 0 && c == HU_P_INV && o == 0 && pr == 1 && st == -1);            // journal / map: the engine's own toggle
+      assert(hu_view_plan(2, HU_P_JOURNAL, 0, &c, &o, &pr, &st) == 0 && c == 0 && pr == 1);
+      assert(hu_view_plan(1, HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == HU_VIEW_EQUIP && !c && !o && !pr && st == -1);       // not a panel code
+      for (int b = 1; b <= HU_P_JOURNAL; b <<= 1) assert(hu_panel_pc(b) >= 0 && hu_panel_pc(b) <= 5);
+      assert(hu_panel_pc(HU_P_SHEET) == hu_side_panel(3) && hu_panel_pc(HU_P_INV) == hu_side_panel(4) && hu_panel_pc(HU_P_SKILLS) == hu_side_panel(5) &&
+             hu_panel_pc(HU_P_CRAFT) == hu_side_panel(6) && hu_panel_pc(HU_P_JOURNAL) == hu_side_panel(7));
+      assert(!hu_pair_broken(HU_VIEW_EQUIP, HU_P_SHEET | HU_P_INV, 5000) && !hu_pair_broken(HU_VIEW_EQUIP, HU_P_INV, 100) && hu_pair_broken(HU_VIEW_EQUIP, HU_P_INV, 400));
+      assert(hu_pair_broken(HU_VIEW_EQUIP, 0, 1000) && !hu_pair_broken(0, HU_P_INV, 1000)); }
     printf("dos2_touchui_hud_test: ok\n");
     return 0;
 }
