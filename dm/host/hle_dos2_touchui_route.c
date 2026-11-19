@@ -71,7 +71,8 @@
 #include <time.h>
 #include "hle_dos2_touch_gesture.h"   // dt_stage_press_keep, DT_HR_* (5.)
 
-enum { RT_DISPATCH = 0xaea7b0, RT_CALL1 = 0xae8468, RT_CALL2 = 0xae84a8, RT_MODAL = 0xaea820, RT_MODAL2 = 0xaea87c, RT_HANDLED = 0xaea8d0, RT_UPPER = 0xaea830,
+enum { RT_MODE_BYTE = 0x2bb8918,   // the engine's input mode: 1 controller UI, 0 keyboard-and-mouse UI (hle_dos2_touch.c pass 3)
+       RT_DISPATCH = 0xaea7b0, RT_CALL1 = 0xae8468, RT_CALL2 = 0xae84a8, RT_MODAL = 0xaea820, RT_MODAL2 = 0xaea87c, RT_HANDLED = 0xaea8d0, RT_UPPER = 0xaea830,
        RT_NAMES_LD = 0xd26c18, RT_NAMES = 0xd26c40, RT_NAME_ID = 0xd26c7c, RT_FLASH_IDS = 0xd23810,
        RT_UIMGR = 0x2bbb230, RT_INMGR = 0x2bb8960, RT_MGR_LIST = 0xf8, RT_MGR_LISTN = 0x100, RT_MGR_OBJS = 0x10, RT_MGR_NOBJ = 0x1c,
        RT_CAPTURE = 0xaea8e8, RT_UIM_CAPT = 0x10d, RT_UIM_CAPT_OBJ = 0x218,
@@ -190,13 +191,16 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
       } }
     if (!(fl & RT_F_INPUT)) return g_orig(mgr, obj, ev, pass, a4, a5);   // the game does nothing with it either
     const int in_game = dm_dos2_touch_in_game();
-    const int routed = g_game || !in_game;
+    // UI mode touch (mode byte main+0x2bb8918 = 0, hle_dos2_uimode.c): the PC movies are up and every one of them has the PC's own mouse code -
+    // the engine's own routing stands (no allow list, no modal / accept guard: those are for the console movies); the bookkeeping below stays
+    const int pcui = *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0;
+    const int routed = (g_game || !in_game) && !pcui;
     int why = 0;
     if (mouse && routed) {
         if (g_modal && g_modal_seen) why = 2;
         else if (type > 255 || !g_allow[type]) why = 1;
         else if (!(fl & RT_F_VISIBLE) && !g_hidden) why = 3;
-    } else if (!mouse && g_accept && g_accept_id && id == g_accept_id) {
+    } else if (!mouse && !pcui && g_accept && g_accept_id && id == g_accept_id) {
         const uint64_t now = rt_ms();
         if (now - g_left_ms < (uint64_t)g_accept_ms && now - dm_dos2_touch_a_ms() > 300 && type != 0x48 && type != 0x57 && type != 0x17 &&
             (in_game || (type < 256 && g_allow[type]) || dm_dos2_touchui_is_block(type))) why = 4;

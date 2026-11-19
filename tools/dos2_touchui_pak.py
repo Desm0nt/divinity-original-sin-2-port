@@ -27,6 +27,8 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
                + tools/dos2_hudrect_touch.py over bottomBar_d / minimap_d / playerInfo_d (ExternalInterface dmHudRects: the HUD elements' real
                stage bounds for the floating sticks; --no-hudrect = without), and overhead_d = overhead.swf + that pass (the "(X) Actions..." hint
                over the selected target as rect "hint3": a world tap there = X; --no-ohint = without);
+        touch (hints + the HUD of UI mode TOUCH made from the player's PC movies: hotBar_p minimap_p statusConsole_p playerInfo_p combatLog_p dmSide_p,
+               tools/dos2_pchud_touch.py, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"; every `hints` movie is byte for byte the same),
         menu1 (mainMenu_t only), menu (11 menus + uiElements_t; no mainMenu_t: the owner keeps mainMenu_c, 15.11), hud, all (every registered `_t` movie, no journal_t), list (print the sets)
   every set but menu1 gets mainMenu_d.swf = the Switch mainMenu_c.swf with touch handlers (variant D, tools/dos2_mainmenu_touch.py) and tappable
   button hints (tools/dos2_hint_touch.py), made from
@@ -40,13 +42,13 @@ import glob, os, struct, sys, zlib
 from pathlib import Path
 import lz4.block
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lspk, dos2_column_touch, dos2_minimap_touch, dos2_mainmenu_touch, dos2_hint_touch, dos2_cc_touch, dos2_list_touch, dos2_hud_touch, dos2_panel_touch, dos2_taps_touch, dos2_taps3_touch, dos2_taps4_touch, dos2_taps5_touch, dos2_hudrect_touch
+import lspk, dos2_pchud_touch, dos2_column_touch, dos2_minimap_touch, dos2_mainmenu_touch, dos2_hint_touch, dos2_cc_touch, dos2_list_touch, dos2_hud_touch, dos2_panel_touch, dos2_taps_touch, dos2_taps3_touch, dos2_taps4_touch, dos2_taps5_touch, dos2_hudrect_touch
 
 GUI = 'Public/Game/GUI/'
 MENU = ['msgBox', 'gameMenu', 'saveLoad', 'optionsSettings', 'optionsInput', 'loadingScreen', 'userProfile', 'characterCreation',
         'connectionMenu', 'serverlist', 'tutorialBox']
 HUD = ['hotBar', 'minimap', 'playerInfo', 'statusConsole', 'combatLog', 'combatTurn']
-SETS = {'console': [], 'hints': [],   # no iPad movie: made from the Switch package only
+SETS = {'console': [], 'hints': [], 'touch': [],   # no iPad movie: made from the Switch package only
         'menu1': ['mainMenu_t.swf'],
         'menu': [m + '_t.swf' for m in MENU] + ['uiElements_t.swf'],
         'hud': [m + '_t.swf' for m in MENU + HUD] + ['uiElements_t.swf'],
@@ -62,20 +64,20 @@ def source(src):
     return {e[0][len(GUI):]: (lambda e=e: pak.read(e)) for e in pak.entries if e[0].startswith(GUI) and e[0].endswith('.swf') and '/' not in e[0][len(GUI):]}
 
 
-def host_movies():
+def host_movies(tables=('k_def', 'k_hint')):
     """GUI/<name>.swf of the host's default and hints tables (dm/host/hle_dos2_touchui.c k_def + k_hint), or None without the source"""
     import re
     c = Path(__file__).resolve().parent.parent / 'dm' / 'host' / 'hle_dos2_touchui.c'
     if not c.exists(): return None
     src = c.read_text(encoding='utf-8'); out = set()
-    for tname in ('k_def', 'k_hint'):
+    for tname in tables:
         m = re.search(r'static const tu_def %s\[\] = \{(.*?)\n\};' % tname, src, re.S)
         out |= {GUI + mv + '.swf' for mv in re.findall(r'\{0x[0-9a-f]+, (?:0x[0-9a-f]+|0), "(\w+)", "[^"]+"\}', m.group(1))}
     return out
 
 
-def host_missing(names):
-    want = host_movies()
+def host_missing(names, tables=('k_def', 'k_hint')):
+    want = host_movies(tables)
     return None if want is None else sorted(n.split('/')[-1] for n in want - set(names))
 
 
@@ -125,7 +127,7 @@ def main():
         made[dos2_mainmenu_touch.MOVIE] = dos2_mainmenu_touch.patch(srcd)[0]   # --no-hints: exactly the movie of pack 2u (run on the phone)
         if '--no-hints' not in a: made[dos2_mainmenu_touch.MOVIE] = dos2_hint_touch.patch(made[dos2_mainmenu_touch.MOVIE])[0]   # + tappable hints (its own accept guard stays)
         if '--no-hints' not in a and dos2_hint_touch.check(dos2_mainmenu_touch.MOVIE, dos2_mainmenu_touch.patch(srcd)[0]): sys.exit('%s: hint patch checks failed, package not written' % dos2_mainmenu_touch.MOVIE)
-        if which == 'hints':
+        if which in ('hints', 'touch'):
             for name, data in dos2_hint_touch.sources(sw, None).items():
                 if dos2_hint_touch.check(name, data): sys.exit('%s: hint patch checks failed, package not written' % name)
                 made[dos2_hint_touch.out_name(name)] = dos2_hint_touch.patch(data, hints=name not in dos2_hint_touch.OWN_HINTS)[0]
@@ -206,14 +208,23 @@ def main():
             # owner 15.11 (run t3o: "the skill bar was right in 3j - put it back"): off by default now, --bb-fill turns it on
             if '--bb-fill' in a and dos2_hud_touch.MOVIE in made:
                 made[dos2_hud_touch.MOVIE] = dos2_hud_touch.set_layout(made[dos2_hud_touch.MOVIE], 'fillVFit'); print('%s: layout "fixed" -> "fillVFit"' % dos2_hud_touch.MOVIE)
+        if which == 'touch':   # UI mode TOUCH: the PC HUD movies laid out as the iPad's + the right side column (tools/dos2_pchud_touch.py), added to the hints set
+            psrc = dos2_pchud_touch.sources(sw)
+            if dos2_pchud_touch.check(psrc): sys.exit('touch HUD movies: static checks failed, package not written')
+            clash = set(dos2_pchud_touch.OUT) & set(made); assert not clash, clash
+            made.update(dos2_pchud_touch.build(psrc))
     files = [(GUI + n, made[n] if n in made else have[n]()) for n in sorted(list(names) + list(made), key=str.lower)]   # Larian's lists are sorted by name, case ignored (Game.pak, Engine.pak)
     for n, d in files:
         if d[:3] not in (b'CWS', b'FWS', b'ZWS'): sys.exit('%s is not a SWF (%r)' % (n, d[:3]))
-    if which == 'hints' and not [o for o in a if o.startswith('--no-')]:   # self-check: every movie the host maps a UI type to is in the package
+    if which in ('hints', 'touch') and not [o for o in a if o.startswith('--no-')]:   # self-check: every movie the host maps a UI type to is in the package
         miss = host_missing({n for n, _ in files})
         if miss is None: print('self-check skipped: dm/host/hle_dos2_touchui.c not found next to tools/')
         elif miss: sys.exit('self-check: the host expects %s, not made; package not written' % ' '.join(miss))
         else: print('self-check: all %d movies of the host table k_hint (and k_def) are in the package' % len(host_movies()))
+        if which == 'touch':
+            miss = host_missing({n for n, _ in files}, ('k_touch',))
+            if miss: sys.exit('self-check: the host table k_touch expects %s, not made; package not written' % ' '.join(miss))
+            if miss is not None: print('self-check: all %d movies of the host table k_touch are in the package' % len(host_movies(('k_touch',))))
     out = Path(opt['--out'] or root / 'touchui' / which); out.mkdir(parents=True, exist_ok=True)
     path = out / opt['--name']
     write_pak(path, files, store)

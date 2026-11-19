@@ -37,8 +37,8 @@ types = {int(m.group(2), 16): (m.group(1), int(m.group(3), 16)) for m in re.find
 tabs = {}
 for tname, body in re.findall(r'static const tu_def (k_\w+)\[\] = \{(.*?)\n\};', src, re.S):
     tabs[tname] = [(int(a, 16), int(b, 16), mv, ex) for a, b, mv, ex in re.findall(r'\{(0x[0-9a-f]+), (0x[0-9a-f]+|0), "(\w+)", "([^"]+)"\}', body)]
-assert sorted(tabs) == ['k_def', 'k_hint', 'k_ipad'] and [d[2] for d in tabs['k_def']] == ['mainMenu_d', 'mainMenu_d'] and len(tabs['k_ipad']) >= 25 and len(tabs['k_hint']) >= 8, {k: len(v) for k, v in tabs.items()}
-assert not any(d[2].endswith('_t') for d in tabs['k_def'] + tabs['k_hint']), 'an iPad movie in the default / hints table'
+assert sorted(tabs) == ['k_def', 'k_hint', 'k_ipad', 'k_touch'] and len(tabs['k_touch']) >= 6 and all(d[2].endswith('_p') for d in tabs['k_touch']) and [d[2] for d in tabs['k_def']] == ['mainMenu_d', 'mainMenu_d'] and len(tabs['k_ipad']) >= 25 and len(tabs['k_hint']) >= 8, {k: len(v) for k, v in tabs.items()}
+assert not any(d[2].endswith('_t') for d in tabs['k_def'] + tabs['k_hint'] + tabs['k_touch']), 'an iPad movie in the default / hints / touch table'
 block = [int(x, 16) for x in re.search(r'static const uint16_t k_block\[\] = \{(.*?)\};', src).group(1).split(',')]
 for t in block:   # every blocker is a registered menu type
     ok = t in types; bad += not ok

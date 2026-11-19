@@ -215,11 +215,16 @@ static const tu_def k_hint[] = {
 };
 // UI mode TOUCH (hle_dos2_uimode.c, owner 19.11): the mode byte is 0 there, so the game creates the PC types (msgBox 0x1d, gameMenu 0x13, saveLoad
 // 0x27, hotBar 0x28 through hle_dos2_touchui_hud.c ...); this table maps PC types to our PC-based `<name>_d.swf` movies (docs/dos2/TOUCH_MODES_PLAN.md
-// T2). EMPTY until those movies exist: an entry is only substituted when TouchUI.pak has its file (tu_apply), the rule of every table here.
-// The test route before the table is filled: DM_DOS2_UI_TOUCH_MAP=<hex id>:<movie>,... (the format of DM_DOS2_TOUCHUI_MAP; added to this table).
+// T2). An entry is only substituted when TouchUI.pak has its file (tu_apply), the rule of every table here: without it the type keeps the
+// player's stock PC movie. More entries for a test: DM_DOS2_UI_TOUCH_MAP=<hex id>:<movie>,... (the format of DM_DOS2_TOUCHUI_MAP; added to this table).
 // The table of SWITCH is empty by design (stock `_c` movies); HYBRID's is k_def + k_hint (or DM_DOS2_TOUCHUI_SET / _MAP) as before.
+// The HUD of UI mode TOUCH (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"): the PC HUD types the host creates (hle_dos2_touchui_hud.c)
+// play the PC movies laid out as the iPad's HUD (tools/dos2_pchud_touch.py, package set `touch`); 0x8d (watermark.swf, a plain UIObject: the
+// hybrid's column type) plays the iPad's right side there: options, the helmet button, the panel column.
 static const tu_def k_touch[] = {
-    {0, 0, NULL, NULL}   // end (no entry yet)
+    {0x28, 0, "hotBar_p", "GUI/hotBar.swf"}, {0x1e, 0, "minimap_p", "GUI/minimap.swf"}, {0x26, 0, "playerInfo_p", "GUI/playerInfo.swf"},
+    {0x75, 0, "statusConsole_p", "GUI/statusConsole.swf"}, {0x07, 0, "combatLog_p", "GUI/combatLog.swf"}, {0x8d, 0, "dmSide_p", "GUI/watermark.swf"},
+    {0, 0, NULL, NULL}   // end
 };
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed
 // (a click would be its "accept"). A type that is substituted with a touch movie is a touch window instead.
@@ -808,7 +813,7 @@ void dm_dos2_touchui_install(void) {
                 LOG("[touchui] set: %s", set && !strcmp(set, "ipad") ? "main menu D + the iPad `_t` menus (DM_DOS2_TOUCHUI_SET=ipad)" : hints
                     ? "main menu D + console menus with tappable hints (the default; DM_DOS2_TOUCHUI_SET=main = main menu only)" : "main menu D only; every other window stays the console one (DM_DOS2_TOUCHUI_SET=main)");
             }
-            // UI mode TOUCH's own table (hle_dos2_uimode.c): k_touch (empty for now) + DM_DOS2_UI_TOUCH_MAP; SWITCH has none
+            // UI mode TOUCH's own table (hle_dos2_uimode.c): k_touch + DM_DOS2_UI_TOUCH_MAP; SWITCH has none
             { const int n0 = g_nmap;
               for (unsigned i = 0; k_touch[i].movie; i++) tu_add(k_touch[i].id, k_touch[i].movie, k_touch[i].expect, k_touch[i].pc, ui_mode_mask(UI_TOUCH));
               if ((v = getenv("DM_DOS2_UI_TOUCH_MAP")) && *v) tu_add_map(v, ui_mode_mask(UI_TOUCH), "DM_DOS2_UI_TOUCH_MAP");

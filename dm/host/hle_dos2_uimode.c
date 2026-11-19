@@ -98,6 +98,8 @@ void dm_dos2_uimode_poll(void) {
         if (ok) LOG("[uimode] HUD part of %s applied (no player UI set: main menu / loading; mode byte %d): the next load builds the %s HUD", ui_mode_name(m), ui_mode_byte(m), ui_mode_name(m));
         else LOG("【红】[uimode] HUD part of %s NOT applied (hle_dos2_touch.c refused: see the line above); menus follow the mode, the HUD keeps the old one", ui_mode_name(m));
     }
+    // the touch HUD the host makes (hle_dos2_touchui_hud.c): sets built without its hooks, the right side's visibility, CONFIRM / cancel clicks
+    { void dm_dos2_touchui_hud_poll(void); dm_dos2_touchui_hud_poll(); }
 }
 
 // JNI (DmActivity.nativeDos2UiMode, the UI thread): mode < 0 = the requested mode now; else the request, answered by the game thread within

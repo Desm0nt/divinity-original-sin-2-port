@@ -1173,12 +1173,12 @@ def step_surfpack(L):
 
 def step_touchui(L):
     """romfs/Data/TouchUI.pak: the console menus with touch handling and the on-screen buttons of the HUD and the panels (tools/dos2_touchui_pak.py,
-    set "hints"), made from the Switch Game.pak alone; the buttons' art is the port's own (assets/touchui). The game mounts every *.pak in Data itself."""
+    set "touch" = "hints" + the HUD movies of UI mode touch, tools/dos2_pchud_touch.py), made from the Switch Game.pak alone; the buttons' art is the port's own (assets/touchui). The game mounts every *.pak in Data itself."""
     want = 'full'
     have = L.touchui_mode()
     if have == want: print('  already done'); return
     sw = L.romfs / 'Data' / 'Game.pak'
-    cmd = [sys.executable, TOOLS / 'dos2_touchui_pak.py', 'hints', '--sw', sw, '--out', L.work / 'touchui']
+    cmd = [sys.executable, TOOLS / 'dos2_touchui_pak.py', 'touch', '--sw', sw, '--out', L.work / 'touchui']   # touch = hints + the HUD movies of UI mode TOUCH (dos2_pchud_touch.py)
     print('  console menus with touch handling + on-screen buttons (HUD column, panel buttons)', flush=True)
     env = dict(os.environ, PYTHONUTF8='1')
     r = subprocess.run([str(c) for c in cmd], env=env, capture_output=True, text=True, encoding='utf-8', errors='replace')
