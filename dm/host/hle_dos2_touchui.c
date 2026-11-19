@@ -224,6 +224,10 @@ static const tu_def k_hint[] = {
 static const tu_def k_touch[] = {
     {0x28, 0, "hotBar_p", "GUI/hotBar.swf"}, {0x1e, 0, "minimap_p", "GUI/minimap.swf"}, {0x26, 0, "playerInfo_p", "GUI/playerInfo.swf"},
     {0x75, 0, "statusConsole_p", "GUI/statusConsole.swf"}, {0x07, 0, "combatLog_p", "GUI/combatLog.swf"}, {0x8d, 0, "dmSide_p", "GUI/watermark.swf"},
+    // the PC panels (hle_dos2_touchui_hud.c makes the set's ones and puts them into the player's record; waypoints is made by the game on demand):
+    // the PC movies + the iPad's 50 px close button (tools/dos2_pchud_touch.py PANEL_CLOSE)
+    {0x74, 0, "partyInventory_p", "GUI/partyInventory.swf"}, {0x77, 0, "characterSheet_p", "GUI/characterSheet.swf"}, {0x29, 0, "skills_p", "GUI/skills.swf"},
+    {0x66, 0, "uiCraft_p", "GUI/uiCraft.swf"}, {0x16, 0, "journal_p", "GUI/journal.swf"}, {0x68, 0, "examine_p", "GUI/examine.swf"}, {0x2f, 0, "waypoints_p", "GUI/waypoints.swf"},
     {0, 0, NULL, NULL}   // end
 };
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed

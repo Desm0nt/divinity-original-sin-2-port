@@ -34,6 +34,10 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        (btn_character; toggles the column locally: the iPad's toggleSidePanel / setRolledIn pair is not in the Switch main),
                        six panel buttons 74 px every 80 px from y 422: map, character, inventory, skills, crafting, journal.
                        A tap = ExternalInterface dmSide(code): 1 options, 2..7 the panels in that order.
+  Panels (stage 4, "Implemented: touch panels"): partyInventory_p characterSheet_p skills_p uiCraft_p journal_p examine_p waypoints_p = the PC
+                       movies with one addition, the iPad's 50 px close button: the PC's 23 px close button gets a transparent 50 x 50 hit area
+                       (PANEL_CLOSE: where it sits in each movie). Size, position and every other gesture are the PC movie's own (tap, double
+                       click = use / equip, right click = context menu, drag, wheel): see the plan for why the iPad's 76 px cells are not here.
 
   python -I tools/dos2_pchud_touch.py build <Switch Game.pak | dir of the PC movies> <out dir>
   python -I tools/dos2_pchud_touch.py check <Switch Game.pak | dir of the PC movies>
@@ -81,8 +85,14 @@ SIDE = [('dmMenu_mc', 1, 'icon_menu', _sx(1348), 20, 74), ('dmHelm_mc', 20, 'btn
     (n, c, i, _sx(1348), 422 + 80 * k, 74) for k, (n, c, i) in enumerate([('dmP2_mc', 2, 'icon_map'), ('dmP3_mc', 3, 'ico_charsheet'),
     ('dmP4_mc', 4, 'ico_inventory'), ('dmP5_mc', 5, 'ico_skills'), ('dmP6_mc', 6, 'ico_craft'), ('dmP7_mc', 7, 'ico_journal')])]
 SIDE_COLUMN = [s[0] for s in SIDE if 2 <= s[1] <= 7]
+# ---- panels: the close button of each PC panel (instance path from the root) gets a CLOSE_HIT px hit area around its 23 px drawing
+CLOSE_HIT = 50
+PANEL_CLOSE = {'partyInventory': ('inventory_mc', 'close_mc'), 'characterSheet': ('stats_mc', 'close_mc'), 'skills': ('skillPane_mc', 'Xclose_mc'),
+               'uiCraft': ('craftPanel_mc', 'closeButton_mc'), 'journal': ('journal_mc', 'close_mc'), 'examine': ('examine_mc', 'close_mc'),
+               'waypoints': ('waypoints_mc', 'Xclose_mc')}
 OUT = {'hotBar_p.swf': 'hotBar.swf', 'minimap_p.swf': 'minimap.swf', 'statusConsole_p.swf': 'statusConsole.swf', 'playerInfo_p.swf': 'playerInfo.swf',
        'combatLog_p.swf': 'combatLog.swf', 'dmSide_p.swf': 'watermark.swf'}
+OUT.update({n + '_p.swf': n + '.swf' for n in PANEL_CLOSE})
 EI_NEW = ['dmSide', 'dmAim', 'dmAimBtn']   # ExternalInterface names the host implements (hle_dos2_touchui_hud.c)
 
 
@@ -281,6 +291,28 @@ def moved(data, moves, tap=None):
     return swf.write(), dict(placed=[], defs=0, methods=d.made)
 
 
+def closer(data, path):
+    """onEventInit: the original, then the close button at `path` gets a transparent CLOSE_HIT square centred on its 23 px drawing"""
+    swf = Swf(data); d = Doc(swf); P = d.P
+    def init(n):
+        o, g, b = n + 1, n + 2, n + 3
+        c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', o), ('pushnull',), ('coerce_a',), ('setlocal', g), ('pushnull',), ('coerce_a',), ('setlocal', b)] + d.call_orig('dmInitOrig', n)
+        c += [('getlocal0',), ('coerce_a',), ('setlocal', o)]
+        for name in path: c += [('getlocal', o), ('getproperty', P(name)), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', 'end')]
+        # bounds of the drawing in the button's own space, then the square around their centre
+        c += [('getlocal', o), ('getlocal', o), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', b),
+              ('getlocal', o), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', g), ('getlocal', g), ('iffalse', 'end'),
+              ('getlocal', g), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2), ('getlocal', g)]
+        for pos, size in (('x', 'width'), ('y', 'height')):
+            c += [('getlocal', b), ('getproperty', P(pos)), ('getlocal', b), ('getproperty', P(size)), ('pushbyte', 2), ('divide',), ('add',)] + num(CLOSE_HIT // 2) + [('subtract',)]
+        c += num(CLOSE_HIT) + num(CLOSE_HIT) + [('callpropvoid', P('drawRect'), 4), ('getlocal', g), ('callpropvoid', P('endFill'), 0), ('L', 'end'), ('returnvoid',)]
+        return c
+    d.wrap('onEventInit', 'dmInitOrig', init)
+    d.inst['traits'].append(Trait(P('dmHook'), 1, 0, d.add('dmHook', 0, HEAD + [('returnvoid',)])))   # the "already patched" mark
+    d.done()
+    return swf.write(), dict(placed=[], defs=0, methods=d.made)
+
+
 def minimap(data): return moved(data, MM_MOVE, ('hit_mc', 2))
 def status(data): return moved(data, [(n, 0, -SC_UP) for n in SC_MOVE])
 def same(data): return data, dict(placed=[], defs=0, methods=[])
@@ -327,7 +359,9 @@ def side(data):
     return swf.write(), dict(placed=placed, defs=ndefs, methods=d.made)
 
 
+def _closer(name): return lambda data: closer(data, PANEL_CLOSE[name])
 MAKE = {'hotBar_p.swf': hotbar, 'minimap_p.swf': minimap, 'statusConsole_p.swf': status, 'playerInfo_p.swf': same, 'combatLog_p.swf': same, 'dmSide_p.swf': side}
+MAKE.update({n + '_p.swf': _closer(n) for n in PANEL_CLOSE})
 
 
 def build(src):
@@ -370,6 +404,15 @@ def check(src):
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
+        elif o[:-6] in PANEL_CLOSE:
+            import dos2_layout as lay, tempfile
+            t = dis('onEventInit'); path = PANEL_CLOSE[o[:-6]]
+            say('dmInitOrig' in t and all(n in t for n in path) and 'drawRect' in t and 'getBounds' in t, 'onEventInit = original + a %d px hit area on %s' % (CLOSE_HIT, '.'.join(path)))
+            with tempfile.TemporaryDirectory() as td:   # the instance really is there, with the PC's small drawing
+                f = os.path.join(td, OUT[o]); open(f, 'wb').write(data)
+                hit = [e for e in lay.walk(lay.Mov.load(f), 3) if e['npath'] == '.'.join(path)]
+            sz = (hit[0]['stage'][2] - hit[0]['stage'][0], hit[0]['stage'][3] - hit[0]['stage'][1]) if hit and hit[0]['stage'] else None
+            say(bool(sz) and max(sz) < CLOSE_HIT, 'the PC close button %s: %s px drawn' % ('.'.join(path), '%.0f x %.0f' % sz if sz else 'NOT FOUND'))
         elif o == 'dmSide_p.swf':
             say(b.head[:-4] == rect_bytes(SIDE_W, SIDE_H), 'frame %dx%d' % (SIDE_W, SIDE_H))
             say(all((s[0].encode() + b'\0') in names for s in SIDE) and all(0 <= p[1][0] and p[1][2] <= SIDE_W and p[1][3] <= SIDE_H for p in rep['placed']), 'all %d buttons on the root, inside the frame' % len(SIDE))

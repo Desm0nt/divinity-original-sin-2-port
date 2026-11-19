@@ -44,6 +44,25 @@
 //   every switch and only tested when DM_DOS2_TOUCHUI_HUD_STATES=<hex,..> names the allowed ids (0x13 = Running is a static guess, never run).
 //   When the game destroys the sets itself (unload) in UI mode TOUCH the byte stays 0 (the menus are PC ones there); with the old switch
 //   alone it goes back to 1 as before.
+// The PC PANELS (stage 4, "Implemented: touch panels"). The player's record is the same on both builds: the iPad's node offsets are the
+//   Switch's (checked on shared slots: bottomBar_c 0x3b node +0x68, contextMenu_c 0xc +0x50, worldTooltip 0x30 +0xd8, overhead 5 +0xb8; the
+//   iPad only appends its touch slots +0x2b8.. after the Switch's last one). The iPad's PC branch 0x1012e0118..0x1012e0658 fills, each only
+//   when the slot is 0 (CreateUIObject(mgr, layer, type, flags | builder flags, 0x80, player) -> str x0,[node,#off]):
+//     statusConsole 0x75 +0x28 layer 6     hotBar 0x28 +0x20 layer 0xf    minimap 0x1e +0x58 layer 2      enemyHealthBar 0x2a +0x30 layer 2 flags 0x20000
+//     combatLog 7 +0x70 layer 0xa          playerInfo 0x26 +0xd0 layer 7  (all flags 0x201e0 unless said)
+//     msgBox 0x1d +0x108 layer 0x28 flags 0x21fe0      gameMenu 0x13 +0x88 layer 0x1f flags 0x61fe0     journal 0x16 +0x138 layer 0xa flags 0x400201e0
+//     tutorialBox 0x37 +0x160 layer 0x16 flags 0x24000   examine 0x68 +0xa8 layer 0xa     contextMenu 0xa +0x18 / 0xb +0x48 layer 0x16 flags 0x21fe0
+//     uiCraft 0x66 +0x170, partyInventory 0x74 +0x228, characterSheet 0x77 +0x238, skills 0x29 +0x258: layer 0xa
+//   The Switch builder makes none of these (mode 1: the `_c` block, else only the shared tail), but its PC code READS the slots: the panel
+//   toggles the PC hot bar's buttons end in (hotbarBtnPressed ids 0..5) look their window up there and do nothing when the handle is 0 -
+//   skills 0x10c70a0: `ldr x9,[x22,#0x248]` (x22 = node + 0x10) then `cmp [obj+0xf0],#0x29` (0x10c71cc / 0x10c722c); partyInventory
+//   0x10c82c4 `ldr x10,[x8,#0x228]`, characterSheet 0x10c8380 +0x238, uiCraft 0x10d5620 +0x170, the hot bar itself 0x10c6638 +0x20.
+//   So the host fills the PC branch the way the iPad's builder does: every type of the table, created when its slot is 0, the handle written
+//   into the slot. From then on the object is the engine's (found by its toggles / updates). The host still destroys what it made BEFORE the
+//   game's destroy-all and zeroes the slot it filled (a handle the game already destroyed fails the salt check and is skipped).
+//   DM_DOS2_TOUCHUI_HUD_SLOTS=0: the handles are not written into the record (the stage 3 behaviour: a HUD the engine cannot find).
+//   Windows the game makes on demand in mode 0 by itself (trade 0x2e, containerInventory 9 / 0x25, waypoints 0x2f, dialog 0xe, saveLoad, options,
+//   itemSplitter ...: the `csel` on the mode byte at their creation sites, docs/dos2/TOUCH_UI_PLAN.md section 3) need nothing here.
 // Size. The engine's "fixed" layout, main+0xae3be0(obj, w, h) branch 0xae3c8c: k = c x S x h / D with c = float [obj+0x94] (the class scale,
 //   set by 0xae4c40(obj, s0), which also writes the movie's root.uiScaling = c x S), S = float [[main+0x2bb8a60]+0x34] (the "UI scale"
 //   setting; applied in every input mode here, the iPad applies it only off the pad), D = u32 [uimgr+0x110] = 1080 (the UI manager's
@@ -64,7 +83,8 @@
 // Switches (need DM_DOS2_TOUCHUI=1 with the package; players use the gear's UI mode):
 //   DM_DOS2_TOUCHUI_HUD=1 | 0        1: the PC HUD whenever a set is built with the byte 0, in any UI mode (turns DM_DOS2_TOUCH_LIVE=1 on when
 //                                    it is unset, as before); 0: never, also in UI mode TOUCH
-//   DM_DOS2_TOUCHUI_HUD_SET=<hex,..> only these types (default 75,1e,26,28,7,8d): to find the one that breaks
+//   DM_DOS2_TOUCHUI_HUD_SET=<hex,..> only these types (default: the whole table below): to find the one that breaks
+//   DM_DOS2_TOUCHUI_HUD_SLOTS=0      the handles are not written into the player's record (panels then cannot be opened)
 //   DM_DOS2_TOUCH_HUD_SCALE=<f>      the one size factor, default 1 (0.5..2); 0 = class scales left to the engine
 //   DM_DOS2_TOUCHUI_HUD_SHOW=1       the host also sets the visible flag on every object it makes (if the PC classes do not show themselves)
 //   DM_DOS2_TOUCHUI_HUD_STATES / _BLOCK  see above
@@ -107,7 +127,15 @@ enum { HU_SETSCALE = 0xae4c40, HU_SETSCALE_ST = 0xae4c64, HU_RESIZE_NOW = 0xae38
        // the PC hot bar class: OnFunctionCalled, its "hotbarBtnPressed" compare, the id switch and its table
        HU_HB_CALLED = 0x122fdb0, HU_HB_BTN = 0x122fe98, HU_HB_SWITCH = 0x12308e0, HU_HB_TABLE = 0x1f52e1e,
        HU_INJECT = 0x847690, HU_INMGR = 0x2bb8960, HU_CURSOR = 0x2bb88e8, HU_IN_DEVS = 0x18, HU_IN_DEVN = 0x24,
-       HU_T_HOTBAR = 0x28, HU_T_SIDE = 0x8d, HU_F_VISIBLE = 8 };
+       HU_T_HOTBAR = 0x28, HU_T_SIDE = 0x8d, HU_F_VISIBLE = 8,
+       // the record's PC slots as the Switch code reads them (node-relative; the skills toggle uses x22 = node + 0x10)
+       HU_SLOT_SKILLS = 0x10c71cc, HU_SLOT_SKILLS_T = 0x10c7228, HU_SLOT_INV = 0x10c82c4, HU_SLOT_SHEET = 0x10c8380, HU_SLOT_CRAFT = 0x10d5620, HU_SLOT_HOTBAR = 0x10c6638 };
+static const uint32_t k_hu_slot_skills[2] = {0xf94126c9 /* ldr x9,[x22,#0x248]: node + 0x258 */, 0xf260553f /* tst x9,#0x3fffff00000000 */};
+static const uint32_t k_hu_slot_skills_t[2] = {0xb940f2a8 /* ldr w8,[x21,#0xf0] */, 0x7100a51f /* cmp w8,#0x29 */};
+static const uint32_t k_hu_slot_inv[2] = {0xf941150a /* ldr x10,[x8,#0x228] */, 0xf260555f};
+static const uint32_t k_hu_slot_sheet[2] = {0xf9411d0a /* ldr x10,[x8,#0x238] */, 0xf260555f};
+static const uint32_t k_hu_slot_craft[2] = {0xf940b90a /* ldr x10,[x8,#0x170] */, 0xf260555f};
+static const uint32_t k_hu_slot_hotbar[2] = {0xf940110a /* ldr x10,[x8,#0x20] */, 0xf260555f};
 static const uint32_t k_hu_setscale[8] = {0xd10183ff, 0xfd0023e8, 0xf90027f3, 0xa9057bfd, 0x910143fd, 0xaa0003f3, 0xf9400c00 /* ldr x0,[x0,#0x18]: the player */, 0x4ea01c08 /* v8 = s0 */};
 static const uint32_t k_hu_setscale_st[1] = {0xbd009668 /* 0xae4c64 str s8,[x19,#0x94] */};
 static const uint32_t k_hu_resize_now[9] = {0xb00106e8, 0x900106c9, 0xf9415d08, 0xf9413129, 0xb9805108, 0xf9402129, 0xf8687928, 0x295b0901 /* ldp w1,w2,[x8,#0xd8]: the window */,
@@ -131,16 +159,30 @@ typedef uint64_t (*hu_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint
 typedef struct { uint32_t raw; float v[2]; uint8_t pressed, pad[3], flag, pad2[3]; } hu_rec;   // InjectInputData (hle_dos2_touch.c dt_rec)
 _Static_assert(sizeof(hu_rec) == 20, "InjectInputData is 20 bytes");
 
-enum { HU_NTYPES = 6, HU_MAXOBJ = 32 };
-static struct { uint32_t type, layer, flags; float ipad_c; const char *need; int on, logged; } g_t[HU_NTYPES] = {
-    {0x75, 6, 0x201e0, 1.0f, NULL, 1, 0},
-    {0x1e, 2, 0x221e0, 1.0f, NULL, 1, 0},
-    {0x26, 0xf, 0x201e0, 1.1f, NULL, 1, 0},     // the iPad's class scale of playerInfo_t (docs/dos2/TOUCH_LAYOUT.md section 1)
-    {0x28, 0x10, 0x201e0, 1.0f, NULL, 1, 0},
-    {7, 0xa, 0x201e0, 1.0f, NULL, 1, 0},
-    {HU_T_SIDE, 0x12, 0x261e0, 1.0f, "GUI/dmSide_p.swf", 1, 0}};   // only with this movie: the stock watermark.swf is never shown
-static struct { uint64_t h; uint32_t type; uint16_t player; } g_obj[HU_MAXOBJ];
-static int g_nobj, g_env = -1, g_sites, g_hooked, g_dbg, g_switching, g_any_state = 1, g_tried, g_show, g_scale_ok, g_flags_ok, g_btn_ok, g_mdev = 1;
+enum { HU_NTYPES = 18, HU_MAXOBJ = 80 };
+// type, layer, flags, the record's slot (node offset, 0 = none: the host keeps the handle), the iPad's class scale of the movie (0 = the size is
+// left to the engine: not a "fixed" HUD / panel movie), the movie the type must play to be made at all
+static struct { uint32_t type, layer, flags, slot; float ipad_c; const char *need; int on, logged; } g_t[HU_NTYPES] = {
+    {0x75, 6, 0x201e0, 0x28, 1.0f, NULL, 1, 0},       // statusConsole
+    {0x1e, 2, 0x221e0, 0x58, 1.0f, NULL, 1, 0},       // minimap (flags of the iPad's touch branch)
+    {0x26, 0xf, 0x201e0, 0xd0, 1.1f, NULL, 1, 0},     // playerInfo: the iPad's class scale of playerInfo_t (docs/dos2/TOUCH_LAYOUT.md section 1)
+    {0x28, 0x10, 0x201e0, 0x20, 1.0f, NULL, 1, 0},    // hotBar
+    {7, 0xa, 0x201e0, 0x70, 1.0f, NULL, 1, 0},        // combatLog
+    {HU_T_SIDE, 0x12, 0x261e0, 0, 1.0f, "GUI/dmSide_p.swf", 1, 0},   // only with this movie: the stock watermark.swf is never shown
+    {0x2a, 2, 0x20000, 0x30, 0, NULL, 1, 0},          // enemyHealthBar
+    {0x1d, 0x28, 0x21fe0, 0x108, 0, NULL, 1, 0},      // msgBox
+    {0x13, 0x1f, 0x61fe0, 0x88, 0, NULL, 1, 0},       // gameMenu: what the options button's escape (ToggleInGameMenu) opens
+    {0x16, 0xa, 0x400201e0, 0x138, 1.0f, NULL, 1, 0}, // journal
+    {0x37, 0x16, 0x24000, 0x160, 0, NULL, 1, 0},      // tutorialBox
+    {0x68, 0xa, 0x201e0, 0xa8, 1.28f, NULL, 1, 0},    // examine: the iPad's window is 620 wide for the PC's 484
+    {0x0a, 0x16, 0x21fe0, 0x18, 1.6f, NULL, 1, 0},    // contextMenu: contextMenu_t scales its list 1.6
+    {0x0b, 0x16, 0x21fe0, 0x48, 1.6f, NULL, 1, 0},
+    {0x66, 0xa, 0x201e0, 0x170, 1.0f, NULL, 1, 0},    // uiCraft
+    {0x74, 0xa, 0x201e0, 0x228, 1.0f, NULL, 1, 0},    // partyInventory
+    {0x77, 0xa, 0x201e0, 0x238, 1.0f, NULL, 1, 0},    // characterSheet (the PC's equipment doll is in it)
+    {0x29, 0xa, 0x201e0, 0x258, 1.0f, NULL, 1, 0}};   // skills
+static struct { uint64_t h; uint32_t type; uint16_t player; uint8_t *slot; } g_obj[HU_MAXOBJ];
+static int g_nobj, g_env = -1, g_sites, g_hooked, g_dbg, g_switching, g_any_state = 1, g_tried, g_show, g_scale_ok, g_flags_ok, g_btn_ok, g_mdev = 1, g_slots = 1, g_slots_ok;
 static float g_tune = 1.0f;
 static uint32_t g_states[8] = {0x13}, g_block[16] = {0xe, 0x42, 0x65, 0x17, 3, 4};
 static int g_nstates = 1, g_nblock = 6;
@@ -185,12 +227,15 @@ static int hu_blocking(uint8_t *mgr) {   // type of a visible UI object that for
     }
     return -1;
 }
-static int hu_records(const uint8_t *ui, uint16_t *ids, int max) {   // the players that have a UI set (hash ui+0xf0: +4 buckets, +8 array; node +8 u16 id)
+static int hu_records(const uint8_t *ui, uint16_t *ids, uint8_t **nodes, int max) {   // the players that have a UI set (hash ui+0xf0: +4 buckets, +8 array; node +8 u16 id)
     const uint32_t nb = *(const volatile uint32_t *)(ui + HU_UI_HASH + 4);
     uint8_t *const volatile *bk = *(uint8_t *const volatile *const volatile *)(ui + HU_UI_HASH + 8);
     int n = 0;
     if (!bk || !nb || nb > 0x10000) return 0;
-    for (uint32_t i = 0; i < nb; i++) for (const uint8_t *nd = bk[i]; nd && n < max; nd = *(const uint8_t *const *)(const void *)nd) { if (ids) ids[n] = *(const uint16_t *)(const void *)(nd + 8); n++; }
+    for (uint32_t i = 0; i < nb; i++) for (uint8_t *nd = bk[i]; nd && n < max; nd = *(uint8_t *const *)(const void *)nd) {
+        if (ids) ids[n] = *(const uint16_t *)(const void *)(nd + 8);
+        if (nodes) nodes[n] = nd;
+        n++; }
     return n;
 }
 // the movie a type's creator plays now: the tail from the last "GUI/" of its path ("" = no creator with a long-form path)
@@ -209,7 +254,7 @@ static void hu_tail(uint8_t *mgr, uint32_t type, char *out, size_t n) {
 // ---- the size: class scale + the engine's own resize ----
 static float hu_cfg_s(void) { const uint8_t *cfg = *(const uint8_t *volatile *)(g_main->base + HU_CFG); return cfg ? *(const volatile float *)(cfg + HU_CFG_S) : 0; }
 static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
-    if (!g_scale_ok || g_tune == 0) return;
+    if (!g_scale_ok || g_tune == 0 || g_t[ti].ipad_c == 0) return;
     const float s = hu_cfg_s(), was = *(volatile float *)(o + HU_OBJ_C), c = hu_class_scale(g_tune, g_t[ti].ipad_c, s);
     const uint32_t d = *(volatile uint32_t *)(mgr + HU_MGR_D);
     ((void (*)(void *, float))(void *)(g_main->base + HU_SETSCALE))(o, c);     // [obj+0x94] = c, root.uiScaling = c x S when the movie has it
@@ -236,7 +281,10 @@ static void hu_destroy(const char *why) {
     const uint64_t t0 = hu_us(); int gone = 0;
     for (int i = g_nobj - 1; i >= 0 && mgr; i--) {
         uint8_t *o = hu_obj(mgr, g_obj[i].h);
-        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != g_obj[i].type) { if (g_dbg) LOG("[hud] type %#x player %u handle %#llx: already gone", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h); continue; }
+        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != g_obj[i].type) {
+            if (g_obj[i].slot && *(volatile uint64_t *)(void *)g_obj[i].slot == g_obj[i].h) *(volatile uint64_t *)(void *)g_obj[i].slot = 0;   // a stale handle of ours
+            if (g_dbg) LOG("[hud] type %#x player %u handle %#llx: already gone", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
+            continue; }
         void **vt = *(void ***)(void *)o;
         ((void (*)(void *))vt[0xf0 / 8])(o);                                                              // as main+0x10bc820
         uint64_t h = g_obj[i].h;
@@ -244,6 +292,7 @@ static void hu_destroy(const char *why) {
         struct { void *vt; uint32_t one, pad; void *obj; } msg = {g_main->base + HU_MSG_VT, 1, 0, o};     // as main+0x10bc83c..0x10bc860
         void *to = *(void *volatile *)(g_main->base + HU_MSG_TO);
         if (to) ((void (*)(void *, void *))(void *)(g_main->base + HU_MSG_SEND))(to, &msg);
+        if (g_obj[i].slot && *(volatile uint64_t *)(void *)g_obj[i].slot == g_obj[i].h) *(volatile uint64_t *)(void *)g_obj[i].slot = 0;   // the game's own destroy skips an empty slot
         gone++;
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
@@ -253,20 +302,23 @@ static void hu_destroy(const char *why) {
 static void hu_create(uint8_t *ui, const char *why) {
     uint8_t *mgr = hu_mgr();
     if (!mgr || !ui || g_nobj) return;
-    uint16_t ids[8]; const int np = hu_records(ui, ids, 8);
+    uint16_t ids[8]; uint8_t *nodes[8]; const int np = hu_records(ui, ids, nodes, 8);
     if (!np) return;
     g_tried = 1;
-    const uint64_t t0 = hu_us(); int made = 0, failed = 0; char list[320]; size_t lo = 0; list[0] = 0;
+    const uint64_t t0 = hu_us(); int made = 0, failed = 0, had = 0; char list[640]; size_t lo = 0; list[0] = 0;
     for (int p = 0; p < np; p++) for (int i = 0; i < HU_NTYPES && g_nobj < HU_MAXOBJ; i++) {
         if (!g_t[i].on) continue;
         char mv[96]; hu_tail(mgr, g_t[i].type, mv, sizeof mv);
         if (!mv[0]) { if (!p) LOG("【红】[hud] type %#x: no creator with a long-form GUI path: not made", g_t[i].type); continue; }
+        volatile uint64_t *slot = g_slots && g_slots_ok && g_t[i].slot ? (volatile uint64_t *)(void *)(nodes[p] + g_t[i].slot) : NULL;
+        if (slot && (*slot & 0x3fffff00000000ull)) { had++; if (g_dbg) LOG("[hud] type %#x player %u: the record's slot +%#x already holds %#llx: left alone", g_t[i].type, ids[p], g_t[i].slot, (unsigned long long)*slot); continue; }
         if (g_t[i].need && strcmp(mv, g_t[i].need)) { if (!p) LOG("[hud] type %#x plays %s, not %s (UI mode not touch, or the package has no such movie): not made", g_t[i].type, mv, g_t[i].need); continue; }
         const uint64_t h = ((hu_fn)(void *)(g_main->base + HU_CREATE))((uint64_t)(uintptr_t)mgr, g_t[i].layer, g_t[i].type, g_t[i].flags | 0x20000000u, 0x80, ids[p]);
         uint8_t *o = hu_obj(mgr, h);
         const int ok = o != NULL;
         if (ok) {
-            g_obj[g_nobj].h = h; g_obj[g_nobj].type = g_t[i].type; g_obj[g_nobj].player = ids[p]; g_nobj++; made++;
+            g_obj[g_nobj].h = h; g_obj[g_nobj].type = g_t[i].type; g_obj[g_nobj].player = ids[p]; g_obj[g_nobj].slot = (uint8_t *)(void *)slot; g_nobj++; made++;
+            if (slot) *slot = h;   // as the iPad's builder: str x0,[node,#off] - the engine's PC code finds the window there
             hu_tail(mgr, g_t[i].type, mv, sizeof mv);   // after the creation: hle_dos2_touchui.c may have gone back to the stock movie
             hu_scale(mgr, o, i, mv);
             if (g_show && g_flags_ok) ((void (*)(void *, uint32_t))(void *)(g_main->base + HU_SETFLAGS_FN))(o, HU_F_VISIBLE);
@@ -275,7 +327,8 @@ static void hu_create(uint8_t *ui, const char *why) {
         if (g_dbg || !ok) LOG("%s[hud] CreateUIObject type %#x = %s layer %#x flags %#x player %u -> handle %#llx%s", ok ? "" : "【红】", g_t[i].type, mv, g_t[i].layer,
                               g_t[i].flags | 0x20000000u, ids[p], (unsigned long long)h, ok ? "" : ": FAILED");
     }
-    LOG("%s[hud] touch HUD up (%s): %d object(s) for %d player(s)%s: %s; %llu us (game state %#x, UI mode %s)", failed ? "【红】" : "", why, made, np, failed ? ", some failed" : "", list,
+    LOG("%s[hud] touch HUD up (%s): %d object(s) for %d player(s)%s, %d slot(s) were filled already, handles %s: %s; %llu us (game state %#x, UI mode %s)", failed ? "【红】" : "", why, made, np,
+        failed ? ", some failed" : "", had, g_slots && g_slots_ok ? "written into the player's record (the PC branch of the set)" : "kept by the host only (panels cannot be opened)", list,
         (unsigned long long)(hu_us() - t0), hu_state(), ui_mode_name(dm_dos2_ui_mode()));
     dm_dos2_touchui_ei_dump("touch HUD up");
 }
@@ -407,7 +460,7 @@ void dm_dos2_touchui_hud_poll(void) {
     if (!g_hooked) return;
     uint8_t *ui = *(uint8_t *volatile *)(g_main->base + HU_UI_THIS), *mgr = hu_mgr();
     if (!ui || !mgr) return;
-    const int recs = hu_records(ui, NULL, 64);
+    const int recs = hu_records(ui, NULL, NULL, 64);
     if (!recs) g_tried = 0;
     if (g_nobj && !recs) hu_destroy("the player UI sets are gone");
     else if (!g_nobj && recs && !g_tried && hu_on() && *hu_mode() == 0) hu_create(ui, "a player UI set exists with the mode byte 0 and no host HUD");
@@ -475,6 +528,12 @@ void dm_dos2_touchui_hud_install(void) {
     static const hu_site k_hb[] = {{HU_HB_CALLED, 12, k_hu_hb_called}, {HU_HB_BTN, 5, k_hu_hb_btn}, {HU_HB_SWITCH, 5, k_hu_hb_switch}};
     g_btn_ok = hu_same(m, k_hb, 3) < 0 && m->size > HU_HB_TABLE + sizeof k_hu_hb_table && !memcmp(m->base + HU_HB_TABLE, k_hu_hb_table, sizeof k_hu_hb_table);
     if (!g_btn_ok) LOG("【红】[hud] the PC hot bar class's hotbarBtnPressed (main+%#x) differs: the panel column of dmSide_p opens nothing", HU_HB_CALLED);
+    static const hu_site k_sl[] = {{HU_SLOT_SKILLS, 2, k_hu_slot_skills}, {HU_SLOT_SKILLS_T, 2, k_hu_slot_skills_t}, {HU_SLOT_INV, 2, k_hu_slot_inv}, {HU_SLOT_SHEET, 2, k_hu_slot_sheet},
+                                   {HU_SLOT_CRAFT, 2, k_hu_slot_craft}, {HU_SLOT_HOTBAR, 2, k_hu_slot_hotbar}};
+    const int bl = hu_same(m, k_sl, sizeof k_sl / sizeof *k_sl);
+    g_slots_ok = bl < 0;
+    if (bl >= 0) LOG("【红】[hud] main+%#x differs (the record's PC slots): the host keeps its handles to itself, the PC panels cannot be opened", k_sl[bl].off);
+    g_slots = !((v = getenv("DM_DOS2_TOUCHUI_HUD_SLOTS")) && *v == '0');
     if ((v = getenv("DM_DOS2_TOUCHUI_HUD_SET")) && *v) { uint32_t ids[HU_NTYPES]; const int n = hu_list(v, ids, HU_NTYPES);
         for (int i = 0; i < HU_NTYPES; i++) { g_t[i].on = 0; for (int k = 0; k < n; k++) if (ids[k] == g_t[i].type) g_t[i].on = 1; } }
     if ((v = getenv("DM_DOS2_TOUCHUI_HUD_STATES")) && *v) { if (!strcmp(v, "any")) g_any_state = 1; else { g_nstates = hu_list(v, g_states, 8); g_any_state = 0; } }
@@ -515,11 +574,11 @@ void dm_dos2_touchui_hud_hook(void) {
             return; }
     }
     g_hooked = 1;
-    char list[160]; size_t o = 0; list[0] = 0;
-    for (int i = 0; i < HU_NTYPES; i++) if (g_t[i].on) o += (size_t)snprintf(list + o, sizeof list - o, "%s%#x", o ? ", " : "", g_t[i].type);
-    LOG("[hud] touch HUD: create-all main+%#x / destroy-all main+%#x hooked (after hle_dos2_touch.c compared them); a player UI set built with the mode byte 0 gets the PC HUD types %s "
-        "from the host (movies: the `touch` path table) %s; active now: %s; DM_DOS2_TOUCH_HUD_SCALE %.3f%s; a live switch needs %s and no dialog / loading / character creation on screen",
-        HU_CREATE_ALL, HU_DESTROY_ALL, list, g_env > 0 ? "in every UI mode (DM_DOS2_TOUCHUI_HUD=1)" : "in UI mode touch", hu_on() ? "yes" : "no (UI mode not touch)", g_tune,
+    char list[200]; size_t o = 0; list[0] = 0;
+    for (int i = 0; i < HU_NTYPES; i++) if (g_t[i].on && o + 8 < sizeof list) o += (size_t)snprintf(list + o, sizeof list - o, "%s%#x", o ? ", " : "", g_t[i].type);
+    LOG("[hud] touch HUD: create-all main+%#x / destroy-all main+%#x hooked (after hle_dos2_touch.c compared them); a player UI set built with the mode byte 0 gets the PC branch of the set (HUD + panels: types %s) "
+        "from the host, handles %s (movies: the `touch` path table) %s; active now: %s; DM_DOS2_TOUCH_HUD_SCALE %.3f%s; a live switch needs %s and no dialog / loading / character creation on screen",
+        HU_CREATE_ALL, HU_DESTROY_ALL, list, g_slots && g_slots_ok ? "in the record's PC slots" : "NOT in the record", g_env > 0 ? "in every UI mode (DM_DOS2_TOUCHUI_HUD=1)" : "in UI mode touch", hu_on() ? "yes" : "no (UI mode not touch)", g_tune,
         !g_scale_ok ? " (NOT applied: sites differ)" : g_tune == 0 ? " (class scales left to the engine)" : " (class scale = it x iPad class scale / S)",
         g_any_state ? "any game state (logged)" : "a game state of DM_DOS2_TOUCHUI_HUD_STATES");
 }
