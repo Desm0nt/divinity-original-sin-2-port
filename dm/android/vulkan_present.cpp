@@ -668,7 +668,7 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
         if(has){VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};f2.pNext=&have;vkGetPhysicalDeviceFeatures2(physical,&f2);}
         if(has && have.conditionalRendering){dext.push_back(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);crf.conditionalRendering=VK_TRUE;crf.pNext=draw.pNext;draw.pNext=&crf;dm_vk_cond_render=1;}
         __android_log_print(ANDROID_LOG_INFO,"dm-vulkan","VK_EXT_conditional_rendering: listed=%d feature=%u -> %s",int(has),unsigned(have.conditionalRendering),dm_vk_cond_render?"enabled":"off");}
-    float priority=1;VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qc.queueFamilyIndex=family;qc.queueCount=1;qc.pQueuePriorities=&priority;VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dc.pNext=&draw;dc.pEnabledFeatures=&features.features;dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qc;dc.enabledExtensionCount=uint32_t(dext.size());dc.ppEnabledExtensionNames=dext.data();if((r=vkCreateDevice(physical,&dc,nullptr,&device)))return fail("vkCreateDevice",r);vkGetDeviceQueue(device,family,0,&queue);
+    float priority=1;VkDeviceQueueCreateInfo qc{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qc.queueFamilyIndex=family;qc.queueCount=1;qc.pQueuePriorities=&priority;VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dc.pNext=&draw;dc.pEnabledFeatures=&features.features;dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qc;dc.enabledExtensionCount=uint32_t(dext.size());dc.ppEnabledExtensionNames=dext.data();__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","[init] vkCreateDevice: %u extensions (issue #3: init steps on disk)",unsigned(dext.size()));if((r=vkCreateDevice(physical,&dc,nullptr,&device)))return fail("vkCreateDevice",r);vkGetDeviceQueue(device,family,0,&queue);__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","[init] device created; surface and swapchain next");
     for(;;){
         wait_window();
         if(!surface||window_changed()){
@@ -679,7 +679,7 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
         r=VkResult(create_swap());
         if(r==VK_NOT_READY||r==VK_ERROR_OUT_OF_DATE_KHR){wait_resize();continue;}
         if(r==VK_ERROR_SURFACE_LOST_KHR){uint64_t bad=active_generation;destroy_swap();wait_window_change(bad);continue;}
-        if(r)return fail("Swapchain",r);break;
+        if(r)return fail("Swapchain",r);__android_log_print(ANDROID_LOG_INFO,"dm-vulkan","[init] swapchain created");break;
     }
     if(fake_init_fail()){__android_log_print(ANDROID_LOG_WARN,"dm-vulkan","DM_VK_FAKE_INIT_FAIL=%s: failing the initialization after the swapchain (test of the driver fallback)",getenv("DM_VK_FAKE_INIT_FAIL"));
         return fail("Swapchain (faked by DM_VK_FAKE_INIT_FAIL)",VK_ERROR_INVALID_EXTERNAL_HANDLE);}

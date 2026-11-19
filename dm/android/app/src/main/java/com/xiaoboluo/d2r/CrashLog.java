@@ -106,8 +106,9 @@ final class CrashLog {
 
     // ---- the session marker: the game is running (pid, state fg / bg / boot); removed on a clean end
     static void session(Context c, String state) {
-        try (OutputStream os = new FileOutputStream(new File(c.getFilesDir(), SESSION))) {
+        try (FileOutputStream os = new FileOutputStream(new File(c.getFilesDir(), SESSION))) {
             os.write(("pid=" + android.os.Process.myPid() + "\nstate=" + state + "\ntime=" + System.currentTimeMillis() + "\n").getBytes(StandardCharsets.UTF_8));
+            try { os.getFD().sync(); } catch (IOException e) { /* best effort */ }   // [DOS2] issue #3: survives a kernel crash / phone reboot
         } catch (IOException e) { android.util.Log.w("dm", "crash log: session marker: " + e); }
     }
     static void sessionEnd(Context c) { new File(c.getFilesDir(), SESSION).delete(); }
@@ -121,6 +122,7 @@ final class CrashLog {
     // ---- at the start: did the last run end badly? Returns a one-line description of what was found (for the boot log), or null.
     // The report itself is written on a background thread; done receives its path (null when nothing was written).
     interface Done { void written(File report, String why); }
+    static volatile boolean lastRunRebooted;   // [DOS2] issue #3: checkPrevious saw the phone boot after the last run started
     static String checkPrevious(Context c, Done done) {
         File marker = new File(c.getFilesDir(), NATIVE_MARK), sess = new File(c.getFilesDir(), SESSION);
         String mark = readSmall(marker), session = readSmall(sess);
@@ -162,9 +164,14 @@ final class CrashLog {
             why = "the app was ended while the game was " + (front ? "in front" : "in the background") + ": " + exit;
         } else {
             if (!front) return "last run (pid " + pid + ") ended in the background (Android 10: no exit reason), not reported";
-            why = "the app ended while the game was in front (state " + state + "; " + (exit != null ? exit : "no exit reason on Android 10") + ")";
+            why = "the app ended while the game was in front (state " + state + "; " + (exit != null ? exit : Build.VERSION.SDK_INT >= 30 ? "no exit reason from the system" : "no exit reason on Android 10") + ")";
         }
         if (started > 0) why += "; that run started " + stamp(started);
+        // [DOS2] issue #3: the phone booted after that run started = the whole phone went down (a kernel / system crash), not only the app
+        long bootAt = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime();
+        if (mark == null && started > 0 && bootAt > started) lastRunRebooted = true;   // DmActivity.gpuSafeEnv: the next safe step
+        if (mark == null && started > 0 && bootAt > started) why = "the phone restarted while the game was running (booted " + stamp(bootAt)
+            + ": a system or kernel crash took the whole phone down, not only the app); " + why;
         final String reasonText = why, details = trace == null ? null : "ANR trace:\n" + trace;
         final File log = bootLog(c);
         final byte[][] snap = snapshot(log);   // now: the native side moves boot.log to boot.prev.log when the game starts again

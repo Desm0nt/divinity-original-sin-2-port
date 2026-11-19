@@ -1898,3 +1898,10 @@ unknown= bad_addr= nb= left_open= …` (на кадр).
 - Ошибка present всплывает на кадр позже. Поток не останавливается (живёт с процессом), объект передачи не освобождается.
 - Другие подачи в очередь вне `xbg_game.cpp`: `xbg_selftest.cpp` (только при инициализации, до первого present), `xbg_vulkan.cpp` (в DOS2 не
   вызывается). Новый код с `vkQueue*` в движке — только через `ptq::` (тест модуля считает прямые вызовы в `xbg_game.cpp`).
+## Issue #3: паника ядра на OnePlus 6 (Adreno 630) — сбор логов (19.11)
+- Телефон уходит в crashdump на старте; `boot.log` игрока обрывался после «Custom border colour», до `vkCreateDevice`. Лог писался без
+  `fsync`, при панике ядра пропадают секунды строк -> точный шаг неизвестен. Сделано (KB APP-15): поток `dm-logsync` (fsync новых строк,
+  первые 180 с подряд, потом раз в 1 с; `DM_LOG_SYNC=0` выкл.), строки `[init]` вокруг `vkCreateDevice` / swapchain, маркер сессии с sync,
+  в crash.txt «the phone restarted while the game was running». Ответ игроку — черновик хозяину (DOOM / D3 на том же телефоне? pstore?).
+- Профилактика (19.11, гипотеза): zero-copy по умолчанию выкл. на ядрах < 4.14 (`xbg_old_kernel`), лестница после перезагрузки телефона
+  во время запуска: шаг 1 zero-copy выкл., шаг 2 + `TU_DEBUG=sysmem,noubwc,nolrz` (prefs `gpu_safe_step`, тост; `DM_GPU_SAFE=0` сброс).

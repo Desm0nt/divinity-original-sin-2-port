@@ -34,6 +34,7 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>   // [DOS2] setpriority of the log sync thread
 #include <sys/system_properties.h>
 #include "../host/dm_cpu.h"   // [DOOM] getauxval + dm_cpu_lse() for the boot cpu line
 
@@ -95,6 +96,35 @@ static _Atomic int g_pump_busy;
 static char g_crash_note[384];   // the last FATAL line: copied into the crash marker (read in the signal handler, racy by design)
 static long g_log_head = -1, g_log_max = 32l << 20;
 #define LOG_HEAD_KEEP (4l << 20)
+// [DOS2] issue #3 (OnePlus 6, Adreno 630, custom ROM: the KERNEL crashed and the phone rebooted at the Vulkan start): fflush only puts a
+// line into the page cache; a kernel panic loses every line not yet written back (seconds), so the log looked cut earlier than the real
+// last step. A low-priority thread (dm-logsync) now fsyncs the log as soon as new lines arrive: back to back for the first DM_LOG_SYNC_FAST_S
+// seconds of the run (default 180: driver load, Vulkan init, shaders, first frames, level load), then at most once per DM_LOG_SYNC_MS
+// (default 1000). The writers never wait for it. DM_LOG_SYNC=0: off (as before).
+static pthread_mutex_t g_sync_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_sync_cv = PTHREAD_COND_INITIALIZER;
+static int g_sync_dirty, g_sync_on;
+static void log_sync_kick(void) { if (!g_sync_on) return; pthread_mutex_lock(&g_sync_mu); g_sync_dirty = 1; pthread_cond_signal(&g_sync_cv); pthread_mutex_unlock(&g_sync_mu); }
+static void *log_sync_thread(void *arg) {
+    (void)arg; setpriority(PRIO_PROCESS, 0, 10);
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        pthread_mutex_lock(&g_sync_mu); while (!g_sync_dirty) pthread_cond_wait(&g_sync_cv, &g_sync_mu); g_sync_dirty = 0; pthread_mutex_unlock(&g_sync_mu);
+        if (g_log_fd >= 0) fsync(g_log_fd);
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        long ms = (t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000;
+        const char *e = getenv("DM_LOG_SYNC_FAST_S"); long fast_ms = (e ? atol(e) : 180) * 1000;   // read each time: dm/env comes after the start
+        e = getenv("DM_LOG_SYNC_MS"); long slow_ms = e && atol(e) > 0 ? atol(e) : 1000;
+        e = getenv("DM_LOG_SYNC"); if (e && !atoi(e)) { g_sync_on = 0; return NULL; }   // dm/env DM_LOG_SYNC=0: off from here on
+        if (ms >= fast_ms) { struct timespec d = {slow_ms / 1000, (slow_ms % 1000) * 1000000}; nanosleep(&d, NULL); }
+    }
+    return NULL;
+}
+static void log_sync_start(void) {
+    const char *e = getenv("DM_LOG_SYNC"); if ((e && !atoi(e)) || g_log_fd < 0) return;
+    pthread_t th; if (pthread_create(&th, NULL, log_sync_thread, NULL)) return;
+    pthread_setname_np(th, "dm-logsync"); pthread_detach(th); g_sync_on = 1; log_sync_kick();
+}
 static void log_file_line(const char *tag, const char *s) {
     if (!g_logf) return;
     pthread_mutex_lock(&g_log_mu);
@@ -107,6 +137,7 @@ static void log_file_line(const char *tag, const char *s) {
             fprintf(g_logf, "[dm] [log] boot.log passed %ld MB: cut back to its first %ld MB (DM_LOG_MAX_MB), later lines follow\n", g_log_max >> 20, g_log_head >> 20); fflush(g_logf); }
     }
     pthread_mutex_unlock(&g_log_mu);
+    log_sync_kick();
 }
 static void note_fatal(const char *s) { if (strstr(s, "FATAL")) snprintf(g_crash_note, sizeof g_crash_note, "%s", s); }
 static void *log_pump(void *arg) {
@@ -228,6 +259,7 @@ static void log_init(void) {
     int fds[2]; if (pipe(fds)) return;
     dup2(fds[1], 2); close(fds[1]); setvbuf(stderr, NULL, _IOLBF, 0);
     pthread_t th; if (!pthread_create(&th, NULL, log_pump, (void *)(intptr_t)fds[0])) { pthread_setname_np(th, "dm-log"); pthread_detach(th); }
+    log_sync_start();   // [DOS2] issue #3: the log on disk even when the kernel crashes (the thread reads DM_LOG_SYNC* again after every sync: dm/env too)
     log_header();
 }
 

@@ -270,6 +270,29 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             CrashLog.startLiveLogcat(app);   // [D3] logs/logcat.txt written live (survives a kill); after checkPrevious read the old run
         }
     }
+    // ---- [DOS2] issue #3 (OnePlus 6 / Adreno 630, custom ROM: the whole phone rebooted at every start): when CrashLog saw the phone boot
+    // after the last run had started (a kernel / system crash, not an app crash), the next start goes one step safer, kept in prefs
+    // (front gpu_safe_step, 0..2): 1 = zero-copy guest memory off (DM_GFX_ZEROCOPY=0: no AHardwareBuffer / ION mappings), 2 = + Turnip
+    // without UBWC compression and LRZ (TU_DEBUG=sysmem,noubwc,nolrz). dm/env still wins (read after this). DM_GPU_SAFE=0 in the process
+    // environment (adb) clears the step. The player sees a toast; no flags to edit.
+    private void gpuSafeEnv() {
+        SharedPreferences p = getSharedPreferences(Ui.PREFS, MODE_PRIVATE);
+        int step = p.getInt("gpu_safe_step", 0);
+        if ("0".equals(System.getenv("DM_GPU_SAFE")) && step != 0) { step = 0; p.edit().putInt("gpu_safe_step", 0).commit(); crumb("gpu safe step cleared (DM_GPU_SAFE=0)"); }
+        else if (CrashLog.lastRunRebooted && step < 2) {
+            step++; p.edit().putInt("gpu_safe_step", step).commit();
+            boolean ru = UpdateNotice.russianUi(Locale.getDefault().getLanguage());
+            android.widget.Toast.makeText(this, ru ? "Телефон перезагрузился во время прошлого запуска: включены более безопасные настройки графики (шаг " + step + " из 2)"
+                : "The phone restarted during the last launch: safer graphics settings are on now (step " + step + " of 2)", android.widget.Toast.LENGTH_LONG).show();
+        }
+        CrashLog.lastRunRebooted = false;
+        try {
+            if (step >= 1) Os.setenv("DM_GFX_ZEROCOPY", "0", true);
+            if (step >= 2 && System.getenv("TU_DEBUG") == null) Os.setenv("TU_DEBUG", "sysmem,noubwc,nolrz", true);
+        } catch (ErrnoException e) { crumb("gpu safe step: setenv failed: " + e); }
+        crumb("gpu safe step " + step + (step == 0 ? " (normal)" : step == 1 ? " (zero-copy off)" : " (zero-copy off, TU_DEBUG=sysmem,noubwc,nolrz)") + ", issue #3 ladder");
+    }
+
     // A start / boot failure screen: the report now (the screen names it), once per message and process.
     private File startErrorReport(String message) {
         File f = CrashLog.report(this);
@@ -583,6 +606,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             File runtime = new File(internal, "out/main.patched.bin").canRead() || ext == null ? internal : new File(ext, "dm");
             try { Os.setenv("DM_DERIVED", new File(runtime, "derived.tsv").getAbsolutePath(), true); } catch (ErrnoException e) { showStartError(getString(R.string.dmAndroidStorage)); return; }
             if (DOOM) { applyPendingImport(); GearSettings.applyEnv(this); }   // [front] a requested save import first; then every gear section's environment (Tl2Gear)
+            if (DOS2) gpuSafeEnv();   // [DOS2] issue #3: safer GPU settings after the phone restarted during a run
             if (DOOM) try {   // [DOOM] the app version for boot.log's first lines (jni_android.c log_header)
                 android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
                 Os.setenv("DM_APP_VERSION", getPackageName() + " " + pi.versionName + " (" + pi.getLongVersionCode() + ")" + (BuildConfig.DEBUG ? " debug" : ""), true);

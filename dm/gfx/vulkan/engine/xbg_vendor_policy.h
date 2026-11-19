@@ -16,6 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <stdio.h>
+#include <sys/utsname.h>
+#endif
 
 enum XbgGpuFamily { XBG_GPU_OTHER=0, XBG_GPU_ADRENO=1, XBG_GPU_MALI=2, XBG_GPU_POWERVR=3, XBG_GPU_XCLIPSE=4, XBG_GPU_MALEOON=5 };
 
@@ -127,7 +131,17 @@ inline float xbg_aniso_allowed(float wanted,bool feature,float max_aniso){
 // Zero-copy guest memory (AHardwareBuffer BLOB pages imported as VkBuffer memory, CPU-cached pages read by the GPU through IO
 // coherency) was proven only on Adreno (work/zc_test). Elsewhere the copy path is the default: a GPU that does not snoop the CPU
 // caches would read stale vertices / uniforms (Arm documents ACE-Lite only for some SoCs). DM_GFX_ZEROCOPY=1 forces it on.
-inline bool xbg_zero_copy_default(XbgGpuFamily f){return f==XBG_GPU_ADRENO;}
+// [DOS2] issue #3 (OnePlus 6, SDM845, kernel 4.9 custom ROM: the KERNEL crashed at the start): zero-copy allocates AHardwareBuffer BLOBs
+// of up to 0.5 GB through gralloc / ION, imports them into Vulkan and maps the dma-buf MAP_FIXED over guest memory - the most kernel-
+// heavy thing we do. Kernels older than 4.14 (4.4 / 4.9: SD835 / SD845 era, gralloc 2) get it off by default; DM_GFX_ZEROCOPY=1 still wins.
+inline bool xbg_old_kernel(){
+#if defined(__ANDROID__) || defined(__linux__)
+    static int v=-1;if(v<0){struct utsname u;int a=0,b=0;v=0;if(!uname(&u)&&sscanf(u.release,"%d.%d",&a,&b)==2)v=(a<4||(a==4&&b<14))?1:0;}return v==1;
+#else
+    return false;
+#endif
+}
+inline bool xbg_zero_copy_default(XbgGpuFamily f){return f==XBG_GPU_ADRENO && !xbg_old_kernel();}
 // The PowerVR shader compiler is not thread-safe (forums.imgtec.com t/4334, BXM-8-256 1.15) and builds slowly (t/4280):
 // one vkCreate*Pipelines at a time (warm-up threads included). DM_GFX_PIPE_SERIAL.
 inline bool xbg_pipe_serial_default(XbgGpuFamily f){return f==XBG_GPU_POWERVR;}

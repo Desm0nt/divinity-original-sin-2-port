@@ -1718,6 +1718,7 @@ bool on(){
 #endif
 
         if(enabled && !(get_props=(PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vkGetDeviceProcAddr(cfg.device,"vkGetAndroidHardwareBufferPropertiesANDROID"))){enabled=0;xbg_logf("NVN zero-copy: AHardwareBuffer import unavailable, off");}
+        if(!e && !enabled && gpu_policy==XBG_GPU_ADRENO && xbg_old_kernel())xbg_logf("NVN zero-copy: off by default on a kernel older than 4.14 (issue #3: AHB / ION mapping on old kernels)");
         xbg_logf("NVN zero-copy guest memory=%d (DM_GFX_ZEROCOPY)",enabled);}
     return enabled>0;
 }
