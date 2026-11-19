@@ -511,12 +511,30 @@ static void dt_place_tap(void *mgr, float x, float y) {
                                                     "the pad's selector to the ground under the finger, then pad A once the mode's preview is back"); }
 }
 static void dt_w3_tap_x(void *mgr, float x, float y, int place);
+// UI mode TOUCH, a skill prepared (hle_dos2_touchui_hud.c, hotBar_p reports it): as the iPad, a world tap only AIMS (the cursor goes there, the PC
+// aim preview follows it, no click); the CONFIRM circle of hotBar_p fires at that point, the cancel button drops it. DM_DOS2_TOUCH_T_AIMTAP=0: the
+// tap casts at once, as the PC click.
+int dm_dos2_touchui_hud_aiming(void); void dm_dos2_touchui_hud_aim_at(float x, float y);   // hle_dos2_touchui_hud.c
+static int g_t_aimtap = 1;
 static void dt_w3_tap(void *mgr, float x, float y) { dt_w3_tap_x(mgr, x, y, 1); }
 static void dt_w3_tap_t(void *mgr, float x, float y) { dt_w3_tap_x(mgr, x, y, 0); }   // UI mode TOUCH (below): the PC click, no placement / aim diversion (the PC input mode does those itself)
 static void dt_w3_tap_x(void *mgr, float x, float y, int place) {
     const uint64_t now = dt_ms();
     g_n_wtap++;
     if (place && g_place && dm_dos2_touch_world_placing()) { dt_place_tap(mgr, x, y); return; }
+    if (!place && g_t_aimtap && dm_dos2_touchui_hud_aiming()) {
+        dt_move(mgr, x, y); dm_dos2_touchui_hud_aim_at(x, y);
+        { static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] world tap at %.0f,%.0f: AIM (a skill is prepared): cursor only, CONFIRM fires", (double)x, (double)y); }
+        return;
+    }
+    if (!place) {   // UI mode TOUCH, the iPad's action plate: a tap on a character / item only points at it, the plate above it acts (hle_dos2_touchui_hud.c; DM_DOS2_TOUCH_T_PLATE=0 off)
+        int dm_dos2_touchui_hud_plate(float x, float y, int obj); int dm_dos2_touch_world_obj_under(void);
+        if (dm_dos2_touchui_hud_plate(x, y, dm_dos2_touch_world_obj_under())) {
+            dt_move(mgr, x, y);
+            { static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] world tap at %.0f,%.0f: an object is there: cursor only, the action plate acts", (double)x, (double)y); }
+            return;
+        }
+    }
     if (g_w3_confirm && !(w3.prev_until && now < w3.prev_until && hypotf(x - w3.px, y - w3.py) < g_win_h * 0.07f)) {   // first tap: preview only
         w3.px = x; w3.py = y; w3.prev_until = w3.hover_until = now + 4000; g_n_w3prev++;
         dt_move(mgr, x, y);
@@ -991,7 +1009,11 @@ static void dt_step(void *mgr, const dt_ev *e) {
             if (!g.wact && e->ph == EV_UP) {
                 const int rel = dt_t1_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms);
                 if (rel == DT_REL_TAP) { dt_t_world_tap(mgr, g.sx, g.sy); dt_t_note_tap(g.sx, g.sy, "world"); }
-                else if (rel == DT_REL_TIP && g_dbg) LOG("[touch] TOUCH: short long press over (%llu ms): tooltip only, no click", (unsigned long long)(e->t - g.t0));
+                else if (rel == DT_REL_TIP) {   // DM_DOS2_TOUCH_T_PICK=long / auto with a dead picking: the hold previews, the action plate acts (hle_dos2_touchui_hud.c)
+                    int dm_dos2_touchui_hud_plate_long(float x, float y);
+                    const int pl = dm_dos2_touchui_hud_plate_long(g.sx, g.sy);
+                    if (g_dbg) LOG("[touch] TOUCH: short long press over (%llu ms): tooltip only, no click%s", (unsigned long long)(e->t - g.t0), pl ? "; the action plate is up there" : "");
+                }
             }
             g.st = G_IDLE; break;
         }
@@ -1927,6 +1949,7 @@ void dm_dos2_touch_install(void) {
         if ((v = getenv("DM_DOS2_TOUCH_T_CONES_MS")) && atoi(v) >= 0 && atoi(v) <= 60000) g_t_cones_ms = atoi(v);
         g_t_pan_inv = (v = getenv("DM_DOS2_TOUCH_T_PAN_INV")) && atoi(v) > 0;
         g_t_t3f_esc = (v = getenv("DM_DOS2_TOUCH_T_3F_ESC")) && atoi(v) > 0;
+        if ((v = getenv("DM_DOS2_TOUCH_T_AIMTAP"))) g_t_aimtap = atoi(v) > 0;
         if (g_t_slong_ms > g_t_long_ms) g_t_slong_ms = g_t_long_ms;   // a tooltip time past the long press: no separate tooltip
         LOG("[touch] UI mode TOUCH gestures%s (iPad touchscreen_1.json as PC records, while the TOUCH PC UI is up): tap = left click (double tap = a PC double click, %d ms), "
             "still %d ms = tooltip (hover, no click), %d ms = right click (ContextMenu); one / two-finger pan = keys w / a / s / d (%d ms per screen height%s), "

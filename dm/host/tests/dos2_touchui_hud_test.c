@@ -40,6 +40,25 @@ int main(void) {
     hu_aim_feed(&a, 300, 300, 1700); hu_aim_feed(&a, 900, 500, 1710);             // a fast pass (10 ms at 300,300) is not a rest: the button (200 ms) was
     assert(hu_aim_point(&a, &x, &y) && x == 1200 && y == 790);
     hu_aim_set(&a, 640, 360); assert(hu_aim_point(&a, &x, &y) && x == 640 && y == 360);   // the gestures name the point themselves
+    // the action plate's pick chain (DM_DOS2_TOUCH_T_PICK)
+    assert(hu_pick_parse(NULL) == HU_PICK_AUTO && hu_pick_parse("") == HU_PICK_AUTO && hu_pick_parse("pc") == HU_PICK_PC && hu_pick_parse("hover") == HU_PICK_HOVER);
+    assert(hu_pick_parse("hybrid") == HU_PICK_HYBRID && hu_pick_parse("long") == HU_PICK_LONG && hu_pick_parse("x") == HU_PICK_AUTO);
+    { hu_pick p = {0}; int died = 0;
+      assert(hu_pick_tap(&p, HU_PICK_AUTO, 1, 1, &died) == HU_SRC_PC && hu_pick_tap(&p, HU_PICK_AUTO, 0, 1, &died) == HU_SRC_HOVER && hu_pick_tap(&p, HU_PICK_AUTO, 0, 0, &died) == HU_SRC_NONE);
+      assert(hu_pick_tap(&p, HU_PICK_PC, 0, 1, &died) == HU_SRC_NONE && hu_pick_tap(&p, HU_PICK_HOVER, 1, 0, &died) == HU_SRC_NONE && hu_pick_tap(&p, HU_PICK_HOVER, 1, 1, &died) == HU_SRC_HOVER);
+      assert(hu_pick_tap(&p, HU_PICK_HYBRID, 0, 1, &died) == HU_SRC_HOVER && hu_pick_tap(&p, HU_PICK_LONG, 1, 1, &died) == HU_SRC_NONE);
+      for (int i = 0; i < 200; i++) hu_pick_tap(&p, HU_PICK_AUTO, 0, 0, &died);          // it has worked once: ground taps never kill it
+      assert(!p.dead && !hu_pick_long_on(&p, HU_PICK_AUTO) && hu_pick_long_on(&p, HU_PICK_LONG) && !hu_pick_long_on(&p, HU_PICK_HYBRID)); }
+    { hu_pick p = {0}; int died = 0, n = 0;                                                 // the helper's ray set-up does not run: dead after 3 taps, said once
+      for (int i = 0; i < 10; i++) { hu_pick_tap(&p, HU_PICK_AUTO, 0, -1, &died); n += died; if (i == 1) assert(!p.dead); }
+      assert(p.dead && n == 1 && hu_pick_long_on(&p, HU_PICK_AUTO));
+      assert(hu_pick_tap(&p, HU_PICK_AUTO, 1, -1, &died) == HU_SRC_PC && !p.dead && !hu_pick_long_on(&p, HU_PICK_AUTO)); }   // a hit revives it
+    { hu_pick p = {0}; int died = 0, n = 0;                                                 // it runs but never names an object: dead after 40 world taps
+      for (int i = 0; i < HU_PICK_DEAD_TAPS - 1; i++) { hu_pick_tap(&p, HU_PICK_AUTO, 0, 0, &died); n += died; }
+      assert(!p.dead && !n);
+      hu_pick_tap(&p, HU_PICK_AUTO, 0, 0, &died); assert(p.dead && died);
+      hu_pick p2 = {0}; for (int i = 0; i < 500; i++) hu_pick_tap(&p2, HU_PICK_HYBRID, 0, -1, &died);   // hybrid / pc / hover never fall to the long rule
+      assert(!p2.dead && !hu_pick_long_on(&p2, HU_PICK_HYBRID)); }
     printf("dos2_touchui_hud_test: ok\n");
     return 0;
 }

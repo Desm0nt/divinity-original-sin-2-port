@@ -112,6 +112,7 @@ typedef struct { uint32_t off, n; const uint32_t *want; } tw_site;
 typedef uint64_t (*tw_fn2)(uint64_t, uint64_t);
 static module_t *g_main;
 static tw_fn2 g_o_input, g_o_update, g_o_pickc, g_o_cursor;
+static volatile uint64_t g_live_obj, g_live_ms;   // UI mode TOUCH: [helper+0x80] as the ray set-up found it with the mode byte 0 (the PC's own hover pick), and when
 static volatile uint64_t g_pick_obj, g_pick_ms;   // pack 3y: the last pick under the finger (tw_pickc) and when
 static int g_on, g_dbg;
 static volatile uint8_t g_hover;   // read by the generated stub in front of main+0xfab260 too
@@ -151,6 +152,16 @@ int dm_dos2_touch_world_obj_under(void) {
     if (!h || tw_ms() - g_pick_ms > 400) return 0;
     const char *k = tw_kind(h);
     return k[0] == 'C' || k[0] == 'I';   // CHARACTER / ITEM
+}
+// hle_dos2_touchui_hud.c, the action plate's second source: the engine's own PC pick under the cursor right now. 1 a character / item, 0 none,
+// -1 = the helper's ray set-up has not run with the mode byte 0 in the last second (hooks off, or not the PC input mode)
+int dm_dos2_touch_world_obj_live(void);
+int dm_dos2_touch_world_obj_live(void) {
+    if (!g_on || !g_live_ms || tw_ms() - g_live_ms > 1000) return -1;
+    const uint64_t h = g_live_obj;
+    if (!h) return 0;
+    const char *k = tw_kind(h);
+    return k[0] == 'C' || k[0] == 'I';
 }
 static int tw_task_type(const uint8_t *task) { return task ? *(const volatile int32_t *)(task + TW_TASK_TYPE) : -1; }
 static const char *tw_task_name(int t) {   // what run tw2 showed for a type (the rest are numbers only)
@@ -212,7 +223,11 @@ static uint64_t tw_pickc(uint64_t helper, uint64_t a1) {   // main+0xfa9f50: the
                 (double)w[0], (double)w[1], (double)w[2], h[TW_H_WALK_OK] ? "walkable" : "not walkable", tw_kind(*(const volatile uint64_t *)(h + TW_H_OBJ)),
                 (unsigned long long)*(const volatile uint64_t *)(h + TW_H_OBJ)); }
     }
-    if (!g_hover) return g_o_pickc(helper, a1);
+    if (!g_hover) {
+        const uint64_t r0 = g_o_pickc(helper, a1);
+        if (helper && *g_mode == 0) { g_live_obj = *(const volatile uint64_t *)((const uint8_t *)(uintptr_t)helper + TW_H_OBJ); g_live_ms = tw_ms(); }   // PC input mode: the engine's own pick under the UI cursor
+        return r0;
+    }
     const uint8_t old = *g_mode; *g_mode = 0;
     const uint64_t r = g_o_pickc(helper, a1);
     *g_mode = old; g_n_pick++;

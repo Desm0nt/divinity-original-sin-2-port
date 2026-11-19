@@ -78,6 +78,22 @@
 //   dmAimBtn(1 | 0)  hotBar_p: CONFIRM = the PC's left click at the aimed point, cancel = the PC's right click there (PC: right click drops a
 //                    prepared skill). The aimed point = dm_dos2_touchui_hud_aim_at(x, y) when the gestures call it, else the last place the
 //                    cursor rested before the finger went to the button. Sent as mouse records through InjectInput on the next polls.
+//   dmKey(code)      minimap_p: 1 = quick save -> the f5 key (PC: QuickSave <- key:f5), 2 = the tactical camera -> the o key (ToggleTacticalCamera
+//                    <- key:o); raw key ids from the engine's name table main+0x2974b10 (index - 2: f5 0x42, o 0x32, as hle_dos2_touch.c's).
+// The ACTION PLATE (the iPad's overhead_t action button; "Implemented: touch HUD extras"). The iPad's own route - the overhead class's
+//   clickedAction - is not in the Switch main, and the PC acts on the first click. So the host does it: hle_dos2_touch.c asks
+//   dm_dos2_touchui_hud_plate(x, y, object under the finger) on a world tap in UI mode TOUCH. With a character / item there (the picking of
+//   hle_dos2_touch_world.c) the tap does not click: the cursor stays on the object (the PC's own hover shows its name / highlight) and the host
+//   invokes hotBar_p's showActiveSkill(2000000 + stageX * 2000 + stageY): the CONFIRM circle appears above the object. A tap on it =
+//   dmAimBtn(1) = the PC's left click at that point (open / talk / attack / pick up - whatever the PC click does). A tap on the ground walks
+//   at once and hides the plate. The plate carries no action name (the engine's text for it lives in the missing touch class).
+//   DM_DOS2_TOUCH_T_PLATE=0: off, a tap on an object acts at once as the PC click.
+//   Who names the object (DM_DOS2_TOUCH_T_PICK=auto|pc|hover|hybrid|long, rules in hle_dos2_touchui_hud.h hu_pick_tap): `pc` = the pick
+//   hle_dos2_touch_world.c noted while the finger was down; `hover` = the engine's own PC pick now ([PlayerPickingHelper+0x80] after its ray
+//   set-up main+0xfa9f50 ran with the mode byte 0 - there the helper casts from the UI cursor itself, 0xfa9fdc: this IS what the PC hover
+//   shows); `long` = no picking: a tap clicks, the short long press (the tooltip hold) puts the plate up at the finger. `auto` asks pc, then
+//   hover, and goes to `long` when the picking proves dead (the ray set-up never runs: 3 taps; or 40 world taps and never an object), one
+//   log line; a later hit revives it. `hybrid` = pc + hover without `long`: in mode 0 the hybrid's picking trick is the PC pick itself.
 // The pad is never turned off by the host; in the PC set the GAME drops the pad's records (its filter 0x844014), hle_dos2_touch.c sees them in
 // the poll and switches back (its live switch).
 // Switches (need DM_DOS2_TOUCHUI=1 with the package; players use the gear's UI mode):
@@ -192,7 +208,9 @@ static hu_fn g_create_all_orig, g_destroy_all_orig;
 static _Atomic int g_aim;                 // a skill is prepared (hotBar_p's dmAim)
 static hu_aim g_aimp;                     // the aimed point (game thread)
 static _Atomic int g_aim_set; static _Atomic uint64_t g_aim_xy;   // dm_dos2_touchui_hud_aim_at from another thread: two floats
-static struct { int kind, step; float x, y; uint64_t t; } g_act;   // a host click on its way: kind 1 left, 2 right, 3 escape
+static struct { int kind, step; float x, y; uint64_t t; uint32_t key; } g_act;   // a host click on its way: kind 1 left, 2 right, 3 a key (raw id in key)
+static int g_plate = 1, g_plate_on, g_pick_mode;   // the action plate: enabled, shown now, DM_DOS2_TOUCH_T_PICK
+static hu_pick g_pick;
 
 int dm_dos2_ui_mode(void); int dm_dos2_ui_mode_hud(void);   // hle_dos2_uimode.c
 int dm_dos2_touch_on(void);                                 // hle_dos2_touch.c
@@ -297,7 +315,7 @@ static void hu_destroy(const char *why) {
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
-    g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0;
+    g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0; g_plate_on = 0;
 }
 static void hu_create(uint8_t *ui, const char *why) {
     uint8_t *mgr = hu_mgr();
@@ -382,20 +400,22 @@ static int hu_input_ok(uint32_t dev) {   // the raw-state array hle_dos2_touch.c
     if (!mgr || !dm_dos2_touch_on()) return 0;
     return *(void *const volatile *)(mgr + HU_IN_DEVS) != NULL && *(const volatile uint32_t *)(mgr + HU_IN_DEVN) > dev;
 }
-static void hu_act_start(int kind, const char *what) {
+static void hu_act_start_key(int kind, const char *what, uint32_t key);
+static void hu_act_start(int kind, const char *what) { hu_act_start_key(kind, what, 1 /* escape */); }
+static void hu_act_start_key(int kind, const char *what, uint32_t key) {
     float x = -1, y = -1;
     if (kind != 3 && !hu_aim_point(&g_aimp, &x, &y)) { LOG("[hud] %s: no aimed point yet (the cursor has not rested anywhere): nothing sent", what); return; }
     if (!hu_input_ok(kind == 3 ? 0 : (uint32_t)g_mdev)) { LOG("【红】[hud] %s: touch as mouse is off or the input manager has no state array for the device: nothing sent", what); return; }
-    g_act.kind = kind; g_act.step = 0; g_act.x = x; g_act.y = y; g_act.t = 0;
-    if (g_dbg || g_naim++ < 12) LOG("[hud] %s -> %s%s (sent on the next polls)", what, kind == 1 ? "left click" : kind == 2 ? "right click" : "escape key",
+    g_act.kind = kind; g_act.step = 0; g_act.x = x; g_act.y = y; g_act.t = 0; g_act.key = key;
+    if (g_dbg || g_naim++ < 12) LOG("[hud] %s -> %s%s (sent on the next polls)", what, kind == 1 ? "left click" : kind == 2 ? "right click" : "a key record",
                                     kind == 3 ? "" : " at the aimed point");
     if (kind != 3 && (g_dbg || g_naim < 14)) LOG("[hud]   aimed point %.0f,%.0f (window px)", (double)x, (double)y);
 }
 static void hu_act_step(void) {
-    enum { ID_ESC = 1, ID_LEFT = 0x74, ID_RIGHT = 0x76, ID_MOTION = 0x79 };
+    enum { ID_LEFT = 0x74, ID_RIGHT = 0x76, ID_MOTION = 0x79 };
     if (!g_act.kind) return;
     const uint64_t now = hu_us() / 1000;
-    const uint32_t dev = g_act.kind == 3 ? 0 : (uint32_t)g_mdev, id = g_act.kind == 1 ? ID_LEFT : g_act.kind == 2 ? ID_RIGHT : ID_ESC;
+    const uint32_t dev = g_act.kind == 3 ? 0 : (uint32_t)g_mdev, id = g_act.kind == 1 ? ID_LEFT : g_act.kind == 2 ? ID_RIGHT : g_act.key;
     if (!hu_input_ok(dev)) { g_act.kind = 0; return; }
     if (g_act.step == 0) {
         if (g_act.kind != 3) {   // the iPad's order: the cursor, a motion record, then the button
@@ -443,6 +463,59 @@ static int hu_ei_aimbtn(void *ctx, void *player, void *ui, const char *name, uns
     const int ok = n && a && a[0].type == 4 && a[0].d != 0;
     if (!dm_dos2_touchui_may_press(ui)) return 1;
     hu_act_start(ok ? 1 : 2, ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)");
+    if (ok) g_plate_on = 0;   // the movie hid the plate itself
+    return 1;
+}
+static int hu_ei_key(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmKey(1 quick save | 2 tactical camera)
+    (void)ctx; (void)player; (void)name;
+    enum { ID_KEY_O = 0x32, ID_KEY_F5 = 0x42 };   // raw name table main+0x2974b10, index - 2
+    const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1;
+    if (code != 1 && code != 2) { LOG("[hud] dmKey(%d): no such key button (1 quick save, 2 tactical camera)", code); return 1; }
+    if (!dm_dos2_touchui_may_press(ui)) return 1;
+    hu_act_start_key(3, code == 1 ? "dmKey(1 quick save: f5)" : "dmKey(2 tactical camera: o)", code == 1 ? ID_KEY_F5 : ID_KEY_O);
+    return 1;
+}
+// hle_dos2_touch.c, the release of a short long press over the world in UI mode TOUCH: with the `long` rule on, the plate goes up there (1)
+int dm_dos2_touchui_hud_plate(float x, float y, int obj);
+int dm_dos2_touchui_hud_plate_long(float x, float y);
+int dm_dos2_touchui_hud_plate_long(float x, float y) {
+    if (!g_plate || !g_nobj || !hu_pick_long_on(&g_pick, g_pick_mode)) return 0;
+    return dm_dos2_touchui_hud_plate(x, y, -2);
+}
+// hle_dos2_touch.c, a world tap in UI mode TOUCH (game thread; x, y window px; obj = a character / item is under the finger): 1 = the tap is
+// taken - no click, the action plate is up over the object; 0 = act as always (the plate, if any, is hidden)
+int dm_dos2_touchui_hud_plate(float x, float y, int obj);
+int dm_dos2_touchui_hud_plate(float x, float y, int obj) {
+    enum { PLATE_BASE = 2000000, PLATE_HIDE = 1999999, PLATE_MUL = 2000, HB_W = 1948, HB_H = 1000 };   // tools/dos2_pchud_touch.py
+    if (!g_plate || !g_nobj || !g_main) return 0;
+    uint8_t *mgr = hu_mgr(), *hb = NULL;
+    for (int i = 0; i < g_nobj && mgr && !hb; i++) if (g_obj[i].type == HU_T_HOTBAR) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
+    uint8_t *fp = hb ? *(uint8_t *volatile *)(hb + HU_OBJ_FP) : NULL;
+    if (!fp) return 0;
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4;
+    static unsigned cnt;
+    if (obj >= 0) {   // a world tap: who names an object (obj = the `pc` source; -2 = the short long press of the `long` rule: the plate at once)
+        int dm_dos2_touch_world_obj_live(void);
+        const int live = dm_dos2_touch_world_obj_live(); int died = 0;
+        const int src = hu_pick_tap(&g_pick, g_pick_mode, obj, live, &died);
+        if (died) LOG("【红】[hud] action plate: the object picking is dead in this input mode (%u world taps, %s): from now on a tap clicks at once and the SHORT LONG PRESS puts the "
+                      "plate up (DM_DOS2_TOUCH_T_PICK=auto -> long)", g_pick.taps, live < 0 ? "the picking helper's ray set-up does not run" : "no source ever named an object");
+        if (g_dbg || cnt < 20) LOG("[hud] action plate pick #%u: source %s (pc %d, hover %d; DM_DOS2_TOUCH_T_PICK=%s%s)", g_pick.taps, hu_src_name(src), obj, live, hu_pick_name(g_pick_mode),
+                                   g_pick.dead ? ", picking dead: long press rule" : "");
+        obj = src != HU_SRC_NONE;
+    }
+    if (!obj) {
+        if (g_plate_on) { v.d = PLATE_HIDE; dm_dos2_touchui_invoke(fp, "showActiveSkill", &v, 1); g_plate_on = 0; if (g_dbg || cnt++ < 20) LOG("[hud] action plate hidden (a tap on the ground)"); }
+        return 0;
+    }
+    const int32_t *r = (const int32_t *)(const void *)(fp + 0x10);   // the movie's rect in the window: x, y, w, h
+    if (r[2] <= 0 || r[3] <= 0) return 0;
+    const int sx = (int)((x - (float)r[0]) * HB_W / (float)r[2]), sy = (int)((y - (float)r[1]) * HB_H / (float)r[3]);
+    if (sx < 0 || sx >= HB_W || sy < 0 || sy >= HB_H) return 0;   // outside hotBar_p's frame (the far left / right of a wide screen): no plate there
+    v.d = (double)(PLATE_BASE + sx * PLATE_MUL + sy);
+    if (!dm_dos2_touchui_invoke(fp, "showActiveSkill", &v, 1)) { if (cnt++ < 20) LOG("【红】[hud] action plate: hotBar_p's player has no invoke name \"showActiveSkill\": the tap acts at once"); return 0; }
+    hu_aim_set(&g_aimp, x, y); g_plate_on = 1;
+    if (g_dbg || cnt++ < 20) LOG("[hud] action plate over the object at %.0f,%.0f (stage %d,%d of hotBar_p): a tap on it = the PC click there", (double)x, (double)y, sx, sy);
     return 1;
 }
 // for the gestures (hle_dos2_touch.c; any thread): is a skill prepared (CONFIRM / cancel on screen), and "the player aimed here" (window px)
@@ -539,11 +612,16 @@ void dm_dos2_touchui_hud_install(void) {
     if ((v = getenv("DM_DOS2_TOUCHUI_HUD_STATES")) && *v) { if (!strcmp(v, "any")) g_any_state = 1; else { g_nstates = hu_list(v, g_states, 8); g_any_state = 0; } }
     if ((v = getenv("DM_DOS2_TOUCHUI_HUD_BLOCK")) && *v) g_nblock = hu_list(v, g_block, 16);
     g_show = (v = getenv("DM_DOS2_TOUCHUI_HUD_SHOW")) && atoi(v) > 0;
+    g_plate = !((v = getenv("DM_DOS2_TOUCH_T_PLATE")) && *v == '0');
+    g_pick_mode = hu_pick_parse(getenv("DM_DOS2_TOUCH_T_PICK"));
+    LOG("[hud] action plate %s; object picking DM_DOS2_TOUCH_T_PICK=%s (auto: the tap's pick, then the engine's PC hover pick, then the short long press when the picking is dead)",
+        g_plate ? "on" : "OFF (DM_DOS2_TOUCH_T_PLATE=0)", hu_pick_name(g_pick_mode));
     v = getenv("DM_DOS2_TOUCH_HUD_SCALE"); g_tune = hu_tune(v && *v ? (float)atof(v) : 0, v && *v);
     if ((v = getenv("DM_DOS2_TOUCH_DEV")) && atoi(v) > 0 && atoi(v) < 64) g_mdev = atoi(v);
     g_sites = 1;
     if (dm_dos2_touchui_ei_on()) {
         dm_dos2_touchui_ei_register("dmSide", hu_ei_side, NULL); dm_dos2_touchui_ei_register("dmAim", hu_ei_aim, NULL); dm_dos2_touchui_ei_register("dmAimBtn", hu_ei_aimbtn, NULL);
+        dm_dos2_touchui_ei_register("dmKey", hu_ei_key, NULL);
     } else LOG("【红】[hud] the ExternalInterface hook is off (DM_DOS2_TOUCHUI_EI=0 or its sites differ): dmSide / dmAim / dmAimBtn of the touch HUD movies do nothing");
     if (g_env > 0) {   // the old switch: the PC set follows the last input, rebuilt in game
         const char *lv = getenv("DM_DOS2_TOUCH_LIVE");

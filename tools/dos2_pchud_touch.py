@@ -20,13 +20,21 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
       showActiveSkill(slot)  the original, then CONFIRM / cancel are shown while the engine marks a prepared skill (slot >= 0) and
                        ExternalInterface dmAim(0 | 1) tells the host; a tap on them = dmAimBtn(1 confirm | 0 cancel) (host: the PC's left
                        click at the aimed point / right click = cancel)
+      HUD extras ("Implemented: touch HUD extras"): the deck list - dmDeck_mc (above the deck number) opens / closes five plates dmDeck1..5_mc
+                       (k pips = deck k), a tap on one runs the PC cycleHotBar as many times as it takes (nextHotbar) and closes the list; the
+                       deck indicator dmInd1..5_mc under the slots (the current deck's bar is bright; followed on enterFrame from the PC's
+                       currentHotBarIndex). The ACTION PLATE: showActiveSkill(2000000 + stageX * 2000 + stageY) from the host (a world tap on
+                       an object) puts the CONFIRM circle PLATE_UP px above that point, 1999999 hides it; a tap on it = dmAimBtn(1) as CONFIRM.
       Everything else is the PC movie's own mouse code: tap a slot = SlotPressed, hover (long press = the host's right click / still finger)
       = tooltip, drag from a slot = startDragging / stopDragging (unlocked bar), lock, actions list, chat, combat log buttons.
   minimap_p.swf        minimap.swf: the ring group moved (-42, +29), ping (-4, -61), home / diplomacy above the ring (TOUCH_LAYOUT 2.3);
-                       a tap on the ring (press and release on hit_mc) = ExternalInterface dmSide(2) = the map
+                       a tap on the ring (press and release on hit_mc) = ExternalInterface dmSide(2) = the map; two of the iPad's buttons:
+                       dmMmTac_mc (the tactical camera, where the iPad's view-menu button sits) = dmKey(2), dmMmSave_mc (quick save) = dmKey(1)
   statusConsole_p.swf  statusConsole.swf: console / fight buttons / turn notice / GM button raised by SC_UP more (the hot bar is taller):
                        health bar at screen y 943 as the iPad's
-  playerInfo_p.swf, combatLog_p.swf   the PC movies as they are (the portraits' 1.1 is the host's class scale; their PC mouse code is the
+  combatLog_p.swf      combatLog.swf opened at the screen centre as the iPad's (setPosition center / screen / center in onEventInit and
+                       onEventResize instead of bottomright); the PC window, its drag, resize, filters and wheel scroll are untouched
+  playerInfo_p.swf     the PC movie as it is (the portraits' 1.1 is the host's class scale; their PC mouse code is the
                        iPad's: tap = select, double = centre, right click = inventory, drag = regroup). Own names so a later touch edit needs
                        no host change.
   dmSide_p.swf         watermark.swf (UI type 0x8d, a plain UIObject) + the iPad's right side (rightSideButtons_t numbers, 2.4): frame
@@ -71,10 +79,16 @@ EXP_SX = (49, 100)               # expBar_mc.scaleX: ends near the last slot
 SWIPE = 130                      # stage px (1.5 slots)
 CONFIRM = (974, 788 - 80, 118)   # centre x, y, size: statusConsole_t confirmActionBtn_mc centre (W/2, 788), 118
 CANCEL = (974 + 201, 816 - 80, 69)   # cancelBtn_mc centre (W/2 + 201, 816), 69
+DECK_BTN = (396, 836, 44)        # dmDeck_mc: x, y, size (just above the deck number of the bar)
+DECK_LIST = (396, 778, 52, 58)   # dmDeck1..5_mc: x of the first, y, size, pitch
+IND = (750, 988, 80, 5, 82)      # dmInd1..5_mc: x of the first, y, bar w, h, pitch (hotBar_t indicator_mc: 5 bars 80 x 5 every 82)
+PLATE_UP = 110                   # the action plate's centre above the tapped point
+PLATE_BASE, PLATE_HIDE, PLATE_MUL = 2000000, 1999999, 2000
 # ---- minimap (PC stage 420 x 2000, anchored topright)
 MM_MOVE = [('hit_mc', -42, 29), ('map_mc', -42, 29), ('tension_mc', -42, 29), ('north_mc', -42, 29), ('armourDoll_mc', -42, 29),
            ('tensionHit_mc', -42, 29), ('title_txt', -42, 29), ('pingButton_mc', -4, -61), ('homestead_mc', 136 - 111, 47 - 94),
            ('diplomacy_mc', 268 - 111, 47 - 178)]
+MM_BTNS = [('dmMmTac_mc', 12, 'icon_tactical', 420 - 378, 154, 67), ('dmMmSave_mc', 11, None, 420 - 89, 163, 48)]   # name, code (10 + dmKey), art, x, y, size
 # ---- status console (PC stage 1920 x 1080, anchored bottom; its own code already raises by bottomBarHeight 67)
 SC_UP = 33                       # health bar 1043 - 67 - 33 = 943 (statusConsole_t: 943)
 SC_MOVE = ['console_mc', 'fightButtons_mc', 'turnNotice_mc', 'toGM_mc']
@@ -93,7 +107,7 @@ PANEL_CLOSE = {'partyInventory': ('inventory_mc', 'close_mc'), 'characterSheet':
 OUT = {'hotBar_p.swf': 'hotBar.swf', 'minimap_p.swf': 'minimap.swf', 'statusConsole_p.swf': 'statusConsole.swf', 'playerInfo_p.swf': 'playerInfo.swf',
        'combatLog_p.swf': 'combatLog.swf', 'dmSide_p.swf': 'watermark.swf'}
 OUT.update({n + '_p.swf': n + '.swf' for n in PANEL_CLOSE})
-EI_NEW = ['dmSide', 'dmAim', 'dmAimBtn']   # ExternalInterface names the host implements (hle_dos2_touchui_hud.c)
+EI_NEW = ['dmSide', 'dmAim', 'dmAimBtn', 'dmKey']   # ExternalInterface names the host implements (hle_dos2_touchui_hud.c)
 
 
 def sources(path):
@@ -139,6 +153,10 @@ class Doc:
         m = s.add(name, n, lines_of(n), like=orig)
         old = t.b; t.b = m; s.inst['traits'].append(Trait(s.P(keep), 1, 0, old))
     def done(s): s.swf.tags[s.tag][1] = s.pre + s.abc.write()
+    def abc_int(s, v):
+        """index of an int constant (append-only pool)"""
+        if v in s.abc.ints[1:]: return s.abc.ints.index(v, 1)
+        s.abc.ints.append(v); return len(s.abc.ints) - 1
     # code fragments
     def ei(s, name, *args): return [('getlex', s.EI), ('pushstring', s.S(name))] + [x for a in args for x in a] + [('callpropvoid', s.P('call'), 1 + len(args))]
     def get(s, *path): return [('getlocal0',)] + [('getproperty', s.P(p)) for p in path]
@@ -198,6 +216,20 @@ def hotbar_art(swf):
     sp, sb = art.png('plate_round_steel', centre=True); ic, ib = art.png('glyph_cancel', centre=True)
     x = g.sprite([(sp, 1, (0, 0), None), (ic, 2, (0, 0), None)])
     g.place(x, CANCEL[0], CANCEL[1], 'dmCancel_mc', CANCEL[2] / (sb[2] - sb[0])); placed.append(('dmCancel_mc', CANCEL))
+    # the deck list: our plates (assets/touchui) + pips / bars drawn in code
+    sq, qb = art.png('plate_square_copper'); qw = qb[2] - qb[0]; ink = (236, 226, 200)
+    def rect(x0, y0, w, h, rgb=ink): return ta.poly_shape(g, [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)], rgb)[0]
+    def pip(cx, cy, r=5): return ta.poly_shape(g, [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)], ink)[0]
+    bx, by, bs = DECK_BTN
+    g.place(g.sprite([(sq, 1, (0, 0, bs / qw), None)] + [(rect(bs * 0.25, bs * (0.28 + 0.19 * i), bs * 0.5, bs * 0.09), 2 + i, (0, 0), None) for i in range(3)]), bx, by, 'dmDeck_mc')
+    placed.append(('dmDeck_mc', DECK_BTN))
+    lx, ly, ls, lp = DECK_LIST
+    for k in range(1, 6):
+        xs = [ls / 2.0 + (i - (k - 1) / 2.0) * 9 for i in range(k)]
+        g.place(g.sprite([(sq, 1, (0, 0, ls / qw), None)] + [(pip(xv, ls / 2.0, 3.5), 2 + i, (0, 0), None) for i, xv in enumerate(xs)]), lx + lp * (k - 1), ly, 'dmDeck%d_mc' % k)
+    ix, iy, iw, ih, ip = IND
+    for k in range(1, 6): g.place(g.sprite([(rect(0, 0, iw, ih), 1, (0, 0), None)]), ix + ip * (k - 1), iy, 'dmInd%d_mc' % k)
+    placed.append(('dmDeck1..5_mc', DECK_LIST)); placed.append(('dmInd1..5_mc', IND))
     g.finish()
     return placed, len(g.new_defs)
 
@@ -236,7 +268,32 @@ def hotbar(data):
         ('getlocal', 3)] + num(SWIPE) + [('ifngt', 'left')] + cycle(True) + [('returnvoid',),
         ('L', 'left'), ('getlocal', 3)] + num(-SWIPE) + [('ifnlt', 'end')] + cycle(False) + [('L', 'end'), ('returnvoid',)]
     d.method('dmSwUp', 1, code)
-    press_code(d, d.ei('dmAimBtn', [('getlocal1',)]))
+    # dmBAct(code): 30 = the deck list open / closed, 31..35 = that deck, 1 / 0 = CONFIRM (also the action plate) / cancel. locals 2 steps, 3 mc
+    idx = d.get('hotbar_mc', 'cycleHotBar_mc', 'currentHotBarIndex')
+    act = [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3),
+           ('getlocal1',), ('pushbyte', 30), ('ifne', 'pick'),
+           ('getlocal0',)] + d.get('dmDeckOpen') + [('not',), ('setproperty', P('dmDeckOpen')), ('getlocal0',), ('callpropvoid', P('dmDeckShow'), 0), ('returnvoid',),
+           ('L', 'pick'), ('getlocal1',), ('pushbyte', 30), ('ifngt', 'aim'),
+           ('getlocal1',), ('pushbyte', 30), ('subtract',)] + idx + [('subtract',), ('pushbyte', 5), ('add',), ('pushbyte', 5), ('modulo',), ('convert_i',), ('setlocal', 2)]
+    for k in range(1, 5): act += [('getlocal', 2), ('pushbyte', k), ('iflt', 'pd')] + cycle(False)
+    act += [('L', 'pd'), ('getlocal0',), ('pushfalse',), ('setproperty', P('dmDeckOpen')), ('getlocal0',), ('callpropvoid', P('dmDeckShow'), 0), ('returnvoid',),
+            ('L', 'aim')] + d.get('dmPlate') + [('iffalse', 'send'), ('getlocal1',), ('pushbyte', 1), ('ifne', 'send'),
+            ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate'))] + d.child('dmConfirm_mc', 3) + [('getlocal', 3), ('iffalse', 'send'),
+            ('getlocal', 3)] + d.get('dmAimV') + [('convert_b',), ('setproperty', P('visible')),
+            ('L', 'send')] + d.ei('dmAimBtn', [('getlocal1',)])
+    press_code(d, act)
+    code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1)]
+    for k in range(1, 6):
+        code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 's%d' % k), ('getlocal', 1)] + d.get('dmDeckOpen') + [('convert_b',), ('setproperty', P('visible')), ('L', 's%d' % k)]
+    d.method('dmDeckShow', 0, code + [('returnvoid',)])
+    # dmTick(e): the indicator follows the PC's current deck. locals 2 current, 3 mc
+    code = HEAD + [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3)] + d.get('hotbar_mc') + [('iffalse', 'end')] + d.get(
+        'hotbar_mc', 'cycleHotBar_mc') + [('iffalse', 'end')] + idx + [('convert_i',), ('setlocal', 2), ('getlocal', 2)] + d.get('dmIndCur') + [('ifstricteq', 'end'),
+        ('getlocal0',), ('getlocal', 2), ('setproperty', P('dmIndCur'))]
+    for k in range(1, 6):
+        code += d.child('dmInd%d_mc' % k, 3) + [('getlocal', 3), ('iffalse', 'i%d' % k), ('getlocal', 3), ('pushbyte', 3), ('pushbyte', 10), ('divide',),
+            ('getlocal', 2), ('pushbyte', k), ('ifne', 'j%d' % k), ('pop',), ('pushbyte', 1), ('L', 'j%d' % k), ('setproperty', P('alpha')), ('L', 'i%d' % k)]
+    d.method('dmTick', 1, code + [('L', 'end'), ('returnvoid',)])
     # dmHook(): once. locals 1 object, 2 graphics
     code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1), ('pushnull',), ('coerce_a',), ('setlocal', 2)] + d.get('dmOn') + [('iftrue', 'end'),
         ('getlocal0',), ('pushtrue',), ('setproperty', P('dmOn'))]
@@ -250,6 +307,13 @@ def hotbar(data):
             ('getlocal', 2), ('callpropvoid', P('endFill'), 0), ('L', 'h%d' % k)]
     for k, (name, c) in enumerate((('dmConfirm_mc', 1), ('dmCancel_mc', 0))):
         code += d.child(name, 1) + [('getlocal', 1), ('iffalse', 'b%d' % k)] + arm(d, 1, c) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'b%d' % k)]
+    code += d.child('dmDeck_mc', 1) + [('getlocal', 1), ('iffalse', 'nd')] + arm(d, 1, 30) + [('L', 'nd')]
+    for k in range(1, 6):
+        code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 'dk%d' % k)] + arm(d, 1, 30 + k) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'dk%d' % k)]
+        code += d.child('dmInd%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 'ik%d' % k), ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseEnabled')),
+                                                    ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseChildren')), ('L', 'ik%d' % k)]
+    code += [('getlocal0',), ('pushfalse',), ('setproperty', P('dmDeckOpen')),
+             ('getlocal0',), ('pushstring', S('enterFrame')), ('getlocal0',), ('getproperty', P('dmTick')), ('callpropvoid', P('addEventListener'), 2)]
     code += [('L', 'end'), ('returnvoid',)]
     d.method('dmHook', 0, code)
     d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.call_orig('dmInitOrig', n) + [('getlocal0',), ('callpropvoid', P('dmLay'), 0), ('getlocal0',), ('callpropvoid', P('dmHook'), 0), ('returnvoid',)])
@@ -257,10 +321,22 @@ def hotbar(data):
     # showActiveSkill(slot): the original; CONFIRM / cancel follow "a skill is prepared"; the host hears every change. locals: n+1 shown, n+2 mc
     def sas(n):
         a, m = n + 1, n + 2
-        c = HEAD + [('pushfalse',), ('setlocal', a), ('pushnull',), ('coerce_a',), ('setlocal', m)] + d.call_orig('dmSasOrig', n) + [
-            ('getlocal1',), ('pushbyte', 0), ('greaterequals',), ('setlocal', a)]
+        v = n + 3
+        c = HEAD + [('pushfalse',), ('setlocal', a), ('pushnull',), ('coerce_a',), ('setlocal', m), ('pushbyte', 0), ('convert_i',), ('setlocal', v)]
+        # the host's action plate (never a slot number): PLATE_HIDE, or PLATE_BASE + stageX * PLATE_MUL + stageY
+        c += [('getlocal1',), ('pushint', d.abc_int(PLATE_HIDE)), ('ifnge', 'slot')] + d.child('dmConfirm_mc', m) + [('getlocal', m), ('iffalse', 'pe'),
+              ('getlocal1',), ('pushint', d.abc_int(PLATE_HIDE)), ('ifne', 'pshow'),
+              ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate')), ('getlocal', m)] + d.get('dmAimV') + [('convert_b',), ('setproperty', P('visible')), ('returnvoid',),
+              ('L', 'pshow'), ('getlocal1',), ('pushint', d.abc_int(PLATE_BASE)), ('subtract',), ('convert_i',), ('setlocal', v),
+              ('getlocal', m), ('getlocal', v)] + num(PLATE_MUL) + [('divide',), ('convert_i',)] + num(CONFIRM[2] // 2) + [('subtract',), ('setproperty', P('x')),
+              ('getlocal', m), ('getlocal', v)] + num(PLATE_MUL) + [('modulo',)] + num(CONFIRM[2] // 2 + PLATE_UP) + [('subtract',), ('setproperty', P('y')),
+              ('getlocal', m), ('pushtrue',), ('setproperty', P('visible')), ('getlocal0',), ('pushtrue',), ('setproperty', P('dmPlate')),
+              ('L', 'pe'), ('returnvoid',), ('L', 'slot')]
+        c += d.call_orig('dmSasOrig', n) + [('getlocal1',), ('pushbyte', 0), ('greaterequals',), ('setlocal', a), ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate'))]
         for k, name in enumerate(('dmConfirm_mc', 'dmCancel_mc')):
-            c += d.child(name, m) + [('getlocal', m), ('iffalse', 'v%d' % k), ('getlocal', m), ('getlocal', a), ('setproperty', P('visible')), ('L', 'v%d' % k)]
+            c += d.child(name, m) + [('getlocal', m), ('iffalse', 'v%d' % k), ('getlocal', m), ('getlocal', a), ('setproperty', P('visible'))]
+            if not k: c += [('getlocal', m)] + num(CONFIRM[0] - CONFIRM[2] // 2) + [('setproperty', P('x')), ('getlocal', m)] + num(CONFIRM[1] - CONFIRM[2] // 2) + [('setproperty', P('y'))]
+            c += [('L', 'v%d' % k)]
         c += d.get('dmAimV') + [('getlocal', a), ('ifstricteq', 'end'), ('getlocal0',), ('getlocal', a), ('setproperty', P('dmAimV')),
             ('getlocal', a), ('iffalse', 'off')] + d.ei('dmAim', num(1)) + [('returnvoid',), ('L', 'off')] + d.ei('dmAim', num(0)) + [('L', 'end'), ('returnvoid',)]
         return c
@@ -270,11 +346,25 @@ def hotbar(data):
 
 
 # ---------------------------------------------------------------- minimap, status console
-def moved(data, moves, tap=None):
-    """onEventInit: the original, then named root instances moved by (dx, dy); tap = (instance, dmSide code) for a press-and-release button"""
-    swf = Swf(data); d = Doc(swf); P = d.P
+def moved(data, moves, tap=None, btns=()):
+    """onEventInit: the original, then named root instances moved by (dx, dy); tap = (instance, dmSide code) for a press-and-release button;
+    btns = MM_BTNS-like grafted buttons (code 10 + n = ExternalInterface dmKey(n))"""
+    swf = Swf(data); nd = 0
+    if btns:
+        g = gr.Graft(swf); art = ta.Art(g); rp, rb = art.png('plate_round_copper'); pw = rb[2] - rb[0]; ink = (236, 226, 200)
+        for name, code, icon, x, y, size in btns:
+            k = size / pw; kids = [(rp, 1, (0, 0, k), None)]
+            if icon: ic, ib = art.png(icon); ki = k * 0.9; kids.append((ic, 2, (size / 2.0 - (ib[2] - ib[0]) * ki / 2.0, size / 2.0 - (ib[3] - ib[1]) * ki / 2.0, ki), None))
+            else:   # quick save: our own glyph drawn in code - an arrow down into a tray
+                u = size / 48.0; P2 = lambda pts: ta.poly_shape(g, [(a * u, b * u) for a, b in pts], ink)[0]
+                kids += [(P2([(21, 12), (27, 12), (27, 22), (32, 22), (24, 30), (16, 22), (21, 22)]), 2, (0, 0), None), (P2([(14, 32), (34, 32), (34, 36), (14, 36)]), 3, (0, 0), None)]
+            g.place(g.sprite(kids), x, y, name)
+        g.finish(); nd = len(g.new_defs)
+    d = Doc(swf); P = d.P
     # the ring: not in ping mode (there the PC code's own press sends minimapPing and leaves the mode; our listener was added first, so dmNote = the mode at the press)
-    if tap: press_code(d, d.get('dmNote') + [('iftrue', 'ping')] + d.ei('dmSide', [('getlocal1',)]) + [('L', 'ping')], dim=False, note='pingModeEnabled')
+    if tap: press_code(d, [('getlocal1',), ('pushbyte', 10), ('ifngt', 'side')] + d.ei('dmKey', [('getlocal1',), ('pushbyte', 10), ('subtract',)]) + d.ei(
+        'PlaySound', [('pushstring', d.S('UI_Generic_Click'))]) + [('returnvoid',), ('L', 'side')] + d.get('dmNote') + [('iftrue', 'ping')] + d.ei('dmSide', [('getlocal1',)]) + [('L', 'ping')],
+        dim=False, note='pingModeEnabled')
     def init(n):
         c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', n + 1)] + d.call_orig('dmInitOrig', n)
         for k, (name, dx, dy) in enumerate(moves):
@@ -283,12 +373,13 @@ def moved(data, moves, tap=None):
                 if v: c += [('getlocal', n + 1), ('getlocal', n + 1), ('getproperty', P(prop))] + num(v) + [('add',), ('setproperty', P(prop))]
             c += [('L', 'm%d' % k)]
         if tap: c += d.get(tap[0]) + [('coerce_a',), ('setlocal', n + 1), ('getlocal', n + 1), ('iffalse', 'nt')] + arm(d, n + 1, tap[1], kids=True) + [('L', 'nt')]
+        for k, b in enumerate(btns): c += d.child(b[0], n + 1) + [('getlocal', n + 1), ('iffalse', 'bt%d' % k)] + arm(d, n + 1, b[1]) + [('L', 'bt%d' % k)]
         return c + [('returnvoid',)]
     assert d.abc.trait(d.ci, 'dmHook') is None
     d.wrap('onEventInit', 'dmInitOrig', init)
     d.inst['traits'].append(Trait(P('dmHook'), 1, 0, d.add('dmHook', 0, HEAD + [('returnvoid',)])))   # the "already patched" mark
     d.done()
-    return swf.write(), dict(placed=[], defs=0, methods=d.made)
+    return swf.write(), dict(placed=[(b[0], b[3:]) for b in btns], defs=nd, methods=d.made)
 
 
 def closer(data, path):
@@ -313,7 +404,18 @@ def closer(data, path):
     return swf.write(), dict(placed=[], defs=0, methods=d.made)
 
 
-def minimap(data): return moved(data, MM_MOVE, ('hit_mc', 2))
+def minimap(data): return moved(data, MM_MOVE, ('hit_mc', 2), MM_BTNS)
+
+
+def combatlog(data):
+    """the iPad's place: the window opens at the screen centre (onEventInit after the original, onEventResize instead of the original's bottomright)"""
+    swf = Swf(data); d = Doc(swf); P, S = d.P, d.S
+    centre = d.ei('setPosition', [('pushstring', S('center'))], [('pushstring', S('screen'))], [('pushstring', S('center'))])
+    d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.call_orig('dmInitOrig', n) + centre + [('returnvoid',)])
+    d.wrap('onEventResize', 'dmResizeOrig', lambda n: HEAD + d.get('log_mc', 'moved') + [('iftrue', 'end')] + centre + [('L', 'end'), ('returnvoid',)])
+    d.inst['traits'].append(Trait(P('dmHook'), 1, 0, d.add('dmHook', 0, HEAD + [('returnvoid',)])))
+    d.done()
+    return swf.write(), dict(placed=[], defs=0, methods=d.made)
 def status(data): return moved(data, [(n, 0, -SC_UP) for n in SC_MOVE])
 def same(data): return data, dict(placed=[], defs=0, methods=[])
 
@@ -360,7 +462,7 @@ def side(data):
 
 
 def _closer(name): return lambda data: closer(data, PANEL_CLOSE[name])
-MAKE = {'hotBar_p.swf': hotbar, 'minimap_p.swf': minimap, 'statusConsole_p.swf': status, 'playerInfo_p.swf': same, 'combatLog_p.swf': same, 'dmSide_p.swf': side}
+MAKE = {'hotBar_p.swf': hotbar, 'minimap_p.swf': minimap, 'statusConsole_p.swf': status, 'playerInfo_p.swf': same, 'combatLog_p.swf': combatlog, 'dmSide_p.swf': side}
 MAKE.update({n + '_p.swf': _closer(n) for n in PANEL_CLOSE})
 
 
@@ -400,7 +502,13 @@ def check(src):
             t = dis('dmSwUp'); say('cycleHotBar' in t and 'isDragging' in t, 'swipe over the slots (%d px, not while dragging) -> cycleHotBar' % SWIPE)
             t = dis('showActiveSkill'); say('dmSasOrig' in t and "'dmAim'" in t and 'visible' in t, 'showActiveSkill: original, CONFIRM / cancel visible, dmAim(0 | 1)')
             say("'dmAimBtn'" in dis('dmBAct') and all((n.encode() + b'\0') in names for n in ('dmConfirm_mc', 'dmCancel_mc')), 'CONFIRM %s / cancel %s on the root, tap -> dmAimBtn(1 | 0)' % (CONFIRM, CANCEL))
+            t = dis('dmBAct'); say('dmDeckShow' in t and 'cycleHotBar' in t and all((('dmDeck%d_mc' % k).encode() + b'\0') in names and (('dmInd%d_mc' % k).encode() + b'\0') in names for k in range(1, 6))
+                                   and (b'dmDeck_mc\0') in names and 'currentHotBarIndex' in dis('dmTick'), 'deck list (button, 5 plates -> cycleHotBar) and the deck indicator (5 bars, enterFrame)')
+            t = dis('showActiveSkill'); say('dmPlate' in t and str(PLATE_BASE) in t and str(PLATE_HIDE) in t, 'action plate: showActiveSkill(%d + x * %d + y) puts CONFIRM %d px above the point, %d hides' % (PLATE_BASE, PLATE_MUL, PLATE_UP, PLATE_HIDE))
+        elif o == 'combatLog_p.swf':
+            t = dis('onEventInit'); say('dmInitOrig' in t and "'center'" in t and "'center'" in dis('onEventResize'), 'onEventInit = original + setPosition center / screen / center; onEventResize the same unless moved')
         elif o == 'minimap_p.swf':
+            say("'dmKey'" in dis('dmBAct') and all((b[0].encode() + b'\0') in names for b in MM_BTNS), 'tactical camera / quick save buttons on the root -> dmKey(2 | 1)')
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
