@@ -77,7 +77,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         add("DM_NB_RP","0");add("DM_NB_OPBARRIER","0");add("DM_NB_UIAREA","0");
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
         add("DM_NR_Z3","0");add("DM_NR_Z5","0");   // NR-ZERO Z3 / Z5: resolved draws from a table / the packet from the game thread (they sit on NR-09)
-        add("DM_NR_Z3B","0");add("DM_NR_Z3C","0");add("DM_NR_Z3D","0");   // NR-ZERO Z3b / Z3c / Z3d: the image word, the mesh view table, the ring word
+        add("DM_NR_Z3B","0");add("DM_NR_Z3C","0");add("DM_NR_Z3D","0");add("DM_NR_Z3K","0");   // NR-ZERO Z3b / Z3c / Z3d / Z3K: the image word, the mesh view table, the ring word, the cheap key
         // batch C defaults (19.11): shader twins, native state / uniform / translator / texture paths, AA with the outline
         add("DM_NR_SH_SURF","0");add("DM_NR_MAT","0");add("DM_NR_STATE","0");add("DM_NR_UBO","0");add("DM_NR_UBD","0");
         add("DM_NR_TRX_STICKY","0");add("DM_NR_TRX_ZC","0");add("DM_NR_TAPSET","0");add("DM_NR_TEX","0");add("DM_NR_TEXSTREAM","0");

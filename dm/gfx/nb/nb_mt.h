@@ -254,6 +254,29 @@ struct Queue {
         std::lock_guard<std::mutex> l(mu);
         if (c->big) free(c); else { c->used = c->cmds = 0; c->next = free_list; free_list = c; ++free_n; }
     }
+    // [DOS2] NR-ZERO Z5, the second writer (docs/dos2/nr/NR-ZERO.md section 18; dm/gfx/nr/nr_z5w.h). A thread that is NOT the producer
+    // (the game thread) fills chunks of its own and hands them to the producer, which splices them. take_spare is its take(): the
+    // free list under the queue's mutex (one lock a chunk, never a packet), no producer statistics (they are the producer's alone),
+    // at most spare_max chunks out at a time (nullptr = none now: that run is not written ahead). A spare chunk ends in
+    // splice_spare (the producer hands it over) or give_back_spare (any thread: its run was declined or never reached).
+    uint32_t spare_max = 64;
+    std::atomic<uint32_t> spare_out{0};
+    std::atomic<uint64_t> spare_taken{0}, spare_mallocs{0}, spare_none{0};
+    Chunk *take_spare() {
+        if (spare_out.load(std::memory_order_relaxed) >= spare_max) { spare_none.fetch_add(1, std::memory_order_relaxed); return nullptr; }   // (one writer: nobody else adds)
+        Chunk *c = nullptr;
+        { std::lock_guard<std::mutex> l(mu); if (free_list) { c = free_list; free_list = c->next; --free_n; } }
+        if (!c) {
+            c = static_cast<Chunk *>(malloc(sizeof(Chunk) + chunk_bytes));
+            if (!c) { spare_none.fetch_add(1, std::memory_order_relaxed); return nullptr; }
+            spare_mallocs.fetch_add(1, std::memory_order_relaxed); c->cap = chunk_bytes;
+        }
+        c->next = nullptr; c->cb = nullptr; c->seq = c->hash = 0; c->used = c->cmds = 0; c->big = 0;
+        spare_out.fetch_add(1, std::memory_order_relaxed); spare_taken.fetch_add(1, std::memory_order_relaxed);
+        return c;
+    }
+    void splice_spare(Chunk *c) { if (!c) return; spare_out.fetch_sub(1, std::memory_order_relaxed); splice(c); }                 // producer
+    void give_back_spare(Chunk *c) { if (!c) return; spare_out.fetch_sub(1, std::memory_order_relaxed); give_back(c); }           // any thread
     // Everything handed over so far is in the command buffer when this returns; the producer may then use it directly.
     void sync(int why) {
         ++st.sync[why]; flush(false);

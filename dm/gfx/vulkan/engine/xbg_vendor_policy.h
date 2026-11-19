@@ -173,6 +173,10 @@ inline int xbg_nr_z5_default(){return 0;}
 inline int xbg_nr_z3b_default(){return 0;}
 inline int xbg_nr_z3c_default(){return 0;}
 inline int xbg_nr_z3d_default(){return 0;}
+// [DOS2] NR-ZERO Z3 cheap key (docs/dos2/nr/NR-ZERO.md section 17): DM_NR_Z3K - the front table of DM_NR_Z3, indexed by the record's key id
+// and compared in place with the live state (no plan lookup, gather or hash before the answer). 0 on every family until the phone runs
+// (=2 verify first: bad 0, then the A/B of "[nr] draw span"). The app never sets it; safe-mode step 2 forces it to 0.
+inline int xbg_nr_z3k_default(){return 0;}
 // The PowerVR shader compiler is not thread-safe (forums.imgtec.com t/4334, BXM-8-256 1.15) and builds slowly (t/4280):
 // one vkCreate*Pipelines at a time (warm-up threads included). DM_GFX_PIPE_SERIAL.
 inline bool xbg_pipe_serial_default(XbgGpuFamily f){return f==XBG_GPU_POWERVR;}

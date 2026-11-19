@@ -18,7 +18,10 @@
 //                 Counted too: the runs (a run ends at any packet that is not an engine draw's, at another command buffer, at a UI
 //                 draw, at a conditional-rendering bracket), their lengths, head and tail draws - the numbers the decision needs.
 //                 Needs DM_NB_MT != 0 (packets) and DM_NR_DRAW=1.
-//              1  refused (red line, off): the game thread's half is not built.
+//              1  refused (red line, off): the game thread's half is not built. Its PACKET half exists and is tested on the PC with two
+//                 threads - the marks of the draw records, the ring of runs, the spare chunks, taking / declining a run on the
+//                 translation thread, the comparison of a written-ahead chunk (dm/gfx/nr/nr_z5w.h, tests/nr_z5w_test.cpp; NR-ZERO.md
+//                 section 18) - but nothing here includes it: the game thread has no values to write (section 18.3).
 // Lines: "[nr] DM_NR_Z5=..." at the start, "[nr] z5 check (DM_NR_Z5=2): ..." every 10 s, red "【红】[nr] z5: ...".
 #include "../../nr/nr_z5.h"
 namespace nrz5{

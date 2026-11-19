@@ -2912,7 +2912,7 @@ def nrz3_check():   # [DOS2] NR-ZERO Z3 DM_NR_Z3 / Z5 DM_NR_Z5 (docs/dos2/nr/NR-
     assert 'if(nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){z3r=nrz3::draw(' in g and 'if(z3r==1)return;}}' in g, 'Z3: only a plain engine draw with a record identity asks'
     assert 'if(z3r!=2 && (nrdraw::cur || (nrdraw::ui_rec && nrdraw::ui_pick())) && nrdraw::lane(' in g, 'Z3: after return 2 the old tail runs as after a lane() that returned false'
     assert g.index('#include "xbg_nr_draw.inc"') < g.index('#include "xbg_nr_z3.inc"') < g.index('#include "xbg_nr_sort.inc"'), 'Z3: included right after the lane'
-    assert 'if(mode<=0)return 0;' in z and 'void begin(){if(mode<0){init();if(mode<0)return;}K.ok=false;ps_called=false;}' in z, 'Z3: nothing runs at 0; the key of the draw before is dropped'
+    assert 'if(mode<=0)return 0;' in z and 'void begin(){if(mode<0){init();if(mode<0)return;}K.ok=false;ps_called=false;FP.valid=false;}' in z, 'Z3: nothing runs at 0; the key of the draw before is dropped'
     # 3 does not exist; needs DM_NR_DRAW=1 and DM_NR_DESC=1; Z5 is not built
     assert 'DM_NR_Z3=3 does not exist' in z and 'if(m && (nrdraw::mode!=1 || nrdesc::mode!=1)){' in z and 'nrz5::init(nrdraw::mode);' in z, 'Z3: modes (DM_NR_Z5 is read by nrz5)'
     # the key: every part through nrz_key (the function the host test mutates); the engine build never mutates
@@ -2931,7 +2931,7 @@ def nrz3_check():   # [DOS2] NR-ZERO Z3 DM_NR_Z3 / Z5 DM_NR_Z5 (docs/dos2/nr/NR-
     order = ['if(nrdesc::mode!=1 || nrdraw::mode!=1)return out(NRZW_GATE);', 'if(!desc_memo_enabled || capture.active || provenance_file || g_ui_moff!=0 || pgraph::armed || nroc::twin_draw || nrlf::fused_draw || read_preflight)return out(NRZW_GATE);',
              'if(nroc::mode>0 || nrpo::mode!=0 || nrps::mode<0 || nrsort::mode!=0 || nrmdi::mode!=0)return out(NRZW_GATE);', '!(pp?nrdraw::groups_pp():nrdraw::groups()))return out(NRZW_GATE);',
              'if(dpn.why || pl->retry || !pl->layout || !pl->layout->definition.valid)return out(NRZW_NO_PLAN);', 'if(memo_epoch!=nrdesc::my_epoch)return out(NRZW_DESC);', 'if(!pass_continues(c))return out(NRZW_PASS);',
-             'const nrz_val *v=nrz_find(&T,K.h,K.w,K.n,stamp,&stale);', 'if(e.plan!=pl || !e.live || e.ring!=rb || !nrdesc::images_alive(e))return out(NRZW_DESC);', 'if(mode==2){P.valid=true;',
+             'const nrz_val *tv=nrz_find(&T,K.h,K.w,K.n,stamp,&stale);', 'if(e.plan!=pl || !e.live || e.ring!=rb || !nrdesc::images_alive(e))return out(NRZW_DESC);', 'if(mode==2){P.valid=true;',
              'if(nrdesc::blocks(*pl,rb,off,tuple,false))return out(NRZW_BLOCK);', 'if(!sv)return out(NRZW_SET);', 'storage_images_bound.clear();pgraph::cx_sh=nullptr;nrrp::frag_first=tile_barrier_on && frag;',
              'Image &gi=get_image(ti.first,true);prepare_read(gi,c.command,-1);', 'if(slot_serial!=s0){c.command=recording_slot().cmd;return out(NRZW_IMAGE);}', 'nrdesc::note_last(*pl,v->did,f);',
              'if(nrd && !pass_continues(c)){', 'for(auto *im:zp.images){im->prior_write=im->last_write;im->last_write=++write_seq;im->gpu_written=true;}++pass_fast_hits;', 'nrdraw::cur=nullptr;',
@@ -2981,6 +2981,81 @@ def nrz3_check():   # [DOS2] NR-ZERO Z3 DM_NR_Z3 / Z5 DM_NR_Z5 (docs/dos2/nr/NR-
     assert 'const int fe=nrlf::fe_mode(m);if(nrlf::mode)m=0;' in (root / 'gfx/vulkan/engine/xbg_nr_onchip.inc').read_text(encoding='utf-8'), 'Z3: ONCHIP superseded by LIGHTFUSE has mode 0 (nrz3 gates on nroc::mode>0)'
     print('PASS: NR-ZERO Z3 DM_NR_Z3: default 0 by policy, app silent, safe-mode step 2; hook before the descriptors; key through nrz_key (mutation switch test-only); three stamps; '
           'checks before effects in the path\'s order; =2 predicts before any effect; shared lane tail; detach_peek pure; PRESKIN decided at its place, skinned draws through the lane')
+def nrz3k_check():   # [DOS2] NR-ZERO Z3 cheap key DM_NR_Z3K (docs/dos2/nr/NR-ZERO.md section 17): the front table of nrz3
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    z = (root / 'gfx/vulkan/engine/xbg_nr_z3.inc').read_text(encoding='utf-8')
+    k = (root / 'gfx/nr/nr_z3k.h').read_text(encoding='utf-8')
+    nd = (root / 'gfx/vulkan/engine/xbg_nr_desc.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    sm = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    # default 0 on every family through the policy; the app does not set it; safe-mode step 2 turns it off; needs DM_NR_Z3
+    assert 'inline int xbg_nr_z3k_default(){return 0;}' in pol and 'e=getenv("DM_NR_Z3K");int k=e && *e?atoi(e):xbg_nr_z3k_default();' in z, 'Z3K: default 0 through the policy'
+    assert 'add("DM_NR_Z3K","0");' in sm and sm.index('if(step>=2){') < sm.index('add("DM_NR_Z3K","0")') < sm.index('if(step>=3){'), 'Z3K: safe-mode step 2'
+    for src in [root / 'android/jni_android.c'] + list((root / 'android/app/src/main/java').rglob('*.java')):
+        assert 'DM_NR_Z3K' not in src.read_text(encoding='utf-8', errors='replace'), 'Z3K: the app does not set the switch (%s)' % src.name
+    assert 'DM_NR_Z3K=3 does not exist' in z and 'if(k && !m){' in z and 'kmode=k;}' in z, 'Z3K: modes'
+    # the mutation switch is the host test's only; every compared word sits under it
+    assert 'NRZK_MUTATE' not in z and 'NRZK_MUTATE' not in g and '#define NRZK_MUTATE 0' in k, 'Z3K: the mutation switch is the test\'s only'
+    for part in ('NRZK_MUTATE != 1 && e->key_id != key_id', 'NRZK_MUTATE != 2 && e->vs != vs', 'NRZK_MUTATE != 3 && e->fs != fs', 'NRZK_MUTATE != 4 && e->var4 != var4', 'NRZK_MUTATE != 5 && e->var5 != var5',
+                 'NRZK_MUTATE != 6 && e->pass_def != pass_def', 'NRZK_MUTATE != 7 && e->fixed_id != fixed_id', 'NRZK_MUTATE != 8 && tex[r.ns][r.slot] != e->th[2 * i]',
+                 'NRZK_MUTATE != 9 && (r.samp != NRZK_NO_SAMP ? samp[r.ns][r.samp] : 0) != e->th[2 * i + 1]', 'NRZK_MUTATE != 11 + (int)i && t->stamp[i] != stamp[i]',
+                 'NRZK_MUTATE != 16 && (key[1] || key[2] || key[3])'):
+        assert part in k, 'Z3K: compared word under the mutation test: %s' % part
+    # the comparison reads the tables nrdesc::gather reads, through rows taken from the plan the way gather takes them
+    assert 'key[n++]=state.tex[r.ns][r.slot];key[n++]=r.samp!=0xff?state.samp[r.ns][r.samp]:0;}' in nd and 'const nr_drow &r=p.row[p.img_row[i]];' in nd, 'Z3K: gather as the front table mirrors it'
+    assert 'const nr_drow &r=p.row[p.img_row[i]];row[i]=nrzk_row{uint8_t(r.ns),uint8_t(r.slot),uint8_t(r.samp)};' in z and 'NRZK_NO_SAMP = 0xff' in k, 'Z3K: the rows are the plan\'s'
+    assert 'fid,state.tex,state.samp);' in z and 'static_assert(sizeof(state.tex)==sizeof(uint64_t)*NRZK_STAGES*NRZK_SLOTS && sizeof(state.samp)==sizeof(state.tex)' in z, 'Z3K: the live binding tables'
+    # asked after every gate of nrz3::draw and after the stamps were checked; before the plan; nothing is taken at =2
+    ask = 'nrzk_sync(&F,stamp);'
+    assert z.count(ask) == 1 and z.index('if(nrdraw::epoch!=nbpipe::epoch)return out(NRZW_STALE);') < z.index(ask) < z.index('fe=nrzk_find(&F,t.key,var.w[0],var.w[1],var.w[4],var.w[5],var.w[3],fid,') < z.index('pl=plan_of(frag);'), 'Z3K: asked after the gates, under the stamps of now, before the plan'
+    assert z.index('!(pp?nrdraw::groups_pp():nrdraw::groups()))return out(NRZW_GATE);') < z.index(ask) and z.index('if(!state.shader[0] || state.shader[1] || state.shader[2] || state.shader[3])return out(NRZW_SPECIAL);') < z.index(ask), 'Z3K: the state-group ids are current and the middle stages empty before the front table is asked'
+    assert 'const uint32_t fid=nrzk_fixed(&F,f,0)' in z and 'const bool fhit=fe && kmode==1;' in z, 'Z3K: a lookup never makes a fixed-words id; only =1 takes the answer'
+    assert 'if(fhit){pl=reinterpret_cast<nrdesc::Plan*>(uintptr_t(fv.plan));frag=fv.frag!=0;}else pl=plan_of(frag);' in z, 'Z3K: the plan of a front hit'
+    # every live check of the path still runs after a front hit (the same statements, once in the file: nrz3_check's order list)
+    assert z.index('const bool fhit=fe && kmode==1;') < z.index('if(dpn.why || pl->retry || !pl->layout || !pl->layout->definition.valid)return out(NRZW_NO_PLAN);') < z.index('if(!pass_continues(c))return out(NRZW_PASS);') < z.index('const nrz_val *v=&fv;') < z.index('if(e.plan!=pl || !e.live || e.ring!=rb || !nrdesc::images_alive(e))return out(NRZW_DESC);') < z.index('if(mode==2){P.valid=true;'), 'Z3K: plan, pass and entry checks after the front answer; DM_NR_Z3=2 predicts with it'
+    assert '++s.odd;K.ok=!fhit;return out(NRZW_DESC);}' in z, 'Z3K: no key in hand after a front hit (served() stores nothing under it)'
+    # the front table is filled where the table is: found there (front_after) and learned (served()); the same stamps
+    assert z.count('nrzk_put(&F,stamp,K.w,K.n,') == 2 and z.count('{nrdesc::tab_gen,nrdraw::tab_gen(),nbpipe::epoch}') == 2, 'Z3K: stored under the key and stamps of the table'
+    assert 'if(__builtin_expect(kmode!=0,0))front_after(tv,stale,fe,fv,*pl,stamp);' in z and z.index('nrz_put(&T,K.h,K.w,K.n,stamp,&now);++s.learned;') < z.index('if(nrzk_put(&F,stamp,K.w,K.n,pl->p.nimg,row,&now))++ks.stored;'), 'Z3K: learned with the table'
+    # =2: both answers compared; a front answer the table lost is compared with the path's resolution
+    assert 'if(tv){if(nrz_val_same(tv,&fv))++ks.same;else{++ks.bad;' in z and 'else{++ks.front_only;FP.valid=true;FP.v=fv;}' in z and 'if(FP.valid){FP.valid=false;if(nrz_val_same(&FP.v,&now))++ks.same;else{++ks.bad;' in z, 'Z3K: the comparison'
+    assert '"[nr] z3 key: DM_NR_Z3K=%d;' in z and '"[nr] z3 key by part (NR-ZERO, DM_NR_Z3K=%d,' in z, 'Z3K: the lines'
+    assert 'if(f_ok){nrzk_free(&F);f_ok=false;}kmode=0;' in z, 'Z3K: released with the table'
+    print('PASS: NR-ZERO Z3K DM_NR_Z3K: default 0 by policy, app silent, safe-mode step 2; mutation switch test-only; in-place comparison over gather\'s tables and the plan\'s rows; '
+          'asked after the gates under the stamps of now; every live check after a front hit; filled with the table; =2 compares with the table and with the path')
+def nrz5w_check():   # [DOS2] NR-ZERO Z5, the second writer (docs/dos2/nr/NR-ZERO.md section 18): the packet half of the game thread's writer - built and tested, NOT wired
+    w = (root / 'gfx/nr/nr_z5w.h').read_text(encoding='utf-8')
+    q = (root / 'gfx/nb/nb_mt.h').read_text(encoding='utf-8')
+    z5 = (root / 'gfx/vulkan/engine/xbg_nr_z5.inc').read_text(encoding='utf-8')
+    # not in the engine build, and DM_NR_Z5=1 still refuses: nothing half-built behind the switch
+    for src in list((root / 'gfx/vulkan/engine').glob('xbg_*')) + list((root / 'gfx/nvn').glob('*.c')) + list((root / 'gfx/nvn').glob('*.inc')) + list((root / 'host').glob('*.c')) + list((root / 'host').glob('*.inc')):
+        t = src.read_text(encoding='utf-8', errors='replace')
+        assert 'nr_z5w.h"' not in t and 'nrz5w::' not in t and 'NRZ5W_MUTATE' not in t, 'Z5 writer: not wired into the engine (%s)' % src.name
+    assert 'if(m==1){xbg_logf("【红】[nr] DM_NR_Z5=1: the game thread\'s half is not built' in z5 and 'if(m!=0 && m!=2){' in z5, 'Z5: =1 is refused'
+    assert '#define NRZ5W_MUTATE 0' in w
+    # the second writer's chunks: the free list under the queue's mutex, never the producer's statistics; bounded; each ends in splice_spare or give_back_spare
+    ts = w and q[q.index('    Chunk *take_spare() {'):q.index('    void splice_spare(Chunk *c)')]
+    assert 'std::lock_guard<std::mutex> l(mu); if (free_list)' in ts and 'st.' not in ts and 'spare_out.load(std::memory_order_relaxed) >= spare_max' in ts and 'spare_out.fetch_add(1' in ts, 'Z5 writer: take_spare'
+    assert 'void splice_spare(Chunk *c) { if (!c) return; spare_out.fetch_sub(1, std::memory_order_relaxed); splice(c); }' in q and 'void give_back_spare(Chunk *c) { if (!c) return; spare_out.fetch_sub(1, std::memory_order_relaxed); give_back(c); }' in q, 'Z5 writer: a spare chunk ends in one of two calls'
+    assert q.count('void splice(Chunk *c) {') == 1 and '        flush();\n        c->cb = cb; st.cmds += c->cmds; ++st.spliced; st.spliced_cmds += c->cmds;\n        cur = c; flush();' in q, 'Z5: splice is the queue\'s one hand-over, twice'
+    # the ring: one atomic store a run on each side
+    assert 'slot[i % N] = x; w.store(i + 1, std::memory_order_release);' in w and 'r.store(r.load(std::memory_order_relaxed) + 1, std::memory_order_release);' in w and w.count('.store(') == 2, 'Z5 writer: the ring'
+    # the writer: a draw that reads an unknown field is never written ahead; a full chunk rolls the draw back; the run is published when it ends
+    wr = w[w.index('struct Writer {'):w.index('struct RStats')]
+    assert wr.index('if (nrz5_reads_unknown(&model, &v)) { head(v); return 0; }') < wr.index('nbmtq::Chunk *c = q->take_spare();') < wr.index('const nrz5_cache saved = model; const uint32_t u = cur.chunk->used, cm = cur.chunk->cmds;') < wr.index('model = saved; cur.chunk->used = u; cur.chunk->cmds = cm;'), 'Z5 writer: head first, the chunk rolled back when full'
+    assert 'NRZ5W_MUTATE != 4 && nrz5_reads_unknown(&model, &v)) { end_run();' in wr and 'cur.at_splice = model;' in wr and 'ring->push(cur); ++st.runs;' in wr and wr.count('ring->push(') == 1, 'Z5 writer: the run ends at a new unknown field; published once'
+    # the reader: taken only after the cache comparison and the caller's verdict, in that order; declined = given back; covered only of a taken run
+    rd = w[w.index('    template <class Real, class Ok> int draw('):w.index('    // Every run the ring holds goes back')]
+    order = ['if (!next_run(id, run)) return RECORD;', 'if (!run.chunk) { ++st.declined_writer; return RECORD; }', 'NRZ5W_MUTATE != 1 && nrz5_cache_diff(&run.at_splice, &rc)) { ++st.declined_cache; q->give_back_spare(run.chunk); return RECORD; }',
+             'NRZ5W_MUTATE != 2 && !ok(run)) { ++st.declined_stamp; q->give_back_spare(run.chunk); return RECORD; }', 'q->splice_spare(run.chunk); *after = run.after; taken = true;', 'if (id == cur_id && (taken || NRZ5W_MUTATE == 3)) { ++st.covered; return SKIP; }']
+    at = -1
+    for o in order:
+        assert rd.count(o) == 1 and rd.index(o) > at, 'Z5 writer: the reader\'s order: %s' % o
+        at = rd.index(o)
+    assert w.count('splice_spare(') == 1, 'Z5 writer: one place hands a written-ahead chunk over'
+    assert 'if (NRZ5W_MUTATE == 5 || r->id == id) { out = *r; ring->pop(); ++st.runs; return true; }' in w and 'if (!id_before(r->id, id)) { ++st.gone; return false; }' in w, 'Z5 writer: runs are matched by id, older ones given back'
+    print('PASS: NR-ZERO Z5 second writer: nr_z5w.h not wired into the engine and DM_NR_Z5=1 refused; spare chunks under the queue mutex without the producer\'s statistics, bounded; '
+          'ring = one atomic store a run; head draws never written ahead; a run is taken only after the bind-cache comparison and the caller\'s verdict, else given back')
 def nrz3e_check():   # [DOS2] NR-ZERO Z3b / Z3c / Z3d (docs/dos2/nr/NR-ZERO.md section 13): the image word, the mesh view table, the ring word
     g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
     z = (root / 'gfx/vulkan/engine/xbg_nr_z3.inc').read_text(encoding='utf-8')
@@ -3486,6 +3561,8 @@ safemode_check()
 nrshc_check()
 nrzero_check()
 nrz3_check()
+nrz3k_check()
+nrz5w_check()
 nrz3e_check()
 nrz5_check()
 nrmdi_check()
