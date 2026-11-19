@@ -571,6 +571,8 @@ def mock(src, path, W=2400):
 
 # trade / container / dialog / reward / waypoints / item splitter in the iPad's layout: tools/dos2_ppanel_trade.py adds its movies to sources() / build() / check()
 import dos2_ppanel_trade; dos2_ppanel_trade.install(sys.modules[__name__])
+# iPad functions the Switch classes have no handler for (trade long press, container context menu): tools/dos2_ptouch_gaps.py patches the built movies
+import dos2_ptouch_gaps; dos2_ptouch_gaps.install(sys.modules[__name__])
 
 
 def main():

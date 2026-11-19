@@ -11,7 +11,7 @@ from pathlib import Path
 import capstone
 
 root = Path(__file__).resolve().parent.parent
-src = ''.join((root / 'dm/host' / f).read_text(encoding='utf-8') for f in ('hle_dos2_touchui.c', 'hle_dos2_touchui_ei.c', 'hle_dos2_touchui_hud.c', 'hle_dos2_touchui_ie.c', 'hle_dos2_touchui_route.c', 'hle_dos2_touch_world.c', 'hle_dos2_touchui_vis.c'))   # TU-06 / TU-07 sites too
+src = ''.join((root / 'dm/host' / f).read_text(encoding='utf-8') for f in ('hle_dos2_touchui.c', 'hle_dos2_touchui_ei.c', 'hle_dos2_touchui_hud.c', 'hle_dos2_touchui_ie.c', 'hle_dos2_touchui_route.c', 'hle_dos2_touch_world.c', 'hle_dos2_touchui_vis.c', 'hle_dos2_touch_gaps.h', 'hle_dos2_touch_gaps.c'))   # TU-06 / TU-07 sites too
 main = open(sys.argv[1], 'rb').read()
 enum = {k: int(v, 16) for k, v in re.findall(r'\b((?:T[UGW]|EI|HU|IE|RT|VS)_[A-Z0-9_]+) = (0x[0-9a-f]+)', src)}
 arr = {}
@@ -68,7 +68,8 @@ for o in range(0x1bf7060, 0x1bf7060 + 0x231d38, 0x18):
 for what, slot, want in (('FlashPlayer vt+0x58 Invoke0', 0x29c3ba0 + 0x58, enum['EI_INV0']), ('FlashPlayer vt+0x88 Invoke6', 0x29c3ba0 + 0x88, enum['EI_INV6']),
                          ('FlashPlayer vt+0x90 InvokeArgs', 0x29c3ba0 + 0x90, enum['EI_INVN']), ('FlashPlayer vt+0x130 EI drain', 0x29c3ba0 + 0x130, enum['EI_DRAIN']),
                          ('UIObject vt[0] OnFunctionCalled', 0x2999a18, enum['EI_BASE']),
-                         ('panelSelect_c vt[0] OnFunctionCalled', enum['VS_PS_VT'], enum['VS_OPENPANEL'])):
+                         ('panelSelect_c vt[0] OnFunctionCalled', enum['VS_PS_VT'], enum['VS_OPENPANEL']),
+                         ('playerInfo 0x26 vt[0] (touch gaps)', enum['TG_PI_VT'], enum['TG_PI_CALLED'])):
     ok = rel.get(slot) == want; bad += not ok
     print('%-34s main+%#x -> %#x  %s' % (what, slot, rel.get(slot, -1), 'ok' if ok else 'DIFFERS'))
 for a in ('EI_DRAIN', 'EI_INV0', 'EI_INV1', 'EI_INV2', 'EI_INV3', 'EI_INV4', 'EI_INV5', 'EI_INV6', 'EI_INVN', 'HU_CREATE_ALL', 'HU_DESTROY_ALL', 'IE_REG', 'RT_DISPATCH'):   # hooked prologues: no PC-relative instruction in the 4 moved words
