@@ -125,4 +125,107 @@ static inline int dt_radial_centre(const int32_t f[4], float sw, float sh, float
     *cx = (float)f[0] + ((float)f[2] - sw * k) / 2 + wx * k; *cy = (float)f[1] + ((float)f[3] - sh * k) / 2 + wy * k;
     return 1;
 }
+// ---- UI mode TOUCH (branch dos2-uimodes, owner 19.11: "touch = the iPad's touchscreen_1.json exactly"; docs/dos2/TOUCH_MODES_PLAN.md section 2
+// and "Implemented: touch gestures"). The iPad's gesture events (touchscr:tap / dtap / slongpress / longpress / pan / pan2f / rotate / pinch /
+// tap2f / tap3f / swipeup3f / swipedown3f / longpress2f / 3f) do not exist in the Switch main (no "touchscr" device, no raw name for them, the
+// event names DoubleTap / ShortLongPress / TacticalCameraOn / Off / LongPress2Fingers are not even strings of main). TOUCH runs the engine's input
+// mode 0 with PlayerProfiles/Eoc/keyboard_1.json (the Switch Game.pak copy = the iPad's minus the mouse buttons, which Default/inputconfig.json
+// binds), so every iPad event becomes its PC twin made of mouse / keyboard records. These rules decide WHICH gesture a set of fingers is; the
+// host (hle_dos2_touch.c, "UI mode TOUCH") turns the result into records. Times / distances come from the host (env-tunable, iPad-like defaults).
+//   one finger: tap (up before the short long press, moved <= slop) | short long press (still >= slong_ms: the tooltip = the PC hover, no click on
+//   the release) | long press (still >= long_ms: the right click = ContextMenu) | pan (moved past the slop before the long press: CameraMove);
+//   double tap = a second tap that lands within dtap_ms of the first one's release and within r px of it;
+//   two fingers: pinch (distance) / rotate (angle) / pan (midpoint), any of them, plus the two-finger tap and long press;
+//   three fingers: vertical swipe (TacticalCamera on = down / off = up), the three-finger tap and long press.
+enum { DT_T1_WAIT = 0 /* still, not decided */, DT_T1_SLONG = 1 /* short long press reached */, DT_T1_LONG = 2 /* long press reached */,
+       DT_T1_PAN = 3 /* moved: camera pan */ };
+// The state of an undecided one-finger TOUCH world finger: moved = px from where it landed, held = ms since it landed. The pan wins over the
+// time while the long press has not fired (the caller stops asking once it is PAN or LONG).
+static inline int dt_t1_state(float moved, uint64_t held_ms, float slop, int slong_ms, int long_ms) {
+    if (moved > slop && held_ms < (uint64_t)(long_ms > 0 ? long_ms : 0)) return DT_T1_PAN;
+    if (long_ms > 0 && held_ms >= (uint64_t)long_ms) return DT_T1_LONG;
+    if (slong_ms > 0 && held_ms >= (uint64_t)slong_ms) return DT_T1_SLONG;
+    return DT_T1_WAIT;
+}
+enum { DT_REL_TAP = 0 /* a click */, DT_REL_TIP = 1 /* a short long press ended: tooltip only, no click */, DT_REL_NONE = 2 /* moved: nothing */ };
+// What the release of a still one-finger touch (no pan, no long press fired) is.
+static inline int dt_t1_release(float moved, uint64_t held_ms, float slop, int slong_ms) {
+    if (moved > slop) return DT_REL_NONE;
+    return slong_ms > 0 && held_ms >= (uint64_t)slong_ms ? DT_REL_TIP : DT_REL_TAP;
+}
+// Is a new finger down the second tap of a double tap: prev_up = when the previous TAP ended (0 = none), px, py its point; t, x, y the new one.
+static inline int dt_is_dtap(uint64_t prev_up, float px, float py, uint64_t t, float x, float y, int dtap_ms, float r) {
+    if (!prev_up || t < prev_up || t - prev_up > (uint64_t)(dtap_ms > 0 ? dtap_ms : 0)) return 0;
+    return hypotf(x - px, y - py) <= r;
+}
+// Two fingers: the change from the reference pair a (x0, y0, x1, y1) to the pair b: distance change dd (px, + = apart), angle change da (radians,
+// wrapped to -pi..pi, + = clockwise on screen: y points down), midpoint motion mx, my (px).
+static inline void dt_pair_delta(const float a[4], const float b[4], float *dd, float *da, float *mx, float *my) {
+    const float da0 = atan2f(a[3] - a[1], a[2] - a[0]), db0 = atan2f(b[3] - b[1], b[2] - b[0]);
+    float d = db0 - da0;
+    while (d > 3.14159265f) d -= 6.28318531f;
+    while (d < -3.14159265f) d += 6.28318531f;
+    *dd = hypotf(b[2] - b[0], b[3] - b[1]) - hypotf(a[2] - a[0], a[3] - a[1]);
+    *da = d;
+    *mx = (b[0] + b[2]) / 2 - (a[0] + a[2]) / 2; *my = (b[1] + b[3]) / 2 - (a[1] + a[3]) / 2;
+}
+enum { DT_2F_PINCH = 1, DT_2F_ROT = 2, DT_2F_PAN = 4 };
+// Which two-finger components run: on = the mask so far; dd / arc / dm = how far each has gone since the gesture began (distance change, the
+// rotation as an arc = |angle| x half the finger distance, midpoint motion; px). A component starts past its step; once one runs, another one
+// starts only past twice its step (the fingers of a pinch drift a little, a pan changes the distance a little). The iPad runs its pinch,
+// rotation and pan recognizers at the same time - so does this, after the hysteresis.
+static inline unsigned dt_two_mask(unsigned on, float dd, float arc, float dm, float pinch_step, float rot_step, float pan_step) {
+    const float k = on ? 2.f : 1.f;
+    unsigned m = on;
+    if (!(m & DT_2F_PINCH) && fabsf(dd) > pinch_step * k) m |= DT_2F_PINCH;
+    if (!(m & DT_2F_ROT) && fabsf(arc) > rot_step * k) m |= DT_2F_ROT;
+    if (!(m & DT_2F_PAN) && fabsf(dm) > pan_step * k) m |= DT_2F_PAN;
+    return m;
+}
+// A multi-finger tap: nmax = the most fingers that were down together, dur = ms from the first down to the last up, moved = the largest
+// distance any finger went, started = a pinch / rotation / pan / swipe ran. Returns nmax (2 or 3) for a tap, else 0.
+static inline int dt_tapn(int nmax, uint64_t dur_ms, float moved, int started, int tap_ms, float slop) {
+    if (started || nmax < 2 || nmax > 3 || dur_ms > (uint64_t)(tap_ms > 0 ? tap_ms : 0) || moved > slop) return 0;
+    return nmax;
+}
+// A three-finger swipe: dx, dy = the motion of the fingers' centre since three were down (px). +1 = down (TacticalCameraOn), -1 = up (Off).
+static inline int dt_swipe3(float dx, float dy, float min_d) {
+    if (!(fabsf(dy) > min_d) || fabsf(dy) < 1.5f * fabsf(dx)) return 0;
+    return dy > 0 ? 1 : -1;
+}
+// The iPad's TacticalCameraOn / Off against the PC's one toggle key (keyboard_1.json ToggleTacticalCamera <- key:o): *state = what the host
+// believes the camera is (0 off, 1 on); dir +1 = on wanted, -1 = off wanted. 1 = press the toggle now (and *state follows).
+static inline int dt_tac_press(int *state, int dir) {
+    const int want = dir > 0;
+    if (dir == 0 || *state == want) return 0;
+    *state = want;
+    return 1;
+}
+// The keyboard camera (keyboard_1.json CameraForward / Backward / Left / Right <- w / s / a / d; CameraRotateLeft / Right <- delete / end): the
+// finger's motion becomes a hold time of a key. *b = the signed hold time (ms) one axis still owes; d = the new motion (px for a pan, radians
+// for a rotation), unit = px of a screen height (or 1 for radians), ms_per = ms of hold per unit, cap = most ms owed. A motion against the
+// owed direction cancels it first (the camera stops at once when the finger turns).
+static inline void dt_hold_add(float *b, float d, float unit, int ms_per, int cap_ms) {
+    if (!(unit > 0) || ms_per <= 0) return;
+    const float add = d / unit * (float)ms_per, cap = (float)(cap_ms > 0 ? cap_ms : 0);
+    if ((*b > 0 && add < 0) || (*b < 0 && add > 0)) *b = 0;
+    *b += add;
+    if (*b > cap) *b = cap;
+    if (*b < -cap) *b = -cap;
+}
+// time passes: the owed hold shrinks towards 0 by ms
+static inline void dt_hold_tick(float *b, float ms) {
+    if (*b > 0) { *b -= ms; if (*b < 0) *b = 0; }
+    else if (*b < 0) { *b += ms; if (*b > 0) *b = 0; }
+}
+// -1 / 0 / +1: the key of the negative / no / positive direction is down (a hold shorter than eps ms is no hold)
+static inline int dt_hold_dir(float b, float eps) { return b > eps ? 1 : b < -eps ? -1 : 0; }
+enum { DT_K_W = 1, DT_K_S = 2, DT_K_A = 4, DT_K_D = 8, DT_K_ROTL = 16, DT_K_ROTR = 32 };
+// The keys of a pan: bx / by = the owed hold of the finger's x / y motion (+ = the finger went right / down). The camera follows the finger as
+// a grabbed map does: the finger right = the view goes left (a), the finger down = the view goes forward (w). invert flips both
+// (DM_DOS2_TOUCH_T_PAN_INV). Rotation: br + = the fingers turned clockwise = CameraRotateRight (end), swap flips (DM_DOS2_TOUCH_ROT_SWAP).
+static inline unsigned dt_cam_keys(float bx, float by, float br, int invert, int swap, float eps) {
+    const int x = dt_hold_dir(bx, eps) * (invert ? -1 : 1), y = dt_hold_dir(by, eps) * (invert ? -1 : 1), r = dt_hold_dir(br, eps) * (swap ? -1 : 1);
+    return (x > 0 ? DT_K_A : x < 0 ? DT_K_D : 0) | (y > 0 ? DT_K_W : y < 0 ? DT_K_S : 0) | (r > 0 ? DT_K_ROTR : r < 0 ? DT_K_ROTL : 0);
+}
 #endif

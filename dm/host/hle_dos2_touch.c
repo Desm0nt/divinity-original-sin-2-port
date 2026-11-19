@@ -200,6 +200,11 @@
 //   2. Tap places a moved object (DM_DOS2_TOUCH_PLACE=0: off). hle_dos2_touch_world.c sees the item placement mode (the controller runs the
 //      item-move task, type 10); then a world tap = the cursor (the PC picking) at the finger, picking window held open, pad A pressed
 //      through the npad pulse = what a pad player does with the cursor there (dt_place_tap / dt_w3_poll phase 3). No Action1 of ours.
+// UI mode TOUCH (19.11, branch dos2-uimodes; docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch gestures"): while the UI mode's HUD part is TOUCH
+//   and the PC UI is up, the gestures follow the iPad's touchscreen_1.json, every iPad event as its PC twin in mouse / keyboard records (tap =
+//   left click, double tap = a PC double click, short long press = hover, long press = right click, pans = keys w / a / s / d, rotation = keys
+//   delete / end, pinch = wheel, 2f / 3f taps = held lalt / lshift, 3f swipe = key o); no pad path. Section "UI mode TOUCH" below dt_radial_up;
+//   rules in hle_dos2_touch_gesture.h, host test dm/host/tests/dos2_touch_t_gesture_test.c. DM_DOS2_TOUCH_T=0: TOUCH keeps the hybrid gestures.
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include "dm_input.h"   // DM_BTN_* (also included further down; pack 3y uses DM_BTN_X before that)
@@ -393,8 +398,12 @@ static void dt_button(void *mgr, uint32_t id, int down) { if (g_cx >= 0) dt_curs
 // gesture state
 static int dt_pc(void);
 enum { G_IDLE, G_PENDING, G_DRAG, G_HELD, G_TWO, G_WPROBE /* world: left is down, who took it? */, G_WTAP /* the same, finger already up */, G_WORLD /* the finger moves the character */,
-       G_MAP /* map view: the finger pans the map (left stick) */, G_RADIAL /* dos2-touch7: a ZL / ZR wheel is open, the finger points its item (right stick) */ };
-static struct { int st, f0, f1; float sx, sy, x0, y0, x1, y1, d0, wy, wmx, lx, ly; uint64_t t0; uint32_t pulse; int pulse_frames, wact, wmoved, wplace; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation; wplace: a placement-mode finger (no mouse press)
+       G_MAP /* map view: the finger pans the map (left stick) */, G_RADIAL /* dos2-touch7: a ZL / ZR wheel is open, the finger points its item (right stick) */,
+       G_TMULTI /* UI mode TOUCH: two / three world fingers (pinch / rotation / pan, 2f / 3f taps, 3f swipe) */ };
+static struct { int st, f0, f1; float sx, sy, x0, y0, x1, y1, d0, wy, wmx, lx, ly; uint64_t t0; uint32_t pulse; int pulse_frames, wact, wmoved, wplace;
+                int tg, dtap, wtip; uint64_t tup; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation, 5 TOUCH pan; wplace: a placement-mode finger (no mouse press)
+// tg: this gesture runs the UI mode TOUCH rules (latched when its first finger lands); dtap: its first finger is the second tap of a double tap;
+// wtip: its short long press was reached (tooltip); tup: when a probing world finger was lifted (G_WTAP)
 // ---- world gestures (pass 7): virtual sticks for hle_hid.c, the tap = walk + A ----
 #include <stdatomic.h>
 static int g_world, g_world_walk_ms = 1400, g_world_probe_ms = 250, g_ui_ok, g_in_game, g_rot_swap, g_swipe_rot = 1, g_place = 1;   // pass 9: DM_DOS2_TOUCH_SWIPE_ROT / _PLACE
@@ -501,10 +510,13 @@ static void dt_place_tap(void *mgr, float x, float y) {
                                                     dm_dos2_touch_world_place_preview(), how == 2 ? "PC picking at the finger, pad A in 2 polls (DM_DOS2_TOUCH_PLACE=2)" :
                                                     "the pad's selector to the ground under the finger, then pad A once the mode's preview is back"); }
 }
-static void dt_w3_tap(void *mgr, float x, float y) {
+static void dt_w3_tap_x(void *mgr, float x, float y, int place);
+static void dt_w3_tap(void *mgr, float x, float y) { dt_w3_tap_x(mgr, x, y, 1); }
+static void dt_w3_tap_t(void *mgr, float x, float y) { dt_w3_tap_x(mgr, x, y, 0); }   // UI mode TOUCH (below): the PC click, no placement / aim diversion (the PC input mode does those itself)
+static void dt_w3_tap_x(void *mgr, float x, float y, int place) {
     const uint64_t now = dt_ms();
     g_n_wtap++;
-    if (g_place && dm_dos2_touch_world_placing()) { dt_place_tap(mgr, x, y); return; }
+    if (place && g_place && dm_dos2_touch_world_placing()) { dt_place_tap(mgr, x, y); return; }
     if (g_w3_confirm && !(w3.prev_until && now < w3.prev_until && hypotf(x - w3.px, y - w3.py) < g_win_h * 0.07f)) {   // first tap: preview only
         w3.px = x; w3.py = y; w3.prev_until = w3.hover_until = now + 4000; g_n_w3prev++;
         dt_move(mgr, x, y);
@@ -671,6 +683,195 @@ static void dt_radial_up(float x, float y, int up) {
                                             (double)x, (double)y, (double)g_rad_cx, (double)g_rad_cy, (double)(dt_radial_angle(sx, sy) * 57.29578f), sx, sy, g_rad_ms);
     } else { atomic_store(&g_rad_rx, 0); atomic_store(&g_rad_ry, 0); g_rad_clear_at = 0; }
 }
+// ---- UI mode TOUCH: the iPad's gestures (PlayerProfiles/iOS/Eoc/touchscreen_1.json) as PC mouse / keyboard records (branch dos2-uimodes,
+// owner 19.11; docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch gestures"; the pure rules: hle_dos2_touch_gesture.h "UI mode TOUCH", host test
+// dm/host/tests/dos2_touch_t_gesture_test.c). Static only: nothing of this ran on a phone.
+// When: the HUD part of the UI mode is TOUCH (hle_dos2_uimode.c dm_dos2_ui_mode_hud) AND the PC UI is up (dt_pc: mode byte 0, keyboard_1.json).
+// TOUCH waiting for the next load, or brought back to the controller UI by a pad press, keeps the hybrid rules. HYBRID never runs any of this.
+// The world part needs DM_DOS2_TOUCH_WORLD=3's hooks (g_w3: the probe press is kept from the input controller, the click is the PC click);
+// without them a TOUCH finger is the plain PC mouse (tap = click, drag = drag, hold = right click).
+// Why records of mouse / keyboard only: in the PC input mode the game filters the pad's records (main+0x844014), and the npad state the host's
+// virtual sticks / pad pulses go through would flip the live switch back to the controller UI (dt_inject_log sees them as pad use). So TOUCH uses
+// none of the pad paths of the hybrid (walk stick, swipe rotation, pad A / X / '-' pulses, the map's sticks).
+// Raw ids of the keyboard (device 0): the name table main+0x2974b10 (relocated pointers, id = index - 2; dumped from main.raw's .rela.dyn).
+// The bindings: the Switch Game.pak's PlayerProfiles/Eoc/keyboard_1.json (= the iPad's minus the mouse buttons; SkipVideo <- escape there).
+enum { ID_KEY_HOME = 0x0a, ID_KEY_DELETE = 0x0c, ID_KEY_END = 0x0d, ID_KEY_A = 0x24, ID_KEY_D = 0x27, ID_KEY_O = 0x32, ID_KEY_S = 0x36, ID_KEY_W = 0x3a,
+       ID_KEY_LSHIFT = 0x6c, ID_KEY_LALT = 0x6d };
+static int g_t_cfg = 1, g_t_slong_ms = 350, g_t_long_ms = 600, g_t_dtap_ms = 300, g_t_tapn_ms = 350, g_t_pan_ms = 1200, g_t_rot_ms = 700, g_t_cap_ms = 500;
+static int g_t_pan_inv, g_t_tips_ms, g_t_cones_ms, g_t_t3f_esc, g_t_tac;   // g_t_tac: what the host believes the tactical camera is (0 off)
+static float g_t_bx, g_t_by, g_t_br;      // the keyboard camera's owed hold (ms): pan x / y, rotation (dt_hold_add)
+static unsigned g_t_keys, g_t_tog;        // camera keys down now (DT_K_*); held toggles: 1 = lalt (ShowWorldTooltips), 2 = lshift (ShowSneakCones)
+static uint64_t g_t_tog_until[2], g_t_tick;
+static uint64_t g_t_tap_up; static float g_t_tap_x, g_t_tap_y;   // the last one-finger tap (the double tap's first half)
+static unsigned g_n_t_tap, g_n_t_dtap, g_n_t_tip, g_n_t_long, g_n_t_pan, g_n_t_pinch, g_n_t_rot, g_n_t_pan2, g_n_t_tap2, g_n_t_tap3, g_n_t_sw3, g_n_t_lp;
+static struct { int n, live, nmax, id[3], up[3], started, lp, swiped; float x[3], y[3], sx[3], sy[3], b0[4], pd, pa, pmx, pmy, c3x, c3y, moved; unsigned mask; uint64_t t0; } tm;
+int dm_dos2_ui_mode_hud(void);   // hle_dos2_uimode.c
+static int dt_t_mode(void) { return g_t_cfg && g_main && dm_dos2_ui_mode_hud() == UI_TOUCH && dt_pc(); }
+static void dt_key(void *mgr, uint32_t id, int down) { dt_send(mgr, DEV_KEYS, id, down ? 1.f : 0.f, down ? 1.f : 0.f, down); }
+static int dt_t_busy(void) { return g_t_keys || g_t_tog || g_t_bx != 0 || g_t_by != 0 || g_t_br != 0; }
+static void dt_t_toggle(void *mgr, int which, const char *what) {   // which 0 = lalt (world tooltips), 1 = lshift (sneak cones)
+    const unsigned bit = 1u << which; const uint32_t id = which ? ID_KEY_LSHIFT : ID_KEY_LALT; const int ms = which ? g_t_cones_ms : g_t_tips_ms;
+    const int on = !(g_t_tog & bit);
+    dt_key(mgr, id, on);
+    if (on) { g_t_tog |= bit; g_t_tog_until[which] = ms > 0 ? dt_ms() + (uint64_t)ms : 0; } else g_t_tog &= ~bit;
+    LOG("[touch] TOUCH: %d-finger tap = %s: key %s %s%s", which ? 3 : 2, what, which ? "lshift" : "lalt", on ? "DOWN" : "up",
+        on ? ms > 0 ? " (held for DM_DOS2_TOUCH_T_*_MS)" : " (held until the next such tap, a menu or leaving the game)" : "");
+}
+static void dt_t_release_all(void *mgr, const char *why) {
+    static const uint32_t kid[6] = {ID_KEY_W, ID_KEY_S, ID_KEY_A, ID_KEY_D, ID_KEY_DELETE, ID_KEY_END};
+    if (!g_t_keys && !g_t_tog && !(g_t_bx != 0 || g_t_by != 0 || g_t_br != 0)) return;
+    for (int i = 0; i < 6; i++) if (g_t_keys >> i & 1) dt_key(mgr, kid[i], 0);
+    if (g_t_tog & 1) dt_key(mgr, ID_KEY_LALT, 0);
+    if (g_t_tog & 2) dt_key(mgr, ID_KEY_LSHIFT, 0);
+    if (g_t_keys || g_t_tog) { static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: keys let go (%s): camera keys %#x, held toggles %#x", why, g_t_keys, g_t_tog); }
+    g_t_keys = 0; g_t_tog = 0; g_t_bx = g_t_by = g_t_br = 0;
+}
+// every pad poll (game thread, the raw-state array checked): the camera keys follow the owed hold times, timed / stale toggles are let go
+static void dt_t_poll(void *mgr) {
+    const uint64_t now = dt_ms();
+    const float dtm = g_t_tick ? fminf((float)(now - g_t_tick), 50.f) : 0.f;   // at most 50 ms: the poll is skipped while idle (dt_drain), a new hold must not pay for that gap
+    g_t_tick = now;
+    if (!dt_t_mode()) { dt_t_release_all(mgr, "not the TOUCH PC UI any more"); return; }
+    const int st = atomic_load(&g_ui_state);
+    if (g_t_tog && (st & 4) && ((st & 1) || !(st & 2))) dt_t_release_all(mgr, (st & 1) ? "a menu / panel is on screen" : "out of game");
+    for (int w = 0; w < 2; w++) if ((g_t_tog >> w & 1) && g_t_tog_until[w] && now >= g_t_tog_until[w]) { dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 0); g_t_tog &= ~(1u << w); }
+    dt_hold_tick(&g_t_bx, dtm); dt_hold_tick(&g_t_by, dtm); dt_hold_tick(&g_t_br, dtm);
+    const unsigned want = dt_cam_keys(g_t_bx, g_t_by, g_t_br, g_t_pan_inv, g_rot_swap, 4.f);
+    if (want != g_t_keys) {
+        static const uint32_t kid[6] = {ID_KEY_W, ID_KEY_S, ID_KEY_A, ID_KEY_D, ID_KEY_DELETE, ID_KEY_END};
+        for (int i = 0; i < 6; i++) if ((want ^ g_t_keys) >> i & 1) dt_key(mgr, kid[i], want >> i & 1);
+        if (g_dbg) { static unsigned n; if (n++ < 200) LOG("[touch] TOUCH camera keys %#x -> %#x (w 1 s 2 a 4 d 8 delete 16 end 32; owed ms x %.0f y %.0f rotation %.0f)", g_t_keys, want,
+                                                          (double)g_t_bx, (double)g_t_by, (double)g_t_br); }
+        g_t_keys = want;
+    }
+    if (g.st == G_TMULTI && !tm.started && !tm.lp && tm.live == tm.nmax && now - tm.t0 >= (uint64_t)g_t_long_ms && tm.moved <= g_win_h * 0.05f) {
+        tm.lp = 1; g_n_t_lp++;
+        static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: long press with %d fingers = the iPad's LongPress%dFingers: no PC twin in keyboard_1.json, nothing sent", tm.nmax, tm.nmax);
+    }
+}
+// a one-finger tap on the world = the PC click at the finger (dt_w3_tap without the placement / aim diversion: in the PC input mode the item move
+// and the throw follow the cursor themselves and Action1's release places / throws)
+static void dt_t_world_tap(void *mgr, float x, float y) {
+    if (w3.ph == 2) { g_w3_kind = 2; dt_button(mgr, ID_LEFT, 0); g_w3_kind = 1; w3.ph = 0; }   // a double tap faster than the click sequencer: the first click's up first
+    dt_w3_tap_t(mgr, x, y);
+}
+static void dt_t_note_tap(float x, float y, const char *where) {   // after a tap's click: the double tap's reference; the log
+    g_n_t_tap++;
+    if (g.dtap) { g_n_t_dtap++; static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: double tap (%s) at %.0f,%.0f: the second click of a PC double click%s", where, (double)x, (double)y,
+                                                                         *where == 'U' ? " at the first one's point" : " (the PC world has no double-click action: a second click)"); }
+    else if (g_dbg) LOG("[touch] TOUCH: tap (%s) at %.0f,%.0f: left click", where, (double)x, (double)y);
+    g_t_tap_up = g.dtap ? 0 : dt_ms(); g_t_tap_x = x; g_t_tap_y = y;   // a third tap starts a new pair
+}
+static void dt_t_pan(float x, float y) {   // the one-finger pan: the finger's motion since the last step -> the keyboard camera's owed hold
+    dt_hold_add(&g_t_bx, x - g.wmx, g_win_h, g_t_pan_ms, g_t_cap_ms); dt_hold_add(&g_t_by, y - g.wy, g_win_h, g_t_pan_ms, g_t_cap_ms);
+    g.wmx = x; g.wy = y;
+}
+static void dt_t_pan_start(float x, float y, const char *why) {
+    g.wact = 5; g.wmx = g.sx; g.wy = g.sy; g_n_t_pan++;   // from where it landed: the camera follows the whole motion
+    static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: one-finger pan from %.0f,%.0f (%s) = CameraMove: keys w / a / s / d held %d ms per screen height of motion", (double)g.sx, (double)g.sy, why, g_t_pan_ms);
+    dt_t_pan(x, y);
+}
+// the hold of a still one-finger world finger (dt_world_poll): the short long press = the tooltip (the PC hover: the cursor is the finger), the
+// long press = the right click (ContextMenu; ActionCancel too in keyboard_1.json); AreaPickup has no keyboard / mouse binding on the PC
+static void dt_t_hold(void *mgr, uint64_t now) {
+    if (g.wact) return;
+    const int k = dt_t1_state(hypotf(g.lx - g.sx, g.ly - g.sy), now - g.t0, g_win_h * 0.025f, g_t_slong_ms, g_t_long_ms);
+    if (k == DT_T1_SLONG && !g.wtip) {
+        g.wtip = 1; g_n_t_tip++;
+        if (g_dbg) LOG("[touch] TOUCH: short long press at %.0f,%.0f = tooltip: the PC hover (cursor at the finger), no click on the release", (double)g.lx, (double)g.ly);
+    } else if (k == DT_T1_LONG) {
+        void dm_dos2_touch_world_ctx(void); dm_dos2_touch_world_ctx();
+        dt_move(mgr, g.lx, g.ly); dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g.wact = 2; g_n_t_long++;
+        static unsigned n; if (g_dbg || n++ < 40) LOG("[touch] TOUCH: long press at %.0f,%.0f = ContextMenu: right click at the finger (AreaPickup: no PC binding)", (double)g.lx, (double)g.ly);
+    }
+}
+// two / three world fingers
+static void dt_tm_pair(float p[4]) {   // the two live fingers of a two-finger gesture
+    int k = 0;
+    for (int i = 0; i < tm.n && k < 2; i++) if (!tm.up[i]) { p[2 * k] = tm.x[i]; p[2 * k + 1] = tm.y[i]; k++; }
+}
+static void dt_tm_start(int id, float x, float y, uint64_t t) {   // a second finger joins a world finger
+    memset(&tm, 0, sizeof tm);
+    tm.n = tm.live = tm.nmax = 2; tm.t0 = g.t0;
+    tm.id[0] = g.f0; tm.x[0] = g.lx; tm.y[0] = g.ly; tm.sx[0] = g.sx; tm.sy[0] = g.sy;
+    tm.id[1] = id; tm.x[1] = tm.sx[1] = x; tm.y[1] = tm.sy[1] = y;
+    tm.moved = hypotf(g.lx - g.sx, g.ly - g.sy);
+    tm.started = g.wact == 5; tm.lp = g.wact == 2;   // the first finger had already panned / opened the context menu: no tap
+    dt_tm_pair(tm.b0);
+    tm.pd = hypotf(tm.b0[2] - tm.b0[0], tm.b0[3] - tm.b0[1]); tm.pa = atan2f(tm.b0[3] - tm.b0[1], tm.b0[2] - tm.b0[0]);
+    tm.pmx = (tm.b0[0] + tm.b0[2]) / 2; tm.pmy = (tm.b0[1] + tm.b0[3]) / 2;
+    (void)t;
+    g.st = G_TMULTI;
+}
+static void dt_tm_move(void *mgr, int i, float x, float y) {
+    tm.x[i] = x; tm.y[i] = y;
+    const float mv = hypotf(x - tm.sx[i], y - tm.sy[i]); if (mv > tm.moved) tm.moved = mv;
+    if (tm.nmax == 3) {   // three fingers: the vertical swipe = TacticalCameraOn (down) / Off (up) -> the PC's toggle key 'o'
+        if (tm.swiped || tm.live < 3) return;
+        const float cx = (tm.x[0] + tm.x[1] + tm.x[2]) / 3, cy = (tm.y[0] + tm.y[1] + tm.y[2]) / 3;
+        const int s = dt_swipe3(cx - tm.c3x, cy - tm.c3y, g_win_h * 0.08f);
+        if (!s) return;
+        tm.swiped = tm.started = 1; g_n_t_sw3++;
+        const int press = dt_tac_press(&g_t_tac, s);
+        if (press) { dt_key(mgr, ID_KEY_O, 1); dt_key(mgr, ID_KEY_O, 0); }
+        static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: three-finger swipe %s = TacticalCamera%s: %s", s > 0 ? "down" : "up", s > 0 ? "On" : "Off",
+                                                      press ? "key o (ToggleTacticalCamera) pressed" : "the host believes it is so already: nothing (the toggle key has no on / off)");
+        return;
+    }
+    if (tm.live != 2) return;
+    float p[4], dd, da, mx, my;
+    dt_tm_pair(p);
+    dt_pair_delta(tm.b0, p, &dd, &da, &mx, &my);
+    const float half = hypotf(p[2] - p[0], p[3] - p[1]) / 2;
+    const unsigned was = tm.mask;
+    tm.mask = dt_two_mask(tm.mask, dd, da * half, hypotf(mx, my), g_win_h * 0.04f, g_win_h * 0.03f, g_win_h * 0.03f);
+    if (tm.mask) tm.started = 1;
+    if ((tm.mask & ~was) && (g_dbg || g_n_t_pinch + g_n_t_rot + g_n_t_pan2 < 20))
+        LOG("[touch] TOUCH: two fingers: %s%s%s started (distance %+.0f px, angle %+.2f rad, centre moved %.0f px)", (tm.mask & ~was & DT_2F_PINCH) ? "pinch (CameraZoom = wheel) " : "",
+            (tm.mask & ~was & DT_2F_ROT) ? "rotation (CameraRotate = keys delete / end) " : "", (tm.mask & ~was & DT_2F_PAN) ? "pan (CameraMove2Fingers = keys w / a / s / d) " : "",
+            (double)dd, (double)da, (double)hypotf(mx, my));
+    const float d = hypotf(p[2] - p[0], p[3] - p[1]), a = atan2f(p[3] - p[1], p[2] - p[0]), cx = (p[0] + p[2]) / 2, cy = (p[1] + p[3]) / 2;
+    if (tm.mask & DT_2F_PINCH) {   // a wheel notch per 4 % of the height (keyboard_1.json CameraZoomIn <- wheel_ypos: apart = closer)
+        const float step = g_win_h * 0.04f;
+        while (fabsf(d - tm.pd) > step) {
+            const int apart = d > tm.pd;
+            const uint32_t id = apart != !!getenv("DM_DOS2_TOUCH_PINCH_SWAP") ? ID_WHEEL_YPOS : ID_WHEEL_YNEG;
+            dt_button(mgr, id, 1); dt_button(mgr, id, 0); g_n_t_pinch++;
+            tm.pd += apart ? step : -step;
+        }
+    } else tm.pd = d;
+    if (tm.mask & DT_2F_ROT) {
+        float r = a - tm.pa;
+        while (r > 3.14159265f) r -= 6.28318531f;
+        while (r < -3.14159265f) r += 6.28318531f;
+        dt_hold_add(&g_t_br, r, 1.f, g_t_rot_ms, g_t_cap_ms); if (fabsf(r) > 0.02f) g_n_t_rot++;
+    }
+    tm.pa = a;
+    if (tm.mask & DT_2F_PAN) { dt_hold_add(&g_t_bx, cx - tm.pmx, g_win_h, g_t_pan_ms, g_t_cap_ms); dt_hold_add(&g_t_by, cy - tm.pmy, g_win_h, g_t_pan_ms, g_t_cap_ms); g_n_t_pan2++; }
+    tm.pmx = cx; tm.pmy = cy;
+}
+static void dt_tm_down(int id, float x, float y) {
+    if (tm.n >= 3) { tm.nmax = 4; tm.started = 1; return; }   // a fourth finger: no iPad gesture, nothing
+    const int i = tm.n++;
+    tm.id[i] = id; tm.x[i] = tm.sx[i] = x; tm.y[i] = tm.sy[i] = y; tm.up[i] = 0; tm.live++;
+    if (tm.n > tm.nmax) tm.nmax = tm.n;
+    if (tm.n == 3) {   // three fingers: the two-finger components stop, the swipe starts from here
+        tm.c3x = (tm.x[0] + tm.x[1] + tm.x[2]) / 3; tm.c3y = (tm.y[0] + tm.y[1] + tm.y[2]) / 3;
+        if (tm.mask) tm.started = 1;
+    }
+}
+static void dt_tm_up(void *mgr, int i, const dt_ev *e) {
+    if (tm.up[i]) return;
+    tm.up[i] = 1; tm.live--;
+    if (tm.live > 0) return;
+    g.st = G_IDLE;
+    const int k = e->ph == EV_UP && !tm.lp ? dt_tapn(tm.nmax, e->t - tm.t0, tm.moved, tm.started, g_t_tapn_ms, g_win_h * 0.05f) : 0;
+    if (k == 2) { g_n_t_tap2++; dt_t_toggle(mgr, 0, "ShowWorldTooltips (the PC's held left Alt)"); }
+    else if (k == 3) { g_n_t_tap3++; dt_t_toggle(mgr, 1, "ShowSneakCones (the PC's held left Shift)"); }
+    else if (g_dbg) LOG("[touch] TOUCH: %d-finger gesture over (%llu ms, moved %.0f px, components %#x%s%s): no tap", tm.nmax, (unsigned long long)(e->t - tm.t0), (double)tm.moved, tm.mask,
+                        tm.swiped ? ", swiped" : "", tm.lp ? ", long press" : "");
+}
+static int dt_tm_find(int id) { for (int i = 0; i < tm.n && i < 3; i++) if (tm.id[i] == id) return i; return -1; }
 static int g_pad_dev = -1;
 static float px_x(float nx) { return nx * g_win_w; }
 static float px_y(float ny) { return ny * g_win_h; }
@@ -680,18 +881,22 @@ static void dt_step(void *mgr, const dt_ev *e) {
     g_tx = e->x; g_ty = e->y;
     switch (e->ph) {
     case EV_DOWN:
-        if (g.st == G_IDLE) g_fmap = 0;
+        if (g.st == G_IDLE) {
+            g_fmap = 0;
+            g.tg = dt_t_mode(); g.wtip = 0; g.tup = 0;   // UI mode TOUCH: latched for the whole gesture
+            g.dtap = g.tg && dt_is_dtap(g_t_tap_up, g_t_tap_x, g_t_tap_y, e->t, x, y, g_t_dtap_ms, 2 * slop);
+        }
         if (g.st == G_IDLE && atomic_load(&g_rad_live)) {   // dos2-touch7: a ZL / ZR wheel is open: the finger points it
             g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; dt_world_stop(); g.st = G_RADIAL; dt_radial_finger(x, y);
         }
-        else if (g.st == G_IDLE && g_map_live) {   // map view: drag = pan; a tap is decided on the release (click first, the map only if no button answered)
+        else if (g.st == G_IDLE && g_map_live && !g.tg) {   // map view: drag = pan; a tap is decided on the release (click first, the map only if no button answered)
             g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; dt_world_stop(); g_fmap = 1; g_mtap_t = 0;
             dt_move(mgr, x, y); g.st = G_MAP;
         }
-        else if (g.st == G_IDLE && dt_world_now() && !(g_world == 2 && dt_world_zone_ui(e->x, e->y))) {   // pass 7: the world's first step
+        else if (g.st == G_IDLE && (!g.tg || g_w3) && dt_world_now() && !(g_world == 2 && dt_world_zone_ui(e->x, e->y))) {   // pass 7: the world's first step (TOUCH: only with the world hooks)
             g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; g.wmoved = 0; g.wplace = 0; dt_world_stop();
             if (g_world == 2) g.st = G_WORLD;   // zones: no mouse record for a world finger
-            else if (g_w3 && g_place && dm_dos2_touch_world_place_mode() == 1 && dm_dos2_touch_world_placing() && !dt_hud_hit(x, y)) {
+            else if (!g.tg && g_w3 && g_place && dm_dos2_touch_world_place_mode() == 1 && dm_dos2_touch_world_placing() && !dt_hud_hit(x, y)) {
                 // dos2-place, phone place1.log: in the item placement mode the probe's mouse press / release CANCELS the move (preview 10 -> 25 / 8,
                 // then running -1) and the picking stops, so the finger is the world's at once: no mouse record at all, only the UI cursor for
                 // the ray probe; a tap places (dt_w3_tap -> dt_place_tap), a swipe turns the camera, a hold does nothing. HUD rects keep the UI path.
@@ -700,14 +905,20 @@ static void dt_step(void *mgr, const dt_ev *e) {
             }
             else { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 1); g.st = G_WPROBE; }   // the UI answers who took the press (dt_world_poll)
         }
-        else if (g.st == G_IDLE) { g.st = G_PENDING; g.f0 = e->id; g.sx = x; g.sy = y; g.t0 = e->t; dt_move(mgr, x, y); }
+        else if (g.st == G_IDLE) { g.st = G_PENDING; g.f0 = e->id; g.sx = x; g.sy = y; g.t0 = e->t;
+            if (g.dtap) dt_move(mgr, g_t_tap_x, g_t_tap_y); else dt_move(mgr, x, y); }   // TOUCH double tap: the second click where the first one was (the PC movies' double click)
+        else if (g.tg && (g.st == G_WPROBE || g.st == G_WORLD) && e->id != g.f0) {   // UI mode TOUCH: a second world finger = the iPad's two-finger gestures
+            if (g.st == G_WPROBE) dt_button(mgr, ID_LEFT, 0);   // the probe press is let go (a probe: kept from the input controller)
+            dt_tm_start(e->id, x, y, e->t);
+        }
+        else if (g.st == G_TMULTI) { if (dt_tm_find(e->id) < 0) dt_tm_down(e->id, x, y); }
         else if ((g.st == G_PENDING || g.st == G_DRAG || g.st == G_WPROBE || g.st == G_WORLD || g.st == G_MAP) && e->id != g.f0) {
             if (g.st == G_DRAG || g.st == G_WPROBE) dt_button(mgr, ID_LEFT, 0);
             if (g.st == G_WORLD && g.wact == 4) dt_pad_hold(0, "a second finger");
             if (g.st == G_WORLD || g.st == G_WPROBE || g.st == G_MAP) { dt_world_stop(); g.x0 = g.lx; g.y0 = g.ly; } else { g.x0 = g_cx; g.y0 = g_cy; }
             g.st = G_TWO; g.f1 = e->id; g.x1 = x; g.y1 = y; g.wmx = (g.x0 + g.x1) / 2;
             g.d0 = hypotf(g.x1 - g.x0, g.y1 - g.y0); g.wy = (g.y0 + g.y1) / 2;
-        } else if (g.st == G_TWO && dt_pc() && e->id != g.f0 && e->id != g.f1) {   // PC mode, a third finger: escape (ToggleInGameMenu / UICancel / FlashCancel)
+        } else if (g.st == G_TWO && dt_pc() && (!g.tg || g_t_t3f_esc) && e->id != g.f0 && e->id != g.f1) {   // PC mode, a third finger: escape (ToggleInGameMenu / UICancel / FlashCancel); not in TOUCH (the iPad's tap3f) unless DM_DOS2_TOUCH_T_3F_ESC=1
             dt_send(mgr, DEV_KEYS, ID_KEY_ESCAPE, 1, 1, 1); dt_send(mgr, DEV_KEYS, ID_KEY_ESCAPE, 0, 0, 0);
         }
         break;
@@ -733,7 +944,7 @@ static void dt_step(void *mgr, const dt_ev *e) {
                 if (held && g.pulse != raw) dt_send(mgr, g.pulse >> 16, g.pulse & 0xffff, 0, 0, 0);   // direction changed: let the other one go
                 if (!held || g.pulse != raw) dt_send(mgr, raw >> 16, id, g_pinch_stick ? g_pinch_v : 1, 1, 1);   // the stick code's {scaled, |axis|}, pressed
                 g.pulse = raw; g.pulse_frames = g_pinch_stick ? g_pinch_frames : 2; g.d0 = d; g.wy = my;
-            } else if (g_world && g_in_game && fabsf((g.x0 + g.x1) / 2 - g.wmx) > step && fabsf((g.x0 + g.x1) / 2 - g.wmx) > fabsf(my - g.wy)) {   // pass 7: horizontal two-finger drag = camera rotation
+            } else if (!g.tg && g_world && g_in_game && fabsf((g.x0 + g.x1) / 2 - g.wmx) > step && fabsf((g.x0 + g.x1) / 2 - g.wmx) > fabsf(my - g.wy)) {   // pass 7: horizontal two-finger drag = camera rotation (not TOUCH: a pad stick)
                 const float mx = (g.x0 + g.x1) / 2;
                 atomic_store(&g_w_rx, ((mx > g.wmx) != (g_rot_swap != 0)) ? 32767 : -32767); g_w_rx_until = dt_ms() + 140;
                 g.wmx = mx; g.wy = my; g.d0 = d;
@@ -741,6 +952,9 @@ static void dt_step(void *mgr, const dt_ev *e) {
                 uint32_t id = my < g.wy ? ID_WHEEL_YNEG : ID_WHEEL_YPOS;
                 dt_button(mgr, id, 1); dt_button(mgr, id, 0); g.wy = my; g.d0 = d;
             }
+        } else if (g.st == G_TMULTI) {   // UI mode TOUCH: two / three world fingers
+            const int i = dt_tm_find(e->id);
+            if (i >= 0 && !tm.up[i]) dt_tm_move(mgr, i, x, y);
         } else if (e->id == g.f0 && g.st == G_RADIAL) {   // dos2-touch7: the highlight follows the finger
             g.lx = x; g.ly = y; dt_radial_finger(x, y);
         } else if (e->id == g.f0 && g.st == G_MAP) {   // map: pan
@@ -750,6 +964,11 @@ static void dt_step(void *mgr, const dt_ev *e) {
         } else if (e->id == g.f0 && (g.st == G_WORLD || g.st == G_WPROBE)) {
             g.lx = x; g.ly = y;
             if (g.st == G_WPROBE) { dt_move(mgr, x, y); if (hypotf(x - g.sx, y - g.sy) > slop) g.wmoved = 1; }   // decided when the UI answers (dt_world_poll)
+            else if (g.tg) {   // UI mode TOUCH: moved past the slop before the long press = CameraMove (the keyboard camera); else the cursor is the finger (hover)
+                if (!g.wact && dt_t1_state(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms, g_t_long_ms) == DT_T1_PAN) dt_t_pan_start(x, y, "moved");
+                else if (g.wact == 5) dt_t_pan(x, y);
+                else if (!g.wact) dt_move(mgr, x, y);
+            }
             else {
                 if (!g.wact) {   // pass 9: moved past the slop before the hold time = swipe (camera), after it = the walk stick (as before)
                     const int k = dt_gesture_move(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_world_hold_ms, dt_swipe_zone());
@@ -765,8 +984,17 @@ static void dt_step(void *mgr, const dt_ev *e) {
         break;
     case EV_UP: case EV_CANCEL:
         if (g.st == G_TWO) { if (e->id == g.f0 || e->id == g.f1) { g.st = G_IDLE; if (g.pulse_frames > 1) g.pulse_frames = 1; } break; }   // pinch over: zoom released on the next poll
+        if (g.st == G_TMULTI) { const int i = dt_tm_find(e->id); if (i >= 0) { tm.x[i] = x; tm.y[i] = y; dt_tm_up(mgr, i, e); } break; }   // UI mode TOUCH: the last finger up decides the tap
         if (e->id != g.f0) break;
-        if (g.st == G_WPROBE) { g.lx = x; g.ly = y; if (e->ph == EV_UP) { g.st = G_WTAP; break; } dt_button(mgr, ID_LEFT, 0); g.st = G_IDLE; break; }   // up before the UI answered: dt_world_poll ends it
+        if (g.st == G_WPROBE) { g.lx = x; g.ly = y; g.tup = e->t; if (e->ph == EV_UP) { g.st = G_WTAP; break; } dt_button(mgr, ID_LEFT, 0); g.st = G_IDLE; break; }   // up before the UI answered: dt_world_poll ends it
+        if (g.st == G_WORLD && g.tg) {   // UI mode TOUCH, a world finger: a pan / long press ends with nothing; a still release = tap (click) or the end of a tooltip
+            if (!g.wact && e->ph == EV_UP) {
+                const int rel = dt_t1_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms);
+                if (rel == DT_REL_TAP) { dt_t_world_tap(mgr, g.sx, g.sy); dt_t_note_tap(g.sx, g.sy, "world"); }
+                else if (rel == DT_REL_TIP && g_dbg) LOG("[touch] TOUCH: short long press over (%llu ms): tooltip only, no click", (unsigned long long)(e->t - g.t0));
+            }
+            g.st = G_IDLE; break;
+        }
         if (g.st == G_WTAP) break;
         if (g.st == G_RADIAL) { dt_radial_up(x, y, e->ph == EV_UP && atomic_load(&g_rad_live)); g.st = G_IDLE; break; }   // dos2-touch7: lifted on an item = choose it
         if (g.st == G_MAP) {
@@ -781,7 +1009,15 @@ static void dt_step(void *mgr, const dt_ev *e) {
         if (g.st == G_WORLD && g.wact == 3) { dt_swipe_end(); g.st = G_IDLE; break; }   // pass 9: a swipe ends: no tap
         if (g.st == G_WORLD && g.wact == 4) { dt_pad_hold(0, "finger up"); g.st = G_IDLE; break; }   // dos2-touch6: a held hint lets its button go: no tap
         if (g.st == G_WORLD) { if (!g.wact && e->ph == EV_UP && e->t - g.t0 < 400 && dt_hint_tap(x, y)) {} else if (!g.wact && e->ph == EV_UP && e->t - g.t0 < 400 && dt_minimap_hit(x, y)) dt_minimap_tap(x, y); else if (g_w3 && !g.wact && e->ph == EV_UP) dt_w3_tap(mgr, x, y); else if (!g_w3 && !g.wact && e->ph == EV_UP && e->t - g.t0 < 350) dt_world_tap(x, y); else dt_world_stop(); g.st = G_IDLE; break; }
-        if (g.st == G_PENDING && e->ph == EV_UP) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0);
+        if (g.st == G_PENDING && e->ph == EV_UP && g.tg) {   // UI mode TOUCH, a UI finger: a tap = the click (a double tap's second one where the first was); after the
+            // short long press only the tooltip (the PC hover: the cursor stays there), no click - the iPad's ShortLongPress does not tap
+            const int rel = dt_t1_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms);
+            const float cx = g.dtap ? g_t_tap_x : x, cy = g.dtap ? g_t_tap_y : y;
+            dt_move(mgr, cx, cy);
+            if (rel == DT_REL_TAP) { dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0); { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } dt_t_note_tap(cx, cy, "UI"); }
+            else { g_n_t_tip++; if (g_dbg) LOG("[touch] TOUCH: UI short long press over at %.0f,%.0f (%llu ms): tooltip (hover) only, no click", (double)x, (double)y, (unsigned long long)(e->t - g.t0)); }
+        }
+        else if (g.st == G_PENDING && e->ph == EV_UP) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0);
             { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } }   // the iPad movies act on the input event "IE Tap", not on the click (hle_dos2_touchui_ie.c)
         else if (g.st == G_DRAG) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 0); }
         g.st = G_IDLE;
@@ -997,16 +1233,23 @@ static void dt_world_poll(void *mgr) {
         const int was_tap = g.st == G_WTAP;
         if (was_tap) {   // the finger is up already: a click for the UI, or a world tap
             dt_button(mgr, ID_LEFT, 0); g.st = G_IDLE;
-            if (r != 1 && dt_swipe_zone() && g.wmoved) { if (g_dbg) LOG("[touch] world: a quick swipe (lifted before the UI answered): no tap"); }   // pass 9
+            if (g.tg && r != 1) {   // UI mode TOUCH: a quick flick = the pan it was; a still one = tap (click) or, held past the short long press, the tooltip only
+                const uint64_t held = (g.tup > g.t0 ? g.tup : now) - g.t0;
+                if (g.wmoved) { g.st = G_WORLD; dt_t_pan_start(g.lx, g.ly, "a flick lifted before the UI answered"); g.st = G_IDLE; }
+                else if (dt_t1_release(hypotf(g.lx - g.sx, g.ly - g.sy), held, g_win_h * 0.025f, g_t_slong_ms) == DT_REL_TAP) { dt_t_world_tap(mgr, g.sx, g.sy); dt_t_note_tap(g.sx, g.sy, "world"); }
+            }
+            else if (r != 1 && dt_swipe_zone() && g.wmoved) { if (g_dbg) LOG("[touch] world: a quick swipe (lifted before the UI answered): no tap"); }   // pass 9
             else if (r == 1) { g_n_wui++; { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } } else if (dt_hint_tap(g.lx, g.ly)) {} else if (dt_minimap_hit(g.lx, g.ly)) dt_minimap_tap(g.lx, g.ly); else if (g_w3) dt_w3_tap(mgr, g.lx, g.ly); else dt_world_tap(g.lx, g.ly);
         } else if (r == 1) { g.st = G_DRAG; g_n_wui++; }   // a UI element has it: the finger drags / clicks as the mouse
         else { dt_button(mgr, ID_LEFT, 0); g.st = G_WORLD;
-               if (dt_swipe_zone() && g.wmoved) { const int k = dt_gesture_move(hypotf(g.lx - g.sx, g.ly - g.sy), now - g.t0, g_win_h * 0.025f, g_world_hold_ms, 1);   // pass 9: moved during the probe
+               if (g.tg) { if (g.wmoved) dt_t_pan_start(g.lx, g.ly, "moved during the probe"); }   // UI mode TOUCH: the pan (dt_t1_state: a move before the long press)
+               else if (dt_swipe_zone() && g.wmoved) { const int k = dt_gesture_move(hypotf(g.lx - g.sx, g.ly - g.sy), now - g.t0, g_win_h * 0.025f, g_world_hold_ms, 1);   // pass 9: moved during the probe
                    if (k == DT_GW_SWIPE) { dt_swipe_start(g.lx, g.ly); dt_swipe_move(g.lx, g.ly); } else if (k == DT_GW_STICK) { g.wact = 1; g_n_wstick++; } } }
         if (g_dbg) { static unsigned n; if (n++ < 300) LOG("[touch] world: the left press at %.0f,%.0f was %s (%llu ms after the finger%s; UI type %#x)", (double)g.sx, (double)g.sy,
                                                             r == 1 ? "TAKEN by a UI object: mouse gesture" : r == 0 ? "taken by no UI object: the finger is the world's" : "never seen by the UI (timeout): the world's",
                                                             (unsigned long long)(now - g.t0), was_tap ? ", already lifted" : "", ty); }
     }
+    if (g.st == G_WORLD && g.tg) { dt_t_hold(mgr, now); return; }   // UI mode TOUCH: tooltip / ContextMenu (no hold hint, no pad X, no walk stick)
     if (g.st == G_WORLD && !g.wact && now - g.t0 >= (uint64_t)g_world_hold_ms) {   // dos2-touch6: a finger held on a "hold<code>" hint (bottomBar_d "Hold (B) to end the turn")
         const int code = dt_hold_hint(g.lx, g.ly); const uint64_t btn = code > 0 ? dt_btn_of_hint(code) : 0;
         if (btn) { char why[48]; snprintf(why, sizeof why, "held hint (hold%d)", code); dt_pad_hold(btn, why); g.wact = 4; dt_world_stop(); }
@@ -1428,6 +1671,10 @@ static void dt_drain(void) {
         if (g_w3) { LOG("[touch] world clicks (DM_DOS2_TOUCH_WORLD=3): %u click(s), %u preview tap(s), sequencer phase %d", g_n_w3click, g_n_w3prev, w3.ph); dm_dos2_touch_world_summary(); }
     if (g_world) LOG("[touch] world (DM_DOS2_TOUCH_WORLD=%d): taps %u, stick holds %u, swipes %u, placement taps %u, presses the UI took %u, in game %d, sticks now %d,%d / rx %d", g_world, g_n_wtap,
                          g_n_wstick, g_n_swipe, g_n_place, g_n_wui, g_in_game, atomic_load(&g_w_lx), atomic_load(&g_w_ly), atomic_load(&g_w_rx));
+    if (g_t_cfg && g_n_t_tap + g_n_t_tip + g_n_t_long + g_n_t_pan + g_n_t_pinch + g_n_t_rot + g_n_t_pan2 + g_n_t_tap2 + g_n_t_tap3 + g_n_t_sw3 + g_n_t_lp)
+        LOG("[touch] TOUCH gestures: taps %u (double %u), tooltips %u, long presses %u, pans %u | two fingers: wheel notches %u, rotation steps %u, pan steps %u, taps %u | "
+            "three fingers: taps %u, swipes %u | 2f / 3f long presses %u | camera keys %#x, toggles %#x, tactical camera %d (as the host believes)", g_n_t_tap, g_n_t_dtap, g_n_t_tip,
+            g_n_t_long, g_n_t_pan, g_n_t_pinch, g_n_t_rot, g_n_t_pan2, g_n_t_tap2, g_n_t_tap3, g_n_t_sw3, g_n_t_lp, g_t_keys, g_t_tog, g_t_tac);
     if (g_rad_cfg && g_n_rad_open) LOG("[touch] radial (ZL / ZR wheels): opened %u, chosen by touch %u, npad reads with the left stick as the right one %u, open now %#x",
                                        g_n_rad_open, g_n_rad_pick, g_n_rad_lst, atomic_load(&g_rad_live)); }
     if (dt_live()) {   // pad input seen in this poll (dt_inject_log): back to the controller UI, with no finger down and no touch waiting
@@ -1435,7 +1682,7 @@ static void dt_drain(void) {
         else if (g_live_wait && g.st == G_IDLE && g_qh == g_qt) dt_live_switch(g_live_wait == 2, "deferred");   // DM_DOS2_TOUCH_LIVE=2: once the UI sets are gone
         g_pad_act = 0;
     }
-    if (g_qh == g_qt && !g.pulse_frames && g.st != G_PENDING && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
+    if (g_qh == g_qt && !g.pulse_frames && g.st != G_PENDING && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until && !dt_t_busy()) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
     dt_window();
     if (!dt_state(mgr)) { pthread_mutex_lock(&g_qm); g_qh = g_qt; pthread_mutex_unlock(&g_qm); g.st = G_IDLE; g.pulse_frames = 0; dt_world_stop(); atomic_store(&g_w_rx, 0); g_w_rx_until = 0;
                           if (g_w3) { memset(&w3, 0, sizeof w3); dt_w3_sync(G_IDLE, 0); } return; }
@@ -1448,6 +1695,7 @@ static void dt_drain(void) {
     for (int i = 0; i < n; i++) dt_step(mgr, &ev[i]);
     if (g_world || g_map_live || g_fmap || g_mtap_t || g_w_ry_until) dt_world_poll(mgr);
     if (g_w3) { dt_w3_poll(mgr); dt_w3_sync(g.st, g.wact); }
+    if (g_t_cfg) dt_t_poll(mgr);   // UI mode TOUCH: the keyboard camera, held toggles, multi-finger long presses
     // dos2-touch6 (owner 18.11): the console movies' long presses (hot bar tooltip, item menu, equipment, end turn) need the left button DOWN
     // while the finger is: a still finger on a menu / panel got no press at all until it was lifted (a tap = press + release in one poll), and the
     // long press below became a right click no console movie listens to. Controller UI only (the PC UI keeps its right-click context menus);
@@ -1456,7 +1704,7 @@ static void dt_drain(void) {
         dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG;
         if (g_log || (g_dbg && g_nlog < 64)) LOG("[touch] UI finger still %d ms at %.0f,%.0f: left press now (held until the finger is up)", g_ui_press_ms, (double)g_cx, (double)g_cy);
     }
-    if (g.st == G_PENDING && dt_ms() - g.t0 >= (uint64_t)g_hold_ms) {   // long press, still: right click (ContextMenu / FlashRightMouse)
+    if (g.st == G_PENDING && dt_ms() - g.t0 >= (uint64_t)(g.tg ? g_t_long_ms : g_hold_ms)) {   // long press, still: right click (ContextMenu / FlashRightMouse); TOUCH: the iPad's long press time
         dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g.st = G_HELD;
         { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(1); }   // "IE ShortLongPress" / "IE LongPress" for the iPad movies
         if (g_log || (g_dbg && g_nlog < 64)) LOG("[touch] long press at %.0f,%.0f: right click", (double)g_cx, (double)g_cy);
@@ -1665,6 +1913,27 @@ void dm_dos2_touch_install(void) {
                 (double)g_world_cx, (double)g_world_cy, g_world_walk_ms, g_rot_swap ? ", swapped" : "",
                 g_world == 1 && !dm_dos2_route_on() ? " - NOT active: the routing hook (hle_dos2_touchui_route.c) is off, use DM_DOS2_TOUCH_WORLD=2" : "");
         }
+    }
+    if (g_on) {   // UI mode TOUCH: the iPad's gestures as PC mouse / keyboard records (the "UI mode TOUCH" section above)
+        if ((v = getenv("DM_DOS2_TOUCH_T")) && *v == '0') g_t_cfg = 0;
+        if ((v = getenv("DM_DOS2_TOUCH_T_SLONG_MS")) && atoi(v) >= 0 && atoi(v) <= 3000) g_t_slong_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_LONG_MS")) && atoi(v) >= 150 && atoi(v) <= 5000) g_t_long_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_DTAP_MS")) && atoi(v) >= 0 && atoi(v) <= 2000) g_t_dtap_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_TAPN_MS")) && atoi(v) >= 50 && atoi(v) <= 3000) g_t_tapn_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_PAN_MS")) && atoi(v) >= 50 && atoi(v) <= 20000) g_t_pan_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_ROT_MS")) && atoi(v) >= 50 && atoi(v) <= 20000) g_t_rot_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_CAP_MS")) && atoi(v) >= 50 && atoi(v) <= 5000) g_t_cap_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_TIPS_MS")) && atoi(v) >= 0 && atoi(v) <= 60000) g_t_tips_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_CONES_MS")) && atoi(v) >= 0 && atoi(v) <= 60000) g_t_cones_ms = atoi(v);
+        g_t_pan_inv = (v = getenv("DM_DOS2_TOUCH_T_PAN_INV")) && atoi(v) > 0;
+        g_t_t3f_esc = (v = getenv("DM_DOS2_TOUCH_T_3F_ESC")) && atoi(v) > 0;
+        if (g_t_slong_ms > g_t_long_ms) g_t_slong_ms = g_t_long_ms;   // a tooltip time past the long press: no separate tooltip
+        LOG("[touch] UI mode TOUCH gestures%s (iPad touchscreen_1.json as PC records, while the TOUCH PC UI is up): tap = left click (double tap = a PC double click, %d ms), "
+            "still %d ms = tooltip (hover, no click), %d ms = right click (ContextMenu); one / two-finger pan = keys w / a / s / d (%d ms per screen height%s), "
+            "two-finger rotation = keys delete / end (%d ms per radian%s), pinch = wheel; 2f tap = lalt (ShowWorldTooltips, %s), 3f tap = lshift (ShowSneakCones, %s), "
+            "3f swipe down / up = key o (ToggleTacticalCamera); world gestures %s", g_t_cfg ? "" : " OFF (DM_DOS2_TOUCH_T=0)", g_t_dtap_ms, g_t_slong_ms, g_t_long_ms, g_t_pan_ms,
+            g_t_pan_inv ? ", inverted" : "", g_t_rot_ms, g_rot_swap ? ", swapped" : "", g_t_tips_ms ? "held for a time" : "toggled", g_t_cones_ms ? "held for a time" : "toggled",
+            g_w3 ? "on (DM_DOS2_TOUCH_WORLD=3 hooks)" : "OFF: the world hooks (DM_DOS2_TOUCH_WORLD=3) are off - a TOUCH finger is the plain PC mouse");
     }
     if (g_on) {   // dos2-touch7: ZL / ZR wheels by touch / left stick (the radial section above)
         if ((v = getenv("DM_DOS2_TOUCH_RADIAL")) && *v == '0') g_rad_cfg = 0;
