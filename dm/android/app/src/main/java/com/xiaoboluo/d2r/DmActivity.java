@@ -76,6 +76,17 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native void nativeSetDrs(boolean on);
     static native boolean nativeDos2Touch(int phase, int id, float x, float y);   // [DOS2] touch as mouse (hle_dos2_touch.c): phase 0 down / 1 move / 2 up / 3 cancel, x / y 0..1 of the view
     static boolean dos2Touch;   // [DOS2] the gear "touch as mouse" (Tl2Gear.dos2Touch): touches off the pad's controls go to the game
+    // [DOS2] the in-game UI mode (Tl2Gear.dos2UiMode, hle_dos2_uimode.c): 0 Switch (pad overlay, no touches to the game), 1 hybrid (default, as
+    // before), 2 touch (no pad overlay but its gear button, every other finger is the game's mouse). D3PadView follows it at once.
+    static volatile int dos2UiMode = 1;
+    static native int nativeDos2UiMode(int mode);   // mode -> 0 not live / 1 menus now, HUD at the next load / 2 HUD rebuilt / 3 not taken yet; -1 -> the native mode
+    // DM_DOS2_UI_MODE as the native side reads it (hle_dos2_uimode.h ui_mode_parse): 0 / 1 / 2 or switch / hybrid / touch, else hybrid
+    static int dos2UiModeParse(String s) {
+        if (s == null) return 1;
+        s = s.trim();
+        if (s.equals("0") || s.equals("1") || s.equals("2")) return s.charAt(0) - '0';
+        return s.startsWith("switch") ? 0 : s.startsWith("touch") ? 2 : 1;
+    }
     static native float[] nativeDos2HudRects();   // [DOS2] HUD element rects measured by the movies, {x0, y0, x1, y1} * n normalised to the window (hle_dos2_touch.c dm_dos2_hud_rects); D3PadView
     static native int nativeDos2UiState();   // [DOS2] pack 3d: bit 0 a menu / modal / panel is on screen, bit 1 in game, bit 2 known (hle_dos2_touch.c dm_dos2_touch_ui_state); D3PadView's stick priority
     static native boolean nativeSetDos2Column(int state);   // [DOS2] the iPad button column of bottomBar_d: 0 shown, 1 folded, 2 hidden (hle_dos2_touchui_vis.c), live
@@ -1008,6 +1019,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     }
 
     private void dos2TouchUiEnv() {
+        try {   // [DOS2] the UI mode the native side runs (dm/env may have changed the gear's DM_DOS2_UI_MODE): the pad overlay follows it
+            int m = dos2UiModeParse(Os.getenv("DM_DOS2_UI_MODE"));
+            final boolean changed = m != dos2UiMode;
+            if (changed) crumb("DM_DOS2_UI_MODE: UI mode " + m + " (from the environment, the gear's pref was " + dos2UiMode + ")");
+            dos2UiMode = m; if (m == 2) dos2Touch = true;
+            if (d3Pad != null && (changed || m != 1)) d3Pad.dos2UiModeChanged();   // hybrid: the pad as before
+        } catch (Throwable t) { }
         try {
             String v = Os.getenv("DM_DOS2_TOUCHUI"); v = v == null ? "" : v.trim();
             if (!v.isEmpty() && !"0".equals(v) && !dos2Touch) { dos2Touch = true; crumb("DM_DOS2_TOUCHUI: touches off the pad's controls go to the game (touch as mouse)"); }
@@ -1015,6 +1033,23 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             dos2BackB = !v.isEmpty() && !"0".equals(v) && !"0".equals(b);
             if (dos2BackB) crumb("DM_DOS2_TOUCHUI: Back (gesture / key) = pad B; the pause menu opens from the pad's gear button (DM_DOS2_TOUCHUI_BACK=0: Back opens it)");
         } catch (Throwable t) { }
+    }
+    // [DOS2] the gear's UI mode changed (Tl2Gear.dos2UiMode.after): live when the game runs (hle_dos2_uimode.c), a toast says what applies when;
+    // the pad overlay follows only when the native side took the change (else everything waits for the next launch, which reads the pref)
+    void dos2UiModeChanged(int mode) {
+        String[] ru = {"Switch", "гибрид", "касание"}, en = {"Switch", "hybrid", "touch"};
+        String name = Ui.t(this, ru[mode], en[mode]);
+        if (!started || !libraryLoaded) { crumb("UI mode -> " + mode + " (gear, before the start: the start reads the pref)"); return; }   // Tl2Gear.dos2UiMode.env
+        int r;
+        try { r = nativeDos2UiMode(mode); } catch (UnsatisfiedLinkError e) { r = -1; }
+        crumb("UI mode -> " + mode + " (gear): native answer " + r);
+        String msg;
+        if (r == 2) msg = Ui.t(this, "Интерфейс: " + name + " — применён сразу", "Interface: " + name + " - applied now");
+        else if (r == 1 || r == 3) msg = Ui.t(this, "Интерфейс: " + name + " — меню сразу, игровой экран — после следующей загрузки или выхода в главное меню",
+            "Interface: " + name + " - menus now, the game screen after the next load or the return to the main menu");
+        else msg = Ui.t(this, "Интерфейс: " + name + " — со следующего запуска игры", "Interface: " + name + " - from the next launch");
+        if (r >= 1) { dos2UiMode = mode; if (mode == 2) dos2Touch = true; if (d3Pad != null) d3Pad.dos2UiModeChanged(); }
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show();
     }
     private void padSurfaceEnv() {
         if (d3Pad == null) return;

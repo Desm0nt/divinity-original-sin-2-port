@@ -369,13 +369,13 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     private float cx(Ctl c) { if (ed()) { place(); return c.x; } return ax(c) + c.ox * u(); }
     private float cy(Ctl c) { if (ed()) { place(); return c.y; } return ay(c) + c.oy * u(); }
     private float rad(Ctl c) { if (ed()) { place(); return c.r; } return c.size * u(); }
-    private boolean off(Ctl c) { return (ed() && c.hidden && !editMode) || (DmActivity.DOS2 && !editMode && ((DmActivity.dos2LStickOff && c == left) || (DmActivity.dos2RStickOff && c == right))); }   // [DOS2] hidden in the editor / the gear's "left stick off": neither drawn nor hit in play
+    private boolean off(Ctl c) { return (ed() && c.hidden && !editMode) || (DmActivity.DOS2 && !editMode && DmActivity.dos2UiMode != 0 && ((DmActivity.dos2LStickOff && c == left) || (DmActivity.dos2RStickOff && c == right))); }   // [DOS2] UI mode Switch: both sticks (taps do not turn the camera there)   // [DOS2] hidden in the editor / the gear's "left stick off": neither drawn nor hit in play
     private float sx(Stick s) { return Float.isNaN(s.baseX) ? cx(s) : s.baseX; }
     private float sy(Stick s) { return Float.isNaN(s.baseX) ? cy(s) : s.baseY; }
 
     private boolean shown(Btn b) {
         if (editMode) return true;
-        if (controllerMode) return b.key == SETTINGS;
+        if (controllerMode || dos2TouchUi()) return b.key == SETTINGS;   // [DOS2] UI mode touch: only the gear button
         if (off(b)) return false;
         return !menuMode || b.menu;
     }
@@ -702,7 +702,12 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     // [DOS2] touch as mouse (DmActivity.dos2Touch, gear; hle_dos2_touch.c): a touch that is not on a shown button or a stick's home goes to
     // the game as the mouse (the sticks' floating zones, discs around their homes then, keep their touches: a stick spawns under the finger there); the native side makes clicks / drags / right click / zoom of it
     private final android.util.SparseBooleanArray mousePtr = new android.util.SparseBooleanArray();
-    private boolean dos2Mouse() { return DmActivity.DOS2 && DmActivity.dos2Touch && !menuMode; }
+    private boolean dos2Mouse() { return DmActivity.DOS2 && DmActivity.dos2Touch && !menuMode && DmActivity.dos2UiMode != 0; }   // UI mode Switch: taps never reach the game
+    // [DOS2] UI mode touch (DmActivity.dos2UiMode 2, hle_dos2_uimode.c): no pad overlay but the gear button, every other finger is the game's mouse,
+    // also while a real controller is connected (the game itself switches its UI to the one of the device used last); the layout editor still works
+    private boolean dos2TouchUi() { return DmActivity.DOS2 && DmActivity.dos2UiMode == 2 && !editMode; }
+    // DmActivity: the UI mode changed (the start's environment or the gear): let go of everything held, redraw
+    void dos2UiModeChanged() { post(() -> { releaseAll(); if (menuMode && dos2TouchUi()) setMenuMode(false); lw = -1; invalidate(); }); }
     private void mouse(int phase, int id, float x, float y) {
         int w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0) return;
         boolean taken = DmActivity.nativeDos2Touch(phase, id, x / w, y / h);
@@ -714,6 +719,16 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
         float x = e.getX(i), y = e.getY(i);
         if (editMode && ed()) { editor.touch(e); return true; }   // [DOS2]
         if (editMode) { editTouch(e, a, id, x, y); return true; }
+        if (dos2TouchUi()) {   // [DOS2] UI mode touch: the gear button, else the game's mouse (the pad's buttons and sticks are not there)
+            if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); else mouse(0, id, x, y); }
+            else if (a == MotionEvent.ACTION_MOVE) { for (int k = 0; k < e.getPointerCount(); k++) { int pid = e.getPointerId(k); if (mousePtr.get(pid)) mouse(1, pid, e.getX(k), e.getY(k)); } }
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_POINTER_UP || a == MotionEvent.ACTION_CANCEL) {
+                boolean all = a != MotionEvent.ACTION_POINTER_UP, cancel = a == MotionEvent.ACTION_CANCEL;
+                for (int k = mousePtr.size() - 1; k >= 0; k--) { int pid = mousePtr.keyAt(k); if (pid == id || all) { int pi = e.findPointerIndex(pid);
+                    mouse(cancel ? 3 : 2, pid, pi >= 0 ? e.getX(pi) : x, pi >= 0 ? e.getY(pi) : y); } }
+            }
+            return true;
+        }
         if (controllerMode) {   // a real controller drives the game: only the settings button, and no axes from this pad
             if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); }
             return true;
@@ -793,7 +808,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
             } else drawEditPanel(c);
             return;
         }
-        if (!controllerMode && !menuMode) {
+        if (!controllerMode && !menuMode && !dos2TouchUi()) {   // [DOS2] UI mode touch: no sticks
             drawStick(c, left); if (right != null) drawStick(c, right);
             if (worldPtr >= 0) {   // where the hero is walking to
                 line.setColor(0xffffffff); line.setAlpha(Math.round(0x90 * op)); c.drawCircle(worldX, worldY, 22 * dp, line);

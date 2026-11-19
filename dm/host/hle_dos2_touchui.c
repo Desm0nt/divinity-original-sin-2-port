@@ -110,6 +110,7 @@
 //                              every movie of the package (the engine loading it)
 #ifdef DM_GAME_DOS2
 #include "hle.h"
+#include "hle_dos2_uimode.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -145,7 +146,10 @@ static const uint32_t k_iggy_nomethod[7] = {0xf1001f5f /* cmp x26,#7 */, 0x54000
                                             0x321d17e1 /* mov w1,#0x1f8 */, 0x14000011};
 // TU-04 / TU-05: object table, flags, the mode byte's meaning (read only; the header's TU-04 part)
 enum { TU_OBJTYPE = 0xaebc5c, TU_OBJSLOT = 0xaebfe8, TU_SETFLAGS = 0xae411c, TU_CLRFLAGS = 0xae3f20, TU_FREESLOT = 0xaebba0, TU_MODESITE = 0x11d9ee0,
-       TU_MODE = 0x2bb8918, TU_MGR_OBJS = 0x10, TU_MGR_NOBJ = 0x1c, TU_OBJ_FLAGS = 0x14, TU_OBJ_TYPE = 0xf0, TU_F_VISIBLE = 0x8, TU_F_MODAL = 0x1e00 };
+       TU_MODE = 0x2bb8918, TU_MGR_OBJS = 0x10, TU_MGR_NOBJ = 0x1c, TU_OBJ_FLAGS = 0x14, TU_OBJ_TYPE = 0xf0, TU_F_VISIBLE = 0x8, TU_F_MODAL = 0x1e00,
+       TU_MODALSUM = 0xae4180, TU_MGR_MODAL = 0x220 };
+// SetFlags' tail (UI mode switch, dm_dos2_touchui_ui_busy): a visible object's modal bits are OR-ed into [uimgr+0x220]
+static const uint32_t k_modalsum[4] = {0xb942214c /* ldr w12,[x10,#0x220] */, 0x12170d0b /* and w11,w8,#0x1e00 */, 0x2a0b018b, 0xb902214b /* str w11,[x10,#0x220] */};
 static const uint32_t k_objtype[1] = {0xb900f019 /* str w25,[x0,#0xf0]: the object's type */};
 static const uint32_t k_objslot[7] = {0xb9401e69 /* ldr w9,[x19,#0x1c]: count */, 0x92407ec8 /* and x8,x22,#0xffffffff: index */, 0xeb09011f, 0x54000c62,
                                       0xf9400a69 /* ldr x9,[x19,#0x10]: objects */, 0xf868792a, 0xb500008a};
@@ -209,6 +213,14 @@ static const tu_def k_hint[] = {
     // line reports its rect as "hint3", a world tap there = the pad's X (hle_dos2_touch.c dt_hint_tap). The type still gets no mouse (route.c). Off: DM_DOS2_TOUCHUI_DENY=5
     {0x05, 0, "overhead_d", "GUI/overhead.swf"},
 };
+// UI mode TOUCH (hle_dos2_uimode.c, owner 19.11): the mode byte is 0 there, so the game creates the PC types (msgBox 0x1d, gameMenu 0x13, saveLoad
+// 0x27, hotBar 0x28 through hle_dos2_touchui_hud.c ...); this table maps PC types to our PC-based `<name>_d.swf` movies (docs/dos2/TOUCH_MODES_PLAN.md
+// T2). EMPTY until those movies exist: an entry is only substituted when TouchUI.pak has its file (tu_apply), the rule of every table here.
+// The test route before the table is filled: DM_DOS2_UI_TOUCH_MAP=<hex id>:<movie>,... (the format of DM_DOS2_TOUCHUI_MAP; added to this table).
+// The table of SWITCH is empty by design (stock `_c` movies); HYBRID's is k_def + k_hint (or DM_DOS2_TOUCHUI_SET / _MAP) as before.
+static const tu_def k_touch[] = {
+    {0, 0, NULL, NULL}   // end (no entry yet)
+};
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed
 // (a click would be its "accept"). A type that is substituted with a touch movie is a touch window instead.
 static const uint16_t k_block[] = {0x4b, 0x4c, 0x1d, 0x12, 0x4a, 0x27, 0x58, 0x59, 0x5a, 0x5b, 0x01, 0x11, 0x23, 0x2d, 0x0d, 0x67, 0x4d, 0x13, 0x04, 0x03, 0x1b, 0x1a, 0x18};
@@ -230,7 +242,7 @@ typedef struct tu_node { struct tu_node *next; uint32_t id, pad; tu_creator *cr;
 _Static_assert(sizeof(tu_creator) == 0x18 && sizeof(tu_node) == 0x18, "creator / hash node are 0x18 bytes");
 typedef uint64_t (*tu_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-enum { TU_MAX = 64, TU_PATH = 96, TU_FULL = 256 };
+enum { TU_MAX = 128, TU_PATH = 96, TU_FULL = 256 };
 typedef struct {
     uint32_t id; int state;                 // 0 = to do, 1 = substituted, 2 = created as its PC twin (TU-05), -1 = skipped / given back
     uint32_t pc; int pc_ok;                 // the PC twin of the same class (0 = none); 1 = checked: same creator function, twin substituted
@@ -238,9 +250,11 @@ typedef struct {
     tu_str saved; tu_creator *cr; int in_place; uint32_t tail, old_len;
     const char *expect;                     // the "GUI/x.swf" tail this type must have now (the default table), NULL = any
     char full[TU_FULL];                     // the whole new path (the engine's prefix + path) when it does not fit in place
+    unsigned modes;                         // UI modes whose table holds it (hle_dos2_uimode.h ui_mode_mask); states 4 / 5 = 1 / 2 prepared but parked
 } tu_map;
 static tu_map g_map[TU_MAX];
 static int g_nmap, g_on, g_log, g_dbg, g_applied, g_nocheck, g_pcwin = 1, g_filter_any, g_watch_ok, g_mode_ok;
+static int g_ui = UI_HYBRID, g_modal_ok;   // the UI mode whose path table is written now (hle_dos2_uimode.c); [uimgr+0x220] checked (dm_dos2_touchui_ui_busy)
 static uint32_t g_deny[32]; static int g_ndeny;
 // TU-04: the substituted objects the host saw created (handle, type), polled for visibility from hle_dos2_touch.c (game thread)
 enum { TU_LIVE = 96 };
@@ -362,12 +376,25 @@ static void tu_dump(uint8_t *mgr) {
         else LOG("[touchui]   type %#04x creator main+%#llx (path not readable)", id, (unsigned long long)((uint8_t *)nd->cr->fn - g_main->base));
     }
 }
+static int tu_on(const tu_map *m) { return ui_mode_entry_on(m->modes, g_ui); }   // in the table of the UI mode written now
+static void tu_write(tu_map *m) {   // a prepared entry (state 4) -> its path in the creator (state 1); under g_lock, game thread
+    tu_creator *cr = m->cr; const uint32_t pl = (uint32_t)strlen(m->path), nl = m->tail + pl;
+    if (m->in_place) { memcpy(cr->path.ptr + m->tail, m->path, pl + 1); cr->path.len = nl; }   // the engine's own buffer, same allocation
+    else { cr->path.ptr = m->full; cr->path.len = nl; }                                          // host buffer (static, never freed: the table lives for the whole run)
+    m->state = 1;
+}
+static void tu_unwrite(tu_map *m) {   // state 1 -> the creator's own path back, the entry stays prepared (state 4) for a later mode change
+    if (m->in_place) { memcpy(m->cr->path.ptr + m->tail, m->old, strlen(m->old) + 1); m->cr->path.len = m->old_len; }
+    else m->cr->path = m->saved;
+    m->state = 4;
+}
 static void tu_apply(uint8_t *mgr) {   // under g_lock, once, at the first CreateUIObject (the registrar is done by then)
     uint8_t *glob = *(uint8_t *volatile *)(g_main->base + TU_UIMGR);
     if (mgr != glob) { LOG("【红】[touchui] CreateUIObject manager %p is not [main+%#x] = %p: nothing substituted", (void *)mgr, TU_UIMGR, (void *)glob); g_on = 0; return; }
     if (g_log) tu_dump(mgr);
     if (!g_on) return;
-    int done = 0;
+    int done = 0, parked = 0;
+    // pass 1: every entry of every mode's table reads the creator's own path (nothing is written yet: two tables may hold the same type)
     for (int i = 0; i < g_nmap; i++) {
         tu_map *m = &g_map[i]; m->state = -1;
         tu_node *nd = tu_find(mgr, m->id); const char *p; uint32_t len;
@@ -387,28 +414,89 @@ static void tu_apply(uint8_t *mgr) {   // under g_lock, once, at the first Creat
         if (nl + 1 > TU_FULL) { LOG("【红】[touchui] type %#x: the new path is too long: skipped", m->id); continue; }
         memcpy(m->full, p, (size_t)tail); memcpy(m->full + tail, m->path, pl + 1);
         m->cr = cr; m->saved = cr->path; m->tail = (uint32_t)tail; m->old_len = len; m->in_place = nl + 1 <= (cr->path.cap1 & ~1u);
-        if (m->in_place) { memcpy(cr->path.ptr + tail, m->path, pl + 1); cr->path.len = nl; }   // the engine's own buffer, same allocation
-        else { cr->path.ptr = m->full; cr->path.len = nl; }                                      // host buffer (static, never freed: the table lives for the whole run)
-        m->state = 1; done++;
-        LOG("[touchui] type %#x -> %s (was %s; creator %p function main+%#llx, %s)", m->id, m->full, m->old, (void *)cr,
-            (unsigned long long)((uint8_t *)cr->fn - g_main->base), m->in_place ? "written in place" : "pointer and length swapped for a host buffer");
+        m->state = 4;   // prepared
+    }
+    // pass 2: the table of the UI mode now is written; the other modes' entries stay prepared (dm_dos2_touchui_set_mode writes them later)
+    for (int i = 0; i < g_nmap; i++) {
+        tu_map *m = &g_map[i]; if (m->state != 4) continue;
+        if (!tu_on(m)) {
+            parked++;
+            LOG("[touchui] type %#x -> %s prepared for UI mode %s (was %s; not written: the %s table is on)", m->id, m->path,
+                (m->modes & ui_mode_mask(UI_TOUCH)) ? "touch" : "hybrid", m->old, ui_mode_name(g_ui));
+            continue;
+        }
+        tu_write(m); done++;
+        LOG("[touchui] type %#x -> %s (was %s; creator %p function main+%#llx, %s)", m->id, m->full, m->old, (void *)m->cr,
+            (unsigned long long)((uint8_t *)m->cr->fn - g_main->base), m->in_place ? "written in place" : "pointer and length swapped for a host buffer");
     }
     int nre = 0;
     for (int i = 0; i < g_nmap; i++) {   // TU-05: `_c` id -> PC twin, only when both share the creator function (= one class) and the twin plays the `_t` movie
         tu_map *m = &g_map[i]; if (m->state != 2) continue;
-        tu_map *tw = NULL; for (int k = 0; k < g_nmap; k++) if (g_map[k].id == m->pc) tw = &g_map[k];
+        tu_map *tw = NULL; for (int k = 0; k < g_nmap; k++) if (g_map[k].id == m->pc && (g_map[k].modes & m->modes)) tw = &g_map[k];
         tu_node *a = tu_find(mgr, m->id), *b = tu_find(mgr, m->pc);
         if (!g_pcwin) { m->state = -1; LOG("[touchui] type %#x stays %s: its `_t` movie has the PC contract and DM_DOS2_TOUCHUI_PCWIN=0", m->id, m->old); continue; }
-        if (!tw || tw->state != 1 || !a || !b || !a->cr || !b->cr || a->cr->fn != b->cr->fn) {
+        const int tw_ok = tw && (tw->state == 1 || tw->state == 4);
+        if (!tw_ok || !a || !b || !a->cr || !b->cr || a->cr->fn != b->cr->fn) {
             m->state = -1;
-            LOG("【红】[touchui] type %#x: PC twin %#x %s: stays %s", m->id, m->pc, !tw || tw->state != 1 ? "not substituted" : "has another creator function (not the same class)", m->old);
+            LOG("【红】[touchui] type %#x: PC twin %#x %s: stays %s", m->id, m->pc, !tw_ok ? "not substituted" : "has another creator function (not the same class)", m->old);
             continue; }
         m->pc_ok = 1; nre++;
-        LOG("[touchui] type %#x (%s) will be created as %#x -> %s (PC branch of the same class, creator function main+%#llx)", m->id, m->old, m->pc, tw->path,
-            (unsigned long long)((uint8_t *)a->cr->fn - g_main->base));
+        if (!tu_on(m)) m->state = 5;   // prepared, parked with its twin
+        LOG("[touchui] type %#x (%s) will be created as %#x -> %s (PC branch of the same class, creator function main+%#llx)%s", m->id, m->old, m->pc, tw->path,
+            (unsigned long long)((uint8_t *)a->cr->fn - g_main->base), m->state == 5 ? " - in its UI mode only" : "");
     }
     LOG("[touchui] %d of %d type(s) substituted, %d `_c` type(s) created as their PC twin (DM_DOS2_TOUCHUI_PCWIN=%d) (UI manager %p, %u types registered)", done, g_nmap, nre,
         g_pcwin, (void *)mgr, *(volatile uint32_t *)(mgr + TU_HASH_CNT));
+    if (parked) LOG("[touchui] UI mode %s: %d prepared substitution(s) of the other modes' tables left unwritten (written on a mode change)", ui_mode_name(g_ui), parked);
+}
+// hle_dos2_uimode.c (game thread, the pad poll): the path table of `mode` is written, every other one given back. Windows made from now on
+// play the new movies; objects alive keep the movie they were made with (the HUD sets change at the next load or the live rebuild).
+// Returns the entries of that table now in the creators, -1 = no touch UI in this run (no package / DM_DOS2_TOUCHUI=0).
+int dm_dos2_touchui_set_mode(int mode);
+int dm_dos2_touchui_set_mode(int mode) {
+    if (!g_on || !g_main || !ui_mode_valid(mode)) return -1;
+    pthread_mutex_lock(&g_lock);
+    const int was = g_ui; g_ui = mode;
+    int on = 0, off = 0;
+    if (g_applied) {   // before the first CreateUIObject tu_apply reads g_ui itself
+        for (int i = 0; i < g_nmap; i++) {   // first give back what leaves (a type in two tables: the old entry first)
+            tu_map *m = &g_map[i];
+            if (m->state == 1 && !tu_on(m)) { tu_unwrite(m); off++; }
+            else if (m->state == 2 && !tu_on(m)) { m->state = 5; off++; }
+        }
+        for (int i = 0; i < g_nmap; i++) {
+            tu_map *m = &g_map[i];
+            if (m->state == 4 && tu_on(m)) { tu_write(m); on++; }
+            else if (m->state == 5 && tu_on(m)) { m->state = 2; on++; }
+        }
+    } else for (int i = 0; i < g_nmap; i++) on += tu_on(&g_map[i]);
+    pthread_mutex_unlock(&g_lock);
+    LOG("[touchui] path table %s -> %s: %d substitution(s) written, %d given back%s", ui_mode_name(was), ui_mode_name(mode), on, off,
+        g_applied ? "" : " (before the first CreateUIObject: written there)");
+    return on;
+}
+// hle_dos2_uimode.c, DM_DOS2_UI_LIVE=1: may the player UI sets be rebuilt now? 1 = no (*type = the window: a visible modal one, a dialog, the
+// loading screen, character creation; TU_MGR_MODAL = the modal bits [uimgr+0x220]), 0 = nothing of that, -1 = cannot tell (no window watch)
+int dm_dos2_touchui_ui_busy(uint32_t *type);
+int dm_dos2_touchui_ui_busy(uint32_t *type) {
+    static const uint32_t k_busy_types[] = {0xe, 0x42, 0x65, 0x17, 3, 4};   // dialog, dialog_c, loading screen, character creation (as hle_dos2_touchui_hud.c)
+    if (type) *type = 0;
+    if (!g_watch_ok || !g_main) return -1;
+    uint8_t *mgr = *(uint8_t *volatile *)(g_main->base + TU_UIMGR);
+    if (!mgr) return -1;
+    if (g_modal_ok && (*(volatile uint32_t *)(mgr + TU_MGR_MODAL) & TU_F_MODAL)) { if (type) *type = TU_MGR_MODAL; return 1; }
+    uint8_t *const *objs = *(uint8_t *const *volatile *)(mgr + TU_MGR_OBJS);
+    const uint32_t nobj = *(volatile uint32_t *)(mgr + TU_MGR_NOBJ);
+    if (!objs || nobj >= 0x100000) return -1;
+    for (uint32_t i = 0; i < nobj; i++) {
+        const uint8_t *o = objs[i]; if (!o) continue;
+        const uint32_t fl = *(const volatile uint32_t *)(o + TU_OBJ_FLAGS), ty = *(const volatile uint32_t *)(o + TU_OBJ_TYPE);
+        if (!(fl & TU_F_VISIBLE)) continue;
+        int hit = (fl & TU_F_MODAL) != 0;
+        for (unsigned k = 0; k < sizeof k_busy_types / sizeof *k_busy_types && !hit; k++) hit = ty == k_busy_types[k];
+        if (hit) { if (type) *type = ty; return 1; }
+    }
+    return 0;
 }
 // ---- TU-04: which substituted windows are on screen (polled by hle_dos2_touch.c on the game thread, every pad poll) ----
 static void tu_live_add(uint64_t h, uint32_t type, uint32_t asked, int touch) {   // under g_lock
@@ -417,7 +505,7 @@ static void tu_live_add(uint64_t h, uint32_t type, uint32_t asked, int touch) { 
     g_live[g_nlive++] = (tu_live){h, type, asked, -1, 0, touch};
 }
 static const char *tu_name(uint32_t type) {
-    for (int i = 0; i < g_nmap; i++) if (g_map[i].id == type && g_map[i].state > 0) return g_map[i].path;
+    for (int i = 0; i < g_nmap; i++) if (g_map[i].id == type && (g_map[i].state == 1 || g_map[i].state == 2)) return g_map[i].path;
     return "console menu, no touch";
 }
 static int tu_is_block(uint32_t type) { for (unsigned i = 0; i < sizeof k_block / sizeof *k_block; i++) if (k_block[i] == type) return 1; return 0; }
@@ -577,7 +665,7 @@ static uint64_t tu_create_hook(uint64_t mgr, uint64_t layer, uint64_t type, uint
     return h;
 }
 
-static int tu_add(uint32_t id, const char *movie, const char *expect, uint32_t pc) {
+static int tu_add(uint32_t id, const char *movie, const char *expect, uint32_t pc, unsigned modes) {   // modes: the UI modes' tables it belongs to
     if (g_nmap == TU_MAX || id > 0xffff) return 0;
     for (int i = 0; i < g_ndeny; i++) if (g_deny[i] == id || (pc && g_deny[i] == pc)) { LOG("[touchui] type %#x: DM_DOS2_TOUCHUI_DENY, left alone", id); return 1; }
     for (const char *c = movie; *c; c++) if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '/' || *c == '.')) return 0;
@@ -585,9 +673,20 @@ static int tu_add(uint32_t id, const char *movie, const char *expect, uint32_t p
     tu_map *m = &g_map[g_nmap];
     const size_t l = strlen(movie); const int has_gui = !strncmp(movie, "GUI/", 4), has_ext = l > 4 && !strcmp(movie + l - 4, ".swf");
     if (snprintf(m->path, sizeof m->path, "%s%s%s", has_gui ? "" : "GUI/", movie, has_ext ? "" : ".swf") >= (int)sizeof m->path) return 0;
-    for (int i = 0; i < g_nmap; i++) if (g_map[i].id == id) return 0;
-    m->id = id; m->expect = expect; m->state = 0; m->pc = pc; m->pc_ok = 0; g_nmap++;
+    for (int i = 0; i < g_nmap; i++) if (g_map[i].id == id && (g_map[i].modes & modes)) return 0;   // one entry per type in a mode's table
+    m->id = id; m->expect = expect; m->state = 0; m->pc = pc; m->pc_ok = 0; m->modes = modes; g_nmap++;
     return 1;
+}
+static void tu_add_map(const char *v, unsigned modes, const char *what) {   // "<hex id>:<movie>,..." ("GUI/" and ".swf" are added) into the tables of `modes`
+    char *dup = strdup(v), *save = NULL; int bad = 0; const int n0 = g_nmap;
+    for (char *t = dup ? strtok_r(dup, ",; ", &save) : NULL; t; t = strtok_r(NULL, ",; ", &save)) {
+        char *c = strchr(t, ':'), *end = NULL;
+        if (!c) { bad++; continue; }
+        *c = 0; const unsigned long id = strtoul(t, &end, 16);
+        if (end == t || *end || !tu_add((uint32_t)id, c + 1, NULL, 0, modes)) bad++;
+    }
+    free(dup);
+    LOG("%s[touchui] %s: %d type(s)%s", bad ? "【红】" : "", what, g_nmap - n0, bad ? ", some entries were not understood (want <hex id>:<movie>,...)" : "");
 }
 
 // ---- tooltip guard (the header's correction 2): `if (!tooltip_ui) return;` at the entry of main+0x1120b50 and main+0x1121150 ----
@@ -649,6 +748,7 @@ void dm_dos2_touchui_install(void) {
     g_log = lg && atoi(lg) > 0;
     if (!want && !g_log) return;
     g_dbg = (v = getenv("DM_DBG")) && atoi(v) > 0;
+    { int dm_dos2_ui_mode(void); g_ui = dm_dos2_ui_mode(); }   // hle_dos2_uimode.c (installed first): the path table to write
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_main = &g_mod[i];
     module_t *m = g_main;
     if (!m) { LOG("【红】[touchui] no main module: touch UI off"); return; }
@@ -695,30 +795,29 @@ void dm_dos2_touchui_install(void) {
                 getenv("DM_ROMFS") ? getenv("DM_ROMFS") : "DM_ROMFS not set");
             if (!g_log) return;
         } else {
-            if ((v = getenv("DM_DOS2_TOUCHUI_MAP")) && *v) {   // "48:mainMenu_t,57:mainMenu_t": hex type id : movie
-                char *dup = strdup(v), *save = NULL; int bad = 0;
-                for (char *t = dup ? strtok_r(dup, ",; ", &save) : NULL; t; t = strtok_r(NULL, ",; ", &save)) {
-                    char *c = strchr(t, ':'), *end = NULL;
-                    if (!c) { bad++; continue; }
-                    *c = 0; const unsigned long id = strtoul(t, &end, 16);
-                    if (end == t || *end || !tu_add((uint32_t)id, c + 1, NULL, 0)) bad++;
-                }
-                free(dup);
-                LOG("%s[touchui] DM_DOS2_TOUCHUI_MAP: %d type(s)%s", bad ? "【红】" : "", g_nmap, bad ? ", some entries were not understood (want <hex id>:<movie>,...)" : "");
-            } else {
+            if ((v = getenv("DM_DOS2_TOUCHUI_MAP")) && *v) tu_add_map(v, ui_mode_mask(UI_HYBRID), "DM_DOS2_TOUCHUI_MAP");   // "48:mainMenu_t,57:mainMenu_t"
+            else {
                 const char *set = getenv("DM_DOS2_TOUCHUI_SET");
-                for (unsigned i = 0; i < sizeof k_def / sizeof *k_def; i++) tu_add(k_def[i].id, k_def[i].movie, k_def[i].expect, k_def[i].pc);
+                for (unsigned i = 0; i < sizeof k_def / sizeof *k_def; i++) tu_add(k_def[i].id, k_def[i].movie, k_def[i].expect, k_def[i].pc, ui_mode_mask(UI_HYBRID));
                 // since 15.11 (branch dos2-tc2) the console menus with tappable hints are part of the default: the routing hook's modal guard keeps a click
                 // away from a touch menu under a box (hle_dos2_touchui_route.c). DM_DOS2_TOUCHUI_SET=main = the main menu only (the default of pack 2v).
                 const int hints = !set || !*set || !strcmp(set, "hints");
-                if (hints) for (unsigned i = 0; i < sizeof k_hint / sizeof *k_hint; i++) tu_add(k_hint[i].id, k_hint[i].movie, k_hint[i].expect, k_hint[i].pc);
-                if (set && !strcmp(set, "ipad")) for (unsigned i = 0; i < sizeof k_ipad / sizeof *k_ipad; i++) tu_add(k_ipad[i].id, k_ipad[i].movie, k_ipad[i].expect, k_ipad[i].pc);
+                if (hints) for (unsigned i = 0; i < sizeof k_hint / sizeof *k_hint; i++) tu_add(k_hint[i].id, k_hint[i].movie, k_hint[i].expect, k_hint[i].pc, ui_mode_mask(UI_HYBRID));
+                if (set && !strcmp(set, "ipad")) for (unsigned i = 0; i < sizeof k_ipad / sizeof *k_ipad; i++) tu_add(k_ipad[i].id, k_ipad[i].movie, k_ipad[i].expect, k_ipad[i].pc, ui_mode_mask(UI_HYBRID));
                 else if (set && *set && !hints && strcmp(set, "main")) LOG("【红】[touchui] DM_DOS2_TOUCHUI_SET=%s is not main / hints / ipad: the main menu only", set);
                 LOG("[touchui] set: %s", set && !strcmp(set, "ipad") ? "main menu D + the iPad `_t` menus (DM_DOS2_TOUCHUI_SET=ipad)" : hints
                     ? "main menu D + console menus with tappable hints (the default; DM_DOS2_TOUCHUI_SET=main = main menu only)" : "main menu D only; every other window stays the console one (DM_DOS2_TOUCHUI_SET=main)");
             }
+            // UI mode TOUCH's own table (hle_dos2_uimode.c): k_touch (empty for now) + DM_DOS2_UI_TOUCH_MAP; SWITCH has none
+            { const int n0 = g_nmap;
+              for (unsigned i = 0; k_touch[i].movie; i++) tu_add(k_touch[i].id, k_touch[i].movie, k_touch[i].expect, k_touch[i].pc, ui_mode_mask(UI_TOUCH));
+              if ((v = getenv("DM_DOS2_UI_TOUCH_MAP")) && *v) tu_add_map(v, ui_mode_mask(UI_TOUCH), "DM_DOS2_UI_TOUCH_MAP");
+              if (g_nmap > n0 || g_ui != UI_HYBRID) LOG("[touchui] UI mode %s at start: the %s path table is written (hybrid %d entr%s, touch %d, switch none: stock movies)", ui_mode_name(g_ui),
+                                                      ui_mode_name(g_ui), n0, n0 == 1 ? "y" : "ies", g_nmap - n0); }
             g_on = g_nmap > 0;
         }
+        // the modal bits' sum [uimgr+0x220] for the UI mode switch's live rebuild (dm_dos2_touchui_ui_busy); without it the walk of the objects alone decides
+        g_modal_ok = g_watch_ok && (uint64_t)TU_MODALSUM + sizeof k_modalsum <= m->text_end && !memcmp(m->base + TU_MODALSUM, k_modalsum, sizeof k_modalsum);
     }
     // the hook: CreateUIObject's first 4 instructions -> trampoline, a jump to the host in their place
     uint32_t *t = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -733,9 +832,13 @@ void dm_dos2_touchui_install(void) {
     if (tu_poke(m, TU_CREATE, jump, 4)) { LOG("【红】[touchui] mprotect RW failed: CreateUIObject not hooked, touch UI off"); g_on = 0; g_create_orig = NULL; return; }
     if (g_on) {
         char list[2560]; size_t o = 0; list[0] = 0;
-        for (int i = 0; i < g_nmap && o + 64 < sizeof list; i++)
-            o += (size_t)(g_map[i].pc ? snprintf(list + o, sizeof list - o, "%s%#x -> %#x", i ? ", " : "", g_map[i].id, g_map[i].pc)
-                                      : snprintf(list + o, sizeof list - o, "%s%#x -> %s", i ? ", " : "", g_map[i].id, g_map[i].path));
+        for (int i = 0, j = 0; i < g_nmap && o + 64 < sizeof list; i++) {   // the start mode's table (hle_dos2_uimode.c); SWITCH: none
+            if (!ui_mode_entry_on(g_map[i].modes, g_ui)) continue;
+            o += (size_t)(g_map[i].pc ? snprintf(list + o, sizeof list - o, "%s%#x -> %#x", j ? ", " : "", g_map[i].id, g_map[i].pc)
+                                      : snprintf(list + o, sizeof list - o, "%s%#x -> %s", j ? ", " : "", g_map[i].id, g_map[i].path));
+            j++;
+        }
+        if (!o) snprintf(list, sizeof list, "none (UI mode %s: stock movies until a mode change)", ui_mode_name(g_ui));
         LOG("[touchui] DM_DOS2_TOUCHUI_PCWIN=%d (%s), window watch %s, mouse filter in game: %s", g_pcwin,
             g_pcwin == 0 ? "the `_c` ids of PC-contract menus keep their `_c` movie" : g_pcwin == 1 ? "`_c` id -> PC twin of the same class, mode byte untouched" : "PC twin + mode byte 0 while shown",
             g_watch_ok ? "on" : "OFF", g_filter_any ? "any visible touch window (DM_DOS2_TOUCHUI_FILTER=1)" : "while a modal touch window is visible; out of game: open unless a console menu without touch is up");

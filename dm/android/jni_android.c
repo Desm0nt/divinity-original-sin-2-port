@@ -1030,6 +1030,16 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Column
     (void)state; return JNI_FALSE;
 #endif
 }
+// [DOS2] the in-game UI mode from the gear (hle_dos2_uimode.c): mode 0 switch / 1 hybrid / 2 touch -> 0 not live (next launch), 1 menus now and
+// the HUD at the next load, 2 the HUD rebuilt now, 3 not taken yet (the game thread is paused); mode -1 -> the mode now (-1 = no UI mode switch)
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeDos2UiMode(JNIEnv *env, jclass cls, jint mode) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_DOS2
+    int dm_dos2_uimode_request(int mode); return dm_dos2_uimode_request(mode);
+#else
+    (void)mode; return -1;
+#endif
+}
 // [DOS2] touch as mouse (hle_dos2_touch.c): one finger event, coordinates 0..1 of the game view; returns whether the game takes touches
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeDos2Touch(JNIEnv *env, jclass cls, jint phase, jint id, jfloat x, jfloat y) {
     (void)env; (void)cls;

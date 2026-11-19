@@ -181,6 +181,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_nr_mem_install(void); dm_dos2_nr_mem_install(); }   // [DOS2] NR-29 DM_NR_MEM (default 1): the RAM budget of the NR caches + trims + '[nr] mem' line (hle_dos2_nr_mem.c); before NR-05 reads its caps
     { void dm_dos2_nr_install(void); dm_dos2_nr_install(); }   // [DOS2] DM_NR: engine object registry of the native renderer, default off (hle_dos2_nr.c, NR-01)
     { void dm_dos2_quality_install(void); dm_dos2_quality_install(); }   // [DOS2] DM_DOS2_DRS: dynamic resolution limits, console quality block logged (hle_dos2_quality.c)
+    { void dm_dos2_uimode_install(void); dm_dos2_uimode_install(); }   // [DOS2] DM_DOS2_UI_MODE: switch / hybrid / touch, read by the two below (hle_dos2_uimode.c)
     { void dm_dos2_touchui_install(void); dm_dos2_touchui_install(); }   // [DOS2] DM_DOS2_TOUCHUI: iPad touch movies under the Switch UI types; before the touch hook, it turns DM_DOS2_TOUCH / _KBM on (hle_dos2_touchui.c)
     { void dm_dos2_touchui_ei_install(void); dm_dos2_touchui_ei_install(); }   // [DOS2] DM_DOS2_TOUCHUI_EI: ExternalInterface / invoke log + host EI handlers (hle_dos2_touchui_ei.c)
     { void dm_dos2_touchui_ie_install(void); dm_dos2_touchui_ie_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: the iPad's input events "IE Tap" ... for the `_t` movies (hle_dos2_touchui_ie.c, run tu05a)
