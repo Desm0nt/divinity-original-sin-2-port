@@ -684,6 +684,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             try { Os.setenv("DM_DERIVED", new File(runtime, "derived.tsv").getAbsolutePath(), true); } catch (ErrnoException e) { showStartError(getString(R.string.dmAndroidStorage)); return; }
             if (DOOM) { applyPendingImport(); GearSettings.applyEnv(this); }   // [front] a requested save import first; then every gear section's environment (Tl2Gear)
             if (DOS2) gpuSafeEnv();   // [DOS2] issue #3: safer GPU settings after the phone restarted during a run
+            if (DOS2) dos2TouchScaleEnv();   // [DOS2] UI mode TOUCH: the screen's physical size for the finger-sized UI
             if (DOOM) try {   // [DOOM] the app version for boot.log's first lines (jni_android.c log_header)
                 android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
                 Os.setenv("DM_APP_VERSION", getPackageName() + " " + pi.versionName + " (" + pi.getLongVersionCode() + ")" + (BuildConfig.DEBUG ? " debug" : ""), true);
@@ -1016,6 +1017,31 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         } catch (IOException e) {
             if (out.isFile()) out.delete();   // no seed in this APK
         }
+    }
+
+    // [DOS2] UI mode TOUCH, the physical scale (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: physical scale for fingers"): DM_DOS2_TOUCH_MM_PER_1080
+    // = the millimetres that the game's 1080 design px span here = the physical height of the game's picture: the window's short side, or for
+    // a screen narrower than 16:9 (16:10 / 4:3 tablets) its long side x 9 / 16 (the 16:9 picture letterboxed by the view or by the game itself).
+    // From the window's size in px and the panel's DPI (xdpi / ydpi; densityDpi when they are not believable). dm/env still wins (nativeStart
+    // reads it after this). The native side (dm/host/hle_dos2_touch_scale.h) turns it into the HUD factor and the panels' cell.
+    @SuppressWarnings("deprecation")
+    private void dos2TouchScaleEnv() {
+        try {
+            android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(m);
+            int[] sc = screenSize();
+            if (sc[0] <= 0 || sc[1] <= 0) return;
+            float dpi = (m.xdpi + m.ydpi) / 2f; String how = "xdpi " + m.xdpi + " / ydpi " + m.ydpi;
+            double inch = Math.hypot(sc[0], sc[1]) / dpi;
+            if (!(dpi >= 100 && dpi <= 1000) || Math.abs(m.xdpi - m.ydpi) > 0.15f * dpi || inch < 3.5 || inch > 15) {
+                dpi = m.densityDpi; inch = Math.hypot(sc[0], sc[1]) / dpi; how += " not believable: densityDpi " + m.densityDpi;
+                if (!(dpi >= 100 && dpi <= 1000) || inch < 3.5 || inch > 15) { crumb("touch scale: no believable DPI (" + how + "): DM_DOS2_TOUCH_MM_PER_1080 not set, the touch UI keeps the iPad's sizes"); return; }
+            }
+            double shortMm = sc[1] / dpi * 25.4, longMm = sc[0] / dpi * 25.4, mm = Math.min(shortMm, longMm * 9 / 16);
+            Os.setenv("DM_DOS2_TOUCH_MM_PER_1080", String.format(Locale.ROOT, "%.1f", mm), true);
+            crumb(String.format(Locale.ROOT, "touch scale: window %dx%d px, %.0f dpi (%s), %.1f\" -> the game's picture %.1f mm high: DM_DOS2_TOUCH_MM_PER_1080=%.1f (dm/env wins)",
+                sc[0], sc[1], dpi, how, inch, mm, mm));
+        } catch (Throwable t) { crumb("touch scale: " + t); }
     }
 
     private void dos2TouchUiEnv() {

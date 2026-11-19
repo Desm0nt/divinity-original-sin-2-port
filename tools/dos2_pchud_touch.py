@@ -38,7 +38,7 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        iPad's: tap = select, double = centre, right click = inventory, drag = regroup). Own names so a later touch edit needs
                        no host change.
   dmSide_p.swf         watermark.swf (UI type 0x8d, a plain UIObject) + the iPad's right side (rightSideButtons_t numbers, 2.4): frame
-                       SIDE_W x 1080 anchored right / screen / right; options (plate_round_copper + icon_menu), the round HELMET button
+                       SIDE_W x 1080 anchored topright / screen / topright (the physical scale grows it from the corner); options (plate_round_copper + icon_menu), the round HELMET button
                        (btn_character; toggles the column locally: the iPad's toggleSidePanel / setRolledIn pair is not in the Switch main),
                        six panel buttons 74 px every 80 px from y 422: map, character, inventory, skills, crafting, journal.
                        A tap = ExternalInterface dmSide(code): 1 options, 2..7 the panels in that order.
@@ -69,20 +69,24 @@ CROP = 196                       # hotbar_mc px cut on the left (portrait 16..76
 VISW = int(PC_FIRST + (SLOTS - 1) * PC_PITCH + PC_SLOT_W + 29) - CROP   # ..to 29 px past the 12th slot
 VISH = 180
 IPAD_SLOT_MID_X, IPAD_SLOT_BOTTOM = 730 - 750, 1049                    # of the screen centre / screen y (hotBar_t)
+ROW_DX = 59                     # the whole row (chat .. slots .. combat log button) centred instead of the iPad's slots 20 px left of the centre:
+                                 # it grows with the physical scale about the bottom centre (dm/host/hle_dos2_touch_scale.h TS_HB_HALF = 656)
 _s = HB_S[0] / float(HB_S[1])
-HB_X = int(round(974 + IPAD_SLOT_MID_X - ((PC_FIRST + ((SLOTS - 1) * PC_PITCH + PC_SLOT_W) / 2.0) - CROP) * _s))
+HB_X = int(round(974 + IPAD_SLOT_MID_X + ROW_DX - ((PC_FIRST + ((SLOTS - 1) * PC_PITCH + PC_SLOT_W) / 2.0) - CROP) * _s))
 HB_Y = int(round(IPAD_SLOT_BOTTOM - 80 - (PC_SLOT_Y + PC_SLOT_H) * _s))
 CHAT = (185, 38, (13, 10))       # chatBtn_mc x, y in hotbar_mc px, scale 1.3 (its 31 px button -> 63 screen px, left of the actions button)
 LOG_S = (2, 1)                   # showLog_mc scale (31 px button -> 62)
+LOG_ART_R = 70                   # showLog_mc's drawing (its frame) ends this many own px right of its origin: the row's right end
 LOG_X, LOG_Y = HB_X + int(VISW * _s) + 8 - 46, int(HB_Y + (PC_SLOT_Y + PC_SLOT_H / 2.0) * _s) - 31 - 50
 ACT_X, ACT_Y = int(HB_X + (272 - CROP) * _s), int(HB_Y + 57.5 * _s + 11 * _s - 144 * _s)   # actionSkillHolder_mc: its foot on the bar's top
 EXP_SX = (49, 100)               # expBar_mc.scaleX: ends near the last slot
 SWIPE = 130                      # stage px (1.5 slots)
 CONFIRM = (974, 788 - 80, 118)   # centre x, y, size: statusConsole_t confirmActionBtn_mc centre (W/2, 788), 118
 CANCEL = (974 + 201, 816 - 80, 69)   # cancelBtn_mc centre (W/2 + 201, 816), 69
-DECK_BTN = (396, 836, 44)        # dmDeck_mc: x, y, size (just above the deck number of the bar)
-DECK_LIST = (396, 778, 52, 58)   # dmDeck1..5_mc: x of the first, y, size, pitch
-IND = (750, 988, 80, 5, 82)      # dmInd1..5_mc: x of the first, y, bar w, h, pitch (hotBar_t indicator_mc: 5 bars 80 x 5 every 82)
+DECK_BTN = (396 + ROW_DX, 836, 44)        # dmDeck_mc: x, y, size (just above the deck number of the bar)
+DECK_LIST = (396 + ROW_DX, 778, 52, 58)   # dmDeck1..5_mc: x of the first, y, size, pitch
+IND = (750 + ROW_DX, 988, 80, 5, 82)      # dmInd1..5_mc: x of the first, y, bar w, h, pitch (hotBar_t indicator_mc: 5 bars 80 x 5 every 82)
+ROW_HALF, HB_FRAME_TOP, HB_END_TOP = 695, 875, 849   # the row's half width, its frame's top, the log button's top (stage px): hle_dos2_touch_scale.h
 PLATE_UP = 110                   # the action plate's centre above the tapped point
 PLATE_BASE, PLATE_HIDE, PLATE_MUL = 2000000, 1999999, 2000
 # ---- minimap (PC stage 420 x 2000, anchored topright)
@@ -90,11 +94,14 @@ MM_MOVE = [('hit_mc', -42, 29), ('map_mc', -42, 29), ('tension_mc', -42, 29), ('
            ('tensionHit_mc', -42, 29), ('title_txt', -42, 29), ('pingButton_mc', -4, -61), ('homestead_mc', 136 - 111, 47 - 94),
            ('diplomacy_mc', 268 - 111, 47 - 178)]
 MM_BTNS = [('dmMmTac_mc', 12, 'icon_tactical', 420 - 378, 154, 67), ('dmMmSave_mc', 11, None, 420 - 89, 163, 48)]   # name, code (10 + dmKey), art, x, y, size
+MM_W = 420                       # the stage width (the iPad's place: the ring centred ~194 px from the right edge; owner 20.11: the map keeps it)
+MM_PAD = [('pingButton_mc', 64), ('homestead_mc', 64), ('dmMmTac_mc', 84), ('dmMmSave_mc', 72)]   # finger pads (transparent, stage px) around the
+                                 # small ring buttons (48 / 67 drawn): a phone gets bigger tap targets, not a bigger map (the host keeps the minimap at x 1)
 # ---- status console (PC stage 1920 x 1080, anchored bottom; its own code already raises by bottomBarHeight 67)
 SC_UP = 33                       # health bar 1043 - 67 - 33 = 943 (statusConsole_t: 943)
 SC_MOVE = ['console_mc', 'fightButtons_mc', 'turnNotice_mc', 'toGM_mc']
 # ---- the right side (rightSideButtons_t: stage 1440 x 1080 anchored right; here the last SIDE_W px of it)
-SIDE_W, SIDE_H = 140, 1080
+SIDE_W, SIDE_H = 140, 1080       # frame, anchored topright (the physical scale grows it from the corner: the iPad's places, owner 20.11)
 _sx = lambda x: x - (1440 - SIDE_W)
 SIDE = [('dmMenu_mc', 1, 'icon_menu', _sx(1348), 20, 74), ('dmHelm_mc', 20, 'btn_character', _sx(1316), 310, 105)] + [
     (n, c, i, _sx(1348), 422 + 80 * k, 74) for k, (n, c, i) in enumerate([('dmP2_mc', 2, 'icon_map'), ('dmP3_mc', 3, 'ico_charsheet'),
@@ -347,7 +354,7 @@ def hotbar(data):
 
 
 # ---------------------------------------------------------------- minimap, status console
-def moved(data, moves, tap=None, btns=()):
+def moved(data, moves, tap=None, btns=(), pads=()):
     """onEventInit: the original, then named root instances moved by (dx, dy); tap = (instance, dmSide code) for a press-and-release button;
     btns = MM_BTNS-like grafted buttons (code 10 + n = ExternalInterface dmKey(n))"""
     swf = Swf(data); nd = 0
@@ -375,6 +382,15 @@ def moved(data, moves, tap=None, btns=()):
             c += [('L', 'm%d' % k)]
         if tap: c += d.get(tap[0]) + [('coerce_a',), ('setlocal', n + 1), ('getlocal', n + 1), ('iffalse', 'nt')] + arm(d, n + 1, tap[1], kids=True) + [('L', 'nt')]
         for k, b in enumerate(btns): c += d.child(b[0], n + 1) + [('getlocal', n + 1), ('iffalse', 'bt%d' % k)] + arm(d, n + 1, b[1]) + [('L', 'bt%d' % k)]
+        for k, (name, size) in enumerate(pads):   # a transparent square of `size` px centred on the button's drawing (its own graphics: hit only)
+            o, g, bb = n + 1, n + 2, n + 3
+            c += [('pushnull',), ('coerce_a',), ('setlocal', g), ('pushnull',), ('coerce_a',), ('setlocal', bb)] + d.child(name, o) + [('getlocal', o), ('iffalse', 'pd%d' % k),
+                  ('getlocal', o), ('getlocal', o), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', bb),
+                  ('getlocal', o), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', g), ('getlocal', g), ('iffalse', 'pd%d' % k),
+                  ('getlocal', g), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2), ('getlocal', g)]
+            for pos, sz in (('x', 'width'), ('y', 'height')):
+                c += [('getlocal', bb), ('getproperty', P(pos)), ('getlocal', bb), ('getproperty', P(sz)), ('pushbyte', 2), ('divide',), ('add',)] + num(size // 2) + [('subtract',)]
+            c += num(size) + num(size) + [('callpropvoid', P('drawRect'), 4), ('getlocal', g), ('callpropvoid', P('endFill'), 0), ('L', 'pd%d' % k)]
         return c + [('returnvoid',)]
     assert d.abc.trait(d.ci, 'dmHook') is None
     d.wrap('onEventInit', 'dmInitOrig', init)
@@ -405,7 +421,9 @@ def closer(data, path):
     return swf.write(), dict(placed=[], defs=0, methods=d.made)
 
 
-def minimap(data): return moved(data, MM_MOVE, ('hit_mc', 2), MM_BTNS)
+def minimap(data): return moved(data, MM_MOVE, ('hit_mc', 2), MM_BTNS, MM_PAD)
+
+
 
 
 def combatlog(data):
@@ -457,7 +475,7 @@ def side(data):
     d.method('dmHook', 0, code + [('L', 'end'), ('returnvoid',)])
     # onEventInit(): the iPad's anchor for this movie's own id, then the hook (the original centred "watermark": kept as dmInitOrig, not called)
     d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.ei('registerAnchorId', [('pushstring', S('dmSide'))]) + d.ei(
-        'setAnchor', [('pushstring', S('right'))], [('pushstring', S('screen'))], [('pushstring', S('right'))]) + [('getlocal0',), ('callpropvoid', P('dmHook'), 0), ('returnvoid',)])
+        'setAnchor', [('pushstring', S('topright'))], [('pushstring', S('screen'))], [('pushstring', S('topright'))]) + [('getlocal0',), ('callpropvoid', P('dmHook'), 0), ('returnvoid',)])
     d.done()
     return swf.write(), dict(placed=placed, defs=ndefs, methods=d.made)
 
@@ -499,7 +517,9 @@ def check(src):
             say(abs(PC_PITCH * _s - 86) < 0.2 and abs(top + PC_SLOT_H * _s - IPAD_SLOT_BOTTOM) < 1.5,
                 'slots: pitch %.1f (iPad 86), cell %.1f x %.1f (iPad icon 76 / cell 82), stage x %.0f..%.0f, screen y %.0f..%.0f (iPad 967..1049)' % (
                 PC_PITCH * _s, PC_SLOT_W * _s, PC_SLOT_H * _s, first, first + ((SLOTS - 1) * PC_PITCH + PC_SLOT_W) * _s, top, top + PC_SLOT_H * _s))
-            say(HB_X >= 14 and HB_X + VISW * _s + 80 <= 1934, 'the bar %d..%.0f + the log button stay inside a 16:9 screen (stage 14..1934)' % (HB_X, HB_X + VISW * _s))
+            lo, hi = HB_X, LOG_X + LOG_ART_R * LOG_S[0] / LOG_S[1]
+            say(abs((lo + hi) / 2.0 - 974) <= 1 and abs((hi - lo) / 2.0 - ROW_HALF) <= 1 and HB_X + int(VISW * _s) < LOG_X + 62, 'the row %d..%d (bar + the log button) centred on the stage centre 974, half width %.0f (TS_HB_HALF %d)' % (lo, hi, (hi - lo) / 2.0, ROW_HALF))
+            say(abs(LOG_Y - HB_END_TOP) <= 1 and abs(HB_Y + 54 * _s - HB_FRAME_TOP) <= 2, 'tops: the frame %.0f, the log button %d (stage; TS_HB_TOP 125 / TS_HB_TOP_R 151 above the bottom)' % (HB_Y + 54 * _s, LOG_Y))
             say('dmLay' in dis('onEventResolution') and 'dmInitOrig' in dis('onEventInit') and 'dmHook' in dis('onEventInit'), 'onEventInit = original + dmLay + dmHook; onEventResolution = dmLay')
             t = dis('dmSwUp'); say('cycleHotBar' in t and 'isDragging' in t, 'swipe over the slots (%d px, not while dragging) -> cycleHotBar' % SWIPE)
             t = dis('showActiveSkill'); say('dmSasOrig' in t and "'dmAim'" in t and 'visible' in t, 'showActiveSkill: original, CONFIRM / cancel visible, dmAim(0 | 1)')
@@ -511,6 +531,7 @@ def check(src):
             t = dis('onEventInit'); say('dmInitOrig' in t and "'center'" in t and "'center'" in dis('onEventResize'), 'onEventInit = original + setPosition center / screen / center; onEventResize the same unless moved')
         elif o == 'minimap_p.swf':
             say("'dmKey'" in dis('dmBAct') and all((b[0].encode() + b'\0') in names for b in MM_BTNS), 'tactical camera / quick save buttons on the root -> dmKey(2 | 1)')
+            say('drawRect' in dis('onEventInit') and all(n in dis('onEventInit') for n, _ in MM_PAD), 'finger pads: %s' % ', '.join('%s %d' % p for p in MM_PAD))
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
@@ -527,16 +548,21 @@ def check(src):
         elif o == 'dmSide_p.swf':
             say(b.head[:-4] == rect_bytes(SIDE_W, SIDE_H), 'frame %dx%d' % (SIDE_W, SIDE_H))
             say(all((s[0].encode() + b'\0') in names for s in SIDE) and all(0 <= p[1][0] and p[1][2] <= SIDE_W and p[1][3] <= SIDE_H for p in rep['placed']), 'all %d buttons on the root, inside the frame' % len(SIDE))
-            t = dis('onEventInit'); say("'registerAnchorId'" in t and "'right'" in t and "'screen'" in t and 'dmHook' in t, 'onEventInit: anchor right / screen / right, then the hook')
+            t = dis('onEventInit'); say("'registerAnchorId'" in t and "'topright'" in t and "'screen'" in t and 'dmHook' in t, 'onEventInit: anchor topright / screen / topright, then the hook')
+            bot = max(p[1][3] for p in rep['placed']); right = min(SIDE_W - p[1][2] for p in rep['placed'])
+            say(bot == 896 and SIDE_W - _sx(1348) == 92, 'the iPad places: stack bottom %d (TS_SIDE_BOT 896), %d px from the right edge, column edge %d (TS_SIDE_COL 92)' % (bot, right, SIDE_W - _sx(1348)))
             t = dis('dmBAct'); say("'dmSide'" in t and 'dmRoll' in t, 'tap: helmet -> the column shown / hidden; others -> dmSide(code)')
     return bad
 
 
-def mock(src, path, W=2400):
-    """the computed layout: the movies' own symbols drawn where the patched code puts them, on a W x 1080 screen (not a played movie)"""
+def mock(src, path, W=2400, F=None, made=None):
+    """the computed layout: the movies' own symbols drawn where the patched code puts them, on a W x 1080 screen (not a played movie).
+    F = the host's factors (dm/host/hle_dos2_touch_scale.h; default all 1): hb (hot bar + status console), mm (minimap), side (dmSide_p), pi
+    (portraits, over their class scale 1.1); every object scales about its anchor as the engine's fixed layout does. -> the picture"""
     import numpy as np
-    from PIL import Image
+    from PIL import Image, ImageDraw
     import dos2_swf_render as rn
+    F = dict(dict(hb=1.0, mm=1.0, side=1.0, pi=1.0), **(F or {}))
     canvas = Image.new('RGBA', (W, 1080), (38, 44, 40, 255))
     def put(swf, what, x, y, sx=1.0, sy=None, crop=None):
         sy = sx if sy is None else sy
@@ -547,26 +573,39 @@ def mock(src, path, W=2400):
         canvas.alpha_composite(img, (int(round(x + (0 if crop else org[0] * sx))), int(round(y + (0 if crop else org[1] * sy)))))
     def root_ids(swf):
         return {p['name'][:-1].decode(): p['char'] for p in (gr.place_parse(c, t) for c, t, _ in swf.tags if c in (4, 26, 70)) if p.get('name')}
-    made = build(src)
-    # hot bar: stage x = screen x - (W - 1948) / 2, stage y = screen y - 80
-    hb = Swf(made['hotBar_p.swf']); ids = root_ids(hb); ox, oy = (W - 1948) / 2.0, 80
-    put(hb, ids['hotbar_mc'], ox + HB_X, oy + HB_Y, _s, crop=(CROP, 0, CROP + VISW, VISH))
-    put(hb, ids['showLog_mc'], ox + LOG_X, oy + LOG_Y, LOG_S[0] / LOG_S[1])
-    put(hb, ids['dmConfirm_mc'], ox + CONFIRM[0] - CONFIRM[2] / 2.0, oy + CONFIRM[1] - CONFIRM[2] / 2.0)
-    put(hb, ids['dmCancel_mc'], ox + CANCEL[0], oy + CANCEL[1], CANCEL[2] / 69.0)
-    sc = Swf(made['statusConsole_p.swf']); ids = root_ids(sc); ox = (W - 1920) / 2.0
-    put(sc, ids['console_mc'], ox + 960, 1080 - 67 - SC_UP)
-    mm = Swf(made['minimap_p.swf']); ids = root_ids(mm); ox = W - 420
+    made = made or build(src)
+    # hot bar (stage 1948 x 1000, anchor bottom): screen = (W / 2 + (x - 974) f, 1080 - (1000 - y) f)
+    f = F['hb']; hx = lambda x: W / 2.0 + (x - 974) * f; hy = lambda y: 1080 - (1000 - y) * f
+    hb = Swf(made['hotBar_p.swf']); ids = root_ids(hb)
+    put(hb, ids['hotbar_mc'], hx(HB_X), hy(HB_Y), _s * f, crop=(CROP, 0, CROP + VISW, VISH))
+    put(hb, ids['showLog_mc'], hx(LOG_X), hy(LOG_Y), LOG_S[0] / LOG_S[1] * f)
+    put(hb, ids['dmDeck_mc'], hx(DECK_BTN[0]), hy(DECK_BTN[1]), f)
+    for k in range(1, 6): put(hb, ids['dmInd%d_mc' % k], hx(IND[0] + IND[4] * (k - 1)), hy(IND[1]), f)
+    if F.get('aim', True):
+        put(hb, ids['dmConfirm_mc'], hx(CONFIRM[0] - CONFIRM[2] / 2.0), hy(CONFIRM[1] - CONFIRM[2] / 2.0), f)
+        put(hb, ids['dmCancel_mc'], hx(CANCEL[0]), hy(CANCEL[1]), CANCEL[2] / 69.0 * f)
+    # status console (stage 1920 x 1080, anchor bottom)
+    sc = Swf(made['statusConsole_p.swf']); ids = root_ids(sc)
+    put(sc, ids['console_mc'], W / 2.0, 1080 - (67 + SC_UP) * f, f)
+    # minimap (stage MM_W wide, anchor topright)
+    f = F['mm']; mw = MM_W
+    mm = Swf(made['minimap_p.swf']); ids = root_ids(mm)
     at = {p['name'][:-1].decode(): gr.Bits(p['matrix'], 0).matrix() for p in (gr.place_parse(c, t) for c, t, _ in mm.tags if c in (4, 26, 70)) if p.get('name') and p.get('matrix')}
     for name, dx, dy in MM_MOVE:
         if name in ('hit_mc', 'tension_mc', 'armourDoll_mc', 'tensionHit_mc', 'title_txt', 'diplomacy_mc', 'north_mc'): continue
-        m = at[name]; put(mm, ids[name], ox + m[4] / 20.0 + dx, m[5] / 20.0 + dy)
-    sd = Swf(made['dmSide_p.swf']); ids = root_ids(sd); ox = W - SIDE_W
-    for name, code, icon, x, y, size in SIDE: put(sd, ids[name], ox + x, y)
-    pi = Swf(made['playerInfo_p.swf'])
-    try: put(pi, 'playerInfo', 10 * 1.1, 20 * 1.1, 1.1)
+        m = at[name]; put(mm, ids[name], W - (mw - (m[4] / 20.0 + dx)) * f, (m[5] / 20.0 + dy) * f, f)
+    for name, code, icon, x, y, size in MM_BTNS: put(mm, ids[name], W - (mw - x) * f, y * f, f)
+    # the right side (stage SIDE_W x 1080, anchor topright)
+    f = F['side']; sd = Swf(made['dmSide_p.swf']); ids = root_ids(sd)
+    for name, code, icon, x, y, size in SIDE: put(sd, ids[name], W - (SIDE_W - x) * f, y * f, f)
+    # portraits (anchor topleft, class scale 1.1): one portrait drawn; the box is a party of four (TS_PI_W x TS_PI_BOT, an estimate)
+    f = F['pi'] * 1.1; pi = Swf(made['playerInfo_p.swf'])
+    try: put(pi, 'playerInfo', 25 * f, 30 * f, f)
     except Exception as e: print('portrait symbol not drawn: %s' % e)
-    canvas.save(path); print('%s: %dx%d (computed layout, DM_DOS2_TOUCH_HUD_SCALE 1)' % (path, W, 1080))
+    dr = ImageDraw.Draw(canvas)
+    dr.rectangle([int(25 * f), int(30 * f), int(180 * F['pi']), int(720 * F['pi'])], outline=(120, 160, 200, 255), width=2)
+    if path: canvas.save(path); print('%s: %dx%d (computed layout, factors %s)' % (path, W, 1080, ', '.join('%s %.3f' % kv for kv in sorted(F.items()) if kv[0] != 'aim')))
+    return canvas
 
 
 # trade / container / dialog / reward / waypoints / item splitter in the iPad's layout: tools/dos2_ppanel_trade.py adds its movies to sources() / build() / check()

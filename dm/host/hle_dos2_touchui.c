@@ -677,6 +677,7 @@ static uint64_t tu_create_hook(uint64_t mgr, uint64_t layer, uint64_t type, uint
         LOG("[touchui] CreateUIObject type %#x (layer %#x flags %#x player %u) -> handle %#llx%s", id, (unsigned)layer, (unsigned)flags, (unsigned)player & 0xffff,
             (unsigned long long)h, ok ? "" : " (failed)");
     }
+    if (ok && g_on) { void dm_dos2_touchui_hud_created(void *mgr, uint64_t h, uint32_t type); dm_dos2_touchui_hud_created((void *)(uintptr_t)mgr, h, id); }   // UI mode TOUCH: the physical scale of the game's own windows
     return h;
 }
 

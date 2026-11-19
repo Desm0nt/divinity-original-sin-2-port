@@ -101,7 +101,11 @@
 //                                    it is unset, as before); 0: never, also in UI mode TOUCH
 //   DM_DOS2_TOUCHUI_HUD_SET=<hex,..> only these types (default: the whole table below): to find the one that breaks
 //   DM_DOS2_TOUCHUI_HUD_SLOTS=0      the handles are not written into the player's record (panels then cannot be opened)
-//   DM_DOS2_TOUCH_HUD_SCALE=<f>      the one size factor, default 1 (0.5..2); 0 = class scales left to the engine
+//   DM_DOS2_TOUCH_HUD_SCALE=<f>      testing: the HUD factor instead of the physical one (0.5..2; the column / portraits still keep off the hot
+//                                    bar); 0 = class scales left to the engine. Default: the physical scale (hle_dos2_touch_scale.h) from
+//   DM_DOS2_TOUCH_MM_PER_1080=<mm>   the mm 1080 design px span (Java DmActivity sets it from DisplayMetrics; dm/env wins); unset = the iPad's sizes
+//   DM_DOS2_TOUCH_CELL=<px> | off    testing: the panels' cell (40..160) instead of the physical one; off = not sent (the movies keep 76)
+//   DM_DOS2_TOUCH_WIN_SCALE=0        the windows the game makes (reward, splitter, dialog, tooltip) keep the engine's size
 //   DM_DOS2_TOUCHUI_HUD_SHOW=1       the host also sets the visible flag on every object it makes (if the PC classes do not show themselves)
 //   DM_DOS2_TOUCHUI_HUD_STATES / _BLOCK  see above
 //   DM_DOS2_TOUCH_ONE_PANEL=0        the PC's free windows: dmSide(2..7) only sends the button's own toggle, dmSide(8) does nothing (default 1: one
@@ -112,6 +116,7 @@
 #include "hle.h"
 #include "hle_dos2_touchui_ei.h"
 #include "hle_dos2_touchui_hud.h"
+#include "hle_dos2_touch_scale.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -274,10 +279,36 @@ static void hu_tail(uint8_t *mgr, uint32_t type, char *out, size_t n) {
 }
 
 // ---- the size: class scale + the engine's own resize ----
+// The factor of each object (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: physical scale for fingers"; the rule: hle_dos2_touch_scale.h):
+// the hot bar and the status console grow to an 8 mm hot bar cell while the row fits the width, and go back to factor 1 while a panel /
+// window is open (the panels end above the factor-1 hot bar); the minimap keeps the iPad's size (owner 20.11: bigger tap targets, not a
+// bigger map - minimap_p has finger pads); the right column and the portraits grow in the iPad's places as far as they stay clear; the panels with their own cell (0x74 / 0x77: dmSetCell) or as designed (1); the context menu / examine / combat log
+// grow while they fit. DM_DOS2_TOUCH_HUD_SCALE given = the HUD factor (testing); 0 = no class scale at all.
+static ts_scale g_ts;
+static int g_panel_open;                  // a panel / window is on the screen now: the hot bar is at factor 1
+static uint8_t g_cell_vis;                // 1 the inventory, 2 the sheet were on the screen at the last poll (the cell is told at every opening)
+static int g_win_scale = 1;               // DM_DOS2_TOUCH_WIN_SCALE: the windows the game makes itself (reward, splitter, dialog, tooltip) get their factor
+static float hu_type_factor(uint32_t type) {
+    switch (type) {
+    case 0x28: case 0x75: return g_panel_open ? 1.0f : g_ts.hud;   // hot bar, status console
+    case 0x1e: return g_ts.mmap;                                   // minimap
+    case 0x26: return g_ts.pi;                                     // portraits
+    case HU_T_SIDE: return g_ts.side;                              // the right column
+    case 7: return g_ts.log;                                       // combat log
+    case 0x0a: case 0x0b: return g_ts.menu;                        // context menu
+    case 0x68: return g_ts.examine;                                // examine
+    case 0x88: return g_ts.reward;                                 // reward (made by the game)
+    case 0x15: return g_ts.splitter;                               // item splitter (made by the game)
+    case 0x0e: return g_ts.dialog;                                 // dialog (made by the game)
+    case 0x2c: return g_ts.tooltip;                                // tooltip (made by the game)
+    default: return 1.0f;                                          // the panels (their cell is dmSetCell's) and the rest
+    }
+}
 static float hu_cfg_s(void) { const uint8_t *cfg = *(const uint8_t *volatile *)(g_main->base + HU_CFG); return cfg ? *(const volatile float *)(cfg + HU_CFG_S) : 0; }
 static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
     if (!g_scale_ok || g_tune == 0 || g_t[ti].ipad_c == 0) return;
-    const float s = hu_cfg_s(), was = *(volatile float *)(o + HU_OBJ_C), c = hu_class_scale(g_tune, g_t[ti].ipad_c, s);
+    const float f = hu_type_factor(g_t[ti].type);
+    const float s = hu_cfg_s(), was = *(volatile float *)(o + HU_OBJ_C), c = hu_class_scale(f, g_t[ti].ipad_c, s);
     const uint32_t d = *(volatile uint32_t *)(mgr + HU_MGR_D);
     ((void (*)(void *, float))(void *)(g_main->base + HU_SETSCALE))(o, c);     // [obj+0x94] = c, root.uiScaling = c x S when the movie has it
     ((void (*)(void *))(void *)(g_main->base + HU_RESIZE_NOW))(o);             // main+0xae3be0(obj, window w, h); a movie not loaded yet: the engine's own first resize uses c
@@ -286,13 +317,13 @@ static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
     const uint8_t *fp = *(uint8_t *const volatile *)(o + HU_OBJ_FP); const int32_t *r = fp ? (const int32_t *)(const void *)(fp + 0x10) : NULL;
     const float sw = *(volatile float *)(o + HU_OBJ_W), sh = *(volatile float *)(o + HU_OBJ_W + 4);
     const float eff = s >= 0.2f && s <= 4.0f ? s : 1;   // the S hu_class_scale cancelled
-    LOG("[hud] size of type %#x %s: D %u, S %.3f%s, DM_DOS2_TOUCH_HUD_SCALE %.3f x iPad class scale %.2f -> class scale c %.4f (was %.3f); fixed k = c x S x h / D = %.4f x h / %u; "
-        "drawn %.0fx%.0f px, FlashPlayer rect %d,%d %dx%d", g_t[ti].type, movie, d, s, eff == s ? "" : " (not usable: taken as 1)", g_tune, g_t[ti].ipad_c, c, was, c * eff, d,
-        (double)sw, (double)sh, r ? r[0] : 0, r ? r[1] : 0, r ? r[2] : 0, r ? r[3] : 0);
+    LOG("[hud] size of type %#x %s: D %u, S %.3f%s, factor %.3f (physical scale%s) x iPad class scale %.2f -> class scale c %.4f (was %.3f); fixed k = c x S x h / D = %.4f x h / %u; "
+        "drawn %.0fx%.0f px, FlashPlayer rect %d,%d %dx%d", g_t[ti].type, movie, d, s, eff == s ? "" : " (not usable: taken as 1)", f, g_panel_open && (g_t[ti].type == 0x28 || g_t[ti].type == 0x75) ? ", a panel is open" : "",
+        g_t[ti].ipad_c, c, was, c * eff, d, (double)sw, (double)sh, r ? r[0] : 0, r ? r[1] : 0, r ? r[2] : 0, r ? r[3] : 0);
     if (g_t[ti].type == HU_T_HOTBAR && r && d) {
         const float k = sh > 0 ? sh / 1000.0f : hu_fixed_k(c, eff, (float)d, (float)d);   // the drawn height of the 1000 px stage
-        LOG("[hud] hot bar on this screen (tools/dos2_pchud_touch.py numbers x k %.3f): slot pitch 86 -> %.1f px, slot 74 x 78 -> %.1f x %.1f px; on a 1080-high screen at scale 1: 86 / 74 x 78 (iPad: pitch 86, icon 76, cell 82)",
-            k, 86.0 * k, 74.1 * k, 78.1 * k);
+        LOG("[hud] hot bar on this screen (tools/dos2_pchud_touch.py numbers x k %.3f): slot pitch 86 -> %.1f px, slot 74 x 78 -> %.1f x %.1f px; on a 1080-high screen at scale 1: 86 / 74 x 78 (iPad: pitch 86, icon 76, cell 82); "
+            "cell 82 x factor %.3f = %.1f mm at %.1f mm per 1080 px", k, 86.0 * k, 74.1 * k, 78.1 * k, f, g_ts.mm > 0 ? 82.0 * f * g_ts.mm / 1080.0 : 0.0, g_ts.mm);
     }
 }
 
@@ -319,7 +350,7 @@ static void hu_destroy(const char *why) {
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
-    g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0; g_plate_on = 0;
+    g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
 }
 static void hu_create(uint8_t *ui, const char *why) {
     uint8_t *mgr = hu_mgr();
@@ -573,6 +604,68 @@ void dm_dos2_touchui_hud_aim_at(float x, float y) {
     atomic_store(&g_aim_xy, (uint64_t)a << 32 | b); atomic_store(&g_aim_set, 1);
 }
 
+// ---- the physical scale at run time (hle_dos2_touch_scale.h): the panels' cell, the hot bar while a panel is open, the windows the game makes ----
+// a panel / window of these types on the screen (any player) = the hot bar and the status console go back to factor 1 (the panels end above it)
+static const uint32_t k_hu_win_types[] = {0x74, 0x77, 0x29, 0x66, 0x16, 0x68, 0x2e, 0x09, 0x25, 0x88, 0x2f, 0x15};
+static int g_send_cell = 1;               // DM_DOS2_TOUCH_CELL=off: the panels keep their built-in cell 76
+static unsigned g_nwin;
+static uint32_t hu_window_open(uint8_t *mgr) {
+    const uint32_t n = *(volatile uint32_t *)(mgr + HU_OBJS_N); uint8_t **objs = *(uint8_t **volatile *)(mgr + HU_OBJS);
+    if (!objs || n > 4096) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t *o = objs[i];
+        if (!o || !(o[HU_OBJ_FLAGS] & HU_F_VISIBLE)) continue;
+        const uint32_t t = *(const volatile uint32_t *)(o + HU_OBJ_TYPE);
+        for (unsigned k = 0; k < sizeof k_hu_win_types / sizeof *k_hu_win_types; k++) if (t == k_hu_win_types[k]) return t;
+    }
+    return 0;
+}
+static void hu_rescale_hb(uint8_t *mgr) {   // the hot bar and the status console take the factor of the moment again
+    for (int i = 0; i < g_nobj; i++) {
+        if (g_obj[i].type != 0x28 && g_obj[i].type != 0x75) continue;
+        uint8_t *o = hu_obj(mgr, g_obj[i].h);
+        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != g_obj[i].type) continue;
+        for (int ti = 0; ti < HU_NTYPES; ti++) if (g_t[ti].type == g_obj[i].type) { char mv[96]; hu_tail(mgr, g_obj[i].type, mv, sizeof mv); hu_scale(mgr, o, ti, mv); }
+    }
+}
+static void hu_tell_cell(uint8_t *mgr) {   // inventory / sheet: dmSetCell(cell) and the bottom limit through their invoke channel, when the window opens
+    uint8_t vis = 0;
+    for (int i = 0; i < g_nobj; i++) {
+        const int bit = g_obj[i].type == 0x74 ? 1 : g_obj[i].type == 0x77 ? 2 : 0;
+        if (!bit) continue;
+        uint8_t *o = hu_obj(mgr, g_obj[i].h);
+        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != g_obj[i].type || !(o[HU_OBJ_FLAGS] & HU_F_VISIBLE)) continue;
+        uint8_t *fp = *(uint8_t *volatile *)(o + HU_OBJ_FP);
+        if (!fp) continue;   // its movie is not loaded yet: asked again on the next poll
+        vis |= (uint8_t)bit;
+        if (g_cell_vis & bit) continue;
+        const char *name = bit == 2 ? "setHelmetOptionState" : "setAnchor";
+        dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4;
+        v.d = (double)(1000000 + g_ts.cell); const int a = dm_dos2_touchui_invoke(fp, name, &v, 1);
+        v.d = (double)(1000000 + g_ts.bottom); const int b = dm_dos2_touchui_invoke(fp, name, &v, 1);
+        static unsigned n; if (g_dbg || n++ < 12) LOG("%s[scale] %s opened: %s(1000000 + %d) the cell (%.1f mm), %s(1000000 + %d) the bottom limit: %s", a && b ? "" : "【红】",
+                                                      bit == 2 ? "characterSheet_p" : "partyInventory_p", name, g_ts.cell, g_ts.cell_mm, name, g_ts.bottom,
+                                                      a && b ? "told" : "the invoke name is not registered: the window keeps its built-in cell 76");
+    }
+    g_cell_vis = vis;
+}
+// hle_dos2_touchui.c tu_create_hook: a UI object the game made itself (game thread). The windows of UI mode TOUCH that grow while they fit
+// (reward 0x88, item splitter 0x15, dialog 0xe, tooltip 0x2c) get their factor; the rest keep the engine's own size.
+void dm_dos2_touchui_hud_created(void *mgr, uint64_t h, uint32_t type);
+void dm_dos2_touchui_hud_created(void *mgr, uint64_t h, uint32_t type) {
+    if (!g_hooked || !g_win_scale || !g_scale_ok || g_tune == 0 || !mgr) return;
+    if (type != 0x88 && type != 0x15 && type != 0x0e && type != 0x2c) return;
+    if (!hu_on() || *hu_mode() != 0) return;
+    const float f = hu_type_factor(type);
+    if (f == 1.0f) return;
+    uint8_t *o = hu_obj((uint8_t *)mgr, h);
+    if (!o) return;
+    const float s = hu_cfg_s(), c = hu_class_scale(f, 1.0f, s);
+    ((void (*)(void *, float))(void *)(g_main->base + HU_SETSCALE))(o, c);
+    ((void (*)(void *))(void *)(g_main->base + HU_RESIZE_NOW))(o);
+    if (g_dbg || g_nwin++ < 12) LOG("[scale] type %#x made by the game: factor %.3f -> class scale c %.4f (S %.3f)", type, f, c, s);
+}
+
 // hle_dos2_uimode.c dm_dos2_uimode_poll, every pad poll (game thread)
 void dm_dos2_touchui_hud_poll(void);
 void dm_dos2_touchui_hud_poll(void) {
@@ -595,6 +688,15 @@ void dm_dos2_touchui_hud_poll(void) {
         ((void (*)(void *, uint32_t))(void *)(g_main->base + (want ? HU_SETFLAGS_FN : HU_CLRFLAGS_FN)))(o, HU_F_VISIBLE);
         static unsigned n; if (n++ < 24 || g_dbg) LOG("[hud] right side (dmSide_p) %s with the hot bar (flags now %#x)", want ? "SHOWN" : "hidden", *(volatile uint32_t *)(o + HU_OBJ_FLAGS));
     }
+    // the physical scale: the hot bar at factor 1 while a panel / window is open; the panels' cell at their opening
+    if (g_scale_ok && g_tune != 0) {
+        const uint32_t w = hu_window_open(mgr); const int open = w != 0;
+        if (open != g_panel_open) {
+            g_panel_open = open;
+            if (g_ts.hud != 1.0f) { hu_rescale_hb(mgr); static unsigned n; if (g_dbg || n++ < 16) LOG("[scale] %s (type %#x): hot bar / status console factor %.3f", open ? "a panel / window opened" : "no panel / window", w, open ? 1.0 : (double)g_ts.hud); }
+        }
+    }
+    if (g_send_cell) hu_tell_cell(mgr);
     // the equipment view is one window: the close button of one half takes the other half with it
     if (g_one && g_view == HU_VIEW_EQUIP) {
         uint8_t *o[5]; const int vis = hu_panels(mgr, g_view_who, o);
@@ -675,6 +777,22 @@ void dm_dos2_touchui_hud_install(void) {
     LOG("[hud] action plate %s; object picking DM_DOS2_TOUCH_T_PICK=%s (auto: the tap's pick, then the engine's PC hover pick, then the short long press when the picking is dead)",
         g_plate ? "on" : "OFF (DM_DOS2_TOUCH_T_PLATE=0)", hu_pick_name(g_pick_mode));
     v = getenv("DM_DOS2_TOUCH_HUD_SCALE"); g_tune = hu_tune(v && *v ? (float)atof(v) : 0, v && *v);
+    {   // the physical scale (hle_dos2_touch_scale.h): mm of 1080 design px from Java (DmActivity), the UI's aspect from hle_dos2_wide.c's window
+        void dm_dos2_wide_size(unsigned *w, unsigned *h);
+        const char *mmv = getenv("DM_DOS2_TOUCH_MM_PER_1080"), *cv = getenv("DM_DOS2_TOUCH_CELL"), *wv = getenv("DM_DOS2_TOUCH_WIN_SCALE");
+        unsigned ww = 0, wh = 0; dm_dos2_wide_size(&ww, &wh);
+        const float mm = mmv && *mmv ? (float)atof(mmv) : 0, aspect = ww && wh ? (float)ww / (float)wh : 16.0f / 9.0f;
+        g_send_cell = !(cv && (!strcmp(cv, "off") || !strcmp(cv, "0")));
+        g_win_scale = !(wv && *wv == '0');
+        ts_compute(mm, aspect, v && *v && g_tune > 0 ? g_tune : 0, cv && *cv && g_send_cell ? atoi(cv) : 0, &g_ts);
+        LOG("[scale] physical scale: %.1f mm per 1080 px (DM_DOS2_TOUCH_MM_PER_1080=%s), UI aspect %.3f (window %ux%u%s) -> HUD x%.3f (8 mm wants x%.3f, the row fits x%.3f%s): hot bar "
+            "cell %.1f mm; minimap x%.3f, column x%.3f, portraits x%.3f, combat log x%.3f; panels: hot bar x1 while one is open, cell %d (8 mm wants %d, 5 rows above y %d allow %d%s) = %.1f mm%s; "
+            "windows: context menu x%.3f, examine x%.3f, tooltip x%.3f, dialog x%.3f, reward x%.3f, splitter x%.3f%s", g_ts.mm, mmv && *mmv ? mmv : "unset: the iPad's sizes", g_ts.aspect, ww, wh,
+            ww ? "" : ", 16:9 default", g_ts.hud, g_ts.want, g_ts.cap_row, v && *v ? ", DM_DOS2_TOUCH_HUD_SCALE given" : "", g_ts.hb_mm, g_ts.mmap, g_ts.side, g_ts.pi, g_ts.log, g_ts.cell, g_ts.cell_want,
+            g_ts.bottom, g_ts.cell_cap, cv && *cv && g_send_cell ? ", DM_DOS2_TOUCH_CELL given" : "", g_ts.cell_mm, g_send_cell ? "" : " (DM_DOS2_TOUCH_CELL=off: not sent, the movies keep 76)",
+            g_ts.menu, g_ts.examine, g_ts.tooltip, g_ts.dialog, g_ts.reward, g_ts.splitter, g_win_scale ? "" : " (DM_DOS2_TOUCH_WIN_SCALE=0: the game's own windows keep the engine's size)");
+        if (g_tune == 0) LOG("[scale] DM_DOS2_TOUCH_HUD_SCALE=0: no class scale is set at all (the engine's own sizes); the panels' cell is still sent");
+    }
     if ((v = getenv("DM_DOS2_TOUCH_DEV")) && atoi(v) > 0 && atoi(v) < 64) g_mdev = atoi(v);
     g_sites = 1;
     if (dm_dos2_touchui_ei_on()) {
@@ -715,7 +833,7 @@ void dm_dos2_touchui_hud_hook(void) {
     LOG("[hud] touch HUD: create-all main+%#x / destroy-all main+%#x hooked (after hle_dos2_touch.c compared them); a player UI set built with the mode byte 0 gets the PC branch of the set (HUD + panels: types %s) "
         "from the host, handles %s (movies: the `touch` path table) %s; active now: %s; DM_DOS2_TOUCH_HUD_SCALE %.3f%s; a live switch needs %s and no dialog / loading / character creation on screen",
         HU_CREATE_ALL, HU_DESTROY_ALL, list, g_slots && g_slots_ok ? "in the record's PC slots" : "NOT in the record", g_env > 0 ? "in every UI mode (DM_DOS2_TOUCHUI_HUD=1)" : "in UI mode touch", hu_on() ? "yes" : "no (UI mode not touch)", g_tune,
-        !g_scale_ok ? " (NOT applied: sites differ)" : g_tune == 0 ? " (class scales left to the engine)" : " (class scale = it x iPad class scale / S)",
+        !g_scale_ok ? " (NOT applied: sites differ)" : g_tune == 0 ? " (class scales left to the engine)" : " (class scale = the object's physical factor x iPad class scale / S: the [scale] line)",
         g_any_state ? "any game state (logged)" : "a game state of DM_DOS2_TOUCHUI_HUD_STATES");
 }
 #endif
