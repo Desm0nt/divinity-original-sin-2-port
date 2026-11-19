@@ -2937,6 +2937,7 @@ inline bool skip_draw(){
 inline bool gpu_begin(VkCommandBuffer cmd){
     if(cg.kind!=CONDR_K_COND || cg.mode!=CONDR_GPU || !cg.gpu_ok)return false;
     VkConditionalRenderingBeginInfoEXT bi{VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT};bi.buffer=cg.buf;bi.offset=cg.off;nbmt::PBeginConditionalRendering(cg.pbegin,cmd,&bi);++cg.gpu;return true;}
+inline bool gpu_would(){return cg.kind==CONDR_K_COND && cg.mode==CONDR_GPU && cg.gpu_ok;}   // [NR-ZERO Z5] gpu_begin would open a bracket (asked without doing it)
 inline void gpu_end(VkCommandBuffer cmd){nbmt::PEndConditionalRendering(cg.pend,cmd);}
 // OP_END of a top-level handle: a condition does not outlive it
 inline void handle_end(){if(cg.mode>0 && cg.kind!=CONDR_K_ON){cg.kind=CONDR_K_ON;++cg.left_open;}}
@@ -8250,6 +8251,7 @@ namespace nrsort{extern int mode;bool take(Commands &c,Descriptors &d,Pass &p,in
 // the old tail finishes the draw (dp / p are what descriptors_stable and create_pass would have left), 0 = not answered, nothing changed.
 namespace nrz3{extern int mode;void begin();int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);
     void served();void tick();void release();void span_end();extern uint64_t span_t0,span_calls,span_ns,span_n;extern bool ps_called;}
+namespace nrz5t{extern int gmode;extern bool held;extern const nr_dplan *plan_hint;void rec_begin(const nbd_hdr &h);void rec_end();void cut();void lost();void tick();}   // [DOS2] NR-ZERO Z5, the game thread's half (xbg_nr_z5g.inc)
 namespace nrdraw{enum{F_GI=1,F_QUAD=2,F_UIOFF=4,F_PP=8,F_QUADP=16};extern int mode;extern bool armed;extern const nrd_tail *cur;void reset();void record(const nrd_tail *t);void stale();void tick();void release();
     extern int ui_mode;extern bool ui_rec;bool ui_pick();void ui_end();   // [DOS2] NR-12 DM_NR_UI: plain Iggy draw records through the same lane
     bool lane(Commands &c,Descriptors &d,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,unsigned flags,int draw_fast);
@@ -9552,6 +9554,7 @@ void exec_bind_handles(uint32_t op,const p_bind_handles &a,size_t n){need(a.stag
 #include "xbg_nb_order.inc"   // [DOS2] NB-17a / NB-17b: DM_NB_ORDER, a part executed segment by segment in the order tail's order (namespace nbord)
 #include "xbg_nb_own.inc"   // [DOS2] NB-21: DM_NB_OWN, the frame job that comes with a submission of the frame IR (namespace nbown)
 #include "xbg_nr_z5.inc"   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the packets of a run written apart from the bind cache - the comparison of =2 (namespace nrz5; before the lane, whose tail calls it)
+#include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5 DM_NR_Z5 = 1 / 2: the game thread writes the packets of the draws it has values for, the translation thread takes them draw by draw (namespaces nrz5g, nrz5t)
 #include "xbg_nr_draw.inc"   // [DOS2] NR-09 DM_NR_DRAW: nr_draw, the short executor of an OP_X_NR_DRAW (namespace nrdraw)
 #include "xbg_nr_z3.inc"   // [DOS2] NR-ZERO Z3 DM_NR_Z3: an engine draw whose plan, NR-08 entry and pipeline are already resolved (namespace nrz3)
 #include "xbg_nr_sort.inc"   // [DOS2] NR-21 DM_NR_SORT: order-free draws of a depth-only segment recorded in pipeline order (namespace nrsort)
@@ -10379,3 +10382,5 @@ extern "C" void xbg_present_texture(const win_t *window,const tex_t *texture){
 
 extern "C" void xbg_legacy_register_texture(int id,const tex_t *t,const view_t *v){std::lock_guard<std::recursive_mutex> l(mutex);need(id>=0&&t,"Invalid legacy texture registration");if(register_texture_record(legacy_textures[id],*t,v)){++memo_bump[0];note_reg(id);}}
 extern "C" void xbg_legacy_register_sampler(int id,const samp_par *s){std::lock_guard<std::recursive_mutex> l(mutex);need(id>=0&&s,"Invalid legacy sampler registration");legacy_samplers[id]=*s;++memo_epoch;++memo_bump[1];}
+#define XBG_NR_Z5G_BRIDGE
+#include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5: the game thread's entry points (called by the NVN tap)

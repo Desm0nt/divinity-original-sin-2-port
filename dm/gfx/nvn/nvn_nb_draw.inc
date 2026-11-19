@@ -104,6 +104,14 @@ static int nbd_take_ren(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) 
 // NR-09 (DM_NR_DRAW, armed by the front end hle_dos2_nr.c before guest code runs): the record of a draw whose engine identity the NR-02
 // hook took right before this NVN draw (dm_nr_draw_ident, same thread) becomes an OP_X_NR_DRAW: NBD_F_NR + the nrd_tail after the binds.
 // No identity (the hook is off / did not run for this draw) -> the plain OP_X_NB_DRAW, as before. g_nrd_on == 0: one load, nothing else.
+// [DOS2] NR-ZERO Z5 (DM_NR_Z5): the record's mark and slot from the backend (state and the other hooks: nvn_nb_tap.inc Z5G_*)
+static void z5g_draw(NVNcommandBuffer *c, uint8_t *p, uint32_t key) {
+    nbd_hdr h; memcpy(&h, p, sizeof h);
+    int32_t slot = 0; const uint32_t mark = xbg_nr_z5_game_draw(CB(c), &h, key, &t_z5g_ub[0][0], t_z5g_vb0, __atomic_load_n(&g_z5g_frame, __ATOMIC_RELAXED), &slot);
+    memcpy(p + offsetof(nbd_hdr, _pad1), &mark, sizeof mark); memcpy(p + offsetof(nbd_hdr, _pad2), &slot, sizeof slot);
+    t_z5g_run = 1;
+}
+#define Z5G_DRAW(nr, c, p, key) do { if (Z5G_ON() && (nr)) z5g_draw((c), (p), (key)); } while (0)
 static int g_nrd_on;
 static uint64_t g_nrds[2];   // records with the tail / without an identity (atomics)
 int dm_nr_draw_ident(uint32_t *key, uint32_t *texset, unsigned *why, unsigned *site) __attribute__((weak));
@@ -128,6 +136,7 @@ static int nbd_draw(NVNcommandBuffer *c, int kind, int prim, int itype, int coun
     nbd_pack(&t_nbd.s, p, size);
     if (nr) nrd_tail_put(p, size, nr_key, nr_ts, nr_why, nr_site);
     NRD_EXT_PUT(nr, p, size);   // [DOS2] NR-09R DM_NR_DIRECT: the tail's spare word (nothing without the switch)
+    Z5G_DRAW(nr && !t_nbd_chk, c, p, nr_key);   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the mark and the slot of this record (nothing without the switch)
     if (__builtin_expect(g_nrd_on, 0)) __atomic_fetch_add(&g_nrds[nr ? 0 : 1], 1, __ATOMIC_RELAXED);
     nbds_add(NBDS_DRAWS, 1); nbds_add(NBDS_BINDS, h->nbind); nbds_add(NBDS_BYTES, (size + 8 + 7) & ~7u);
     nbd_reset(); t_nbd.drew = 1;

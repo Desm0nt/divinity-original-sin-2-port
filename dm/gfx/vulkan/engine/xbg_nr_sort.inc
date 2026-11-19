@@ -158,6 +158,7 @@ inline void order_by(int which,uint32_t n,uint32_t *out){
 // Record the segment (from a wrapper, the submission end, a draw recorded at once, take()). exact: the bind cache stays what the
 // segment left (a draw path reads it next); else it is reset (whoever called may bind without the cache).
 void flush(unsigned why,bool exact){
+    if(__builtin_expect(nrz5t::held,0)){nrz5t::cut();return;}   // [NR-ZERO Z5] DM_NR_Z5=1: pend names the command buffer of a held chunk (DM_NR_SORT is 0 then): a draw path about to read the bind cache and record - the chunk goes in first
     const VkCommandBuffer c=pend.exchange(VK_NULL_HANDLE,std::memory_order_relaxed);if(!c)return;
     const uint32_t n=uint32_t(q.size());if(!n)return;
     const uint64_t t0=timing_clock();
@@ -193,13 +194,14 @@ void flush_draw(){flush(W_DRAW,true);}
 // clear resets the cache and binds its own pipeline). A segment still open at a BeginRenderPass would be a missed pass end: its draws
 // would land outside a render pass, so they are dropped instead (red; never expected - every pass end goes through EndRenderPass first).
 void cut(VkCommandBuffer c,unsigned op){if(pend.load(std::memory_order_relaxed)!=c)return;
+    if(__builtin_expect(nrz5t::held,0)){nrz5t::cut();return;}   // [NR-ZERO Z5] DM_NR_Z5=1: the chunk the game thread wrote is held for this command buffer - it goes in first (DM_NR_SORT is 0 then)
     if(op==nbmt::OP_BeginRenderPass){red("a segment of %zu draws was still open when a render pass began (its end did not record it): dropped",q.size());
         ++s.by[W_LOST];pend.store(VK_NULL_HANDLE);q.clear();offs.clear();vbs.clear();return;}
     const bool binds=op==nbmt::OP_BindPipeline || op==nbmt::OP_BindDescriptorSets || op==nbmt::OP_BindVertexBuffers || op==nbmt::OP_BindIndexBuffer || op==nbmt::OP_SetViewport ||
         op==nbmt::OP_SetScissor || op==nbmt::OP_PushConstants || (op>=nbmt::OP_Draw && op<=nbmt::OP_DispatchIndirect);
     flush(op,!binds);}
 // recording_slot() began a command buffer: a queue left over would belong to a finished one (never expected; counted, dropped).
-void cb_begun(){if(!pend.load(std::memory_order_relaxed) && q.empty())return;
+void cb_begun(){if(__builtin_expect(nrz5t::held,0))nrz5t::lost();if(!pend.load(std::memory_order_relaxed) && q.empty())return;
     red("%zu queued draws left when a new command buffer began: dropped",q.size());++s.by[W_LOST];pend.store(VK_NULL_HANDLE);q.clear();offs.clear();vbs.clear();}
 void tick(){   // from nrdraw::tick (every submission)
     if(!mode)return;const uint64_t now=timing_clock();if(!next_ns){next_ns=now+10000000000ull;frames0=stats.presents.load();return;}if(now<next_ns)return;next_ns=now+10000000000ull;

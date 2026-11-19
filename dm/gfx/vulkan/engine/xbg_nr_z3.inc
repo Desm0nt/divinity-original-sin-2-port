@@ -282,7 +282,9 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
     H.ent=pe;H.pipe=VkPipeline(pe->pipe);H.used=pe->used;H.inst=pe->inst;H.zero=pe->zero;memcpy(H.stride,pe->stride,sizeof H.stride);
     DRAW_MARK(3);if(tm.sp){tm.ta=timing_clock();++s.sp_n;s.sp_look+=tl-tm.t0;s.sp_desc+=td-tl;s.sp_pass+=tm.ta-td;s.sp_gate+=tg-tm.t0;s.sp_front+=tf-tg;s.sp_full+=tk-tf;s.sp_blk+=tb-tl;s.sp_img+=ti-tb;}
     const nrdraw::DSet ds{pl->layout->pipeline_layout,sv->set,uint32_t(dpn.ndyn),off};
-    if(nrdraw::lane_tail(c,nullptr,ds,zp,first,count,indexed,instances,first_instance,pp?unsigned(nrdraw::F_PP):0u,false,1,active_colors,tm)){++s.served;return 1;}
+    nrz5t::plan_hint=&dpn;   // [Z5] the template of this record names the uniform slot of each dynamic offset (cleared below)
+    if(nrdraw::lane_tail(c,nullptr,ds,zp,first,count,indexed,instances,first_instance,pp?unsigned(nrdraw::F_PP):0u,false,1,active_colors,tm)){nrz5t::plan_hint=nullptr;++s.served;return 1;}
+    nrz5t::plan_hint=nullptr;
     // the tail left the draw to the old tail: hand draw() what descriptors_stable and create_pass would have (as after a lane() that returned false)
     Descriptors &d=acquire_descriptors();d.entry=pl->layout;d.set=sv->set;d.pipeline_layout=pl->layout->pipeline_layout;d.dynamic_offsets.assign(off,off+dpn.ndyn);
     if(d.buffers.capacity()<pl->reserve)d.buffers.reserve(pl->reserve);

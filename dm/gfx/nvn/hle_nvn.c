@@ -1474,6 +1474,7 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
+    Z5G_END();   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the run written ahead is published before its recording can be submitted
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_END, 8);
     o->recording = 0;
     wt_end((uint64_t)(uintptr_t)o->begin);   // [DOS2] DM_NVN_WT_DRAIN
@@ -1519,6 +1520,7 @@ NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAdd
 // ---------- Render commands: parameters are recorded into command memory in the payload format of nvn_obj.h; for replay see nvn_mtl.m ----------
 static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
     NBS_REC(c, op, payload);   // [DOS2] NB-13a: inside a taken state bracket a state record goes to the shadow (returns its slot)
+    Z5G_OTHER(op);   // [DOS2] NR-ZERO Z5 DM_NR_Z5: a record that is not an engine draw ends the run this thread writes ahead (nothing without the switch)
     uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, op, sz);
     memset(p + 8, 0, sz - 8);
@@ -1639,10 +1641,12 @@ NVN(nvnCommandBufferBindVertexStreamState, void, NVNcommandBuffer *c, int n, con
 NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *rg) {
     if (n < 0 || first + n > 16) { LOG("【红】BindVertexBuffers first=%d n=%d", first, n); return; }
     NBT(nbt_note(c, NBN_VBUF));   // [DOS2] DM_NB
+    Z5G_VB(first, n, rg);   // [DOS2] NR-ZERO Z5
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
 NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
     NUB(c, st, i, a, n);   // [DOS2] NR-09U DM_NR_UBO=2
+    Z5G_UBO(st, i, a);   // [DOS2] NR-ZERO Z5 DM_NR_Z5: what this thread bound (before NR-UBD may leave the bind out: the backend holds the same range then)
     const int nrub_same = NRUB_BIND1(c, st, i, a, n);   // [DOS2] NR-UBD DM_NR_UBD: the backend's table already holds this range (0 without the switch)
     if (nrub_same == 2) return;   // [DOS2] NR-UBD =1: not sent
     NBT(nbt_note(c, NBN_UBO));   // [DOS2] DM_NB
@@ -1651,6 +1655,7 @@ NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage
 }
 NVN(nvnCommandBufferBindUniformBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) {
     NRUB_BINDS(c, st, first, n, rg);   // [DOS2] NR-UBD DM_NR_UBD: the mirror learns the ranges (never left out)
+    for (int z5i_ = 0; z5i_ < n; z5i_++) Z5G_UBO(st, first + z5i_, rg[z5i_].address);   // [DOS2] NR-ZERO Z5
     NBT(nbt_note(c, NBN_UBO));   // [DOS2] DM_NB
     for (int i = 0; i < n; i++) {
         if (NBD_TAKE(c) && nbd_take_bind(c, NBD_B_UBO, st, first + i, rg[i].address, rg[i].size)) continue;   // [DOS2] DM_NB_OPS (NB-09)
@@ -2747,6 +2752,7 @@ void (*g_nvn_present_crop)(int crop[4]);
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    Z5G_FRAME();   // [DOS2] NR-ZERO Z5 DM_NR_Z5: a frame of the game thread's record counts ends
     NBT(if (idx >= 0 && idx < o->ntex && idx < 4) nbt_present(o->tex[idx]));   // [DOS2] DM_NB
 #ifdef DM_GAME_DOS2
     { extern void dm_cpu_place_self(void) __attribute__((weak)); if (dm_cpu_place_self) dm_cpu_place_self(); }   // [NR-CPU] DM_CPU_SELF: the main thread re-asserts its own mask
@@ -3230,6 +3236,7 @@ NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbuffe
     NST(NRST_F_VB, c, a, n, i, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     if (i < 0 || i >= 16) { LOG("【红】BindVertexBuffer %d", i); return; }
     NBT(nbt_note(c, NBN_VBUF));   // [DOS2] DM_NB
+    Z5G_VB1(i, a);   // [DOS2] NR-ZERO Z5
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, 1); r->first = i; r->n = 1; r->r[0] = (NVNbufferRange){a, n};
 }
 NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) {

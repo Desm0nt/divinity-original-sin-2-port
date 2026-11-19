@@ -441,6 +441,28 @@ static void nbd_foreign(cmd_t *o);     // nvn_nb_draw.inc: a record that is not 
 #define NBD_QUIET(x) do { const int nbd_e_ = t_nbd.emitting; t_nbd.emitting = 1; x; t_nbd.emitting = nbd_e_; } while (0)   // records that are not foreign (NB records, wrappers)
 #define NBD_REN(c, on) do { if (NBD_TAKE(c)) nbd_render_enable((c), (on)); } while (0)
 #define NBD_COND(c, m, a) do { if (NBD_TAKE(c)) nbd_render_cond((c), (m), (a)); } while (0)
+// [DOS2] NR-ZERO Z5 (DM_NR_Z5 = 1 / 2; docs/dos2/nr/NR-ZERO.md section 22, dm/gfx/vulkan/engine/xbg_nr_z5g.inc): the game thread writes the
+// recorder packets of the engine draws it has values for. Armed by the backend (nvn_nr_z5_enable, from the translation thread); 0: every
+// hook below is one load and a not-taken branch and the record is byte for byte the old one (hdr._pad1 / _pad2 stay 0).
+//   Z5G_UBO / Z5G_VB   what this thread last bound: the uniform slots, vertex stream 0 (the words a prediction needs besides the record)
+//   Z5G_DRAW           an OP_X_NR_DRAW was packed: the backend gives its mark word (hdr._pad1) and its slot + 1 (hdr._pad2)
+//   Z5G_OTHER          any other record of a thread that wrote engine draws but OP_X_NB_STATE, and the end of a recording: the run ends
+//   Z5G_FRAME          a present: the count of records per site starts again
+static int g_z5g_on;
+static uint32_t g_z5g_frame;
+static __thread uint64_t t_z5g_ub[6][16], t_z5g_vb0;
+static __thread int t_z5g_run;
+uint32_t xbg_nr_z5_game_draw(const void *cb, const nbd_hdr *h, uint32_t key, const uint64_t *ub, uint64_t vb0, uint32_t frame, int32_t *slot) __attribute__((weak));
+void xbg_nr_z5_game_other(void) __attribute__((weak));
+void nvn_nr_z5_enable(int on);
+void nvn_nr_z5_enable(int on) { __atomic_store_n(&g_z5g_on, on && xbg_nr_z5_game_draw && xbg_nr_z5_game_other, __ATOMIC_RELEASE); }
+#define Z5G_ON() __builtin_expect(__atomic_load_n(&g_z5g_on, __ATOMIC_RELAXED), 0)
+#define Z5G_UBO(st, i, a) do { if (Z5G_ON() && (unsigned)(st) < 6 && (unsigned)(i) < 16) t_z5g_ub[(st)][(i)] = (uint64_t)(a); } while (0)
+#define Z5G_VB(first, n, rg) do { if (Z5G_ON() && (first) == 0 && (n) > 0) t_z5g_vb0 = (uint64_t)(rg)[0].address; } while (0)
+#define Z5G_VB1(i, a) do { if (Z5G_ON() && (i) == 0) t_z5g_vb0 = (uint64_t)(a); } while (0)
+#define Z5G_OTHER(op) do { if (Z5G_ON() && t_z5g_run && (op) != OP_X_NB_DRAW && (op) != OP_X_NB_STATE) { t_z5g_run = 0; xbg_nr_z5_game_other(); } } while (0)
+#define Z5G_END() do { if (Z5G_ON() && t_z5g_run) { t_z5g_run = 0; xbg_nr_z5_game_other(); } } while (0)
+#define Z5G_FRAME() do { if (Z5G_ON()) __atomic_fetch_add(&g_z5g_frame, 1, __ATOMIC_RELAXED); } while (0)
 // ---- NB-15 (DM_NB_FOREIGN=1, default 0): the share of the fallback path, by caller class (classes: nvn_nb_tap.h NBF_*) ----
 // cmd_alloc (NBF_REC, after the NB-13a / NB-09 flushes, so their own records are classified first) files every record of every command
 // buffer; rec (NBF_DRAW) adds the draw records to the class of the record just filed. The packet bracket comes from the front end
@@ -539,6 +561,12 @@ static void nbf_draw(uint32_t op) {
 #define NBF_REC(o, size) do { if (__builtin_expect(g_nbf_on, 0)) nbf_rec(size); } while (0)
 #define NBF_DRAW(op) do { if (__builtin_expect(g_nbf_on, 0)) nbf_draw(op); } while (0)
 #else
+#define Z5G_UBO(st, i, a) ((void)0)
+#define Z5G_VB(first, n, rg) ((void)0)
+#define Z5G_VB1(i, a) ((void)0)
+#define Z5G_OTHER(op) ((void)0)
+#define Z5G_END() ((void)0)
+#define Z5G_FRAME() ((void)0)
 #define NBT(x) ((void)0)
 #define NBD_FOREIGN(o) ((void)0)
 #define NBD_TAKE(c) 0

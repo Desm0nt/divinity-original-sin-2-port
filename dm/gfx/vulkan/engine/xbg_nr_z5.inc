@@ -18,12 +18,12 @@
 //                 Counted too: the runs (a run ends at any packet that is not an engine draw's, at another command buffer, at a UI
 //                 draw, at a conditional-rendering bracket), their lengths, head and tail draws - the numbers the decision needs.
 //                 Needs DM_NB_MT != 0 (packets) and DM_NR_DRAW=1.
-//              1  refused (red line, off): the game thread's half is not built. Its PACKET half exists and is tested on the PC with two
-//                 threads - the marks of the draw records, the ring of runs, the spare chunks, taking / declining a run on the
-//                 translation thread, the comparison of a written-ahead chunk (dm/gfx/nr/nr_z5w.h, tests/nr_z5w_test.cpp; NR-ZERO.md
-//                 section 18) - but nothing here includes it: the game thread has no values to write (section 18.3).
+//              1  apply: the game thread's half (xbg_nr_z5g.inc; NR-ZERO.md section 22) - the game thread writes the packets of the draws it
+//                 has values for, the translation thread takes them draw by draw. The comparison below does not run. =2 runs both:
+//                 this comparison and the game thread's chunks against the translation thread's packets.
 // Lines: "[nr] DM_NR_Z5=..." at the start, "[nr] z5 check (DM_NR_Z5=2): ..." every 10 s, red "【红】[nr] z5: ...".
 #include "../../nr/nr_z5.h"
+namespace nrz5t{bool init(int m);void release();}   // xbg_nr_z5g.inc: the game thread's half (DM_NR_Z5 = 1 / 2)
 namespace nrz5{
 int mode=0;bool read=false;
 nrz5_cache model{};bool in_run=false,live=false;VkCommandBuffer run_cmd{};uint32_t run_len=0;uint64_t sig_after=0;
@@ -38,15 +38,16 @@ void red(const char *fmt,...){if(told>=16)return;++told;char b[640];va_list ap;v
 void init(int draw_mode){
     if(read)return;read=true;
     const char *e=getenv("DM_NR_Z5");int m=e && *e?atoi(e):xbg_nr_z5_default();
-    if(m==1){xbg_logf("【红】[nr] DM_NR_Z5=1: the game thread's half is not built (resolving a draw from published tables ahead of the translator; docs/dos2/nr/NR-ZERO.md section 14) - only =2, the comparison of the packet side: off");m=0;}
-    if(m!=0 && m!=2){xbg_logf("【红】[nr] DM_NR_Z5=%d: only 0 / 2: off",m);m=0;}
-    if(m && (nbmt::mode==0 || draw_mode!=1)){xbg_logf("【红】[nr] DM_NR_Z5=2 needs DM_NB_MT (now %d) and DM_NR_DRAW=1 (now %d): off",nbmt::mode,draw_mode);m=0;}
+    if(m<0 || m>2){xbg_logf("【红】[nr] DM_NR_Z5=%d: only 0 / 1 / 2: off",m);m=0;}
+    if(m && (nbmt::mode==0 || draw_mode!=1)){xbg_logf("【红】[nr] DM_NR_Z5=%d needs DM_NB_MT (now %d) and DM_NR_DRAW=1 (now %d): off",m,nbmt::mode,draw_mode);m=0;}
+    if(m && !nrz5t::init(m))m=0;   // the game thread's half (xbg_nr_z5g.inc): 1 apply, 2 verify
+    if(m==1)m=0;   // (below: the comparison of the run assembler on the translation thread - =2 only)
     if(m){scratch=static_cast<nbmtq::Chunk*>(malloc(sizeof(nbmtq::Chunk)+16384));if(!scratch){xbg_logf("【红】[nr] DM_NR_Z5=2: no memory: off");m=0;}else{memset(scratch,0,sizeof *scratch);scratch->cap=16384;}}
     if(m)xbg_logf("[nr] DM_NR_Z5=2 (NR-ZERO Z5, verify: nothing is recorded differently): every engine draw the lane's tail records is written again by the run assembler over a model of the bind cache "
         "that starts empty at each run - a draw that reads only fields its run set is compared packet for packet with the tail's packets; the model's known fields against the real bind cache "
-        "after every draw; runs counted (ended by any other packet, another command buffer, a moved cache, a UI draw, a conditional bracket). The game thread's half is not built");
+        "after every draw; runs counted (ended by any other packet, another command buffer, a moved cache, a UI draw, a conditional bracket)");
     mode=m;}
-void release(){free(scratch);scratch=nullptr;mode=0;read=false;in_run=false;live=false;s=Stats{};}
+void release(){nrz5t::release();free(scratch);scratch=nullptr;mode=0;read=false;in_run=false;live=false;s=Stats{};}
 inline nrz5_cache conv(const BindCache &bc){
     nrz5_cache c;nrz5_cache_unknown(&c);c.known=NRZ5_K_PIPE|NRZ5_K_SET|NRZ5_K_VP|NRZ5_K_SC|NRZ5_K_IB;c.known_vb=0xffff;
     c.pipe=uint64_t(uintptr_t(bc.pipe));c.layout=uint64_t(uintptr_t(bc.layout));c.set=uint64_t(uintptr_t(bc.set));c.noff=bc.noff;memcpy(c.off,bc.off,sizeof c.off);

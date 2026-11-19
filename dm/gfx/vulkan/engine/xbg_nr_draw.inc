@@ -145,6 +145,7 @@ void tick(){   // every submission (nbdraw::tick)
     if(__builtin_expect(nrz3::mode>0,0))nrz3::tick();   // [DOS2] NR-ZERO Z3: its lines
     if(__builtin_expect((nrzx::bmode|nrzx::cmode|nrzx::dmode)!=0,0))nrzx::tick();   // [DOS2] NR-ZERO Z3b / Z3c / Z3d: their line
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::tick();   // [DOS2] NR-ZERO Z5: its line
+    if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::tick();   // [DOS2] NR-ZERO Z5, the game thread's half: its lines
     if(__builtin_expect(nrmdi::mode>0,0))nrmdi::tick();   // [DOS2] NR-MDI: its line
     if(__builtin_expect(nrpo::mode>0,0))nrpo::tick();   // [DOS2] NR-POSONLY: its line
     if(__builtin_expect(nrps::mode>0,0))nrps::tick();   // [DOS2] NR-PRESKIN: its line
@@ -305,8 +306,13 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     // draw records the waiting ones first, before it reads the bind cache
     const bool queued=__builtin_expect(nrsort::mode!=0,0) && dr && nrsort::take(c,*dr,p,count,indexed,instances,first,first_instance);
     if(!queued){
-    if(nrsort::pend.load(std::memory_order_relaxed))nrsort::flush_draw();
+    if(nrsort::pend.load(std::memory_order_relaxed) && !nrz5t::held)nrsort::flush_draw();   // (held: DM_NR_Z5=1 keeps a chunk for this command buffer - not a segment of nrsort)
     BindCache &bc=bind_cache;if(bc.cmd!=c.command){bc=BindCache{};bc.cmd=c.command;}
+    // [DOS2] NR-ZERO Z5 DM_NR_Z5=1 (xbg_nr_z5g.inc): the game thread wrote this draw's packets from the same values and the bind cache holds what its run assumed - the command section is not run
+    const bool z5cond=__builtin_expect(nrz5t::gmode!=0,0) && condr::gpu_would();const uint32_t z5i=indexed?uint32_t(indexed->instances):instances,z5f=indexed?H.first_index:uint32_t(first)+H.k,z5b=indexed?uint32_t(indexed->base_instance):first_instance;const int32_t z5v=indexed?int32_t(indexed->base_vertex)+int32_t(H.k):0;
+    if(__builtin_expect(nrz5t::gmode!=0,0) && nrz5t::tail(c.command,bc,ui,z5cond,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),z5i,z5f,z5v,z5b)){
+        ++pipe_memo_hits;++pipe_draw_fast_hits;DRAW_MARK(5);pass_prof_draw(c.command);}
+    else{
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::draw_begin(c.command,bc,ui);   // [DOS2] NR-ZERO Z5 DM_NR_Z5=2: the run this draw belongs to, where its packets start
     unsigned n=1;
     if(bc.pipe!=H.pipe){vkCmdBindPipeline(c.command,VK_PIPELINE_BIND_POINT_GRAPHICS,H.pipe);bc.pipe=H.pipe;++n;++S->c_pipe;}else ++binds_skipped;
@@ -336,6 +342,8 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::draw_end(bc,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),   // [DOS2] NR-ZERO Z5 DM_NR_Z5=2: the same draw by the run assembler, compared
         indexed?uint32_t(indexed->instances):instances,indexed?H.first_index:uint32_t(first)+H.k,indexed?int32_t(indexed->base_vertex)+int32_t(H.k):0,indexed?uint32_t(indexed->base_instance):first_instance,cond_gpu_draw);
     S->cmds+=n;
+    if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::recorded(bc,ui,cond_gpu_draw,H.t.key,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),z5i,z5f,z5v,z5b,H.first_index,H.k);   // [NR-ZERO Z5] =2: the comparison; the template of the record's slot
+    }
     if(__builtin_expect(nrmdi::mode!=0,0) && dr)nrmdi::note(c,*dr,p,indexed,instances,first_instance);   // [DOS2] NR-MDI DM_NR_MDI=2: the batching count (-1: reads its switch once)
     }else{DRAW_MARK(5);pass_prof_draw(c.command);}   // [NR-21] queued: the commands come with the segment (nrsort::emit)
     if(sp)td=timing_clock();

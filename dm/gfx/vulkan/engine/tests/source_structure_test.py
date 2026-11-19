@@ -1472,6 +1472,7 @@ def nr21_check():
     head = 'void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances=1,uint32_t first_instance=0,const GpuIndirect *gi=nullptr){'
     di = g_raw.index(head); dr = code(g_raw[di:g_raw.index('\n}', di)])
     for where, t in (('draw()', dr), ('lane()', nd)):
+        if where == 'lane()': fl = 'if(nrsort::pend.load(std::memory_order_relaxed) && !nrz5t::held)nrsort::flush_draw();'   # [NR-ZERO Z5] held: the next draw of the run arrives - the chunk stays held
         uses = [m.start() for m in re.finditer(r'BindCache &bc=bind_cache;', t)]
         assert len(uses) == 1, 'NR-21: %s reads the bind cache once' % where
         at = t.rfind(fl, 0, uses[0])
@@ -3031,7 +3032,7 @@ def nrz5w_check():   # [DOS2] NR-ZERO Z5, the second writer (docs/dos2/nr/NR-ZER
     for src in list((root / 'gfx/vulkan/engine').glob('xbg_*')) + list((root / 'gfx/nvn').glob('*.c')) + list((root / 'gfx/nvn').glob('*.inc')) + list((root / 'host').glob('*.c')) + list((root / 'host').glob('*.inc')):
         t = src.read_text(encoding='utf-8', errors='replace')
         assert 'nr_z5w.h"' not in t and 'nrz5w::' not in t and 'NRZ5W_MUTATE' not in t, 'Z5 writer: not wired into the engine (%s)' % src.name
-    assert 'if(m==1){xbg_logf("【红】[nr] DM_NR_Z5=1: the game thread\'s half is not built' in z5 and 'if(m!=0 && m!=2){' in z5, 'Z5: =1 is refused'
+    assert 'if(m && !nrz5t::init(m))m=0;' in z5, 'Z5: =1 / =2 are the per-draw protocol of nr_z5r.h (nrz5g_check), not this one-verdict writer'
     assert '#define NRZ5W_MUTATE 0' in w
     # the second writer's chunks: the free list under the queue's mutex, never the producer's statistics; bounded; each ends in splice_spare or give_back_spare
     ts = w and q[q.index('    Chunk *take_spare() {'):q.index('    void splice_spare(Chunk *c)')]
@@ -3125,7 +3126,7 @@ def nrz5_check():   # [DOS2] NR-ZERO Z5 DM_NR_Z5 (docs/dos2/nr/NR-ZERO.md sectio
     mt = (root / 'gfx/vulkan/engine/xbg_nb_mt.inc').read_text(encoding='utf-8')
     q = (root / 'gfx/nb/nb_mt.h').read_text(encoding='utf-8')
     lane = (root / 'gfx/vulkan/engine/xbg_nr_draw.inc').read_text(encoding='utf-8')
-    assert 'int m=e && *e?atoi(e):xbg_nr_z5_default();' in z5 and 'if(m==1){' in z5 and 'if(m!=0 && m!=2){' in z5 and "the game thread's half is not built" in z5, 'Z5: default through the policy; =1 refused; only =2'
+    assert 'int m=e && *e?atoi(e):xbg_nr_z5_default();' in z5 and 'if(m<0 || m>2){' in z5 and 'if(m && !nrz5t::init(m))m=0;' in z5 and z5.index('if(m && !nrz5t::init(m))m=0;') < z5.index('if(m==1)m=0;') < z5.index('if(m){scratch='), 'Z5: default through the policy; the game thread\'s half is asked first; the assembler comparison only at =2'
     assert g.index('#include "xbg_nr_z5.inc"') < g.index('#include "xbg_nr_draw.inc"'), 'Z5: before the lane'
     assert 'NRZ5_MUTATE' not in z5 and 'NRZ5_MUTATE' not in mt and 'NRZ5_MUTATE' not in lane and '#define NRZ5_MUTATE 0' in h, 'Z5: the mutation switch is the test\'s only'
     # =2 records nothing: no queue hand-over, no command, no write to the bind cache from nrz5
@@ -3159,8 +3160,69 @@ def nrz5_check():   # [DOS2] NR-ZERO Z5 DM_NR_Z5 (docs/dos2/nr/NR-ZERO.md sectio
     sp = q[q.index('    void splice(Chunk *c) {'):q.index('    void give_back(Chunk *c) {')]
     assert re.search(r'if \(!c\) return;\s*flush\(\);\s*c->cb = cb; st\.cmds \+= c->cmds; \+\+st\.spliced; st\.spliced_cmds \+= c->cmds;\s*cur = c; flush\(\);', sp), 'Z5: splice = the producer\'s chunk first, then the chunk, both by flush()'
     assert '"[nr] z5 check (DM_NR_Z5=2):' in z5 and '【红】[nr] z5: %s' in z5 and 'if(__builtin_expect(nrz5::mode!=0,0))nrz5::tick();' in lane, 'Z5: the lines'
-    print('PASS: NR-ZERO Z5 DM_NR_Z5: =1 refused (the game thread\'s half is not built), =2 compares and records nothing; draw_begin / draw_end around the tail\'s command section; '
+    print('PASS: NR-ZERO Z5 DM_NR_Z5: the assembler comparison runs at =2 only and records nothing; draw_begin / draw_end around the tail\'s command section; '
           'the assembler\'s tests are the tail\'s; shared packet layouts; splice through the one hand-over')
+def nrz5g_check():   # [DOS2] NR-ZERO Z5, the game thread's half (docs/dos2/nr/NR-ZERO.md section 22): DM_NR_Z5 = 1 apply / 2 verify, a verdict per draw
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    zg = (root / 'gfx/vulkan/engine/xbg_nr_z5g.inc').read_text(encoding='utf-8')
+    lane = (root / 'gfx/vulkan/engine/xbg_nr_draw.inc').read_text(encoding='utf-8')
+    so = (root / 'gfx/vulkan/engine/xbg_nr_sort.inc').read_text(encoding='utf-8')
+    nb = (root / 'gfx/vulkan/engine/xbg_nb.inc').read_text(encoding='utf-8')
+    z3 = (root / 'gfx/vulkan/engine/xbg_nr_z3.inc').read_text(encoding='utf-8')
+    r = (root / 'gfx/nr/nr_z5r.h').read_text(encoding='utf-8')
+    pt = (root / 'gfx/nr/nr_z5p.h').read_text(encoding='utf-8')
+    tap = (root / 'gfx/nvn/nvn_nb_tap.inc').read_text(encoding='utf-8')
+    nd = (root / 'gfx/nvn/nvn_nb_draw.inc').read_text(encoding='utf-8')
+    ndh = (root / 'gfx/nvn/nvn_nb_draw.h').read_text(encoding='utf-8')
+    hle = (root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8', errors='replace')
+    # included twice: the namespaces before the lane, the game thread's entry points at the end of the file (outside the unnamed namespace)
+    assert g.index('#include "xbg_nr_z5.inc"') < g.index('#include "xbg_nr_z5g.inc"') < g.index('#include "xbg_nr_draw.inc"') and g.count('#include "xbg_nr_z5g.inc"') == 2, 'Z5 game: included after nrz5, before the lane'
+    assert g.rstrip().endswith('#define XBG_NR_Z5G_BRIDGE\n#include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5: the game thread\'s entry points (called by the NVN tap)'), 'Z5 game: the entry points at the end of the file'
+    assert 'NRZ5R_MUTATE' not in zg and 'NRZ5P_MUTATE' not in zg and 'NRZ5R_MUTATE' not in lane and '#define NRZ5R_MUTATE 0' in r and '#define NRZ5P_MUTATE 0' in pt, 'Z5 game: the mutation switches are the tests\' only'
+    # the game thread's side never touches the command buffer or the translation thread's state: the table (read), the queue's spare chunks, the ring
+    gs = zg[zg.index('namespace nrz5g{'):zg.index('namespace nrz5t{')]
+    assert not re.search(r'vkCmd\w+\(|nbmt::Cmd\w+\(|bind_cache|state\.|splice', gs) and 'tab.get(s,&t,nullptr)' in gs and 'tab.put(' not in gs, 'Z5 game: the game thread reads the table and writes chunks of its own'
+    assert 'owner.compare_exchange_strong(o,id' in gs and 'inline void other(){if(owner.load(std::memory_order_relaxed)==self() && g.init)g.W.end_run();}' in gs, 'Z5 game: one owner thread'
+    # the translation thread's side: no command of its own; the chunk enters the stream only through Reader::flush (one splice_spare in nr_z5r.h)
+    ts = zg[zg.index('namespace nrz5t{'):zg.index('#else')]
+    assert not re.search(r'vkCmd\w+\(|nbmt::Cmd\w+\(', ts) and 'splice' not in ts and r.count('splice_spare(') == 1 and r.count('q->splice_spare(run.chunk); ++st.handed;') == 1, 'Z5 game: one hand-over'
+    assert 'if(nbmt::cur!=cmd){no_take=1;++s.direct;}else if(ui){no_take=1;++s.ui;}else if(cond){no_take=1;++s.cond;}else if(nrsort::mode!=0 || nrmdi::mode>0){no_take=1;++s.gate;}' in ts, 'Z5 game: never taken - direct recording, UI, a conditional bracket, DM_NR_SORT / DM_NR_MDI'
+    assert ts.index('const int a=R.draw(mw,rv,holds,is_draw);') < ts.index('if(a==nrz5r::Reader::VALID){leave(bc,rv);++s.taken;sync_pend(cmd);return true;}') and ts.count('leave(bc,rv)') == 1, 'Z5 game: the bind cache gets the values only of a taken draw'
+    assert ts.index('if(gmode==1){\n        const int a=R.draw(') < ts.index('v_would=R.verify_begin(mw,rv,holds,is_draw,sig());'), 'Z5 game: =2 holds nothing'
+    assert 'const nrz5_cache real=nrz5::conv(bc);return nrz5r::cache_holds(&sh,&real,&v);' in ts, 'Z5 game: the bind cache against the run\'s shadow, every field the draw reads'
+    assert 'if(R.holding && gmode==1){if(!held){held=true;held_cmd=cmd;nrsort::pend.store(cmd,std::memory_order_relaxed);}}' in ts and 'void cut(){R.flush(nrz5r::CUT_WRITE);held=false;nrsort::pend.store(VK_NULL_HANDLE,std::memory_order_relaxed);}' in ts, 'Z5 game: a held chunk arms the wrappers\' hook'
+    # the reader's rule (nr_z5r.h): values first, then the cache, then the packets up to the draw command; the shadow follows the taken draws
+    st = r[r.index('    template <class Holds, class IsDraw> bool step('):r.index('    bool begin_run(uint32_t id) {')]
+    order = ['const int d = pv_diff(s->data() + side_at, s->used - side_at, &rv);', 'if (NRZ5R_MUTATE != 5 && !holds(shadow, rv)) { *why = CUT_CACHE; return false; }', 'if (!found) { *why = CUT_CHUNK; return false; }', 'if (NRZ5R_MUTATE != 7) nrz5_after(&shadow, &rv);']; at = -1
+    for o in order: assert st.count(o) == 1 and st.index(o) > at, 'Z5 game: the reader\'s order: %s' % o; at = st.index(o)
+    assert 'if (NRZ5R_MUTATE != 6 && NRZ5R_MUTATE != 11) { run.chunk->used = at; run.chunk->cmds = cmds; }' in r, 'Z5 game: a cut hands over the taken draws\' packets only'
+    # the wrappers' hook: nrsort::cut hands the held chunk over first; the lane does not take the hold for a segment of nrsort
+    assert so.index('void cut(VkCommandBuffer c,unsigned op){if(pend.load(std::memory_order_relaxed)!=c)return;') < so.index('if(__builtin_expect(nrz5t::held,0)){nrz5t::cut();return;}', so.index('void cut(VkCommandBuffer c,unsigned op){')) < so.index('if(op==nbmt::OP_BeginRenderPass){red("a segment of'), 'Z5 game: NBMT_PRE hands the held chunk over'
+    assert 'void flush(unsigned why,bool exact){'+chr(10)+'    if(__builtin_expect(nrz5t::held,0)){nrz5t::cut();return;}' in so, 'Z5 game: the old tail of draw() hands the held chunk over before it reads the bind cache'
+    assert 'void cb_begun(){if(__builtin_expect(nrz5t::held,0))nrz5t::lost();' in so and 'if(nrsort::pend.load(std::memory_order_relaxed) && !nrz5t::held)nrsort::flush_draw();' in lane, 'Z5 game: the hold is not nrsort\'s segment'
+    assert '#define NBMT_PRE(c,op) do{if(__builtin_expect((c)==nrsort::pend.load(std::memory_order_relaxed),0) && (c))nrsort::cut((c),(op));}while(0)' in g, 'Z5 game: every wrapper runs the hook'
+    # the lane's tail: asked right after the bind cache is taken; a taken draw runs no command; recorded() after the section it ran itself
+    tail = lane[lane.index('bool lane_tail(Commands &c,Descriptors *dr,'):lane.index('// The old tail finished a draw lane() left to it')]
+    a0 = tail.index('BindCache &bc=bind_cache;if(bc.cmd!=c.command){bc=BindCache{};bc.cmd=c.command;}'); a1 = tail.index('if(__builtin_expect(nrz5t::gmode!=0,0) && nrz5t::tail(c.command,bc,ui,z5cond,H.pipe,')
+    a2 = tail.index('++pipe_memo_hits;++pipe_draw_fast_hits;DRAW_MARK(5);pass_prof_draw(c.command);}'); a3 = tail.index('    else{', a2); a4 = tail.index('vkCmdBindPipeline('); a5 = tail.index('S->cmds+=n;'); a6 = tail.index('nrz5t::recorded(bc,ui,cond_gpu_draw,H.t.key,')
+    assert a0 < a1 < a2 < a3 < a4 < a5 < a6 and not re.search(r'vkCmd\w+\(', tail[a1:a3]) and tail.count('nrz5t::tail(') == 1 and tail.count('nrz5t::recorded(') == 1, 'Z5 game: the tail\'s hooks'
+    assert 'const bool z5cond=__builtin_expect(nrz5t::gmode!=0,0) && condr::gpu_would();' in tail and 'inline bool gpu_would(){return cg.kind==CONDR_K_COND && cg.mode==CONDR_GPU && cg.gpu_ok;}' in g and 'if(cg.kind!=CONDR_K_COND || cg.mode!=CONDR_GPU || !cg.gpu_ok)return false;' in g, 'Z5 game: the conditional bracket is asked without opening it'
+    # the record in hand; a marked record that did not reach the command section cuts its run
+    assert nb.index('if(__builtin_expect(nrz5t::gmode,0))nrz5t::rec_begin(h);') < nb.index('    do_draw(h);\n    if(__builtin_expect(nrz5t::gmode,0))nrz5t::rec_end();') and nb.count('nrz5t::') == 4, 'Z5 game: nbdraw::apply'
+    assert 'if(R.holding){if(gmode==1){R.flush(nrz5r::CUT_RECORD);sync_pend(held_cmd);}else R.verify_miss();}' in ts and 'else R.abandon(r_h._pad1);}' in ts, 'Z5 game: a record that did not come'
+    assert 'nrz5t::plan_hint=&dpn;' in z3 and z3.count('nrz5t::plan_hint=nullptr;') == 2, 'Z5 game: nrz3 names the plan of the tail it runs'
+    # the tap: nothing without the switch (the record's two words stay 0); the hooks
+    assert 'h._pad1 = 0; h._pad2 = 0;' in ndh and '#define Z5G_ON() __builtin_expect(__atomic_load_n(&g_z5g_on, __ATOMIC_RELAXED), 0)' in tap and tap.count('if (Z5G_ON()') == 6, 'Z5 game: every hook of the tap behind the switch'
+    assert nd.index('NRD_EXT_PUT(nr, p, size);') < nd.index('Z5G_DRAW(nr && !t_nbd_chk, c, p, nr_key);') and '#define Z5G_DRAW(nr, c, p, key) do { if (Z5G_ON() && (nr)) z5g_draw((c), (p), (key)); } while (0)' in nd, 'Z5 game: the record\'s mark and slot'
+    for hk in ('    Z5G_END();', '    Z5G_OTHER(op);', '    Z5G_VB(first, n, rg);', '    Z5G_UBO(st, i, a);', 'Z5G_UBO(st, first + z5i_, rg[z5i_].address);', '    Z5G_FRAME();', '    Z5G_VB1(i, a);'):
+        assert hle.count(hk) == 1, 'Z5 game: tap hook %s' % hk
+    assert hle.index('Z5G_UBO(st, i, a);') < hle.index('if (nrub_same == 2) return;'), 'Z5 game: the uniform address is noted before NR-UBD may leave the bind out'
+    # the published table: every word an atomic; the version is odd while a slot is written and read twice
+    assert 'struct Slot { std::atomic<uint32_t> ver; std::atomic<uint64_t> w[NRZ5T_WORDS]; };' in pt and 'if (NRZ5P_MUTATE != 3) x.ver.store(v + 1, std::memory_order_release);' in pt and 'if (NRZ5P_MUTATE != 1 && x.ver.load(std::memory_order_acquire) != v0) return false;' in pt, 'Z5 game: the seqlock'
+    assert zg.count('tab.put(') == 1 and 'if(nrz5g::tab.put(uint32_t(r_h._pad2-1),&t))++s.published;' in ts, 'Z5 game: one writer of the table (the translation thread, after a draw it recorded itself)'
+    print('PASS: NR-ZERO Z5 game thread: wired behind DM_NR_Z5 = 1 / 2 (nothing in the tap, nbdraw::apply or the tail without it); the game thread reads templates and writes spare chunks only; '
+          'a draw is taken only after values and bind cache are compared; one hand-over, armed on the wrappers\' hook; =2 holds nothing; a record that does not come cuts its run')
+
 def nrmdi_check():   # [DOS2] NR-MDI DM_NR_MDI (docs/dos2/nr/NR-MDI.md): the multi-draw batching count (=2) and the rebind probe (=3)
     g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
     inc = (root / 'gfx/vulkan/engine/xbg_nr_mdi.inc').read_text(encoding='utf-8')
@@ -3565,6 +3627,7 @@ nrz3k_check()
 nrz5w_check()
 nrz3e_check()
 nrz5_check()
+nrz5g_check()
 nrmdi_check()
 nrposonly_check()
 nrpreskin_check()
