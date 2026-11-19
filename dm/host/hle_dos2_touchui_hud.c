@@ -436,6 +436,11 @@ static int hu_input_ok(uint32_t dev) {   // the raw-state array hle_dos2_touch.c
     return *(void *const volatile *)(mgr + HU_IN_DEVS) != NULL && *(const volatile uint32_t *)(mgr + HU_IN_DEVN) > dev;
 }
 static void hu_act_start_key(int kind, const char *what, uint32_t key);
+// [touch] the Back gesture in UI mode TOUCH (DmActivity.dos2PadB): the PC escape (close the window / the pause menu), never the pad's B - a pad
+// press there means "the player took a gamepad" and rebuilt the UI to the controller set (phone 20.11: six rebuilds back and forth, the UI broke)
+static _Atomic int g_back_req;
+int dm_dos2_touchui_hud_back(void);
+int dm_dos2_touchui_hud_back(void) { if (!hu_on()) return 0; atomic_store(&g_back_req, 1); return 1; }
 static void hu_act_start(int kind, const char *what) { hu_act_start_key(kind, what, 1 /* escape */); }
 static void hu_act_start_key(int kind, const char *what, uint32_t key) {
     float x = -1, y = -1;
@@ -711,6 +716,7 @@ void dm_dos2_touchui_hud_poll(void) {
     // the aimed point: named by the gestures, else where the cursor rested
     if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v; float x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); hu_aim_set(&g_aimp, x, y); }
     else if (!g_act.kind) { const float *c = *(float *const volatile *)(g_main->base + HU_CURSOR); if (c) hu_aim_feed(&g_aimp, c[0], c[1], hu_us() / 1000); }
+    if (atomic_exchange(&g_back_req, 0) && !g_act.kind) hu_act_start(3, "the Back gesture: escape (UI mode TOUCH)");
     hu_act_step();
 }
 

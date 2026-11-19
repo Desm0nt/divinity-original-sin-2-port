@@ -714,9 +714,10 @@ static void dt_radial_up(float x, float y, int up) {
 // Raw ids of the keyboard (device 0): the name table main+0x2974b10 (relocated pointers, id = index - 2; dumped from main.raw's .rela.dyn).
 // The bindings: the Switch Game.pak's PlayerProfiles/Eoc/keyboard_1.json (= the iPad's minus the mouse buttons; SkipVideo <- escape there).
 enum { ID_KEY_HOME = 0x0a, ID_KEY_DELETE = 0x0c, ID_KEY_END = 0x0d, ID_KEY_A = 0x24, ID_KEY_D = 0x27, ID_KEY_O = 0x32, ID_KEY_S = 0x36, ID_KEY_W = 0x3a,
-       ID_KEY_LSHIFT = 0x6c, ID_KEY_LALT = 0x6d };
+       ID_KEY_LSHIFT = 0x6c, ID_KEY_LALT = 0x6d, ID_KEY_PAGEUP = 0x0b, ID_KEY_PAGEDOWN = 0x0e };
 static int g_t_cfg = 1, g_t_slong_ms = 350, g_t_long_ms = 600, g_t_dtap_ms = 300, g_t_tapn_ms = 350, g_t_pan_ms = 1200, g_t_rot_ms = 700, g_t_cap_ms = 500;
 static int g_t_pan_inv, g_t_tips_ms, g_t_cones_ms, g_t_t3f_esc, g_t_tac;   // g_t_tac: what the host believes the tactical camera is (0 off)
+static float g_t_bz; static uint32_t g_t_zkey; static int g_t_zoom_ms = 90;   // DM_DOS2_TOUCH_T_ZOOM_MS: hold per pinch step   // pinch zoom: the owed hold of pageup (+) / pagedown (-) in ms and the key held now (0 none)
 static float g_t_bx, g_t_by, g_t_br;      // the keyboard camera's owed hold (ms): pan x / y, rotation (dt_hold_add)
 static unsigned g_t_keys, g_t_tog;        // camera keys down now (DT_K_*); held toggles: 1 = lalt (ShowWorldTooltips), 2 = lshift (ShowSneakCones)
 static uint64_t g_t_tog_until[2], g_t_tick;
@@ -726,7 +727,7 @@ static struct { int n, live, nmax, id[3], up[3], started, lp, swiped; float x[3]
 int dm_dos2_ui_mode_hud(void);   // hle_dos2_uimode.c
 static int dt_t_mode(void) { return g_t_cfg && g_main && dm_dos2_ui_mode_hud() == UI_TOUCH && dt_pc(); }
 static void dt_key(void *mgr, uint32_t id, int down) { dt_send(mgr, DEV_KEYS, id, down ? 1.f : 0.f, down ? 1.f : 0.f, down); }
-static int dt_t_busy(void) { return g_t_keys || g_t_tog || g_t_bx != 0 || g_t_by != 0 || g_t_br != 0; }
+static int dt_t_busy(void) { return g_t_keys || g_t_tog || g_t_zkey || g_t_bx != 0 || g_t_by != 0 || g_t_br != 0 || g_t_bz != 0; }
 static void dt_t_toggle(void *mgr, int which, const char *what) {   // which 0 = lalt (world tooltips), 1 = lshift (sneak cones)
     const unsigned bit = 1u << which; const uint32_t id = which ? ID_KEY_LSHIFT : ID_KEY_LALT; const int ms = which ? g_t_cones_ms : g_t_tips_ms;
     const int on = !(g_t_tog & bit);
@@ -737,6 +738,8 @@ static void dt_t_toggle(void *mgr, int which, const char *what) {   // which 0 =
 }
 static void dt_t_release_all(void *mgr, const char *why) {
     static const uint32_t kid[6] = {ID_KEY_W, ID_KEY_S, ID_KEY_A, ID_KEY_D, ID_KEY_DELETE, ID_KEY_END};
+    if (g_t_zkey) { dt_key(mgr, g_t_zkey, 0); g_t_zkey = 0; }
+    g_t_bz = 0;
     if (!g_t_keys && !g_t_tog && !(g_t_bx != 0 || g_t_by != 0 || g_t_br != 0)) return;
     for (int i = 0; i < 6; i++) if (g_t_keys >> i & 1) dt_key(mgr, kid[i], 0);
     if (g_t_tog & 1) dt_key(mgr, ID_KEY_LALT, 0);
@@ -753,7 +756,9 @@ static void dt_t_poll(void *mgr) {
     const int st = atomic_load(&g_ui_state);
     if (g_t_tog && (st & 4) && ((st & 1) || !(st & 2))) dt_t_release_all(mgr, (st & 1) ? "a menu / panel is on screen" : "out of game");
     for (int w = 0; w < 2; w++) if ((g_t_tog >> w & 1) && g_t_tog_until[w] && now >= g_t_tog_until[w]) { dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 0); g_t_tog &= ~(1u << w); }
-    dt_hold_tick(&g_t_bx, dtm); dt_hold_tick(&g_t_by, dtm); dt_hold_tick(&g_t_br, dtm);
+    dt_hold_tick(&g_t_bx, dtm); dt_hold_tick(&g_t_by, dtm); dt_hold_tick(&g_t_br, dtm); dt_hold_tick(&g_t_bz, dtm);
+    { const uint32_t zk = g_t_bz > 4.f ? ID_KEY_PAGEUP : g_t_bz < -4.f ? ID_KEY_PAGEDOWN : 0;   // the pinch's zoom key follows its owed hold
+      if (zk != g_t_zkey) { if (g_t_zkey) dt_key(mgr, g_t_zkey, 0); if (zk) dt_key(mgr, zk, 1); g_t_zkey = zk; } }
     const unsigned want = dt_cam_keys(g_t_bx, g_t_by, g_t_br, g_t_pan_inv, g_rot_swap, 4.f);
     if (want != g_t_keys) {
         static const uint32_t kid[6] = {ID_KEY_W, ID_KEY_S, ID_KEY_A, ID_KEY_D, ID_KEY_DELETE, ID_KEY_END};
@@ -846,7 +851,7 @@ static void dt_tm_move(void *mgr, int i, float x, float y) {
     tm.mask = dt_two_mask(tm.mask, dd, da * half, hypotf(mx, my), g_win_h * 0.04f, g_win_h * 0.03f, g_win_h * 0.03f);
     if (tm.mask) tm.started = 1;
     if ((tm.mask & ~was) && (g_dbg || g_n_t_pinch + g_n_t_rot + g_n_t_pan2 < 20))
-        LOG("[touch] TOUCH: two fingers: %s%s%s started (distance %+.0f px, angle %+.2f rad, centre moved %.0f px)", (tm.mask & ~was & DT_2F_PINCH) ? "pinch (CameraZoom = wheel) " : "",
+        LOG("[touch] TOUCH: two fingers: %s%s%s started (distance %+.0f px, angle %+.2f rad, centre moved %.0f px)", (tm.mask & ~was & DT_2F_PINCH) ? "pinch (CameraZoom = keys pageup / pagedown) " : "",
             (tm.mask & ~was & DT_2F_ROT) ? "rotation (CameraRotate = keys delete / end) " : "", (tm.mask & ~was & DT_2F_PAN) ? "pan (CameraMove2Fingers = keys w / a / s / d) " : "",
             (double)dd, (double)da, (double)hypotf(mx, my));
     const float d = hypotf(p[2] - p[0], p[3] - p[1]), a = atan2f(p[3] - p[1], p[2] - p[0]), cx = (p[0] + p[2]) / 2, cy = (p[1] + p[3]) / 2;
@@ -854,8 +859,12 @@ static void dt_tm_move(void *mgr, int i, float x, float y) {
         const float step = g_win_h * 0.04f;
         while (fabsf(d - tm.pd) > step) {
             const int apart = d > tm.pd;
-            const uint32_t id = apart != !!getenv("DM_DOS2_TOUCH_PINCH_SWAP") ? ID_WHEEL_YPOS : ID_WHEEL_YNEG;
-            dt_button(mgr, id, 1); dt_button(mgr, id, 0); g_n_t_pinch++;
+            const int in = apart != !!getenv("DM_DOS2_TOUCH_PINCH_SWAP");
+            // phone 20.11: wheel records never zoomed (the camera keys delete / end did turn it): CameraZoomIn / Out <- key:pageup / pagedown of
+            // keyboard_1.json, one key tap per step; DM_DOS2_TOUCH_T_PINCH_WHEEL=1 = the wheel as before
+            if (getenv("DM_DOS2_TOUCH_T_PINCH_WHEEL")) { const uint32_t id = in ? ID_WHEEL_YPOS : ID_WHEEL_YNEG; dt_button(mgr, id, 1); dt_button(mgr, id, 0); }
+            else dt_hold_add(&g_t_bz, in ? 1.f : -1.f, 1.f, g_t_zoom_ms, g_t_cap_ms);   // held a while per step: one record pair in one poll may be missed
+            g_n_t_pinch++;
             tm.pd += apart ? step : -step;
         }
     } else tm.pd = d;
@@ -1951,6 +1960,7 @@ void dm_dos2_touch_install(void) {
         g_t_pan_inv = (v = getenv("DM_DOS2_TOUCH_T_PAN_INV")) && atoi(v) > 0;
         g_t_t3f_esc = (v = getenv("DM_DOS2_TOUCH_T_3F_ESC")) && atoi(v) > 0;
         if ((v = getenv("DM_DOS2_TOUCH_T_AIMTAP"))) g_t_aimtap = atoi(v) > 0;
+        if ((v = getenv("DM_DOS2_TOUCH_T_ZOOM_MS")) && atoi(v) > 0 && atoi(v) <= 2000) g_t_zoom_ms = atoi(v);
         if (g_t_slong_ms > g_t_long_ms) g_t_slong_ms = g_t_long_ms;   // a tooltip time past the long press: no separate tooltip
         LOG("[touch] UI mode TOUCH gestures%s (iPad touchscreen_1.json as PC records, while the TOUCH PC UI is up): tap = left click (double tap = a PC double click, %d ms), "
             "still %d ms = tooltip (hover, no click), %d ms = right click (ContextMenu); one / two-finger pan = keys w / a / s / d (%d ms per screen height%s), "
@@ -2000,9 +2010,11 @@ void dm_dos2_touch_install(void) {
     if (((v = getenv("DM_DOS2_TOUCH_PCUI")) && atoi(v) > 0) || ui_start == UI_TOUCH) {   // UI mode TOUCH at start = this PC start (hle_dos2_uimode.c)
         static const uint32_t strb_wzr = 0x3900c11f;   // strb wzr,[x8,#0x30]
         if (ui_start == UI_TOUCH) {
-            g_live_ui = g_on && g_live_ok;
+            // owner 20.11: no live rebuilds in TOUCH (they broke the UI on the phone; the mode changes with a restart): a pad press does not
+            // switch to the controller UI; DM_DOS2_TOUCH_T_PADSWITCH=1 = the pad's way back as before
+            { const char *ps = getenv("DM_DOS2_TOUCH_T_PADSWITCH"); g_live_ui = g_on && g_live_ok && ps && atoi(ps) > 0; }
             LOG("[touch] UI mode touch at start: the PC UI from the start (as DM_DOS2_TOUCH_PCUI=1)%s", g_live_ui
-                ? "; a pad press brings the controller UI back, a touch the PC UI again (DM_DOS2_TOUCH_LIVE=1's switch)" : " - NO live pad switch (its sites differ or touch is off): the pad has no way back");
+                ? "; a pad press brings the controller UI back, a touch the PC UI again (DM_DOS2_TOUCH_LIVE=1's switch)" : " - no live pad switch (owner 20.11: the mode changes with a restart; DM_DOS2_TOUCH_T_PADSWITCH=1 brings it back)");
         }
         if (!g_on) LOG("【红】[touch] DM_DOS2_TOUCH_PCUI needs DM_DOS2_TOUCH=1 (the PC UI has no pad): not applied");
         else if (!g_mode_ok) LOG("【红】[touch] main+%#x / +%#x differ: DM_DOS2_TOUCH_PCUI not applied", DT_MODE_INIT, DT_UISET);

@@ -1030,6 +1030,15 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Column
     (void)state; return JNI_FALSE;
 #endif
 }
+// [DOS2] the Back gesture in UI mode TOUCH: the PC escape through the touch HUD (hle_dos2_touchui_hud.c); 1 = taken, 0 = not in TOUCH (use the pad B)
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeDos2Back(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_DOS2
+    int dm_dos2_touchui_hud_back(void); return dm_dos2_touchui_hud_back();
+#else
+    return 0;
+#endif
+}
 // [DOS2] the in-game UI mode from the gear (hle_dos2_uimode.c): mode 0 switch / 1 hybrid / 2 touch -> 0 not live (next launch), 1 menus now and
 // the HUD at the next load, 2 the HUD rebuilt now, 3 not taken yet (the game thread is paused); mode -1 -> the mode now (-1 = no UI mode switch)
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeDos2UiMode(JNIEnv *env, jclass cls, jint mode) {

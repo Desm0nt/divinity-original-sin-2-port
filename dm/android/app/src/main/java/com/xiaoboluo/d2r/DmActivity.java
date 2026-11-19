@@ -79,6 +79,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] the in-game UI mode (Tl2Gear.dos2UiMode, hle_dos2_uimode.c): 0 Switch (pad overlay, no touches to the game), 1 hybrid (default, as
     // before), 2 touch (no pad overlay but its gear button, every other finger is the game's mouse). D3PadView follows it at once.
     static volatile int dos2UiMode = 1;
+    static native int nativeDos2Back();   // UI mode TOUCH: Back = the PC escape (1 taken)
     static native int nativeDos2UiMode(int mode);   // mode -> 0 not live / 1 menus now, HUD at the next load / 2 HUD rebuilt / 3 not taken yet; -1 -> the native mode
     // DM_DOS2_UI_MODE as the native side reads it (hle_dos2_uimode.h ui_mode_parse): 0 / 1 / 2 or switch / hybrid / touch, else hybrid
     static int dos2UiModeParse(String s) {
@@ -212,6 +213,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     }
     private void dos2PadB() {
         long now = android.os.SystemClock.uptimeMillis(); if (now - dos2BackAt < 300) return; dos2BackAt = now;   // one press per Back (the key and the callback may both arrive)
+        if (dos2UiMode == 2) { int r = 0; try { r = nativeDos2Back(); } catch (UnsatisfiedLinkError e) { /* old library */ }   // [DOS2] UI mode TOUCH: Back = the PC escape, not the pad B
+            if (r == 1) { android.util.Log.i("dm", "[java] back: escape (UI mode touch)"); return; } }
         try {
             nativePadKey(D3PadView.PAD_DEVICE, D3PadView.K_B, true);
             view.postDelayed(() -> { try { nativePadKey(D3PadView.PAD_DEVICE, D3PadView.K_B, false); } catch (UnsatisfiedLinkError e) { /* ended */ } }, 110);
@@ -1063,19 +1066,21 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] the gear's UI mode changed (Tl2Gear.dos2UiMode.after): live when the game runs (hle_dos2_uimode.c), a toast says what applies when;
     // the pad overlay follows only when the native side took the change (else everything waits for the next launch, which reads the pref)
     void dos2UiModeChanged(int mode) {
+        // Owner 20.11 (phone run): the live change was half-baked - the HUD rebuild broke the UI after a few switches and the PC bindings
+        // (keyboard_1.json: pinch zoom, escape) are read only at the start. So a change asks for a restart; the start reads the pref.
         String[] ru = {"Switch", "гибрид", "касание"}, en = {"Switch", "hybrid", "touch"};
         String name = Ui.t(this, ru[mode], en[mode]);
-        if (!started || !libraryLoaded) { crumb("UI mode -> " + mode + " (gear, before the start: the start reads the pref)"); return; }   // Tl2Gear.dos2UiMode.env
-        int r;
-        try { r = nativeDos2UiMode(mode); } catch (UnsatisfiedLinkError e) { r = -1; }
-        crumb("UI mode -> " + mode + " (gear): native answer " + r);
-        String msg;
-        if (r == 2) msg = Ui.t(this, "Интерфейс: " + name + " — применён сразу", "Interface: " + name + " - applied now");
-        else if (r == 1 || r == 3) msg = Ui.t(this, "Интерфейс: " + name + " — меню сразу, игровой экран — после следующей загрузки или выхода в главное меню",
-            "Interface: " + name + " - menus now, the game screen after the next load or the return to the main menu");
-        else msg = Ui.t(this, "Интерфейс: " + name + " — со следующего запуска игры", "Interface: " + name + " - from the next launch");
-        if (r >= 1) { dos2UiMode = mode; if (mode == 2) dos2Touch = true; if (d3Pad != null) d3Pad.dos2UiModeChanged(); }
-        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show();
+        getSharedPreferences(Ui.PREFS, MODE_PRIVATE).edit().putInt("dos2_ui_mode", mode).commit();   // on disk before a restart (the gear saves with apply)
+        if (!started || !libraryLoaded) { crumb("UI mode -> " + mode + " (gear, before the start: the start reads the pref)"); return; }
+        crumb("UI mode -> " + mode + " (gear): restart asked");
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(Ui.t(this, "Интерфейс: " + name, "Interface: " + name))
+            .setMessage(Ui.t(this, "Интерфейс сменится после перезапуска игры. Перезапустить сейчас? Несохранённый прогресс пропадёт.",
+                "The interface changes after the game restarts. Restart now? Unsaved progress will be lost."))
+            .setPositiveButton(Ui.t(this, "Перезапустить", "Restart"), (d, w) -> { crumb("UI mode -> " + mode + ": restarting"); restartGame(); })
+            .setNegativeButton(Ui.t(this, "Позже", "Later"), (d, w) -> android.widget.Toast.makeText(this,
+                Ui.t(this, "Интерфейс: " + name + " — со следующего запуска игры", "Interface: " + name + " - from the next launch"), android.widget.Toast.LENGTH_LONG).show())
+            .show();
     }
     private void padSurfaceEnv() {
         if (d3Pad == null) return;

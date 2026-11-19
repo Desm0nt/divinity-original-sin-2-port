@@ -706,9 +706,13 @@ static void tu_add_map(const char *v, unsigned modes, const char *what) {   // "
 }
 
 // ---- tooltip guard (the header's correction 2): `if (!tooltip_ui) return;` at the entry of main+0x1120b50 and main+0x1121150 ----
-enum { TG_A = 0x1120b50, TG_B = 0x1121150, TG_TAIL_A = 0x10a697c, TG_TAIL_B = 0x10a6a90, TG_GET = 0x10a6fd8, TG_USE = 0x1121220, TG_CHECKED = 0x10a7090 };
+enum { TG_C = 0x111fec0, TG_TAIL_C = 0x10a7404, TG_A = 0x1120b50, TG_B = 0x1121150, TG_TAIL_A = 0x10a697c, TG_TAIL_B = 0x10a6a90, TG_GET = 0x10a6fd8, TG_USE = 0x1121220, TG_CHECKED = 0x10a7090 };
 static const uint32_t k_tg_a[4] = {0xd10503ff /* sub sp,sp,#0x140 */, 0xa90e6ffc, 0xa90f67fa, 0xa9105ff8};
 static const uint32_t k_tg_b[4] = {0xd10703ff /* sub sp,sp,#0x1c0 */, 0xa9166ffc, 0xa91767fa, 0xa9185ff8};
+// third tail (phone 20.11, UI mode TOUCH: a tap on a hotBar_p slot, CRASH sig=11 addr=0x1a0 pc=main+0x111fee4 lr=main+0x10a6238): 0x10a7390 =>
+// `bl 0x10a6fc0` (the tooltip UI or NULL) ... `b 0x111fec0`, whose 1st store is `str xzr,[x0,#0x1a0]`; 0x111fec0 has that one caller
+static const uint32_t k_tg_c[4] = {0xd10543ff /* sub sp,sp,#0x150 */, 0x6d0e23e9, 0xa90f6ffc, 0xa91067fa};
+static const uint32_t k_tg_tail_c[11] = {0x97fffeef /* bl 0x10a6fc0 */, 0x6d4123e9, 0x12000283, 0xaa1603e1, 0xaa1503e2, 0xf94013f7, 0xa9457bfd, 0xa9444ff4, 0xa94357f6, 0x6cc62beb, 0x1401e2a5 /* b 0x111fec0 */};
 static const uint32_t k_tg_tail_a[6] = {0x94000191 /* bl 0x10a6fc0 */, 0xf9408261 /* ldr x1,[x19,#0x100] */, 0xa9427bfd, 0xa9414ff4, 0x9100c3ff, 0x1401e870 /* b 0x1120b50 */};
 static const uint32_t k_tg_tail_b[6] = {0x9400014c /* bl 0x10a6fc0 */, 0xf9408261, 0xa9427bfd, 0xa9414ff4, 0x9100c3ff, 0x1401e9ab /* b 0x1121150 */};
 static const uint32_t k_tg_get[3] = {0x94019c86 /* bl 0x110e1f0: the tooltip UI or NULL */, 0xaa0003f4, 0xb4000140 /* cbz x0, return it */};
@@ -729,28 +733,28 @@ void dm_dos2_touch_guard_install(void) {
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
     if (!m) return;
-    static const tu_site ck[] = {{TG_A, 4, k_tg_a}, {TG_B, 4, k_tg_b}, {TG_TAIL_A, 6, k_tg_tail_a}, {TG_TAIL_B, 6, k_tg_tail_b}, {TG_GET, 3, k_tg_get}, {TG_USE, 2, k_tg_use}, {TG_CHECKED, 2, k_tg_checked}};
+    static const tu_site ck[] = {{TG_A, 4, k_tg_a}, {TG_B, 4, k_tg_b}, {TG_TAIL_A, 6, k_tg_tail_a}, {TG_TAIL_B, 6, k_tg_tail_b}, {TG_GET, 3, k_tg_get}, {TG_USE, 2, k_tg_use}, {TG_CHECKED, 2, k_tg_checked}, {TG_C, 4, k_tg_c}, {TG_TAIL_C, 11, k_tg_tail_c}};
     for (unsigned i = 0; i < sizeof ck / sizeof *ck; i++)
         if ((uint64_t)ck[i].off + 4ull * ck[i].n > m->text_end || memcmp(m->base + ck[i].off, ck[i].want, 4ull * ck[i].n)) {
             LOG("【红】[touchui] main+%#x differs: no tooltip guard (a mouse hover over the controller HUD may crash)", ck[i].off); return; }
     uint32_t *t = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (t == MAP_FAILED) { LOG("【红】[touchui] mmap failed: no tooltip guard"); return; }
-    const struct { uint32_t off; const uint32_t *pro; } f[2] = {{TG_A, k_tg_a}, {TG_B, k_tg_b}};
+    const struct { uint32_t off; const uint32_t *pro; } f[3] = {{TG_A, k_tg_a}, {TG_B, k_tg_b}, {TG_C, k_tg_c}};
     const uint64_t host = (uint64_t)(uintptr_t)(void *)tu_tip_null;
-    for (int i = 0; i < 2; i++) {   // stub: cbz x0, null; <4 prologue instructions>; jump to function + 16;  null: jump to the host (it returns to the caller)
+    for (int i = 0; i < 3; i++) {   // stub: cbz x0, null; <4 prologue instructions>; jump to function + 16;  null: jump to the host (it returns to the caller)
         uint32_t *s = t + 16 * i; const uint64_t rest = (uint64_t)(uintptr_t)(m->base + f[i].off + 16);
         s[0] = 0xb4000120 /* cbz x0, +9 words */; memcpy(s + 1, f[i].pro, 16);
         s[5] = 0x58000050 /* ldr x16,#8 */; s[6] = 0xd61f0200 /* br x16 */; s[7] = (uint32_t)rest; s[8] = (uint32_t)(rest >> 32);
         s[9] = 0x58000050; s[10] = 0xd61f0200; s[11] = (uint32_t)host; s[12] = (uint32_t)(host >> 32);
     }
     if (mprotect(t, 0x4000, PROT_READ | PROT_EXEC)) { LOG("【红】[touchui] mprotect RX failed: no tooltip guard"); munmap(t, 0x4000); return; }
-    __builtin___clear_cache((char *)t, (char *)(t + 32));
-    for (int i = 0; i < 2; i++) {
+    __builtin___clear_cache((char *)t, (char *)(t + 48));
+    for (int i = 0; i < 3; i++) {
         const uint64_t to = (uint64_t)(uintptr_t)(t + 16 * i);
         const uint32_t jump[4] = {0x58000050, 0xd61f0200, (uint32_t)to, (uint32_t)(to >> 32)};
         if (tu_poke(m, f[i].off, jump, 4)) { LOG("【红】[touchui] mprotect RW failed: tooltip guard not complete (main+%#x)", f[i].off); return; }
     }
-    LOG("[touchui] tooltip guard: main+%#x and main+%#x return when the tooltip UI object is NULL (pending tooltip main+0x10a6920 with no tooltip UI: crash of run tu03 at main+%#x)", TG_A, TG_B, TG_USE);
+    LOG("[touchui] tooltip guard: main+%#x, main+%#x and main+%#x return when the tooltip UI object is NULL (pending tooltip main+0x10a6920 with no tooltip UI: crash of run tu03 at main+%#x; hot bar slot tap in TOUCH 20.11 at main+0x111fee4)", TG_A, TG_B, TG_C, TG_USE);
 }
 
 int dm_dos2_touchui_on(void);
@@ -827,6 +831,15 @@ void dm_dos2_touchui_install(void) {
             // UI mode TOUCH's own table (hle_dos2_uimode.c): k_touch + DM_DOS2_UI_TOUCH_MAP; SWITCH has none
             { const int n0 = g_nmap;
               for (unsigned i = 0; k_touch[i].movie; i++) tu_add(k_touch[i].id, k_touch[i].movie, k_touch[i].expect, k_touch[i].pc, ui_mode_mask(UI_TOUCH));
+              // the console menus the game makes whatever the mode byte is (the main menu 0x48 / 0x57 never reads it; msgBox / saveLoad / options /
+              // character creation / pause menu / dialog _c, and the console HUD after a pad press) keep the hybrid's touch movies (mainMenu_d with the
+              // splash tap, hint taps ...): without them the main menu was the bare mainMenu_c in TOUCH and a tap did nothing (phone 20.11). A type the
+              // touch table has (0x26 portraits, 0x8d the right side) keeps the touch movie.
+              for (unsigned i = 0; i < sizeof k_def / sizeof *k_def + sizeof k_hint / sizeof *k_hint; i++) {
+                  const tu_def *d = i < sizeof k_def / sizeof *k_def ? &k_def[i] : &k_hint[i - sizeof k_def / sizeof *k_def];
+                  int own = 0; for (unsigned j = 0; k_touch[j].movie; j++) if (k_touch[j].id == d->id) own = 1;
+                  if (!own) tu_add(d->id, d->movie, d->expect, d->pc, ui_mode_mask(UI_TOUCH));
+              }
               if ((v = getenv("DM_DOS2_UI_TOUCH_MAP")) && *v) tu_add_map(v, ui_mode_mask(UI_TOUCH), "DM_DOS2_UI_TOUCH_MAP");
               if (g_nmap > n0 || g_ui != UI_HYBRID) LOG("[touchui] UI mode %s at start: the %s path table is written (hybrid %d entr%s, touch %d, switch none: stock movies)", ui_mode_name(g_ui),
                                                       ui_mode_name(g_ui), n0, n0 == 1 ? "y" : "ies", g_nmap - n0); }
