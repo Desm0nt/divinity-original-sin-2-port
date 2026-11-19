@@ -775,6 +775,7 @@ static void dt_t_world_tap(void *mgr, float x, float y) {
 }
 static void dt_t_note_tap(float x, float y, const char *where) {   // after a tap's click: the double tap's reference; the log
     g_n_t_tap++;
+    if (g.dtap) { void dm_dos2_touch_gaps_dtap(void); dm_dos2_touch_gaps_dtap(); }   // a video plays: the double tap skips it (hle_dos2_touch_gaps.c)
     if (g.dtap) { g_n_t_dtap++; static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: double tap (%s) at %.0f,%.0f: the second click of a PC double click%s", where, (double)x, (double)y,
                                                                          *where == 'U' ? " at the first one's point" : " (the PC world has no double-click action: a second click)"); }
     else if (g_dbg) LOG("[touch] TOUCH: tap (%s) at %.0f,%.0f: left click", where, (double)x, (double)y);

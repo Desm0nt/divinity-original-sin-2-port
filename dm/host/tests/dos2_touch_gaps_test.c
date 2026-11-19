@@ -21,6 +21,12 @@ int main(void) {
     assert(hu_side_panel(4) == 1 && hu_side_type(4) == 0x74);
     assert(hu_side_type(2) == 0x16 && hu_side_type(3) == 0x77 && hu_side_type(5) == 0x29 && hu_side_type(6) == 0x66 && hu_side_type(7) == 0x16);
     assert(hu_side_type(1) == -1 && hu_side_type(8) == -1);
+    // the video skip: a video plays when the subtitles class's movie name is set and is not the empty name
+    assert(!tg_video_on(0, 0x1234) && !tg_video_on(0x1234, 0x1234) && tg_video_on(0x5678, 0x1234));
+    // a double tap is due for a short while only (the game thread takes it on its next poll; a stale one never skips a later video)
+    assert(!tg_skip_due(0, 1000) && tg_skip_due(1000, 1000) && tg_skip_due(1000, 1000 + TG_DTAP_MS) && !tg_skip_due(1000, 1001 + TG_DTAP_MS));
+    assert(!tg_skip_due(2000, 1000));   // a clock that went back: not due
+    assert(TG_EV_SKIPVIDEO == 0xe7 && TG_SUB_UI == 0x30 && TG_SUB_TYPE == 0x20);
     puts("dos2_touch_gaps_test: PASS");
     return 0;
 }

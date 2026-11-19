@@ -228,6 +228,12 @@ static const tu_def k_touch[] = {
     // the PC movies + the iPad's 50 px close button (tools/dos2_pchud_touch.py PANEL_CLOSE)
     {0x74, 0, "partyInventory_p", "GUI/partyInventory.swf"}, {0x77, 0, "characterSheet_p", "GUI/characterSheet.swf"}, {0x29, 0, "skills_p", "GUI/skills.swf"},
     {0x66, 0, "uiCraft_p", "GUI/uiCraft.swf"}, {0x16, 0, "journal_p", "GUI/journal.swf"}, {0x68, 0, "examine_p", "GUI/examine.swf"}, {0x2f, 0, "waypoints_p", "GUI/waypoints.swf"},
+    // the windows the game makes on demand in mode 0, laid out as the iPad's (iPad cells 76, centred windows, finger-sized buttons, dialog answers as
+    // tappable rows; tools/dos2_ppanel_trade.py): trade 0x2e, container 9 / 0x25 (two classes, one movie), dialog 0xe, reward 0x88, item splitter 0x15
+    {0x2e, 0, "trade_p", "GUI/trade.swf"}, {0x09, 0, "containerInventory_p", "GUI/containerInventory.swf"}, {0x25, 0, "containerInventory_p", "GUI/containerInventory.swf"},
+    {0x0e, 0, "dialog_p", "GUI/dialog.swf"}, {0x88, 0, "reward_p", "GUI/reward.swf"}, {0x15, 0, "itemSplitter_p", "GUI/itemSplitter.swf"},
+    // the video window: its skip hint says "Double tap to skip" (tools/dos2_ptouch_gaps.py; the double tap itself: hle_dos2_touch_gaps.c)
+    {0x20, 0, "subtitles_p", "GUI/subtitles.swf"},
     {0, 0, NULL, NULL}   // end
 };
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed

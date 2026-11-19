@@ -20,9 +20,15 @@ methods of the built movie, every body it replaces stays callable under a dmGap*
                           rightClickItem (not in main.raw) - also when the engine does not deliver the "IE ContextMenu" input event to the
                           movie in mode 0 (the PC route). onContextMenuInputUp is guarded: a second call within CTX_GUARD_MS (the other route
                           of the same long press) does nothing.
+  subtitles_p (new; type 0x20, k_touch)  the video window's skip hint (the owner, 20.11: "B to skip" -> a double tap). The subtitles class
+                          shows "(Press [1] to skip)" on any input during a video (localised handle hf4e748begfdf9g4d52g8b3fg65483db31de1, [1]
+                          = the B glyph / the key) through setHintText(text) + showHint(); setHintText now shows "Double tap to skip", or
+                          "Двойной тап — пропустить" when the engine's text is Russian (any Cyrillic letter in it: the game's language
+                          decides, the engine localised the text it hands over). The skip itself is the host's (dm/host/hle_dos2_touch_gaps.c:
+                          a TOUCH double tap while a video plays = the class's SkipVideo). Touch set only: the hybrid keeps the B hint.
 
   python -I tools/dos2_ptouch_gaps.py check <Switch Game.pak | dir of the PC movies> [main.raw]
-  python -I tools/dos2_ptouch_gaps.py build <src> <out dir>          the patched trade_p / containerInventory_p only
+  python -I tools/dos2_ptouch_gaps.py build <src> <out dir>          the patched trade_p / containerInventory_p and subtitles_p
 Hook: tools/dos2_pchud_touch.py calls install() at its end (after tools/dos2_ppanel_trade.py's); its build() then returns the patched movies
 and its check() runs check() here too (so the `touch` set of tools/dos2_touchui_pak.py gets them).
 """
@@ -33,6 +39,8 @@ from dos2_abc import Swf, Trait, asm, verify_all
 import dos2_swf_graft as gr
 import dos2_ppanel_trade as ppt
 
+SKIP_EN, SKIP_RU = 'Double tap to skip', 'Двойной тап — пропустить'   # the video skip hint of UI mode TOUCH
+CYRILLIC = '[\u0400-\u04ff]'                                        # the engine's hint text is Russian when it has one of these
 CTX_GUARD_MS = 400   # one long press = at most one context menu (the movie's right mouse up and the engine's IE ContextMenu may both come)
 
 # ---- engine facts (main.raw 4979b200 offsets)
@@ -45,6 +53,11 @@ ENGINE = [
     ('dialog 0x0e', 0x10b4be0, 0x29eb5b0, 0x1237140, ['toggleInv', 'QuestionPressed', 'TradeButtonPressed', 'StopListening'], []),
     ('PC hot bar 0x28 (the column / inventory route of the host)', None, 0x29eb1b0, 0x122fdb0, ['hotbarBtnPressed'], []),
 ]
+# the video skip: strings of the class's hint, its functions (vtable slots) and the one compare with SkipVideo
+SUB = {'hint text': (0x1ea1269, b'(Press [1] to skip)\0'), 'hint handle': (0x1ef58bc, b'hf4e748begfdf9g4d52g8b3fg65483db31de1\0')}
+SUB_HINT_FN, SUB_HINT_VT = 0x1194e90, 0x29e6730      # the class's hint update: builds the text, invokes setHintText / showHint
+SUB_INPUT_FN, SUB_INPUT_VT = 0x1194d00, 0x29e6720    # its OnInputEvent: the only "cmp #0xe7" (SkipVideo) of main
+SKIPVIDEO_ID = 0xe7
 NOT_IN_MAIN = ['itemRightClick', 'itemDoubleClick', 'splitItem', 'rightClickItem', 'middleClickItem']   # the PC movies' calls the patches replace
 STRCMP = (0x1bf4600, 0x1bf43d0)               # the two string compares the handlers call (imports)
 
@@ -86,7 +99,33 @@ def container(data):
     return mv.done()
 
 
+def subtitles(data):
+    """subtitles.swf -> subtitles_p.swf: setHintText(text) shows the touch skip hint in the engine text's language"""
+    mv = ppt.Movie(data); doc = ppt.Cls(mv, 'subtitles_fla.MainTimeline'); P, S = mv.P, mv.S
+    rx = mv.abc.pub('RegExp')
+    _raw_wrap(doc, 'setHintText', 'dmGapHintOrig', [
+        ('getlocal0',), ('pushscope',), ('pushstring', S(SKIP_EN)), ('coerce_a',), ('setlocal', 2),
+        ('getlocal', 1), ('iffalse', 'en'),
+        ('getlocal', 1), ('convert_s',), ('findpropstrict', rx), ('pushstring', S(CYRILLIC)), ('constructprop', rx, 1),
+        ('callproperty', P('search'), 1), ('pushbyte', 0), ('iflt', 'en'),
+        ('pushstring', S(SKIP_RU)), ('coerce_a',), ('setlocal', 2),
+        ('L', 'en'), ('getlocal0',), ('getlocal', 2), ('callpropvoid', P('dmGapHintOrig'), 1), ('returnvoid',)])
+    return mv.done()
+
+
 PATCH = {'trade_p.swf': trade, 'containerInventory_p.swf': container}
+NEW = {'subtitles_p.swf': ('subtitles.swf', subtitles)}   # movies this module makes itself (PC movie of the player's Game.pak)
+GUI = 'Public/Game/GUI/'
+
+
+def sources(path):
+    need = sorted({v[0] for v in NEW.values()})
+    if os.path.isdir(path): return {n: (Path(path) / n).read_bytes() for n in need}
+    import lspk
+    pak = lspk.Pak(path); by = {e[0]: e for e in pak.entries}
+    miss = [n for n in need if GUI + n not in by]
+    if miss: sys.exit('%s: no %s' % (path, ' '.join(miss)))
+    return {n: pak.read(by[GUI + n]) for n in need}
 
 
 def build(made):
@@ -97,15 +136,23 @@ def build(made):
     return out
 
 
+def make(src):
+    """{name: bytes} of the movies this module makes itself"""
+    return {o: f(src[s]) for o, (s, f) in NEW.items()}
+
+
 _host = None
 def install(host):
     """called at the end of tools/dos2_pchud_touch.py (after tools/dos2_ppanel_trade.py's install)"""
     global _host
     _host = host
-    h_build, h_check = host.build, host.check
-    def build_(src): return build(h_build(src))
+    h_sources, h_build, h_check = host.sources, host.build, host.check
+    def sources_(path):
+        s = h_sources(path); s.update(sources(path)); return s
+    def build_(src):
+        out = build(h_build(src)); out.update(make(src)); return out
     def check_(src): return h_check(src) + check(src)
-    host.build, host.check = build_, check_
+    host.sources, host.build, host.check = sources_, build_, check_
 
 
 # ---------------------------------------------------------------- checks
@@ -190,6 +237,25 @@ def check_engine(b, say):
     say(not miss, 'not a string of main.raw at all (dead on every class): %s%s' % (' '.join(NOT_IN_MAIN), '' if not miss else ' - FOUND: ' + ' '.join(miss)))
 
 
+def check_video(b, say):
+    """the subtitles class: the hint it shows during a video, its SkipVideo branch (the host's skip)"""
+    rel = _rel(b)
+    for what, (a, want) in SUB.items():
+        say(b[a:a + len(want)] == want, 'subtitles %s at main+%#x: %r' % (what, a, want[:-1].decode()))
+    got = rel.get(SUB_HINT_VT); names = _scan(b, SUB_HINT_FN, _end(b, SUB_HINT_FN))[0]
+    say(got == SUB_HINT_FN and SUB['hint text'][0] in names and SUB['hint handle'][0] in names and 'setHintText' in names and 'showHint' in names,
+        'its hint update main+%#x (vtable slot main+%#x) builds "(Press [1] to skip)" and invokes setHintText / showHint' % (SUB_HINT_FN, SUB_HINT_VT))
+    w = struct.unpack_from('<%dI' % (0x1e00000 // 4), b, 0)
+    cmps = [k * 4 for k, x in enumerate(w) if x & 0xff80001f == 0x7100001f and (x >> 10) & 0xfff == SKIPVIDEO_ID]
+    say(rel.get(SUB_INPUT_VT) == SUB_INPUT_FN and len(cmps) == 1 and SUB_INPUT_FN <= cmps[0] < _end(b, SUB_INPUT_FN),
+        'SkipVideo (input event %#x) is compared once in main: in the class\'s OnInputEvent main+%#x (vtable slot main+%#x) - the host sends it there' % (SKIPVIDEO_ID, SUB_INPUT_FN, SUB_INPUT_VT))
+    try:
+        src = (Path(__file__).resolve().parent.parent / 'dm' / 'host' / 'hle_dos2_touchui.c').read_text(encoding='utf-8')
+        ok = '{0x20, 0, "subtitles_p", "GUI/subtitles.swf"}' in src.split('static const tu_def k_touch[]')[1].split('};')[0]
+    except (OSError, IndexError): ok = False
+    say(ok, 'k_touch maps type 0x20 to subtitles_p (UI mode touch only; k_hint keeps the stock movie)')
+
+
 def _ei_names(abc):
     import dos2_ui_audit as au
     return {n for rec in au.scan(abc).values() for n, _ in rec['ei'] if n != '<dynamic>'}
@@ -203,6 +269,21 @@ def check(src, main_raw=None):
     b = _main(main_raw)
     if b is None: print('FAIL main.raw not found'); return 1
     check_engine(b, say)
+    check_video(b, say)
+    for o, (sn, f) in NEW.items():
+        data = src[sn]; after = f(data)
+        print('%s -> %s: %d B -> %d B, sha256 %s' % (sn, o, len(data), len(after), hashlib.sha256(after).hexdigest()[:16]))
+        s = Swf(after); (_, _, Bc), = s.abcs(); (_, _, B0), = Swf(data).abcs()
+        errs = verify_all(Bc)
+        for who, why in errs: print('       %s: %s' % (who, why))
+        say(not errs, 'ABC verifies: %d method bodies' % len(Bc.bodies))
+        say(Swf(Swf(after).write()).body() == s.body(), 'the movie parses and round-trips')
+        g = gr.check(data, after, quiet=True); say(g == [], 'every original tag of the PC movie kept%s' % ('' if g == [] else ': ' + str(g)))
+        say(_ei_names(B0) == _ei_names(Bc), 'ExternalInterface names exactly the PC movie\'s')
+        own = {v: k for k, v in Bc.owners().items()}
+        t = '\n'.join(Bc.dis(Bc.methods[own['subtitles_fla.MainTimeline::setHintText']].body))
+        say('dmGapHintOrig' in t and SKIP_EN in t and SKIP_RU in t and 'RegExp' in t and 'search' in t,
+            'setHintText(text) -> the original with "%s", or "%s" when the engine\'s text has a Cyrillic letter' % (SKIP_EN, SKIP_RU))
     made = ppt.build(src); out = build(made)
     for o in PATCH:
         data, before, after = src[ppt.SRC[o]], made[o], out[o]
@@ -236,11 +317,13 @@ def check(src, main_raw=None):
 
 def main():
     a = sys.argv[1:]
-    if len(a) >= 2 and a[0] == 'check': sys.exit(1 if check(ppt.sources(a[1]), a[2] if len(a) > 2 else None) else 0)
+    if len(a) >= 2 and a[0] == 'check':
+        src = ppt.sources(a[1]); src.update(sources(a[1])); sys.exit(1 if check(src, a[2] if len(a) > 2 else None) else 0)
     if len(a) == 3 and a[0] == 'build':
-        out = Path(a[2]); out.mkdir(parents=True, exist_ok=True); src = ppt.sources(a[1])
-        for n, d in build(ppt.build(src)).items():
-            if n in PATCH: (out / n).write_bytes(d); print('%s: %d B' % (out / n, len(d)))
+        out = Path(a[2]); out.mkdir(parents=True, exist_ok=True); src = ppt.sources(a[1]); src.update(sources(a[1]))
+        made = build(ppt.build(src)); made.update(make(src))
+        for n, d in made.items():
+            if n in PATCH or n in NEW: (out / n).write_bytes(d); print('%s: %d B' % (out / n, len(d)))
         return
     sys.exit(__doc__)
 

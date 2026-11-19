@@ -100,6 +100,8 @@ void dm_dos2_uimode_poll(void) {
     }
     // the touch HUD the host makes (hle_dos2_touchui_hud.c): sets built without its hooks, the right side's visibility, CONFIRM / cancel clicks
     { void dm_dos2_touchui_hud_poll(void); dm_dos2_touchui_hud_poll(); }
+    // UI mode TOUCH: a double tap during a video = the subtitles class's SkipVideo (hle_dos2_touch_gaps.c)
+    { void dm_dos2_touch_gaps_poll(void); dm_dos2_touch_gaps_poll(); }
 }
 
 // JNI (DmActivity.nativeDos2UiMode, the UI thread): mode < 0 = the requested mode now; else the request, answered by the game thread within

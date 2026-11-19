@@ -21,4 +21,16 @@ static inline int tg_rule(const char *name, uint32_t type, int64_t called) {
     if (!strcmp(name, "openCharInventory") && type == TG_PI_TYPE && called == TG_PI_CALLED) return TG_OPEN_INV;
     return TG_PASS;
 }
+
+// The video skip (the owner, 20.11: the console's "(Press B to skip)" becomes a double tap). The video plays in the subtitles UI (type 0x20,
+// GUI/subtitles.swf: iggy_video + the hint hintHolder_mc). Its class object: the video base at +8, the UIObject at +0x30 (the pointer the UI
+// manager and the EI hand out; ctor main+0x1194710). Video on <=> the movie name [full+0x18] is not the engine's empty name [main+0x32bd180]
+// (the skip main+0x1195580 compares exactly these and resets it); the class's OnInputEvent main+0x1194d00 skips on input event 0xe7
+// (SkipVideo) when [full+0x180] (skip allowed) is set: the host calls it with that one event.
+enum { TG_SUB_TYPE = 0x20, TG_SUB_UI = 0x30, TG_SUB_NAME = 0x18, TG_SUB_ALLOW = 0x180, TG_SUB_UIVT = 0x29e6770, TG_SUB_INPUT = 0x1194d00,
+       TG_SUB_SKIP = 0x1195580, TG_EMPTY_NAME = 0x32bd180, TG_EV_SKIPVIDEO = 0xe7, TG_DTAP_MS = 400 };
+// a video plays: its name is set and is not the empty name
+static inline int tg_video_on(uint64_t name, uint64_t empty) { return name != 0 && name != empty; }
+// a double tap asked at req_ms (0 = none) is still due at now_ms (the game thread polls every frame; older than TG_DTAP_MS = dropped)
+static inline int tg_skip_due(uint64_t req_ms, uint64_t now_ms) { return req_ms != 0 && now_ms >= req_ms && now_ms - req_ms <= TG_DTAP_MS; }
 #endif
