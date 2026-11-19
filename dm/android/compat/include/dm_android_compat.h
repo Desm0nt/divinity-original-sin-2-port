@@ -50,7 +50,12 @@ int clonefile(const char *src, const char *dst, int flags);   // dm/android/comp
 #ifndef RENAME_SWAP
 #define RENAME_SWAP (1u << 1)   // 与 Linux RENAME_EXCHANGE 同值 | Same value as Linux RENAME_EXCHANGE
 #endif
+// [DOS2] issue #3 (OnePlus 6, custom ROM, old kernel: the phone rebooted / hung at the first save commit): RENAME_SWAP = dm_rename_swap,
+// renameat2(RENAME_EXCHANGE) or, on a kernel older than 4.14 / DM_FS_NO_EXCHANGE=1, three plain renames through "<to>.swp" (clonefile.c).
+int dm_rename_swap(const char *from, const char *to);   // dm/android/compat/clonefile.c
+int dm_fs_no_exchange(void);                            // 1 = the swap is three renames
 static inline int renamex_np(const char *from, const char *to, unsigned flags) {
-    return (int)syscall(__NR_renameat2, AT_FDCWD, from, AT_FDCWD, to, flags & RENAME_SWAP ? (1u << 1) : 0u);
+    if (flags & RENAME_SWAP) return dm_rename_swap(from, to);
+    return (int)syscall(__NR_renameat2, AT_FDCWD, from, AT_FDCWD, to, 0u);
 }
 #endif

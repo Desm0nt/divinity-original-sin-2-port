@@ -187,6 +187,15 @@ static void crash_report_hook(int phase, int sig, uint64_t addr, uint64_t pc) {
     }
     if (g_log_fd >= 0) fsync(g_log_fd);
 }
+// [DOS2] issue #3: before a step that may take the kernel down (the first save swap, hle_fs.c) every line written so far goes to disk:
+// the pump empties the stderr pipe into boot.log (at most 300 ms), then fsync. hle_fs.c calls it through a weak reference.
+void dm_log_flush_sync(void) {
+    for (int i = 0, quiet = 0; i < 60 && quiet < 2; i++) {
+        int n = 0; quiet = !ioctl(2, FIONREAD, &n) && n == 0 && !atomic_load(&g_pump_busy) ? quiet + 1 : 0;
+        struct timespec ts = {0, 5000000}; nanosleep(&ts, NULL);
+    }
+    if (g_log_fd >= 0) fsync(g_log_fd);
+}
 void crash_set_report_hook(void (*fn)(int phase, int sig, uint64_t addr, uint64_t pc));   // crash.c
 static void prop(const char *name, char *out) { out[0] = 0; __system_property_get(name, out); if (!out[0]) snprintf(out, PROP_VALUE_MAX, "-"); }
 static void log_header(void) {

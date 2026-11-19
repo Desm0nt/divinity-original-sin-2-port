@@ -288,9 +288,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         CrashLog.lastRunRebooted = false;
         try {
             if (step >= 1) Os.setenv("DM_GFX_ZEROCOPY", "0", true);
+            if (step >= 1 && System.getenv("DM_FS_NO_EXCHANGE") == null) Os.setenv("DM_FS_NO_EXCHANGE", "1", true);   // saves swapped by plain renames
             if (step >= 2 && System.getenv("TU_DEBUG") == null) Os.setenv("TU_DEBUG", "sysmem,noubwc,nolrz", true);
         } catch (ErrnoException e) { crumb("gpu safe step: setenv failed: " + e); }
-        crumb("gpu safe step " + step + (step == 0 ? " (normal)" : step == 1 ? " (zero-copy off)" : " (zero-copy off, TU_DEBUG=sysmem,noubwc,nolrz)") + ", issue #3 ladder");
+        crumb("gpu safe step " + step + (step == 0 ? " (normal)" : step == 1 ? " (zero-copy off, saves without RENAME_EXCHANGE)" : " (zero-copy off, saves without RENAME_EXCHANGE, TU_DEBUG=sysmem,noubwc,nolrz)") + ", issue #3 ladder");
     }
 
     // A start / boot failure screen: the report now (the screen names it), once per message and process.
@@ -612,7 +613,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 Os.setenv("DM_APP_VERSION", getPackageName() + " " + pi.versionName + " (" + pi.getLongVersionCode() + ")" + (BuildConfig.DEBUG ? " debug" : ""), true);
             } catch (Exception e) { /* only a log line */ }
             try { System.loadLibrary("dm"); libraryLoaded = true; }
-            catch (UnsatisfiedLinkError error) { showStartError(getString(R.string.dmAndroidLibrary)); return; }
+            catch (UnsatisfiedLinkError error) { crumb("loadLibrary(dm) failed: " + error.getMessage()); showStartError(getString(R.string.dmAndroidLibrary)); return; }
             nativeContext(getApplicationContext());
         }
         if (D3 && d3Pad == null) { d3Pad = new D3PadView(this);   // [D3] touch / gamepad layouts

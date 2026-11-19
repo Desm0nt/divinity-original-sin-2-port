@@ -27,6 +27,11 @@
 #include <strings.h>   // strcasecmp ([res] breadcrumb)
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
+#ifdef __ANDROID__
+#include <sys/utsname.h>
+int dm_fs_no_exchange(void);                                  // dm/android/compat/clonefile.c
+void dm_log_flush_sync(void) __attribute__((weak));           // dm/android/jni_android.c
+#endif
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs 模块 2，描述 1 | fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs 模块 2，描述 2 | fs module 2, description 2
@@ -133,6 +138,14 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     int txn_err = 0;   // 事务目录建不起来（清不掉残留 / 克隆失败，盘满时真实可能）：不退出，改成只读挂载已提交目录——角色照常读得到，写一律失败、提交为空操作，已提交版本一个字节不动 | The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only instead. Characters still load, every write fails, commits are no-ops, and not one byte of the committed version changes
     if (txn) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
+#ifdef __ANDROID__
+        {   // [DOS2] issue #3: a three-rename swap (dm_rename_swap) cut by a crash: the committed directory is still at <dir>.swp
+            char swp[1110]; struct stat s1; snprintf(swp, sizeof swp, "%s.swp", dir);
+            if (stat(dir, &s1) && !stat(swp, &s1)) { int rr = rename(swp, dir); LOG("[fs] save: the committed directory was missing, put back from %s (a save swap cut by a crash): %s", swp, rr ? strerror(errno) : "ok"); }
+            else if (!stat(swp, &s1)) rm_tree(swp);
+            snprintf(swp, sizeof swp, "%s.swp", work); if (!stat(swp, &s1)) rm_tree(swp);
+        }
+#endif
         mkdir(dir, 0755);
         const char *why = NULL;
         if (!access(work, F_OK) && rm_tree(work)) why = "清不掉上次残留的工作目录";
@@ -816,6 +829,14 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
     if (!access(neu, F_OK)) rm_tree(neu);
+#ifdef __ANDROID__
+    {   // [DOS2] issue #3: the first commit says how it swaps and is on disk before the swap (the phone rebooted right here)
+        static int first = 1; if (first) { first = 0; struct utsname u;
+            LOG("[fs] first save commit: clone %s -> %s, then swap with %s (kernel %s; issue #3)", g_mnt[i].dir, neu,
+                dm_fs_no_exchange() ? "three renames (DM_FS_NO_EXCHANGE / kernel older than 4.14)" : "renameat2 RENAME_EXCHANGE", uname(&u) ? "?" : u.release);
+            if (dm_log_flush_sync) dm_log_flush_sync(); }
+    }
+#endif
     if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("【红】存档提交：clonefile %s 失败 errno=%d（已提交版本不变）", neu, errno); r = RES_FAIL; }
     else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("【红】存档提交：原子互换失败 errno=%d（已提交版本不变）", errno); rm_tree(neu); r = RES_FAIL; }
     else rm_tree(neu);                                                  // 换下来的旧版 | the old version that was swapped out

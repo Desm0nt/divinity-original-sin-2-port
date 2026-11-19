@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -85,4 +87,33 @@ int clonefile(const char *src, const char *dst, int flags) {
     if (!copy_tree(src, dst)) return 0;
     int e = errno; remove_tree(dst); errno = e;
     return -1;
+}
+
+// [DOS2] issue #3 (OnePlus 6 / SDM845, custom Android 12 ROM on an old kernel): the whole phone rebooted (or hung) at the first save commit,
+// right where renameat2(RENAME_EXCHANGE) swaps the two save directories; the clone before it (plain mkdir / open / write, as at mount)
+// had worked. f2fs cross-rename of directories had bugs fixed only from 2019 on (found when fsstress learned RENAME_EXCHANGE), which old
+// vendor kernels may lack. Kernels older than 4.14, or DM_FS_NO_EXCHANGE=1 (the app sets it at any safe step), swap with three plain
+// renames instead: to -> to.swp, from -> to, to.swp -> from. Not atomic: a crash between them leaves to.swp, which the next save mount
+// (hle_fs.c mount_ex) puts back when <to> is missing, or removes. DM_FS_NO_EXCHANGE=0: always RENAME_EXCHANGE.
+int dm_fs_no_exchange(void) {
+    const char *e = getenv("DM_FS_NO_EXCHANGE"); if (e && *e) return atoi(e) != 0;
+    static int v = -1;
+    if (v < 0) { struct utsname u; int a = 0, b = 0; v = 0; if (!uname(&u) && sscanf(u.release, "%d.%d", &a, &b) == 2) v = a < 4 || (a == 4 && b < 14); }
+    return v;
+}
+
+int dm_rename_swap(const char *from, const char *to) {
+    if (!dm_fs_no_exchange()) return (int)syscall(__NR_renameat2, AT_FDCWD, from, AT_FDCWD, to, 2u /* RENAME_EXCHANGE */);
+    char *swp = malloc(PATH_MAX); if (!swp) return -1;
+    int rc = -1;
+    if (snprintf(swp, PATH_MAX, "%s.swp", to) >= PATH_MAX) errno = ENAMETOOLONG;
+    else {
+        remove_tree(swp);
+        if (!rename(to, swp)) {
+            if (rename(from, to)) { int e = errno; rename(swp, to); errno = e; }   // nothing changed
+            else { if (rename(swp, from)) remove_tree(swp); rc = 0; }             // <to> is the new one; the old one is at <from> (or gone)
+        }
+    }
+    { int e = errno; free(swp); errno = e; }
+    return rc;
 }
