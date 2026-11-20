@@ -254,8 +254,17 @@ static void *nvn_lookup(const char *name) {
 
 // nvnBootstrapLoader 由 main 导入（sdk 定义）；强制接管后 sdk 的 NVN 驱动不再被引用
 // nvnBootstrapLoader is imported by main (defined in sdk); after it is forcibly taken over, the NVN driver in sdk is no longer referenced
+#ifdef DM_GAME_DOS2
+// [DOS2] VK-NATIVE no-NVN step B (dm/host/hle_dos2_vkn_nonvn.c): with DM_VK_NATIVE=1 the native backend answers the bootstrap (its own
+// GetProcAddress / DeviceInitialize: the game's table never gets an HLE NVN entry); NULL (every other mode, or the step off) = as before.
+void *dm_vkn_nonvn_boot(const char *name) __attribute__((weak));
+#endif
 HLE_FORCE("nvnBootstrapLoader", "NVN 图形接口整块换成宿主空设备（后续 Metal），sdk 的 NVN 驱动不执行",
-          void *, h_nvnBootstrapLoader, const char *name) { return nvn_lookup(name); }
+          void *, h_nvnBootstrapLoader, const char *name) {
+#ifdef DM_GAME_DOS2
+    { void *f = dm_vkn_nonvn_boot ? dm_vkn_nonvn_boot(name) : NULL; if (f) return f; }   // [DOS2] VK-NATIVE no-NVN step B
+#endif
+    return nvn_lookup(name); }
 
 // ---------- 布尔参数：Switch 调用方不扩展，只看低 8 位 ----------
 // ---------- Boolean parameters: Switch callers do not extend them, only look at the low 8 bits ----------
@@ -2046,7 +2055,15 @@ static void *x_thread(void *a) {
     }
     return NULL;
 }
+#ifdef DM_GAME_DOS2
+unsigned dm_vkn_nonvn_mask(void) __attribute__((weak));   // [DOS2] VK-NATIVE no-NVN (dm/host/hle_dos2_vkn_nonvn.c)
+#endif
 static void x_start(void) {
+#ifdef DM_GAME_DOS2
+    // [DOS2] VK-NATIVE no-NVN step C: with DM_VK_NATIVE=1 nothing should push a translation job (the backend's command part sinks
+    // every submit / present slot); started anyway as before (behaviour unchanged), but said in red: the boot line checks it too.
+    if (dm_vkn_nonvn_mask && (dm_vkn_nonvn_mask() & 2u)) LOG("【红】[vkn] nonvn: the translation thread nvn-translate is being started in DM_VK_NATIVE=1 (a stray HLE submit / present / frame job)");
+#endif
     const char *e = getenv("DM_NVN_SYNC"); g_x_sync = e && atoi(e);
     if (g_x_sync) { LOG("[nvn] DM_NVN_SYNC=1：翻译在提交线程上同步做（对照档）"); return; }
     pthread_attr_t at; pthread_attr_init(&at);
@@ -2358,7 +2375,17 @@ static uint64_t g_frame;
 static uint64_t nvn_p2_frames(void) { return g_frame; }   // [NR-16]
 static uint64_t g_pa_wait;   // 本帧取图里节拍等待（自适应出图档用） | pacing wait inside acquire this frame (for the adaptive present tier)
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // 取图里节拍等待 / 等出图队列归还的累计，出图时按帧记（一帧内可有多次取图） | Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
-uint64_t dm_nvn_frame_count(void) { return g_frame; }
+#ifdef DM_GAME_DOS2
+// [DOS2] VK-NATIVE no-NVN step D (dm/host/hle_dos2_vkn_nonvn.c): in DM_VK_NATIVE=1 the frame counter and the on-screen frame stats of
+// the rest of the port come from the backend's frame part (1 = it is the source); hle_nvn.c keeps only these two accessors.
+int dm_vkn_nonvn_frame_count(uint64_t *out) __attribute__((weak));
+int dm_vkn_nonvn_frame_stats(float out[4]) __attribute__((weak));
+#endif
+uint64_t dm_nvn_frame_count(void) {
+#ifdef DM_GAME_DOS2
+    { uint64_t f; if (dm_vkn_nonvn_frame_count && dm_vkn_nonvn_frame_count(&f)) return f; }
+#endif
+    return g_frame; }
 extern uint64_t g_t0_ns;   // 宿主进程起点（main.c；UIMSG 时间戳同基） | Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
@@ -2472,7 +2499,11 @@ static void fstat_present(void) {
         win0 = t; n = 0; sum = mx = 0; g_fs_gsum = 0; g_fs_gn = 0;
     }
 }
-void dm_frame_stats(float out[4]) { for (int i = 0; i < 4; i++) out[i] = atomic_load(&g_fs[i]); }
+void dm_frame_stats(float out[4]) {
+#ifdef DM_GAME_DOS2
+    if (dm_vkn_nonvn_frame_stats && dm_vkn_nonvn_frame_stats(out)) return;   // [DOS2] VK-NATIVE no-NVN step D
+#endif
+    for (int i = 0; i < 4; i++) out[i] = atomic_load(&g_fs[i]); }
 
 static int dcmp(const void *a, const void *b);
 void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {

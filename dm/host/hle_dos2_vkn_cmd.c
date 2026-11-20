@@ -521,6 +521,21 @@ int dm_vkn_glue_is_mine(uint64_t fn) __attribute__((weak));
 int dm_vkn_read_slot(unsigned slot_index, void **fn) __attribute__((weak));     // hle_dos2_vkn_read.c
 int dm_vkn_create_slot(unsigned slot_index, void **fn) __attribute__((weak));   // hle_dos2_vkn_create.c
 static void *g_stub[TABLE_SLOTS];   // the host-stack stub of each repointed slot's function (dm_vkn_cmd_register)
+void dm_vkn_nonvn_after_init(void) __attribute__((weak));   // [no-NVN] hle_dos2_vkn_nonvn.c
+void dm_vkn_nonvn_register(void) __attribute__((weak));     // [no-NVN] hle_dos2_vkn_nonvn.c
+// [no-NVN] 1 + *fn = the host-stack stub this part puts into slot `slot_index` of the game's table (mode 1); 0 = not this part's slot.
+int dm_vkn_cmd_slot(unsigned slot_index, void **fn);
+int dm_vkn_cmd_slot(unsigned slot_index, void **fn) {
+    if (fn) *fn = NULL;
+    if (slot_index >= TABLE_SLOTS || !g_stub[slot_index]) return 0;
+    if (fn) *fn = g_stub[slot_index];
+    return 1;
+}
+// [no-NVN] step B: the slot's FORWARD target (what cmd_entry calls for creation callers, host code and K_FWD slots) when the game's
+// table gets this part's stub straight from the backend's GetProcAddress (the repointing below then finds nothing to keep): a local
+// answer of hle_dos2_vkn_nonvn.c, never HLE NVN. Install time (before guest code); ignored once a target is set.
+void dm_vkn_cmd_set_forward(unsigned slot_index, uint64_t fn);
+void dm_vkn_cmd_set_forward(unsigned slot_index, uint64_t fn) { if (slot_index < TABLE_SLOTS && !g_orig[slot_index]) g_orig[slot_index] = fn; }
 static void repoint(uint64_t init) {
     uint64_t *tab = (uint64_t *)(void *)(dm_vkn_base() + M_TABLE);
     int n = 0, nul = 0;
@@ -548,6 +563,7 @@ static void repoint(uint64_t init) {
     cnt(A_REPOINT);
     vkn_logf("cmd: game NVN table main+%#x after device init %d (object %#llx): %d of %zu command / queue / sync entries repointed to the native "
              "front end (%d were null); creation-time entries stay HLE NVN", M_TABLE, ++g_fills, (unsigned long long)init, n, sizeof k_slots / sizeof k_slots[0], nul);
+    if (dm_vkn_nonvn_after_init) dm_vkn_nonvn_after_init();   // [no-NVN] hle_dos2_vkn_nonvn.c: every slot left to HLE NVN gets a counting forwarder (census)
 }
 VKN_HOOK cmd_h_init(VKN_A) {   // 0x938330(init object) -> u8 ok: device, queue, pools, contexts (creation-time NVN: HLE NVN as before)
     const uint64_t rc = g_o_init(VKN_F);
@@ -622,5 +638,6 @@ void dm_vkn_cmd_register(void) {
     static const uint32_t k_init[4] = {0xd10583ff /* sub sp,sp,#0x160 */, 0xa9106ffc, 0xa91167fa, 0xa9125ff8};
     dm_vkn_site(0x938330, k_init, "DeviceInit", (void *)cmd_h_init, &g_o_init, VKN_M_NATIVE);
     dm_vkn_census(cmd_census);
+    if (dm_vkn_nonvn_register) dm_vkn_nonvn_register();   // [no-NVN] after this part's stubs exist (it hands them out at the device start)
 }
 #endif

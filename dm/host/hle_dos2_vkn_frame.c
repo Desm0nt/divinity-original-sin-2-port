@@ -89,6 +89,9 @@ extern _Atomic uint64_t g_nvn_present_period_ns __attribute__((weak));
 // [proposal] hle_nvn.c: the frame-boundary bookkeeping of nvnQueuePresentTexture without its present (frame number g_frame /
 // dm_nvn_frame_count, the XJ_FRAME job of the translator, per-frame stats). Called once a presented native frame when it exists.
 extern void dm_nvn_vkn_frame(void) __attribute__((weak));
+// [no-NVN] step D (hle_dos2_vkn_nonvn.c): the frame counter / on-screen stats of the port kept by the backend; 1 = done (hle_nvn.c is
+// then not called per frame), 0 = the step is off (dm_nvn_vkn_frame as before).
+extern int dm_vkn_nonvn_frame(void) __attribute__((weak));
 // Host per-present calls of nvnQueuePresentTexture that guard themselves (cpu_topo.h / hle_cpuprof.c): kept at the native present.
 extern void dm_cpu_place_self(void) __attribute__((weak));    // [NR-CPU] DM_CPU_SELF: the main thread re-asserts its own mask
 extern void dm_cpuprof_present(void) __attribute__((weak));   // [NR-16] DM_NR_CPU: the first present starts the sampler
@@ -371,7 +374,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (present) {   // nvnQueuePresentTexture's pacing, then the frame counter
         pace_present();
         wr64(dev + DEV_FRAME, vkn_rd64(dev + DEV_FRAME) + 1);
-        if (dm_nvn_vkn_frame) dm_nvn_vkn_frame();
+        if (!(dm_vkn_nonvn_frame && dm_vkn_nonvn_frame()) && dm_nvn_vkn_frame) dm_nvn_vkn_frame();   // [no-NVN] D first
         if (dm_cpu_place_self) dm_cpu_place_self();
         if (dm_cpuprof_present) dm_cpuprof_present();
     }

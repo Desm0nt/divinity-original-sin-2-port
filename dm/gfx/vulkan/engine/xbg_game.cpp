@@ -9878,6 +9878,17 @@ static void d3perf_switches(){
     for(size_t at=0;at<s.size();at+=900)xbg_logf("%s%s",at?"[selftest] ... ":"",s.substr(at,900).c_str());   // xbg_logf keeps 1023 characters a line
 }
 #include "xbg_nr_seed_policy.inc"   // [DOS2] NR-31: nrseed_policy(), this device's policy for the seed re-target
+#ifdef DM_GAME_DOS2
+// [DOS2] VK-NATIVE no-NVN step C (dm/host/hle_dos2_vkn_nonvn.c, DM_VK_NATIVE=1 and DM_VK_NATIVE_NONVN bit 2): the native backend uses this
+// engine as a library only (xbg_vkn_shader / alpha / retype modules through load_shader_key, xbg_vkn_cache_dir), nothing is translated.
+// The initialise then runs as always (every switch, the device facts and caps the shader loader's rewrites read, the presenter's
+// present-thread mode) EXCEPT what serves translation alone: the pipeline cache (vk-pipeline-cache.bin is neither read nor written:
+// pipeline_cache stays VK_NULL_HANDLE, save_pipeline_cache returns at its null check), the warm-up (warm::start not called: the list
+// file is not read, no warm-up thread builds the translator's pipelines; warm::enabled false, so pseed has nothing either) and the
+// async command pool reset thread. A pipeline made by the translator anyway would still work (no cache = a valid null handle).
+extern "C" unsigned dm_vkn_nonvn_mask(void) __attribute__((weak));
+namespace vknlib{bool on=false;}
+#endif
 extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t bytes){
     if(!c || c->size!=sizeof(*c) || !c->physical || !c->device || !c->queue || !c->shader_directory || !c->fence_timeout_ns){if(error&&bytes)snprintf(error,bytes,"Invalid xbg_game_config");return -1;}
     std::lock_guard<std::recursive_mutex> lock(mutex);if(initialized){if(error&&bytes)snprintf(error,bytes,"Game graphics already initialized");return -1;}
@@ -9896,6 +9907,10 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     fold_completion_wait_stats();completion_wait_enabled=completion_wait_default;
     if(const char *mode=getenv("DM_GFX_COMPLETION_WAIT")){if(!strcmp(mode,"0"))completion_wait_enabled=false;else if(!strcmp(mode,"1"))completion_wait_enabled=true;}
     {std::string dir=c->shader_directory?c->shader_directory:"";size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-legacy-waitall").c_str(),"rb");if(m){legacy_waitall=fgetc(m)=='1';fclose(m);}}
+#ifdef DM_GAME_DOS2
+    vknlib::on=dm_vkn_nonvn_mask && (dm_vkn_nonvn_mask()&2u);   // [DOS2] VK-NATIVE no-NVN step C
+    if(vknlib::on && c->log)c->log(c->userdata,"NVN library-only initialise (DM_VK_NATIVE=1, DM_VK_NATIVE_NONVN bit 2): no pipeline cache, no warm-up, no pool reset thread; the shader loader as always");
+#endif
     cfg=*c;xbg_logf("NVN completion_wait enabled=%d legacy_waitall=%d",int(completion_wait_enabled),int(legacy_waitall));vkGetPhysicalDeviceProperties(cfg.physical,&properties);vkGetPhysicalDeviceMemoryProperties(cfg.physical,&memories);{char line[512];int at=snprintf(line,sizeof line,"NVN caps memory types");for(uint32_t i=0;i<memories.memoryTypeCount && at<int(sizeof line)-24;i++)at+=snprintf(line+at,sizeof line-at," %u:%#x/h%u",i,unsigned(memories.memoryTypes[i].propertyFlags),memories.memoryTypes[i].heapIndex);xbg_logf("%s",line);}
     VkPhysicalDeviceProperties2 pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};pp.pNext=&subgroup;vkGetPhysicalDeviceProperties2(cfg.physical,&pp);
 #ifdef DM_GAME_ETERNAL
@@ -9970,7 +9985,14 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     for(auto &sl:slots)sl=Slot{};slot_index=0;pass_prof_enabled=false;pass_prof_next=300;pass_prof_period=600;pass_prof_until=UINT64_MAX;pass_prof_frame=UINT64_MAX;pass_prof_draws=0;pass_prof_queries=pass_prof_slots=pass_prof_skipped_slots=0;perf=Perf{};for(auto &c:perf_timing_before)c=XbgCpuTiming::Counter{};static_arena.cached=false;support_static.clear();format_property_cache.clear();for(auto &k:format_flat_known)k=false;
     VkPhysicalDeviceShaderDrawParametersFeatures draw_parameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};features.pNext=&draw_parameters;vkGetPhysicalDeviceFeatures2(cfg.physical,&features);if(cfg.enabled_shader_draw_parameters && !draw_parameters.shaderDrawParameters){if(error&&bytes)snprintf(error,bytes,"shaderDrawParameters unsupported");return -1;}
     VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cp.queueFamilyIndex=cfg.queue_family;cp.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;VkResult r=vkCreateCommandPool(cfg.device,&cp,nullptr,&command_pool);if(r!=VK_SUCCESS){if(error&&bytes)snprintf(error,bytes,"vkCreateCommandPool=%d",r);return r;}
-    VkPipelineCacheCreateInfo cache{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};std::vector<uint8_t> cache_data=load_pipeline_cache();cache.initialDataSize=cache_data.size();cache.pInitialData=cache_data.empty()?nullptr:cache_data.data();r=vkCreatePipelineCache(cfg.device,&cache,nullptr,&pipeline_cache);if(r!=VK_SUCCESS){vkDestroyCommandPool(cfg.device,command_pool,nullptr);command_pool=VK_NULL_HANDLE;if(error&&bytes)snprintf(error,bytes,"vkCreatePipelineCache=%d",r);return r;}
+    VkPipelineCacheCreateInfo cache{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+#ifdef DM_GAME_DOS2
+    pipeline_cache=VK_NULL_HANDLE;if(!vknlib::on){   // [DOS2] VK-NATIVE no-NVN step C: no translator pipeline cache
+#endif
+    std::vector<uint8_t> cache_data=load_pipeline_cache();cache.initialDataSize=cache_data.size();cache.pInitialData=cache_data.empty()?nullptr:cache_data.data();r=vkCreatePipelineCache(cfg.device,&cache,nullptr,&pipeline_cache);if(r!=VK_SUCCESS){vkDestroyCommandPool(cfg.device,command_pool,nullptr);command_pool=VK_NULL_HANDLE;if(error&&bytes)snprintf(error,bytes,"vkCreatePipelineCache=%d",r);return r;}
+#ifdef DM_GAME_DOS2
+    }
+#endif
     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');std::string base=cut==std::string::npos?dir:dir.substr(0,cut);
      const bool rewrites_fault=xbg_adreno_rewrites_fault(properties.vendorID,properties.deviceName);
      if(rewrites_fault)xbg_logf("NVN Adreno 740/750 (device \"%s\"): the quad-derivative and warp32 rewrites default off; a marker file still turns either on",properties.deviceName);
@@ -10050,9 +10072,17 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
     {const char *e=getenv("DM_GFX_SPV_OPT");const int spv_opt=e && *e?atoi(e):0;   // [DOS2] cache next to vk-pipeline-cache.bin; before the warm-up threads create modules
      std::string dir=cfg.shader_directory?cfg.shader_directory:"";size_t cut=dir.find_last_of('/');if(cut!=std::string::npos)dir.resize(cut);
      if(spv_opt>0)xbg_spvopt_init((dir+"/spvopt").c_str(),spv_opt);xbg_logf("NVN on-device SPIR-V optimizer DM_GFX_SPV_OPT=%d (active=%d)",spv_opt,xbg_spvopt_mode());}
-    xbg_module_id_hook=warm::module_id;{std::string lp=warm::list_path();FILE *nw=fopen((lp.substr(0,lp.find_last_of('/'))+"/gfx-no-warm").c_str(),"rb");warm::enabled=!nw;if(nw)fclose(nw);}warm::start();
+    xbg_module_id_hook=warm::module_id;{std::string lp=warm::list_path();FILE *nw=fopen((lp.substr(0,lp.find_last_of('/'))+"/gfx-no-warm").c_str(),"rb");warm::enabled=!nw;if(nw)fclose(nw);}
+#ifdef DM_GAME_DOS2
+    if(vknlib::on)warm::enabled=false;else   // [DOS2] VK-NATIVE no-NVN step C: no warm-up of the translator's pipelines
+#endif
+    warm::start();
     wtrack::enabled=false;state=State{};nbdesc::P.valid=false;nbdesc::cand=false;nbpipe::reset();nrdraw::reset();nrsort::reset();nrlean::on();   /* [DOS2] NB-11: the state reset moves no counter */state.color.logic_op=3;state.color.alpha_func=8;for(unsigned i=0;i<8;i++)state.blend[i]={i,2,1,2,1,1,1};if(condr::init_counting())state.count_samples=true;nrz8t::boot();   /* [DOS2] NR-ZERO Z8 DM_NR_Z8: read here - the submit walk copies State as it starts */nrocc::init();stats.reset();timing=XbgCpuTiming(timing_clock);pipeline_counts={};pipeline_before={};pipeline_tick=0;timing_active=false;timing_first=timing_last=0;live_profile_used=false;descriptor_detail=false;descriptor_timing=XbgDescriptorTiming{};descriptor_root=nullptr;draw_detail=false;draw_timing=XbgDrawTiming{};draw_root=nullptr;completed=0;last_attachment_trace=UINT64_MAX;sampler_mirror_clamp_enabled=VK_FALSE;sampler_minmax_enabled=VK_FALSE;failed=false;error_text[0]=0;initialized=true;
-    {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-sync-submit").c_str(),"rb");bool sync_submit=false;if(m){sync_submit=fgetc(m)=='1';fclose(m);}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-async-pool-reset").c_str(),"rb");poolreset::enabled=false;if(w){poolreset::enabled=fgetc(w)!='0';fclose(w);}else if(const char *e=getenv("DM_GFX_ASYNC_POOL_RESET"))poolreset::enabled=atoi(e)!=0;poolreset::start();xbg_logf("NVN async command pool reset=%d (marker gfx-async-pool-reset)",int(poolreset::enabled));}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-bindcache").c_str(),"rb");if(w){bind_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-imgcache").c_str(),"rb");if(w){img_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-pass-profile").c_str(),"rb");if(w){pass_prof_enabled=true;unsigned long long from=0,period=0,count=0;if(fscanf(w,"%llu %llu %llu",&from,&period,&count)>=2){pass_prof_next=from;pass_prof_period=period?period:1;if(count)pass_prof_until=from+count;}fclose(w);}}
+    {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-sync-submit").c_str(),"rb");bool sync_submit=false;if(m){sync_submit=fgetc(m)=='1';fclose(m);}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-async-pool-reset").c_str(),"rb");poolreset::enabled=false;if(w){poolreset::enabled=fgetc(w)!='0';fclose(w);}else if(const char *e=getenv("DM_GFX_ASYNC_POOL_RESET"))poolreset::enabled=atoi(e)!=0;
+#ifdef DM_GAME_DOS2
+    if(vknlib::on)poolreset::enabled=false;   // [DOS2] VK-NATIVE no-NVN step C: no pool reset thread (no translator slots)
+#endif
+    poolreset::start();xbg_logf("NVN async command pool reset=%d (marker gfx-async-pool-reset)",int(poolreset::enabled));}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-bindcache").c_str(),"rb");if(w){bind_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-imgcache").c_str(),"rb");if(w){img_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-pass-profile").c_str(),"rb");if(w){pass_prof_enabled=true;unsigned long long from=0,period=0,count=0;if(fscanf(w,"%llu %llu %llu",&from,&period,&count)>=2){pass_prof_next=from;pass_prof_period=period?period:1;if(count)pass_prof_until=from+count;}fclose(w);}}
     // [perf3] DM_GFX_PASS_PROF="from period count" (dm/env; "1" = 300 600 0): the per-pass GPU timestamp profile of the
     // gfx-pass-profile marker without a file push -- one frame every `period` presents logs NVN GPASS lines (tools/gpass_report.py).
     if(!pass_prof_enabled)if(const char *e=getenv("DM_GFX_PASS_PROF"))if(*e && strcmp(e,"0")){unsigned long long from=300,period=600,count=0;std::string v(e);for(char &ch:v)if(ch<'0'||ch>'9')ch=' ';   // dm/env keeps quotes / commas literally
@@ -10441,6 +10471,12 @@ extern "C" VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code){
     if(!initialized || failed || !s.unusable.empty() || s.stage!=0 || !code)return s.module;return vtx_retype_module(s,code);}
 // [DOS2] VK-NATIVE stage 4 (pipeline warm-up, dm/gfx/vkn/vkn_warm.c): the directory of vk-pipeline-cache.bin (pipeline_cache_path:
 // the parent of cfg.shader_directory), where the backend keeps vkn-pipeline-cache.bin and vkn-pipeline-list.bin. 0 = written.
+// [DOS2] VK-NATIVE no-NVN (dm/host/hle_dos2_vkn_nonvn.c boot line): what this engine runs in the process. Bits: 1 library-only
+// initialise (step C), 2 a translator pipeline cache exists, 4 warm-up threads exist, 8 the pool reset thread, 16 the gfx worker; *warm =
+// the number of warm-up threads. No lock: every one of these is written by xbg_game_initialize / shutdown only (read after the init).
+extern "C" unsigned xbg_vkn_lib_report(unsigned *warm){
+    unsigned m=0;if(vknlib::on)m|=1;if(pipeline_cache)m|=2;const size_t w=warm::threads.size();if(w)m|=4;if(poolreset::worker)m|=8;if(gfx_worker.joinable())m|=16;
+    if(warm)*warm=unsigned(w);return m;}
 extern "C" int xbg_vkn_cache_dir(char *out,size_t bytes){
     if(!out || !bytes)return -1;out[0]=0;std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || !cfg.shader_directory)return -1;
     std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');if(cut!=std::string::npos)dir.resize(cut);

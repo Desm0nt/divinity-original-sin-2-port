@@ -130,6 +130,7 @@ VkShaderModule xbg_vkn_alpha_module(void *shader,uint32_t func,float ref);
  * high 32 bits 2 bits per location 1 = SSCALED bound as SINT, 2 = USCALED bound as UINT); the base module for code 0 or a refusal. */
 VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code);
 int xbg_vkn_cache_dir(char *out,size_t bytes);   // [DOS2] VK-NATIVE stage 4: directory of the pipeline cache files (0 = ok)
+unsigned xbg_vkn_lib_report(unsigned *warm);   // [DOS2] VK-NATIVE no-NVN: 1 library-only, 2 pipeline cache, 4 warm-up threads, 8 pool reset, 16 gfx worker
 #ifdef __cplusplus
 }
 #endif
