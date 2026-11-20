@@ -255,6 +255,7 @@ VKN_HOOK h_bind_ssbo(VKN_A) {    // 0x9242c0(r, hash, handle)
 int dm_vkn_exec_scissor(uint64_t r, int32_t out[4]) __attribute__((weak));
 static uint64_t g_last_blend, g_last_ds, g_last_raster; static uint8_t g_last_sref;
 static int32_t g_prev_vp[4], g_prev_sc[4]; static int g_prev_ok, g_sc_from_vp = 1;
+int dm_vkn_cmd_override(uint64_t r, float vp[4], int32_t sc[4]) __attribute__((weak));   // hle_dos2_vkn_cmd.c
 void dm_vkn_draw_fill(vkn_draw_in *in) {
     const uint64_t r = vkn_renderer();
     memset(in, 0, sizeof *in);
@@ -284,6 +285,9 @@ void dm_vkn_draw_fill(vkn_draw_in *in) {
     in->viewport[0] = (float)vp[2]; in->viewport[1] = (float)vp[3]; in->viewport[2] = (float)vp[0]; in->viewport[3] = (float)vp[1];
     if (dm_vkn_exec_scissor) {   // the exec part sees every viewport / scissor event in order: exact
         if (dm_vkn_exec_scissor(r, in->scissor)) g_c.scissor_vp++;
+        // A direct NVN SetViewport / SetScissor of a stage function (hle_dos2_vkn_cmd.c) set a rectangle behind the engine's caches:
+        // it is in effect until the caches change or a new recording begins.
+        if (dm_vkn_cmd_override) dm_vkn_cmd_override(r, in->viewport, in->scissor);
         return;
     }
     if (g_prev_ok) {   // without it: the cache field that changed since the previous draw

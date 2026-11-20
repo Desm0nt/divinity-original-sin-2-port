@@ -33,6 +33,7 @@
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_pass.h"
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_pass.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
@@ -197,8 +198,9 @@ VKN_HOOK vkn_h_cds(VKN_A) {
 VKN_HOOK vkn_h_cpy(VKN_A) {
     VKN_UNUSED;
     g_c[C_CPY]++;
-    // The hook is entered by the patched entry's br (lr untouched): the return address is the engine caller's.
-    if ((uint64_t)(uintptr_t)__builtin_return_address(0) == (uint64_t)(uintptr_t)(dm_vkn_base() + 0x92076c)) { g_c[C_CPY_REDUCE]++; return 0; }
+    // The engine caller's return address: the host-stack stub keeps it for the hook (dm_vkn_caller, hle_dos2_vkn_stack.c; this
+    // function's own return address is the stub's veneer).
+    if (dm_vkn_caller() == (uint64_t)(uintptr_t)(dm_vkn_base() + 0x92076c)) { g_c[C_CPY_REDUCE]++; return 0; }
     vkn_tex *dst = a1 ? vkn_tex_by_cookie(a1) : NULL, *src = a2 ? vkn_tex_by_cookie(a2) : NULL;
     if (!dst || !src) {
         g_c[C_CPY_BAD]++;

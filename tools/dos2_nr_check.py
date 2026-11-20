@@ -36,7 +36,7 @@ ARG_REGS = ['x%d' % i for i in range(8)]
 
 
 VKN_HOOKS = set()          # names of the hook functions of dm/host/hle_dos2_vkn*.c (filled by sites())
-VKN_REPLACED = {0x928be0}   # VK-NATIVE sites whose hook never calls the original (vector / x8 reads of the function do not matter)
+VKN_REPLACED = {0x928be0, 0x92f730, 0x92fc70, 0x930210, 0x930910, 0x930e90}   # VK-NATIVE sites whose hook never calls the original (vector / x8 reads of the function do not matter)
 
 
 def sites():

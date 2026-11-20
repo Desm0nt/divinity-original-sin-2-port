@@ -93,6 +93,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_exec.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define EX_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own
 
@@ -323,6 +324,12 @@ static uint64_t ex_len(unsigned op) {   // the lengths of the taken opcodes (fix
     default: return 0x10;   // 0x3d 0x3e 0x3f
     }
 }
+// The two taken opcodes that reach Vulkan (the region clear records a clear / opens a pass, the draw may compile a pipeline) run on
+// the host stack: the ExecuteRenderCommand hook (hle_dos2_native.c) calls ex_take on the guest stack (hle_dos2_vkn_stack.c).
+typedef struct { uint64_t tex; uint32_t layer; float rgba[4]; int32_t x, y, w, h; } ex_clear_job;
+static uint64_t ex_clear_on_stack(void *p) { const ex_clear_job *j = p; dm_vkn_pass_clear_rect(j->tex, j->layer, j->rgba, j->x, j->y, j->w, j->h); return 0; }
+typedef struct { uint64_t r; uint32_t first, count; } ex_arrays_job;
+static uint64_t ex_arrays_on_stack(void *p) { const ex_arrays_job *j = p; return (uint64_t)(uint32_t)dm_vkn_exec_draw_arrays(j->r, j->first, j->count); }
 static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
     *len = ex_len(op);
     __atomic_add_fetch(&g_op[op & 63], 1, __ATOMIC_RELAXED);
@@ -338,7 +345,8 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         if (!vkn_rec(r, T_TEX, E_TEX, tex)) { red(D_CLEAR_TEX, tex, (uint64_t)(uint32_t)layer, (uint64_t)(uint32_t)w << 32 | (uint32_t)h); return 1; }
         if (!dm_vkn_pass_clear_rect) { red(D_CLEAR_NOPASS, tex, 0, 0); return 1; }
         st(S_CLEAR);
-        dm_vkn_pass_clear_rect(tex, (uint32_t)layer, rgba, x, y, w, h);
+        ex_clear_job j = {tex, (uint32_t)layer, {rgba[0], rgba[1], rgba[2], rgba[3]}, x, y, w, h};
+        dm_vkn_on_stack(ex_clear_on_stack, &j);
         return 1;
     }
     case 0x07: dm_vkn_exec_raster(r, vkn_rd64(pkt + 8)); return 1;
@@ -376,7 +384,7 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         }
         return 1;
     }
-    case 0x23: dm_vkn_exec_draw_arrays(r, vkn_rd32(pkt + 4), vkn_rd32(pkt + 8)); return 1;
+    case 0x23: { ex_arrays_job j = {r, vkn_rd32(pkt + 4), vkn_rd32(pkt + 8)}; dm_vkn_on_stack(ex_arrays_on_stack, &j); return 1; }
     case 0x37: {   // resource state u8 +1: 0 / 1 -> nvnCommandBufferBarrier(cb, 2); 2..12 -> nothing; else the engine aborts (0x80f560)
         const uint8_t s = vkn_rd8(pkt + 1);
         if (s <= 12) { __atomic_add_fetch(&g_bar[s], 1, __ATOMIC_RELAXED); st(s <= 1 ? S_BARRIER_NVN : S_BARRIER_NOP); }

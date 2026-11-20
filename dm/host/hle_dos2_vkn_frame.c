@@ -212,13 +212,19 @@ static void pace_present(void) {
 // ---- the present crop (Window::Resize -> nvnWindowSetCrop(0, 0, w, h)); none until the engine resizes = the whole image ----
 static int32_t g_crop[4]; static int g_crop_set;
 
+// ---- DM_VK_NATIVE_LOG (hle_dos2_vkn.c prints them): ms of the last presented frame in BeginFrame, from BeginRender to EndFrame
+// (the frame's recording: every list the engine executes), in EndFrame (submit + present + the engine's tail, without the tick) ----
+static struct { uint64_t begin, render0, render, end; } g_ft;
+void dm_vkn_frame_times(double ms[3]);
+void dm_vkn_frame_times(double ms[3]) { ms[0] = g_ft.begin / 1e6; ms[1] = g_ft.render / 1e6; ms[2] = g_ft.end / 1e6; }
+
 // ---- hooks ----
 static vkn_fn g_o_begin, g_o_render, g_o_end, g_o_resize, g_o_rb_file, g_o_rb_enc, g_o_rb_raw;   // (originals: never called in mode 1)
 
 VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
     VKN_UNUSED;
     const uint64_t r = a0; const int presented = (int)(a1 & 1);
-    const uint64_t dev = r ? vkn_rd64(r + R_DEV) : 0;
+    const uint64_t dev = r ? vkn_rd64(r + R_DEV) : 0, t0 = vkn_now_ns();
     g_fs.begins++;
     if (!dev) { g_fs.no_dev++; if (red_ok(RL_DEV)) vkn_logf(FH_RED "frame: BeginFrame(r %#llx, %d) without a device: nothing done", (unsigned long long)r, presented); return 0; }
     uint64_t ctx;
@@ -247,6 +253,7 @@ VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
         wr64(ctx + CTX_TS0, b); wr64(ctx + CTX_TS1, e);
     }
     bf_unlock_tail();
+    if (presented) g_ft.begin = vkn_now_ns() - t0;
     return 0;
 }
 
@@ -279,7 +286,7 @@ static void clear_depth(uint64_t r, uint64_t h) {
 VKN_HOOK fh_render(VKN_A) {   // 0x93d9f0 Window::BeginRender(win)
     VKN_UNUSED;
     const uint64_t win = a0, r = win ? vkn_rd64(win + WIN_R) : 0;
-    g_fs.renders++;
+    g_fs.renders++; g_ft.render0 = vkn_now_ns();
     if (!r) { g_fs.no_dev++; if (red_ok(RL_DEV)) vkn_logf(FH_RED "frame: BeginRender(win %#llx) without a renderer: nothing done", (unsigned long long)win); return 0; }
     if (mu_on()) mu_lock();
     wr8(r + R_REC, 1);
@@ -344,8 +351,9 @@ VKN_HOOK fh_render(VKN_A) {   // 0x93d9f0 Window::BeginRender(win)
 VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = window slot 8
     VKN_UNUSED;
     const uint64_t win = a0; const int present = (int)(a1 & 1);
-    const uint64_t r = win ? vkn_rd64(win + WIN_R) : 0, dev = r ? vkn_rd64(r + R_DEV) : 0;
+    const uint64_t r = win ? vkn_rd64(win + WIN_R) : 0, dev = r ? vkn_rd64(r + R_DEV) : 0, t0 = vkn_now_ns();
     if (!dev) { g_fs.no_dev++; if (red_ok(RL_DEV)) vkn_logf(FH_RED "frame: EndFrame(win %#llx, %d) without a device: nothing done", (unsigned long long)win, present); return 0; }
+    if (present && g_ft.render0) { g_ft.render = t0 - g_ft.render0; g_ft.render0 = 0; }
     if (present) g_fs.ends_presented++; else g_fs.ends_off++;
     if (mu_on()) mu_lock();
     if (present) {
@@ -370,7 +378,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (mu_on()) mu_unlock();
     const uint64_t slot10 = vkn_rd64(vkn_rd64(win) + 0x50);   // (the original tail-branches to it)
     const uint64_t rc = ((fn_2)(uintptr_t)slot10)(win, (uint64_t)present);
-    if (present) dm_vkn_tick();
+    if (present) { g_ft.end = vkn_now_ns() - t0; dm_vkn_tick(); }
     return rc;
 }
 
@@ -413,6 +421,9 @@ static void fh_census(void) {
 
 void dm_vkn_frame_register(void);   // hle_dos2_vkn.c (weak there)
 void dm_vkn_frame_register(void) {
+    // Mode 2 has nothing of this part (all sites VKN_M_NATIVE): no census either, so mode 2's 10 s lines stay those of stage 2.
+    // (hle_dos2_vkn.c decides its own EndFrame hook by this function's presence, not by what it registers.)
+    if (vkn_mode() != VKN_NATIVE) return;
     static const uint32_t k_begin[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};
     static const uint32_t k_render[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9045ff8, 0xa90557f6, 0xa9064ff4};
     static const uint32_t k_end[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};

@@ -90,6 +90,7 @@
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
 #include "hle_dos2_vkn_exec.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define CMD_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own
 
@@ -501,7 +502,9 @@ static uint64_t cmd_entry(int slot, uint64_t ra, VKN_A) {
     default: return 0;                                                    // counted no-op (void)
     }
 }
-#define X_FN(i, n, k) VKN_HOOK cmd_s##i(VKN_A) { return cmd_entry(i, (uint64_t)(uintptr_t)__builtin_return_address(0), VKN_F); }
+// Each slot function is entered through its host-stack stub (dm_vkn_stack_stub, made at registration): the engine caller's return
+// address is the one the stub kept (dm_vkn_caller), this function's own is the stub's veneer.
+#define X_FN(i, n, k) VKN_HOOK cmd_s##i(VKN_A) { return cmd_entry(i, dm_vkn_caller(), VKN_F); }
 CMD_SLOTS(X_FN)
 #undef X_FN
 typedef struct { uint16_t idx; uint8_t kind; const char *name; void *fn; } cmd_slot;
@@ -513,12 +516,14 @@ static const cmd_slot k_slots[] = { CMD_SLOTS(X_ROW) };
 // with x8 unwritten, and a hook does not forward x8 (tools/dos2_nr_check.py rejects that site); 0x938330 forwards cleanly. ----
 static vkn_fn g_o_init;
 static int g_fills;
+static void *g_stub[TABLE_SLOTS];   // the host-stack stub of each repointed slot's function (dm_vkn_cmd_register)
 static void repoint(uint64_t init) {
     uint64_t *tab = (uint64_t *)(void *)(dm_vkn_base() + M_TABLE);
     int n = 0, nul = 0;
     for (size_t i = 0; i < sizeof k_slots / sizeof k_slots[0]; i++) {
         const cmd_slot *s = &k_slots[i];
-        const uint64_t cur = __atomic_load_n(&tab[s->idx], __ATOMIC_ACQUIRE), mine = (uint64_t)(uintptr_t)s->fn;
+        const uint64_t cur = __atomic_load_n(&tab[s->idx], __ATOMIC_ACQUIRE), mine = (uint64_t)(uintptr_t)g_stub[s->idx];
+        if (!mine) continue;   // (no stub page: the slot stays HLE NVN; red line at registration)
         if (cur == mine) continue;
         if (!cur) { nul++; red(D_TABLE, s->idx, init, 0); }
         g_orig[s->idx] = cur;
@@ -591,7 +596,13 @@ void dm_vkn_cmd_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2 keeps the game's table as HLE NVN filled it
     module_t *m = dn_main();
     g_text_end = m && m->text_end ? m->text_end : 0x1e80000;   // (main.raw: text ends at 0x1e80000)
-    for (size_t i = 0; i < sizeof k_slots / sizeof k_slots[0]; i++) { g_sname[k_slots[i].idx] = k_slots[i].name; g_skind[k_slots[i].idx] = k_slots[i].kind; }
+    int nostub = 0;
+    for (size_t i = 0; i < sizeof k_slots / sizeof k_slots[0]; i++) {
+        g_sname[k_slots[i].idx] = k_slots[i].name; g_skind[k_slots[i].idx] = k_slots[i].kind;
+        // The slot functions run Vulkan (draws, clears, targets) for a guest caller: entered on the host stack like every site.
+        if (!(g_stub[k_slots[i].idx] = dm_vkn_stack_stub(k_slots[i].fn))) nostub++;
+    }
+    if (nostub) vkn_logf(CMD_RED "cmd: %d slot functions without a host-stack stub: those slots stay HLE NVN", nostub);
     // First 4 instructions of 0x938330 (python <scratchpad>/vk/re/pro.py; none PC-relative, checked with capstone).
     static const uint32_t k_init[4] = {0xd10583ff /* sub sp,sp,#0x160 */, 0xa9106ffc, 0xa91167fa, 0xa9125ff8};
     dm_vkn_site(0x938330, k_init, "DeviceInit", (void *)cmd_h_init, &g_o_init, VKN_M_NATIVE);

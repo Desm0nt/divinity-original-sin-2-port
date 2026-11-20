@@ -62,8 +62,15 @@
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_ui.h"
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
+
+// DM_VK_NATIVE_UI=0 (read once at registration; phone debugging): every GDraw draw (triangles, filter quads, blur passes, filter
+// composites) is counted and not recorded, everything else as with the UI on (GDraw's own fields, targets, viewport / scissor and
+// the clears, so a UI target the engine composites later is transparent black, not undefined): the 3D scene alone.
+static int g_ui_off; static uint64_t g_n_ui_off;
+static int ui_draw(const vkn_ui_draw_in *d) { if (g_ui_off) { g_n_ui_off++; return 0; } return vkn_ui_draw(d); }
 int dn_install_rc_model(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len));   // hle_dos2_native.c
 
 static vkn_fn g_o_prog, g_o_tex, g_o_rt, g_o_fb, g_o_upd, g_o_draw, g_o_filter, g_o_tdb, g_o_tde, g_o_rb, g_o_cdb, g_o_vs, g_o_clr, g_o_aa,
@@ -333,7 +340,9 @@ static void targets_apply(uint64_t ctx) {
                                                           (unsigned long long)((top - (ctx + 0x110)) / 0x28)); }
     vkn_ui_targets(c, d);
 }
-// RenderingEnd 0x1bf4200 (through the function table): the state reset.
+// RenderingEnd 0x1bf4200 (through the function table): the state reset. GDraw calls the table slot directly, so the slot gets this
+// function's host-stack stub (g_re_stub, made at registration; NULL = no stub page: the slot keeps the game's function).
+static void *g_re_stub;
 static void ui_rendering_end(void) {
     const uint64_t ctx = vkn_main64(0x32c6a80);
     if (ctx) state_reset(ctx);
@@ -345,7 +354,7 @@ VKN_HOOK h_rb(VKN_A) {
     VKN_UNUSED;
     const uint64_t ctx = a0;
     const uint64_t slot = (uint64_t)(uintptr_t)(dm_vkn_base() + 0x32c6a88 + 0xf8);   // GDraw table: RenderingEnd
-    if (vkn_rd64(slot) == (uint64_t)(uintptr_t)(dm_vkn_base() + 0x1bf4200)) { wr64(slot, (uint64_t)(uintptr_t)ui_rendering_end); g_n_table++; }
+    if (g_re_stub && vkn_rd64(slot) == (uint64_t)(uintptr_t)(dm_vkn_base() + 0x1bf4200)) { wr64(slot, (uint64_t)(uintptr_t)g_re_stub); g_n_table++; }
     wr64(ctx + 0x80, ~0ull); wr64(ctx + 0xa0, 0); wr64(ctx + 0xa8, 0); wr64(ctx + 0x90, 0); wr64(ctx + 0x98, 0);
     state_reset(ctx);
     targets_apply(ctx);
@@ -480,11 +489,11 @@ VKN_HOOK h_draw(VKN_A) {
         vkn_block b;
         if (vb_get(buf, &b)) {
             d.vb = &b; d.vb_off = vkn_rd64(p); d.ib_off = vkn_rd64(buf + 8) - vkn_rd64(buf) + vkn_rd64(p + 8);
-            if (!drop) drop = vkn_ui_draw(&d);
+            if (!drop) drop = ui_draw(&d);
         } else { drop = 1; g_n_no_vb++; RED16(g_red_draw, "draw from vertex buffer %#llx that has no native block (%u vertices, %u indices)", (unsigned long long)buf, nv, ni); }
     } else {
         d.verts = (const void *)(uintptr_t)vkn_rd64(p); d.idx = (const uint16_t *)(uintptr_t)vkn_rd64(p + 8); d.quads = d.idx == NULL;
-        if (!drop) drop = vkn_ui_draw(&d);
+        if (!drop) drop = ui_draw(&d);
     }
     if (drop) g_n_draw_drop++; else g_n_draws++;
     if (st) {   // GDrawStats: flags |= 1, batches + 1, indices / vertices
@@ -547,7 +556,7 @@ VKN_HOOK h_filter(VKN_A) {
     draw_state(ctx, &d);
     d.vs = vkn_rd64(ctx + 0x23e8); d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.verts = q; d.nverts = 4;
     d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc;
-    if (vkn_ui_draw(&d)) g_n_fq_drop++;
+    if (ui_draw(&d)) g_n_fq_drop++;
     wr32(ctx + 0x10c, saved);
     return 0;
 }
@@ -576,7 +585,7 @@ VKN_HOOK h_blur(VKN_A) {
     draw_state(ctx, &d);
     d.vs = vkn_rd64(ctx + 0x23e8); d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.verts = q; d.nverts = 4;
     d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.fsc1 = fsc1; d.fsc1_bytes = 0xa0;
-    if (vkn_ui_draw(&d)) g_n_blur_drop++; else g_n_blur++;
+    if (ui_draw(&d)) g_n_blur_drop++; else g_n_blur++;
     return 0;
 }
 
@@ -738,7 +747,7 @@ static void filter_composite(uint64_t ctx, uint64_t r, const int32_t dst[4], con
     draw_state(ctx, &d);
     d.vs = vkn_rd64(ctx + 0x23e8); d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.verts = q; d.nverts = 4;
     d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.fsc1 = fsc1; d.fsc1_bytes = 0x50;
-    if (vkn_ui_draw(&d)) g_n_comp_drop++; else g_n_comp++;
+    if (ui_draw(&d)) g_n_comp_drop++; else g_n_comp++;
     wr64(r + 0x20, tde_impl(ctx, st));
 }
 
@@ -757,12 +766,16 @@ VKN_HOOK h_upd(VKN_A) {
 }
 // Packet 0x2c (+8 handle, +0x14 bytes a row, +0x18 rows, +0x1c u8 4 bytes a texel, rows from (packet + 0x2f) & ~15): mirrored, then
 // the engine's handler runs as it is (returns 0: not executed here).
+// The ExecuteRenderCommand hook (hle_dos2_native.c) calls the model on the guest stack: the texture update (staging, copies) runs on
+// the host stack (hle_dos2_vkn_stack.c).
+typedef struct { vkn_tex *t; uint32_t w, rows; const void *src; uint32_t pitch; } ui_upd_job;
+static uint64_t ui_upd_on_stack(void *p) { const ui_upd_job *j = p; vkn_tex_update(j->t, 0, 0, 0, 0, j->w, j->rows, j->src, j->pitch); return 0; }
 static int model_2c(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
     (void)list; (void)len;
     if (op != 0x2c || !pkt) return 0;
     const uint32_t pitch = vkn_rd32(pkt + 0x14), rows = vkn_rd32(pkt + 0x18), bpp = vkn_rd8(pkt + 0x1c) ? vkn_rd8(pkt + 0x1c) : 4;
     vkn_tex *t = vkn_tex_get(vkn_rd64(pkt + 8));
-    if (t && pitch && rows) vkn_tex_update(t, 0, 0, 0, 0, pitch / bpp, rows, (const void *)(uintptr_t)((pkt + 0x2f) & ~15ull), pitch);
+    if (t && pitch && rows) { ui_upd_job j = {t, pitch / bpp, rows, (const void *)(uintptr_t)((pkt + 0x2f) & ~15ull), pitch}; dm_vkn_on_stack(ui_upd_on_stack, &j); }
     else g_n_upd_miss++;
     g_n_pkt2c++;
     return 0;
@@ -782,6 +795,7 @@ static void ui_census(void) {
              (unsigned long long)g_n_special_dst, (unsigned long long)s.targets, (unsigned long long)g_n_tgt_unknown, (unsigned long long)g_n_tdb, (unsigned long long)g_n_tdb_fail, (unsigned long long)g_n_tde,
              (unsigned long long)g_n_rb, (unsigned long long)g_n_re, (unsigned long long)g_n_table, (unsigned long long)g_n_clear, (unsigned long long)s.clears_ds,
              (unsigned long long)s.clears_masked, (unsigned long long)s.clears_color, (unsigned long long)g_n_cdb);
+    if (g_ui_off) vkn_logf("ui: DM_VK_NATIVE_UI=0: %llu GDraw draws not recorded", (unsigned long long)g_n_ui_off);
     vkn_logf("ui: dropped draws by reason: no recording %llu, no pass %llu, no shader %llu, binding %llu, pipeline %llu, set %llu, ring %llu, vertex range %llu, empty %llu, "
              "no native vertex buffer %llu; identical-state draws %llu, tex0 mode without texture %llu; pairs %llu (failed %llu), pipelines %llu (failed %llu), sets %llu in %llu pools, "
              "feedback %llu, placeholder %llu",
@@ -802,6 +816,10 @@ static void ui_census(void) {
 void dm_vkn_ui_register(void);
 void dm_vkn_ui_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2 stays exactly as it was
+    { const char *e = getenv("DM_VK_NATIVE_UI"); g_ui_off = e && *e == '0'; }
+    if (g_ui_off) vkn_logf("ui: DM_VK_NATIVE_UI=0: GDraw draws are counted, not recorded (the 3D scene alone; targets and clears as usual)");
+    g_re_stub = dm_vkn_stack_stub((void *)ui_rendering_end);
+    if (!g_re_stub) vkn_logf(RED "ui: no host-stack stub for RenderingEnd: the GDraw table keeps the game's 0x1bf4200 (NVN)");
     // First 4 instructions of each site (python <scratchpad>/vk/re/pro.py; none PC-relative, checked with capstone).
     static const uint32_t k_prog[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9026ffc, 0xa90367fa, 0xa9045ff8};
     static const uint32_t k_tex[4] = {0xd10403ff /* sub sp,sp,#0x100 */, 0xa90b67fa, 0xa90c5ff8, 0xa90d57f6};
