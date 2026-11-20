@@ -13,6 +13,9 @@
 //      cache of this module (pools never reset or freed singly: the whole generation is retired, vkn_draw_forget_all);
 //   6. vertex buffers of the streams the vertex format reads (+ the null stream, binding 3, for shader inputs it lacks), index buffer,
 //      viewport and scissor (clamped to the pass): each only when it differs from what this recording has bound.
+// Primitives without a Vulkan topology (engine 2 triangle fan, 4 quads, 7 line loop; vkn_state.h vkn_prim_topology) are drawn as
+// the primitive vkn_prim_rewrite names with indices generated here (arrays: from the vertex numbers; indexed: from the engine's
+// indices read through the index buffer's CPU pointer) into a transient area of this module (see "index rewrite").
 // Every drop has a counter (vkn_draw_stats / vkn_draw_stats2) and the first 16 of each reason print one red line with the values.
 // Single-threaded: the recording thread (vkn_draw_forget_all from elsewhere is only a request).
 #ifdef DM_GAME_DOS2
@@ -31,7 +34,7 @@
 enum { REDS = 16, MAX_ELEMS = 1024, MAX_DYN = 64, SET_BUDGET = 4096, SET_TAB = 8192, POOL_SETS = 256, MAX_POOLS = 64, ZERO_UBO = 65536,
        VARIANTS = 256 };
 enum { R_SHADER, R_STAGE, R_STATE, R_PIPE, R_PASS, R_PRIM, R_VB, R_IB, R_BIND, R_VIEWPORT, R_VARIANT, R_SET, R_TEX, R_SMP, R_VIEW,
-       R_PLACE, R_UBO, R_IMG, R_CB, R_N };
+       R_PLACE, R_UBO, R_IMG, R_CB, R_RW, R_N };
 static uint8_t g_red[R_N];
 #define DRAW_RED(reason, ...) do { if (g_red[reason] < REDS) { g_red[reason]++; vkn_logf(VKN_DRAW_RED "draw: " __VA_ARGS__); } } while (0)
 
@@ -474,7 +477,8 @@ static void bind_set(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
 }
 
 // Everything of a graphics draw up to the draw command. 0 = ready (*vf / pass info filled), -1 = dropped (counted).
-static int prepare(const vkn_draw_in *in, VkCommandBuffer *cb_out, vkn_pass_info *pi, const vkn_vfmt **vf_out) {
+// prim: the primitive the pipeline draws (in->prim, or vkn_prim_rewrite(in->prim) for a rewritten draw).
+static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out, vkn_pass_info *pi, const vkn_vfmt **vf_out) {
     VkCommandBuffer cb = cb_ready();
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "draw without an open recording (dropped)"); return -1; }
     const vkn_shader *s = shader_for(in, 0); if (!s) return -1;
@@ -488,7 +492,7 @@ static int prepare(const vkn_draw_in *in, VkCommandBuffer *cb_out, vkn_pass_info
         return -1;
     }
     VkPrimitiveTopology topo;
-    if (vkn_prim_topology(in->prim, &topo)) { g_st.dropped_prim++; DRAW_RED(R_PRIM, "engine primitive %u needs an index rewrite (not in this wave): draw dropped", in->prim); return -1; }
+    if (vkn_prim_topology(prim, &topo)) { g_st.dropped_prim++; DRAW_RED(R_PRIM, "engine primitive %u (drawn as %u) has no Vulkan topology: draw dropped", in->prim, prim); return -1; }
     if (!(in->viewport[2] > 0.0f) || in->viewport[3] == 0.0f) {
         g_st2.dropped_viewport++;
         DRAW_RED(R_VIEWPORT, "viewport %g %g %g %g (x y w h): no area, draw dropped", in->viewport[0], in->viewport[1], in->viewport[2], in->viewport[3]);
@@ -522,7 +526,7 @@ static int prepare(const vkn_draw_in *in, VkCommandBuffer *cb_out, vkn_pass_info
     // pipeline
     vkn_pipe_desc pd; memset(&pd, 0, sizeof pd);
     pd.shader = s->id; pd.vs_variant = (uint8_t)vsv; pd.fs_variant = (uint8_t)fsv; pd.blend = bid; pd.ds = did; pd.raster = rid; pd.vfmt = vid;
-    pd.prim = in->prim; pd.stencil_ref = in->stencil_ref; pd.pass = pi->compat;
+    pd.prim = prim; pd.stencil_ref = in->stencil_ref; pd.pass = pi->compat;
     for (int i = 0; i < 8; i++) pd.write_mask[i] = (uint8_t)(pi->write_mask[i] & 0xf);
     const vkn_pipe_key key = vkn_pipe_key_pack(&pd);
     if (!g_b.gpipe_ok || memcmp(&key, &g_b.gkey, sizeof key)) {
@@ -537,7 +541,7 @@ static int prepare(const vkn_draw_in *in, VkCommandBuffer *cb_out, vkn_pass_info
         if (!p) {
             g_st.dropped_pipe++;
             DRAW_RED(R_PIPE, "no pipeline: shader %#llx (%s / %s) blend %u ds %u raster %u vfmt %u prim %u pass %u, variants vs %d fs %d (draw dropped)",
-                     (unsigned long long)in->shader, s->key[0], s->key[1], bid, did, rid, vid, in->prim, pi->compat, vsv, fsv);
+                     (unsigned long long)in->shader, s->key[0], s->key[1], bid, did, rid, vid, prim, pi->compat, vsv, fsv);
             return -1;
         }
         if (p != g_b.gpipe) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); g_st.pipe_binds++; }
@@ -569,6 +573,89 @@ static int prepare(const vkn_draw_in *in, VkCommandBuffer *cb_out, vkn_pass_info
     return 0;
 }
 
+// ---- index rewrite: engine 2 (triangle fan) -> triangle list, 4 (quads) -> two triangles a quad, 7 (line loop) -> line strip +
+// the first index again (vkn_prim_rewrite). The generated indices go into a transient area of this module: one block of
+// VKN_ARENA_STAGING (host-visible, coherent, index usage) handed out linearly and never written twice; a full block goes through
+// vkn_retire_block (freed 3 presented frames later, after every recording that read it) and the next draw takes a new one. ----
+enum { RW_CHUNK = 256 * 1024 };
+static vkn_block g_rw; static uint64_t g_rw_used; static int g_rw_ok;
+static vkn_draw_rw_stats g_rw_st;
+static int rw_kind(uint8_t p) { return p == 2 ? VKN_RW_FAN : p == 4 ? VKN_RW_QUADS : p == 7 ? VKN_RW_LOOP : -1; }
+// Generated indices for n input vertices / indices (0 = nothing to draw: GL / NVN draw nothing for a fan under 3 or a loop under 2;
+// a quad list ignores an incomplete tail).
+static uint64_t rw_count(int k, uint32_t n) {
+    return k == VKN_RW_FAN ? (n >= 3 ? 3ull * (n - 2) : 0) : k == VKN_RW_QUADS ? 6ull * (n / 4) : k == VKN_RW_LOOP ? (n >= 2 ? (uint64_t)n + 1 : 0) : 0;
+}
+static void *rw_alloc(uint64_t bytes, VkBuffer *buf, VkDeviceSize *off) {
+    bytes = (bytes + 3) & ~3ull;   // u32 index alignment for the next draw
+    if (g_rw_ok && g_rw_used + bytes > g_rw.size) { vkn_retire_block(&g_rw); g_rw_ok = 0; g_rw_st.retired++; }
+    if (!g_rw_ok) {
+        if (vkn_block_alloc(VKN_ARENA_STAGING, bytes > RW_CHUNK ? bytes : RW_CHUNK, 256, &g_rw)) return NULL;
+        g_rw_ok = 1; g_rw_used = 0; g_rw_st.blocks++;
+    }
+    void *p = (uint8_t *)g_rw.cpu + g_rw_used;
+    *buf = g_rw.buf; *off = g_rw.off + g_rw_used;
+    g_rw_used += bytes; g_rw_st.bytes += bytes;
+    return p;
+}
+// src NULL: arrays (index i = vertex i counted from the first vertex); else the engine's indices of isz (2 / 4) bytes.
+static inline uint32_t rw_src(const void *src, uint32_t isz, uint32_t i) {
+    return !src ? i : isz == 4 ? ((const uint32_t *)src)[i] : ((const uint16_t *)src)[i];
+}
+static void rw_fill(int k, const void *src, uint32_t isz, uint32_t n, void *dst, int out32) {
+    uint32_t *d32 = (uint32_t *)dst; uint16_t *d16 = (uint16_t *)dst; uint64_t o = 0;
+#define RW_PUT(v) do { const uint32_t v_ = (v); if (out32) d32[o++] = v_; else d16[o++] = (uint16_t)v_; } while (0)
+    if (k == VKN_RW_FAN) {   // triangle i = (v0, v[i+1], v[i+2]): GL's / NVN's fan, same winding
+        const uint32_t v0 = rw_src(src, isz, 0);
+        for (uint32_t i = 0; i + 2 < n; i++) { RW_PUT(v0); RW_PUT(rw_src(src, isz, i + 1)); RW_PUT(rw_src(src, isz, i + 2)); }
+    } else if (k == VKN_RW_QUADS) {   // quad (a, b, c, d) = (a, b, c) + (a, c, d), as the translator's {0, 1, 2, 0, 2, 3}
+        for (uint32_t q = 0; q + 4 <= n; q += 4) {
+            const uint32_t a = rw_src(src, isz, q), b = rw_src(src, isz, q + 1), c = rw_src(src, isz, q + 2), e = rw_src(src, isz, q + 3);
+            RW_PUT(a); RW_PUT(b); RW_PUT(c); RW_PUT(a); RW_PUT(c); RW_PUT(e);
+        }
+    } else {   // line loop: the strip of every index, then the first one again
+        for (uint32_t i = 0; i < n; i++) RW_PUT(rw_src(src, isz, i));
+        RW_PUT(rw_src(src, isz, 0));
+    }
+#undef RW_PUT
+}
+// The rewritten draw. src NULL: arrays draw of n vertices from first_vertex; else n engine indices at src (isz bytes each).
+// 0 = recorded / nothing to draw, 1 = dropped (counted).
+static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, uint32_t first_vertex, uint32_t n, uint32_t instances) {
+    const int k = rw_kind(in->prim), ix = src != NULL;
+    const uint8_t q = vkn_prim_rewrite(in->prim);
+    const uint64_t m = rw_count(k, n);
+    if (k < 0 || !m) { g_rw_st.degenerate++; return 0; }
+    if (m > 0x7fffffffull) {
+        g_rw_st.dropped++;
+        DRAW_RED(R_RW, "rewrite of engine primitive %u: %u %s give %llu indices (draw dropped)", in->prim, n, ix ? "indices" : "vertices", (unsigned long long)m);
+        return 1;
+    }
+    const int out32 = ix ? isz == 4 : n > 0xffffu;   // arrays: relative indices 0..n-1, the first vertex goes to vertexOffset
+    VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
+    const int r = prepare(in, q, &cb, &pi, &vf);
+    if (r) return r < 0 ? 1 : 0;
+    VkBuffer buf; VkDeviceSize off;
+    void *dst = rw_alloc(m * (out32 ? 4u : 2u), &buf, &off);
+    if (!dst) {
+        g_rw_st.dropped++;
+        DRAW_RED(R_RW, "rewrite of engine primitive %u: no transient index block for %llu indices (draw dropped)", in->prim, (unsigned long long)m);
+        return 1;
+    }
+    rw_fill(k, src, isz, n, dst, out32);
+    const VkIndexType it = out32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (g_b.ib != buf || g_b.ib_off != off || g_b.ib_type != it) {   // the engine's next indexed draw sees the difference and rebinds
+        vkCmdBindIndexBuffer(cb, buf, off, it);
+        g_b.ib = buf; g_b.ib_off = off; g_b.ib_type = it; g_st.ib_binds++;
+    }
+    vkCmdDrawIndexed(cb, (uint32_t)m, instances ? instances : 1, 0, ix ? 0 : (int32_t)first_vertex, 0);
+    g_st.draws++;
+    if (ix) g_st.indexed++; else g_st.arrays++;
+    g_rw_st.draws[ix][k]++; g_rw_st.indices += m;
+    return 0;
+}
+void vkn_draw_rw_stats_get(vkn_draw_rw_stats *s) { if (s) *s = g_rw_st; }
+
 int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count, uint32_t instances) {
     if (!in) return 1;
     if (!count) return 0;
@@ -583,8 +670,16 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
         DRAW_RED(R_IB, "index buffer %#llx: indices %u + %u of %u bytes each exceed its %llu bytes (draw dropped)", (unsigned long long)in->ib, first_index, count, isz, (unsigned long long)ib.size);
         return 1;
     }
+    if (rw_kind(in->prim) >= 0) {   // the engine's indices as it wrote them through the buffer's CPU pointer (mapped, coherent)
+        if (!ib.blk.cpu) {
+            g_rw_st.dropped++;
+            DRAW_RED(R_RW, "index buffer %#llx has no CPU pointer: no rewrite of engine primitive %u (draw dropped)", (unsigned long long)in->ib, in->prim);
+            return 1;
+        }
+        return draw_rewritten(in, (const uint8_t *)ib.blk.cpu + (uint64_t)first_index * isz, isz, 0, count, instances);
+    }
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
-    const int r = prepare(in, &cb, &pi, &vf);
+    const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     const VkIndexType it = vkn_buf_index_type(ib.index_size);
     if (g_b.ib != ib.blk.buf || g_b.ib_off != ib.blk.off || g_b.ib_type != it) {
@@ -599,8 +694,9 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
 int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     if (!in) return 1;
     if (!count) return 0;
+    if (rw_kind(in->prim) >= 0) return draw_rewritten(in, NULL, 0, first, count, 1);
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
-    const int r = prepare(in, &cb, &pi, &vf);
+    const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     vkCmdDraw(cb, count, 1, first, 0);
     g_st.draws++; g_st.arrays++;

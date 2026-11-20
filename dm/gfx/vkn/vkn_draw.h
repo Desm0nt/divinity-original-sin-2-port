@@ -82,6 +82,19 @@ typedef struct vkn_draw_stats2 {
 } vkn_draw_stats2;
 void vkn_draw_stats2_get(vkn_draw_stats2 *s);
 
+// ==== added by the immediate-draw piece (stage 3 wave 2, vkn_draw.c "index rewrite"): not part of the original contract ====
+// vkn_draw_arrays / vkn_draw_indexed draw engine primitives 2 (triangle fan), 4 (quads) and 7 (line loop) themselves: generated
+// u16 / u32 indices in a transient index area of vkn_draw.c, drawn as vkn_prim_rewrite's primitive (no caller change needed).
+enum { VKN_RW_FAN = 0, VKN_RW_QUADS = 1, VKN_RW_LOOP = 2, VKN_RW_KINDS = 3 };
+typedef struct vkn_draw_rw_stats {
+    uint64_t draws[2][VKN_RW_KINDS];   // [0 arrays / 1 indexed][fan / quads / loop] draws recorded with generated indices
+    uint64_t indices, bytes;           // indices generated, transient bytes handed out (u32-aligned)
+    uint64_t degenerate;               // nothing to draw (a fan under 3, quads under 4, a loop under 2 vertices / indices)
+    uint64_t dropped;                  // no transient block / no CPU pointer of the index buffer / too many indices
+    uint64_t blocks, retired;          // transient blocks taken / retired when full
+} vkn_draw_rw_stats;
+void vkn_draw_rw_stats_get(vkn_draw_rw_stats *s);
+
 #ifdef __cplusplus
 }
 #endif
