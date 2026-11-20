@@ -153,6 +153,17 @@ static inline int dt_t1_release(float moved, uint64_t held_ms, float slop, int s
     if (moved > slop) return DT_REL_NONE;
     return slong_ms > 0 && held_ms >= (uint64_t)slong_ms ? DT_REL_TIP : DT_REL_TAP;
 }
+// UI mode TOUCH, a finger on an open PC window (skills / inventory / crafting ...: no world probe, the press waits for the finger; owner 21.11:
+// "not clear how to put a spell onto the hot bar" - a hold first, then a move, started no drag: the long press had fired the right click while
+// the finger was still down). With the drag rule on (DM_DOS2_TOUCH_T_LIFT_LONG, default 1) a hold fires nothing while the finger is down (the
+// cursor rests there: the PC hover tooltip); a move past the slop after ANY hold is a drag (the press at the landing point, then the motion);
+// a still release decides: tap (click) / short long press (tooltip only) / long press (the right click = the PC context menu, on the lift).
+enum { DT_PREL_TAP = 0, DT_PREL_TIP = 1, DT_PREL_RCLICK = 2, DT_PREL_NONE = 3 /* moved: the drag ended (or nothing) */ };
+static inline int dt_panel_release(float moved, uint64_t held_ms, float slop, int slong_ms, int long_ms) {
+    if (moved > slop) return DT_PREL_NONE;
+    if (long_ms > 0 && held_ms >= (uint64_t)long_ms) return DT_PREL_RCLICK;
+    return slong_ms > 0 && held_ms >= (uint64_t)slong_ms ? DT_PREL_TIP : DT_PREL_TAP;
+}
 // Is a new finger down the second tap of a double tap: prev_up = when the previous TAP ended (0 = none), px, py its point; t, x, y the new one.
 static inline int dt_is_dtap(uint64_t prev_up, float px, float py, uint64_t t, float x, float y, int dtap_ms, float r) {
     if (!prev_up || t < prev_up || t - prev_up > (uint64_t)(dtap_ms > 0 ? dtap_ms : 0)) return 0;

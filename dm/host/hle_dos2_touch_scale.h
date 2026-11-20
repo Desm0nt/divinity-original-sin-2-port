@@ -40,7 +40,7 @@
 // ---- the panels (tools/dos2_ppanel_inv.py partyInventory_p: header INV_LIST_Y own px at its own scale <= TS_HEAD_S, then a bag header
 // 56 + the rest 4 + rows x 56 own px at the cell's scale C / 50)
 #define TS_INV_HEAD 202.0f
-#define TS_INV_HEAD_S 1.52f        // the header never grows past the iPad's (tools/dos2_ppanel_inv.py INV_HEAD_S)
+#define TS_INV_HEAD_S 1.19f        // the header's scale cap: 7 rows of 76 = the iPad's 968 px window (tools/dos2_ppanel_inv.py INV_HEAD_S; 1.52 before 21.11)
 #define TS_INV_FIX 60.0f
 #define TS_INV_PITCH 56.0f
 #define TS_INV_BOT 27.0f           // the window's bottom edge under the list (may reach under the hot bar band)

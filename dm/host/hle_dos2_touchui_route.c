@@ -121,6 +121,8 @@ static void (*g_kit_note)(const void *obj, uint32_t type, uint32_t id, int down,
 //    finds the lowest visible PC window in the walk order; once that object has had a mouse event in pass 2, the host sets [x5] = 1, so the
 //    engine itself gives every object below "an upper object took it" (vt+0xb0(event, 1), main+0xaea830) - and the world gets nothing. The
 //    HUD above the windows (column, hot bar, portraits) and the windows above the lowest one keep their own turn. DM_DOS2_TOUCH_ROUTE_BLOCK=0 off.
+//    Not during a UI finger drag (dm_dos2_touch_ui_drag: left down + moved, and 500 ms after its lift): the drop target under the finger gets
+//    the motion and the release even when the walk puts it below the window (owner 21.11: a skill from the book did not drop on the hot bar).
 // 7. A HOST CLICK FOR THE WORLD (hle_dos2_touch.c dm_dos2_touch_world_click: CONFIRM / the action plate): the next left / right button down and
 //    up go past every UI object (none sees them, [x5] stays 0), so the click lands in the world even when its point is under a HUD button
 //    (run 21.11: CONFIRM's click at the CONFIRM circle came back to CONFIRM, again and again).
@@ -188,6 +190,7 @@ static void rt_say(const uint8_t *o, uint32_t type, uint32_t fl, int why, uint32
 }
 uint64_t dm_dos2_touch_a_ms(void);   // hle_dos2_touch.c: when the npad last had A down (ms, monotonic)
 int dm_dos2_touch_in_game(void);     // hle_dos2_touch.c: a player UI set exists
+int dm_dos2_touch_ui_drag(void);     // hle_dos2_touch.c: a UI finger drags (or was lifted < 500 ms ago)
 int dm_dos2_touchui_is_block(uint32_t type);   // hle_dos2_touchui.c: a console menu that takes the whole input
 static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, uint64_t a4, uint64_t a5) {
     const uint8_t *o = (const uint8_t *)(uintptr_t)obj, *e = (const uint8_t *)(uintptr_t)ev, *m = (const uint8_t *)(uintptr_t)mgr;
@@ -201,7 +204,11 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
           if (!g_names_done) rt_names();
           // 6. the lowest visible PC window of this walk (UI mode TOUCH, in game)
           g_block_obj = NULL;
-          if (g_block && mouse && *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0 && dm_dos2_touch_in_game()) {
+          // ... not while a UI finger drags (owner 21.11: skill book -> hot bar did not drop): the drop target under the finger (a hot bar slot,
+          // the doll, another window) must see the motion and the release whatever window is open (hle_dos2_touch.c dm_dos2_touch_ui_drag)
+          const int drag = g_block && mouse && dm_dos2_touch_ui_drag();
+          if (drag && g_dbg) { static uint64_t said; if (rt_ms() - said > 2000) { said = rt_ms(); LOG("[route] a UI finger drag is on: the lowest open PC window does not stop the mouse (the drop target sees it)"); } }
+          if (g_block && mouse && !drag && *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0 && dm_dos2_touch_in_game()) {
               for (uint64_t i = 0; i < n; i++) {
                   const uint8_t *x = (const uint8_t *)list[i]; if (!x) continue;
                   const uint32_t xf = *(const volatile uint32_t *)(x + RT_OBJ_FLAGS), xt = *(const volatile uint32_t *)(x + RT_OBJ_TYPE);

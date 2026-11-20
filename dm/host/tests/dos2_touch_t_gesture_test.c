@@ -28,6 +28,14 @@ int main(void) {
     assert(dt_t1_release(5, 350, slop, slong) == DT_REL_TIP);
     assert(dt_t1_release(40, 100, slop, slong) == DT_REL_NONE);
     assert(dt_t1_release(5, 900, slop, 0) == DT_REL_TAP);                     // DM_DOS2_TOUCH_T_SLONG_MS=0: every still release clicks
+    // a finger on an open PC window (owner 21.11, drag after a hold): nothing fires while it is down; the lift decides; a move = the drag
+    assert(dt_panel_release(5, 100, slop, slong, lng) == DT_PREL_TAP);
+    assert(dt_panel_release(5, 350, slop, slong, lng) == DT_PREL_TIP);
+    assert(dt_panel_release(5, 599, slop, slong, lng) == DT_PREL_TIP);
+    assert(dt_panel_release(5, 600, slop, slong, lng) == DT_PREL_RCLICK);       // the long press: the context menu on the lift
+    assert(dt_panel_release(40, 100, slop, slong, lng) == DT_PREL_NONE);
+    assert(dt_panel_release(40, 2000, slop, slong, lng) == DT_PREL_NONE);       // held, then moved: it was a drag, the lift only drops
+    assert(dt_panel_release(5, 2000, slop, slong, 0) == DT_PREL_TIP);           // long press off: a still hold is the tooltip only
     // double tap: within 300 ms of the first tap's release and near it
     const float r = 2 * slop;
     assert(dt_is_dtap(1000, 500, 500, 1200, 510, 505, dtap, r));

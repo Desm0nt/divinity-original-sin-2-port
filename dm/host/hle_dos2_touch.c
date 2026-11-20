@@ -402,12 +402,17 @@ enum { G_IDLE, G_PENDING, G_DRAG, G_HELD, G_TWO, G_WPROBE /* world: left is down
        G_TMULTI /* UI mode TOUCH: two / three world fingers (pinch / rotation / pan, 2f / 3f taps, 3f swipe) */,
        G_KIT /* DM_DOS2_TOUCH_KIT=1: a finger on a dmTouch movie's element / window (hle_dos2_touch_kit.c: its recogniser, its delivery) */ };
 static struct { int st, f0, f1; float sx, sy, x0, y0, x1, y1, d0, wy, wmx, lx, ly; uint64_t t0; uint32_t pulse; int pulse_frames, wact, wmoved, wplace;
-                int tg, dtap, wtip, tui; uint64_t tup, tui_t; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation, 5 TOUCH pan; wplace: a placement-mode finger (no mouse press)
+                int tg, dtap, wtip, tui; uint64_t tup, tui_t;
+                int mdefer, dmoved; float mdx, mdy; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation, 5 TOUCH pan; wplace: a placement-mode finger (no mouse press)
 // tg: this gesture runs the UI mode TOUCH rules (latched when its first finger lands); dtap: its first finger is the second tap of a double tap;
 // wtip: its short long press was reached (tooltip); tup: when a probing world finger was lifted (G_WTAP); tui (UI mode TOUCH, run 20.11 review):
 // 1 = its probe press was taken by a HUD movie and it has not moved (the hold rules of dt_tui_state apply), 3 = the long press let the left go
 // off the element (the right click follows at tui_t), 2 = the right click was sent (the release does nothing), 4 = as 1 on the hot bar
 // (0x28): no right click there - a hold keeps the press for a drag (the iPad: a slot's long press = drag), released still = tooltip only
+// mdefer / mdx, mdy (owner 21.11, "a spell can't be put onto the hot bar"): a waiting UI finger (G_PENDING) that moves past the slop gets its
+// left press at the LANDING point in this poll and its motion one poll later - the records of one poll are read with the cursor as it is at
+// the end of the poll, so press + move in one poll pressed where the finger already was (off a 76 px skill icon after a quick start: no
+// skillSlot.onDown there, no startDragging). dmoved: the left is down and the finger has moved past the slop (a drag: dm_dos2_touch_ui_drag)
 // ---- world gestures (pass 7): virtual sticks for hle_hid.c, the tap = walk + A ----
 #include <stdatomic.h>
 static int g_world, g_world_walk_ms = 1400, g_world_probe_ms = 250, g_ui_ok, g_in_game, g_rot_swap, g_swipe_rot = 1, g_place = 1;   // pass 9: DM_DOS2_TOUCH_SWIPE_ROT / _PLACE
@@ -444,6 +449,12 @@ uint64_t dm_dos2_touch_a_ms(void);
 uint64_t dm_dos2_touch_a_ms(void) { return atomic_load(&g_a_ms); }
 int dm_dos2_touch_in_game(void);
 int dm_dos2_touch_in_game(void) { return g_in_game; }
+// 1 while a UI finger drags (left down, moved past the slop) and for 500 ms after its lift (the release record is walked after the gesture
+// ended): hle_dos2_touchui_route.c then lets the mouse past the lowest open PC window - the drop target (a hot bar slot under the skill book's
+// drag, the doll from the inventory) must see the motion and the release (owner 21.11: book -> hot bar did not drop)
+static uint64_t g_ui_drag_end;   // when the last UI finger drag (dmoved) was lifted: its release record is walked after the gesture ended
+int dm_dos2_touch_ui_drag(void);
+int dm_dos2_touch_ui_drag(void) { return (g.st == G_DRAG && g.dmoved) || (g_ui_drag_end && dt_ms() - g_ui_drag_end < 500); }
 // [DOS2] pack 3d (owner: "a tap on a menu item must win over the floating stick"): what the UI shows, for the Java pad (jni_android.c
 // nativeDos2UiState, any thread). Made on the game thread in dt_drain (every pad poll) from hle_dos2_touchui_route.c's walk of the visible UI
 // objects, so the Java side never reads game memory. bit 0 = a menu / modal / panel / dialog / context menu (any non-HUD UI that takes taps) is
@@ -720,6 +731,7 @@ static void dt_radial_up(float x, float y, int up) {
 // The bindings: the Switch Game.pak's PlayerProfiles/Eoc/keyboard_1.json (= the iPad's minus the mouse buttons; SkipVideo <- escape there).
 enum { ID_KEY_HOME = 0x0a, ID_KEY_DELETE = 0x0c, ID_KEY_END = 0x0d, ID_KEY_A = 0x24, ID_KEY_D = 0x27, ID_KEY_O = 0x32, ID_KEY_S = 0x36, ID_KEY_W = 0x3a,
        ID_KEY_LSHIFT = 0x6c, ID_KEY_LALT = 0x6d, ID_KEY_PAGEUP = 0x0b, ID_KEY_PAGEDOWN = 0x0e };
+static int g_t_lift_long = 1;   // DM_DOS2_TOUCH_T_LIFT_LONG=0: a still finger on a PC window right-clicks at the long press time (before 21.11)
 static int g_t_cfg = 1, g_t_slong_ms = 350, g_t_long_ms = 600, g_t_dtap_ms = 300, g_t_tapn_ms = 350, g_t_pan_ms = 1200, g_t_rot_ms = 700, g_t_cap_ms = 500;
 static int g_t_pan_inv, g_t_tips_ms, g_t_cones_ms, g_t_t3f_esc, g_t_tac;   // g_t_tac: what the host believes the tactical camera is (0 off)
 static float g_t_bz; static uint32_t g_t_zkey; static int g_t_zoom_ms = 90;   // DM_DOS2_TOUCH_T_ZOOM_MS: hold per pinch step   // pinch zoom: the owed hold of pageup (+) / pagedown (-) in ms and the key held now (0 none)
@@ -1017,7 +1029,7 @@ static void dt_step(void *mgr, const dt_ev *e) {
     case EV_DOWN:
         if (g.st == G_IDLE) {
             g_fmap = 0;
-            g.tg = dt_t_mode(); g.wtip = 0; g.tup = 0; g.tui = 0;   // UI mode TOUCH: latched for the whole gesture
+            g.tg = dt_t_mode(); g.wtip = 0; g.tup = 0; g.tui = 0; g.mdefer = 0; g.dmoved = 0;   // UI mode TOUCH: latched for the whole gesture
             g.dtap = g.tg && dt_is_dtap(g_t_tap_up, g_t_tap_x, g_t_tap_y, e->t, x, y, g_t_dtap_ms, 2 * slop);
         }
         if (g.st == G_IDLE && atomic_load(&g_rad_live)) {   // dos2-touch7: a ZL / ZR wheel is open: the finger points it
@@ -1118,8 +1130,18 @@ static void dt_step(void *mgr, const dt_ev *e) {
                 else if (g.wact == 3) dt_swipe_move(x, y);
             }
         } else if (e->id == g.f0 && g.st != G_IDLE && g.st != G_WTAP) {
-            if (g.st == G_PENDING && hypotf(x - g.sx, y - g.sy) > slop) { dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG; }   // press where it started
+            if (g.st == G_DRAG && g.mdefer) { g.mdx = x; g.mdy = y; break; }   // the press is in this poll: the motion waits for the next one
+            if (g.st == G_PENDING && hypotf(x - g.sx, y - g.sy) > slop) {   // press where it started
+                if (g.tg) {   // UI mode TOUCH (owner 21.11): after any hold too (nothing fired while it was still); the press at the landing point
+                    dt_move(mgr, g.sx, g.sy); dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG; g.dmoved = 1; g.mdefer = 1; g.mdx = x; g.mdy = y;
+                    if (g_dbg) LOG("[touch] TOUCH: UI finger moved after %llu ms: left press at %.0f,%.0f (where it landed), the motion from the next poll (a drag)",
+                                   (unsigned long long)(e->t - g.t0), (double)g.sx, (double)g.sy);
+                    break;
+                }
+                dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG;
+            }
             if (g.st == G_DRAG && (g.tui == 1 || g.tui == 4) && hypotf(x - g.sx, y - g.sy) > slop) g.tui = 0;   // TOUCH: a HUD finger that moved = a plain drag
+            if (g.st == G_DRAG && g.tui == 0 && hypotf(x - g.sx, y - g.sy) > slop) g.dmoved = 1;
             dt_move(mgr, x, y);
         }
         break;
@@ -1160,9 +1182,16 @@ static void dt_step(void *mgr, const dt_ev *e) {
             // short long press only the tooltip (the PC hover: the cursor stays there), no click - the iPad's ShortLongPress does not tap
             const int rel = dt_t1_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms);
             const float cx = g.dtap ? g_t_tap_x : x, cy = g.dtap ? g_t_tap_y : y;
+            // owner 21.11: with the drag rule a still long press right-clicks on the lift (the PC context menu; the map's flag), not while held
+            const int prel = g_t_lift_long ? dt_panel_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms, g_t_long_ms) : DT_PREL_NONE;
             dt_move(mgr, cx, cy);
             int dm_dos2_touchui_hud_corner(float x, float y);   // run 21.11: the top-right corner of an open panel = its close (hle_dos2_touchui_hud.c)
-            if (rel == DT_REL_TAP && !g.dtap && dm_dos2_touchui_hud_corner(cx, cy)) dt_t_note_tap(cx, cy, "UI: a panel's close corner");
+            if (prel == DT_PREL_RCLICK) {
+                dt_move(mgr, g.sx, g.sy); dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g_n_t_long++;
+                { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(1); }
+                if (g_dbg) LOG("[touch] TOUCH: UI long press lifted still at %.0f,%.0f (%llu ms): right click (context menu)", (double)g.sx, (double)g.sy, (unsigned long long)(e->t - g.t0));
+            }
+            else if (rel == DT_REL_TAP && !g.dtap && dm_dos2_touchui_hud_corner(cx, cy)) dt_t_note_tap(cx, cy, "UI: a panel's close corner");
             else if (rel == DT_REL_TAP) { dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0); { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } dt_t_note_tap(cx, cy, "UI"); }
             else { g_n_t_tip++; if (g_dbg) LOG("[touch] TOUCH: UI short long press over at %.0f,%.0f (%llu ms): tooltip (hover) only, no click", (double)x, (double)y, (unsigned long long)(e->t - g.t0)); }
         }
@@ -1174,7 +1203,8 @@ static void dt_step(void *mgr, const dt_ev *e) {
             if (g_dbg) LOG("[touch] TOUCH: HUD short long press over at %.0f,%.0f (%llu ms): tooltip only, released off the element (no click)", (double)x, (double)y, (unsigned long long)(e->t - g.t0));
         }
         else if (g.st == G_DRAG) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 0); }
-        g.st = G_IDLE; g.tui = 0;
+        if (g.st == G_DRAG && g.dmoved) { g_ui_drag_end = dt_ms(); if (!g_ui_drag_end) g_ui_drag_end = 1; }   // the drop: walked after this (route hook)
+        g.st = G_IDLE; g.tui = 0; g.mdefer = 0; g.dmoved = 0;
         break;
     }
 }
@@ -1855,10 +1885,11 @@ static void dt_drain(void) {
         else if (g_live_wait && g.st == G_IDLE && g_qh == g_qt) dt_live_switch(g_live_wait == 2, "deferred");   // DM_DOS2_TOUCH_LIVE=2: once the UI sets are gone
         g_pad_act = 0;
     }
-    if (g_qh == g_qt && !g.pulse_frames && g.st != G_PENDING && !(g.st == G_DRAG && (g.tui == 1 || g.tui == 3)) && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until && !dt_t_busy()) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
+    if (g_qh == g_qt && !g.mdefer && !g.pulse_frames && g.st != G_PENDING && !(g.st == G_DRAG && (g.tui == 1 || g.tui == 3)) && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until && !dt_t_busy()) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
     dt_window();
     if (!dt_state(mgr)) { pthread_mutex_lock(&g_qm); g_qh = g_qt; pthread_mutex_unlock(&g_qm); g.st = G_IDLE; g.pulse_frames = 0; dt_world_stop(); atomic_store(&g_w_rx, 0); g_w_rx_until = 0;
                           if (g_w3) { memset(&w3, 0, sizeof w3); dt_w3_sync(G_IDLE, 0); } return; }
+    if (g.mdefer) { g.mdefer = 0; if (g.st == G_DRAG) dt_move(mgr, g.mdx, g.mdy); }   // the motion of a press made in the previous poll (mdefer)
     dt_ev ev[64]; int n = 0;
     pthread_mutex_lock(&g_qm);
     while (g_qh != g_qt && n < 64) ev[n++] = g_q[g_qh++ & 255];
@@ -1888,7 +1919,7 @@ static void dt_drain(void) {
         { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(1); }
         static unsigned n; if (g_dbg || n++ < 40) LOG("[touch] TOUCH: long press on a HUD element at %.0f,%.0f = ContextMenu: the left let go off it, the right click there", (double)g.sx, (double)g.sy);
     }
-    if (g.st == G_PENDING && dt_ms() - g.t0 >= (uint64_t)(g.tg ? g_t_long_ms : g_hold_ms)) {   // long press, still: right click (ContextMenu / FlashRightMouse); TOUCH: the iPad's long press time
+    if (g.st == G_PENDING && !(g.tg && g_t_lift_long) && dt_ms() - g.t0 >= (uint64_t)(g.tg ? g_t_long_ms : g_hold_ms)) {   // TOUCH: on the lift (dt_panel_release)   // long press, still: right click (ContextMenu / FlashRightMouse); TOUCH: the iPad's long press time
         dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g.st = G_HELD;
         { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(1); }   // "IE ShortLongPress" / "IE LongPress" for the iPad movies
         if (g_log || (g_dbg && g_nlog < 64)) LOG("[touch] long press at %.0f,%.0f: right click", (double)g_cx, (double)g_cy);
@@ -2102,6 +2133,7 @@ void dm_dos2_touch_install(void) {
         if ((v = getenv("DM_DOS2_TOUCH_T")) && *v == '0') g_t_cfg = 0;
         if ((v = getenv("DM_DOS2_TOUCH_T_SLONG_MS")) && atoi(v) >= 0 && atoi(v) <= 3000) g_t_slong_ms = atoi(v);
         if ((v = getenv("DM_DOS2_TOUCH_T_LONG_MS")) && atoi(v) >= 150 && atoi(v) <= 5000) g_t_long_ms = atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCH_T_LIFT_LONG")) && *v == '0') g_t_lift_long = 0;
         if ((v = getenv("DM_DOS2_TOUCH_T_DTAP_MS")) && atoi(v) >= 0 && atoi(v) <= 2000) g_t_dtap_ms = atoi(v);
         if ((v = getenv("DM_DOS2_TOUCH_T_TAPN_MS")) && atoi(v) >= 50 && atoi(v) <= 3000) g_t_tapn_ms = atoi(v);
         if ((v = getenv("DM_DOS2_TOUCH_T_PAN_MS")) && atoi(v) >= 50 && atoi(v) <= 20000) g_t_pan_ms = atoi(v);
