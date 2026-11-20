@@ -352,6 +352,11 @@ static void *host_thread(void *arg) {
     char shaders[1200], error[512] = {0};
     snprintf(shaders, sizeof shaders, "%s/shaders", g_runtime);
     uint64_t t0 = now_ns(); LOG("boot: Vulkan initialization (shaders %s)", shaders);
+#ifdef DM_GAME_DOS2
+    // [DOS2] VK-NATIVE: DM_VK_NATIVE=1 turns the old layers' switches off BEFORE the translator's init reads them (family defaults such as
+    // DM_NR_SH are decided there; host_preload's call of the same function came too late: phone run V3_f).
+    { void dm_dos2_vkn_pre(void); dm_dos2_vkn_pre(); }
+#endif
     int graphics_rc = dm_android_vk_initialize(shaders, error, sizeof error);
     if (graphics_rc && dm_vk_driver_custom()) graphics_rc = vk_fallback_to_system(shaders, error, sizeof error, graphics_rc);   // [DOOM] 2.56 (KB DRV-07)
     if (graphics_rc) { LOG("boot: Vulkan initialization failed %d: %s", graphics_rc, error); front_android_boot_failed(-6); return NULL; }

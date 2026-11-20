@@ -544,6 +544,11 @@ static const char *const k_pre_off[] = {
     // translator features that consume NB / NR records or their native descriptors (k_nb_on and the safe-mode table)
     "DM_NB_RP", "DM_NB_OPBARRIER", "DM_NB_PIPE", "DM_NB_DESC", "DM_NB_UBO", "DM_NB_UIAREA", "DM_NB_MT", "DM_NR_DESC", "DM_NR_HEAT",
     "DM_NR_SH_SURF", "DM_NR_MAT", "DM_NR_TRX_STICKY", "DM_NR_TRX_ZC", "DM_NR_SEED", "DM_NR_SH", "DM_NR_Z3",
+    // Bundle swaps of the translator's shader loader (the backend takes its modules through that loader): replacement shaders that
+    // expect the translator to cooperate at the draw (a compare sampler for the dref shadow taps, the fused light draw, the on-chip
+    // chain, the FSR pass, trimmed vertex outputs). Phone run V3_f: with DM_NR_SH=1 still on (family default, read by the
+    // translator's init before this function ran) the last post pass wrote zeros and the lighting was incomplete.
+    "DM_NR_SH_PCF", "DM_NR_LIGHTFUSE", "DM_NR_LIGHTFUSE_FOG", "DM_NR_ONCHIP", "DM_NR_ONCHIP_FOG", "DM_NR_MAT_VS", "DM_NR_XLQ", "DM_HACK_FSR",
 };
 // Kept on purpose: DM_NR_MEM (RAM budget, no hook; with NR off it plans only the encoder and warm-up caches), DM_GFX_PRESENT_THREAD
 // (the presenter the frame part hands images to), DM_DOS2_* (screen shape, quality / DRS, touch UI: not NVN-stream features), the
