@@ -175,10 +175,25 @@ inline int xbg_nr_z8_default(){return 0;}
 // target objects in one word) and the backend notes what was recorded for it. 0 on every family: =2 is a verify that costs the game
 // thread a hash a draw, =1 (the replay) is not built. The app never sets them; safe-mode step 2 forces every one to 0.
 inline int xbg_nrn_default(){return 0;}
+// [DOS2] NR-NATIVE, the live steps of an answered draw (docs/dos2/nr/NR-NATIVE.md section 10): DM_NRN_LIVE - with a pass at 1, the image
+// walk, the vertex / index views and the ring blocks of a draw are answered by the epoch words of NR-ZERO section 13 (it sets the
+// defaults of DM_NR_Z3B / Z3C / Z3D: 1 apply, 2 verify - the live step runs and must agree). Series CN (20.11): a draw answered from
+// its row still pays 650 ns for the image walk and 430 ns for the views; the row alone saved 600 ns of 2 900. 0 on every family until
+// the phone has run =2 with bad 0. The app never sets it; safe-mode step 2 forces 0.
+inline int xbg_nrn_live_default(){return 0;}
+// [DOS2] NR-NATIVE shadows (NR-NATIVE.md section 11): DM_NRN_SHC - the structure hash of a cascade draw of NR-SHCACHE from the tape of its
+// card instead of hashing (exact by construction: the tape is compared byte for byte). 0 until the phone has run =2 with BAD 0.
+inline int xbg_nrn_shc_default(){return 0;}
 // [DOS2] NR-NATIVE step E (docs/dos2/nr/NR-NATIVE-E.md): DM_NRN_EV - a vertex / index range inside an engine buffer is versioned by the engine's
 // own events (creation, update, copy, destroy) instead of the dirty-page tracker. 0 on every family: =2 (the events against the tracker, a
 // difference decided by a hash of the bytes) has not run on a phone, so =1 is not proven. The app never sets it; safe-mode step 2 forces 0.
 inline int xbg_nrn_ev_default(){return 0;}
+// [DOS2] NR-NATIVE step D (docs/dos2/nr/NR-NATIVE-D.md): DM_NRN_LIST - the engine's draw-yourself functions put a note packet into the
+// list they build (the pass of their context, the hashes of the group); the card of a direct draw comes from the chain of groups.
+// DM_NRN_REC - the uniform-buffer binds and the draw record of a card draw written by the recorder itself, without the bodies of the
+// NVN entry points. Both read by the front end (dm/host/hle_dos2_nrn_d.inc, dm/gfx/nvn/nvn_nrn_d.inc); 0 on every device unless asked.
+inline int xbg_nrn_list_default(){return 0;}
+inline int xbg_nrn_rec_default(){return 0;}
 // [DOS2] NR-ZERO Z8, the parts of section 28 on (each its own switch; all 0 on every family until the phone runs; the app sets none;
 // safe-mode step 2 forces 0): DM_NR_Z8_THREAD - the walk on a thread of its own instead of the submitting thread.
 inline int xbg_nr_z8_thread_default(){return 0;}

@@ -39,7 +39,9 @@
 // a generation of the backend moved, 10 the published word is not compared with the card, 11 a bump of the publication's generation
 // leaves the old words ready, 12 the row's answer is compared without its NR-08 entry id, 13 a row of another pass answers; part 2 -
 // 14 a full table of rows starts again (a card whose short records are in flight loses its image), 15 the engine mask of the image
-// ignores the vertex-buffer slots of a dropped state record, 16 a dropped card stays published.
+// ignores the vertex-buffer slots of a dropped state record, 16 a dropped card stays published; eviction (series CN) - 17 retired rows
+// are removed at once (no quarantine: a short record in flight loses its image), 18 a retired row stays published, 19 a row that was
+// touched again is removed all the same, 20 the row's answer is compared without the lane word (NR-09's key id and variant words).
 #ifndef NRN_MUTATE
 #define NRN_MUTATE 0
 #endif
@@ -301,18 +303,27 @@ static inline void nrn_pstat_note(nrn_pstat *s, int r, unsigned diff) {
 // words the card does not hold and the resolution depends on, compared live before the row answers - the render pass definition of the
 // open pass, the backend's five shader objects, NR-08's six fixed words (viewport size, texture / sampler pool).
 enum { NRN_STAMPS = 3 };   // NR-08's id generation, NR-09's table generation, the backend's object epoch
-typedef struct nrn_ans { uint64_t plan, pent; int32_t did; uint8_t frag, pad[3]; uint64_t passdef, sh[5], f[6]; } nrn_ans;
+// lane (series CN, 20.11: 16 red lines in one frame - the same card, plan and NR-08 entry, another pipeline entry): the words NR-09's
+// table is asked with besides the state groups - the record's key id and the cheap words of the variant (primitive, samples, target
+// count / mask, depth format, restart). The card does not hold the key id (it follows what the registry knows about the targets).
+typedef struct nrn_ans { uint64_t plan, pent; int32_t did; uint8_t frag, pad[3]; uint64_t passdef, sh[5], f[6], lane; } nrn_ans;
 static inline int nrn_ans_same(const nrn_ans *a, const nrn_ans *b) {
     return a->plan == b->plan && a->pent == b->pent && (a->did == b->did || NRN_MUTATE == 12) && a->frag == b->frag && a->passdef == b->passdef &&
-           !memcmp(a->sh, b->sh, sizeof a->sh) && !memcmp(a->f, b->f, sizeof a->f);
+           !memcmp(a->sh, b->sh, sizeof a->sh) && !memcmp(a->f, b->f, sizeof a->f) && (a->lane == b->lane || NRN_MUTATE == 20);
+}
+static inline uint64_t nrn_lane_word(uint32_t key, unsigned prim, unsigned samples, unsigned rt_n, unsigned colors, unsigned depth_fmt, unsigned restart) {
+    return nrn_mix(nrn_mix((uint64_t)key << 32 | (prim & 0xffu) << 24 | (samples & 0xffu) << 16 | (rt_n & 0xffu) << 8 | (restart & 0xffu), colors), depth_fmt) | 1;
 }
 // The live words of a row against the state now: 0 = they stand; else which differ (NRN_L_*).
 enum { NRN_L_PASSDEF = 1, NRN_L_SHADERS = 2, NRN_L_FIXED = 4 };
 static inline unsigned nrn_ans_live(const nrn_ans *a, uint64_t passdef, const uint64_t sh[5], const uint64_t f[6]) {
     return (a->passdef != passdef ? NRN_L_PASSDEF : 0u) | (memcmp(a->sh, sh, sizeof a->sh) ? NRN_L_SHADERS : 0u) | (memcmp(a->f, f, sizeof a->f) ? NRN_L_FIXED : 0u);
 }
-typedef struct nrn_row { uint64_t card; nrn_ans a; uint64_t stamp[NRN_STAMPS]; uint32_t answered, relearned; uint8_t pass, unstable, pad[6]; } nrn_row;   // stamp all 0: no answer yet (the row holds an image only)
-typedef struct nrn_rows { nrn_row *e; uint32_t cap, n; uint64_t clears; } nrn_rows;
+// last: the tick (nrn_rows.now, the backend's frame count) the row was last asked / taught / given an image; retiring: dropped from the
+// publication, removed by the next compaction unless it is touched again.
+typedef struct nrn_row { uint64_t card; nrn_ans a; uint64_t stamp[NRN_STAMPS]; uint32_t answered, relearned; uint8_t pass, unstable, retiring, pad; uint32_t last; } nrn_row;   // stamp all 0: no answer yet (the row holds an image only)
+typedef struct nrn_rows { nrn_row *e; uint32_t cap, n, now, retire_at, nretiring; uint64_t clears, retired, removed, revived; } nrn_rows;
+static inline void nrn_row_touch(nrn_rows *t, nrn_row *e) { e->last = t->now; if (e->retiring && NRN_MUTATE != 19) { e->retiring = 0; t->nretiring--; t->revived++; } }
 static inline int nrn_rows_init(nrn_rows *t, uint32_t cap) {   // cap: a power of two
     memset(t, 0, sizeof *t);
     if (cap < 64 || (cap & (cap - 1))) return -1;
@@ -335,7 +346,7 @@ static inline nrn_row *nrn_rows_find(nrn_rows *t, uint64_t card, int pass, const
         if (e->card != card) continue;
         if (memcmp(e->stamp, stamp, sizeof e->stamp) && NRN_MUTATE != 9) { *why = NRN_F_STALE; return NULL; }
         if (e->pass != pass && NRN_MUTATE != 13) { *why = NRN_F_PASS; return NULL; }
-        *why = NRN_F_HIT;
+        *why = NRN_F_HIT; nrn_row_touch(t, e);
         return e;
     }
 }
@@ -347,10 +358,10 @@ static inline nrn_row *nrn_rows_get(nrn_rows *t, uint64_t card, int pass, int *m
     uint32_t i = (uint32_t)(card ^ card >> 32) & (t->cap - 1);
     for (;; i = (i + 1) & (t->cap - 1)) {
         nrn_row *e = &t->e[i];
-        if (e->card == card) return e;
+        if (e->card == card) { nrn_row_touch(t, e); return e; }
         if (e->card) continue;
         if (t->n * 4 >= t->cap * 3) return NULL;
-        memset(e, 0, sizeof *e); e->card = card; e->pass = (uint8_t)pass; t->n++; *made = 1;
+        memset(e, 0, sizeof *e); e->card = card; e->pass = (uint8_t)pass; e->last = t->now; t->n++; *made = 1;
         return e;
     }
 }
@@ -400,17 +411,59 @@ static inline int nrn_pub_ready(const nrn_pub *p, uint64_t card) {
     return g && w == ((card & ~0xffffull) | g);
 }
 
+// ---- eviction (phone series CN_v2, 20.11: walking fills the table - 12 288 rows - and no new card ever got a row) ----
+// A row cannot simply be removed: a short record written while its card was published is executed later and needs the image the row
+// carries. So eviction has two steps. nrn_rows_retire: rows not touched for `idle` ticks leave the publication (the game thread
+// writes their next record long) and are marked. nrn_rows_compact, at least NRN_QUARANTINE ticks later: the rows still marked are
+// removed and the table is built again (move() tells the owner of the images where each kept row went). A row touched in between -
+// a short record in flight, a long record of the card - is revived and stays. The quarantine is the longest a record may wait between
+// the game thread writing it and the backend executing it, in backend frames; a short record that finds no image is a red line.
+enum { NRN_QUARANTINE = 64 };
+static inline uint32_t nrn_rows_retire(nrn_rows *t, nrn_pub *p, uint32_t idle) {
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < t->cap; i++) { nrn_row *e = &t->e[i];
+        if (!e->card || e->retiring || t->now - e->last < idle) continue;
+        e->retiring = 1; k++; if (NRN_MUTATE != 18) nrn_pub_drop(p, e->card); }
+    t->nretiring += k; t->retired += k; t->retire_at = t->now;
+    return k;
+}
+static inline int nrn_rows_compact_due(const nrn_rows *t) { return t->nretiring && (t->now - t->retire_at >= NRN_QUARANTINE || NRN_MUTATE == 17); }
+// Removes the retiring rows. move(u, from, to): the row at index `from` is now at `to` (called once for every kept row; `from` indexes
+// the old array, `to` the new one); drop(u, from): the row at `from` is gone. Returns the rows removed, -1 = no memory (nothing changed).
+static inline int nrn_rows_compact(nrn_rows *t, void (*move)(void *, uint32_t, uint32_t), void (*drop)(void *, uint32_t), void *u) {
+    nrn_row *ne = (nrn_row *)calloc(t->cap, sizeof *ne);
+    if (!ne) return -1;
+    uint32_t kept = 0, gone = 0;
+    for (uint32_t i = 0; i < t->cap; i++) { const nrn_row *e = &t->e[i];
+        if (!e->card) continue;
+        if (e->retiring) { gone++; if (drop) drop(u, i); continue; }
+        uint32_t j = (uint32_t)(e->card ^ e->card >> 32) & (t->cap - 1);
+        while (ne[j].card) j = (j + 1) & (t->cap - 1);
+        ne[j] = *e; kept++; if (move) move(u, i, j); }
+    free(t->e); t->e = ne; t->n = kept; t->nretiring = 0; t->removed += gone;
+    return (int)gone;
+}
+// The policy of the backend, once a tick: 1 = rows were retired, 2 = the table was compacted, 0 = nothing. A table more than half
+// full retires what was idle for `idle` ticks; when that frees less than an eighth, *idle is halved (never below 2) for the next time.
+static inline int nrn_rows_tick(nrn_rows *t, nrn_pub *p, uint32_t *idle, void (*move)(void *, uint32_t, uint32_t), void (*drop)(void *, uint32_t), void *u) {
+    t->now++;
+    if (nrn_rows_compact_due(t)) return nrn_rows_compact(t, move, drop, u) >= 0 ? 2 : 0;
+    if (t->nretiring || t->n * 2 < t->cap) return 0;
+    if (nrn_rows_retire(t, p, *idle) * 8 < t->cap && *idle > 2) *idle /= 2;
+    return 1;
+}
+
 // ---- step B: counters of one pass (the backend's, a window of the 10 s line) ----
-enum { NRN_BW_NO_ROW, NRN_BW_STALE, NRN_BW_PASS, NRN_BW_GUARD, NRN_BW_FORM, NRN_BW_GATE, NRN_BW_PASSDEF, NRN_BW_SHADERS, NRN_BW_FIXED, NRN_BW_REFUSED, NRN_BW_N };
+enum { NRN_BW_NO_ROW, NRN_BW_STALE, NRN_BW_PASS, NRN_BW_GUARD, NRN_BW_FORM, NRN_BW_GATE, NRN_BW_PASSDEF, NRN_BW_SHADERS, NRN_BW_FIXED, NRN_BW_REFUSED, NRN_BW_LANE, NRN_BW_N };
 static inline const char *nrn_bw_name(int w) {
     static const char *const k[NRN_BW_N] = {"no row yet", "row of other generations", "row of another pass", "the prologue changed the draw", "special draw form",
-                                            "a gate of the short path", "another pass definition", "other shader objects", "viewport size / pools moved", "the answered half refused"};
+                                            "a gate of the short path", "another pass definition", "other shader objects", "viewport size / pools moved", "the answered half refused", "another NR-09 key id / variant word"};
     return w >= 0 && w < NRN_BW_N ? k[w] : "?";
 }
 typedef struct nrn_bstat {
     uint64_t asked, why[NRN_BW_N], answered[4], predicted, p_same, p_bad, p_lost, learned, relearned, kept,
              ready, ready_ans, ready_not,   // records the game thread flagged ready: answered (or predicted) at execution / not
-             shorts, s_noimg, s_changed, img_new, img_same, img_bad, img_full;   // part 2: short records (without an image: cannot be drawn right; that changed State), images captured / confirmed / differing / not kept (table full)
+             shorts, s_noimg, s_changed, img_new, img_same, img_bad, img_full, img_skip;   // part 2: short records (without an image: cannot be drawn right; that changed State), images captured / confirmed / differing / not kept (table full)
 } nrn_bstat;
 
 // ---- step B part 2: what a short record leaves out ----

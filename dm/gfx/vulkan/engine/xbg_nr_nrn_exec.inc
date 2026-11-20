@@ -23,7 +23,7 @@
 // that as "pipeline differs" at the frame LIGHTFUSE switched) and the special forms (QUADS, the UI shift, a geometry stage).
 // Lines every 10 s: "[nr] native <PASS> rows ...".
 namespace nrn{
-struct Pred{bool valid=false;nrn_ans a{};} P;bool full_told=false;
+struct Pred{bool valid=false;nrn_ans a{};} P;bool full_told=false;int lane_prim=0;
 nrz3::Stats zs;uint64_t ecalls=0,stamp_seen[NRN_STAMPS]{};
 inline void stamps(uint64_t st[NRN_STAMPS]){st[0]=nrdesc::tab_gen;st[1]=nrdraw::tab_gen();st[2]=nbpipe::epoch;}
 // The generations moved: no row answers any more, so no card is published.
@@ -33,11 +33,18 @@ inline int out(int w){++b[cur.pass].why[w];if(cur.rsv&NRN_T_READY)++b[cur.pass].
 // 0: not answered (nothing was touched); 1 / 2 / 3: as nrz3::draw. form: a special draw form (never answered).
 int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast,bool form){
     nrn_bstat &x=b[cur.pass];++x.asked;P.valid=false;answering=false;
+    // the lane word of this draw (series CN): what NR-09's table is asked with besides the state groups - learn() keeps it in the row
+    uint32_t active_colors=0;for(int i=0;i<state.rt.n;i++)if(state.rt.color[i])active_colors|=1u<<i;
+    lane_prim=prim;
+    lane_cur=nrdraw::cur?nrn_lane_word(nrdraw::cur->key,unsigned(prim),last_pass.valid?unsigned(last_pass.pass.samples):0u,unsigned(state.rt.n),active_colors,
+        state.rt.depth?unsigned(state.rt.depth->d.format):0u,nrdraw::restart_eff_of(prim,indexed)):0;lane_ok=lane_cur!=0;
     if(pgd)return out(NRN_BW_GUARD);
     if(form || pp)return out(NRN_BW_FORM);
     uint64_t st[NRN_STAMPS];stamps(st);sync(st);
     if(nrdraw::epoch!=nbpipe::epoch)return out(NRN_BW_STALE);   // the lane clears its table at its next draw
-    int why=0;nrn_row *r=nrn_rows_find(&R,cur.card,cur.pass,st,&why);
+    int why=0;nrn_row *r=cur_row;   // the row record() / pre() found for this record: one probe of the table a record
+    if(r && r->card==cur.card){if(memcmp(r->stamp,st,sizeof r->stamp)){why=NRN_F_STALE;r=nullptr;}else if(r->pass!=cur.pass){why=NRN_F_PASS;r=nullptr;}else why=NRN_F_HIT;}
+    else r=nrn_rows_find(&R,cur.card,cur.pass,st,&why);
     if(!r)return out(why==NRN_F_NONE?NRN_BW_NO_ROW:why==NRN_F_STALE?NRN_BW_STALE:NRN_BW_PASS);
     const nrd_tail &t=*nrdraw::cur;
     if(nrz3::gate(t,pp,draw_fast,false))return out(NRN_BW_GATE);
@@ -45,9 +52,9 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
     if(!last_pass.valid)return out(NRN_BW_PASSDEF);
     uint64_t sh[5],f[6];for(unsigned i=0;i<5;i++)sh[i]=uint64_t(uintptr_t(state.shader[i]));nrdesc::fixed_words(f);
     if(const unsigned l=nrn_ans_live(&r->a,uint64_t(uintptr_t(last_pass.pass.definition)),sh,f))return out(l&NRN_L_PASSDEF?NRN_BW_PASSDEF:l&NRN_L_SHADERS?NRN_BW_SHADERS:NRN_BW_FIXED);
+    if(r->a.lane!=lane_cur)return out(NRN_BW_LANE);   // another key id of the front end or another variant word: NR-09 would be asked for another entry
     if(mode[cur.pass]==2){P.valid=true;P.a=r->a;++x.predicted;if(cur.rsv&NRN_T_READY)++x.ready_ans;return 0;}   // verify: the path without the row draws; learn() compares
     nrdraw::Tm tm;tm.timed=!(++ecalls&63);tm.t0=tm.timed?timing_clock():0;tm.sp=false;
-    uint32_t active_colors=0;for(int i=0;i<state.rt.n;i++)if(state.rt.color[i])active_colors|=1u<<i;
     nrz_val v{};v.plan=r->a.plan;v.pent=r->a.pent;v.did=r->a.did;v.frag=r->a.frag;
     nrz3::Ans a;a.v=&v;a.pl=reinterpret_cast<nrdesc::Plan*>(uintptr_t(r->a.plan));a.frag=r->a.frag!=0;a.fhit=true;a.psk=false;a.pp=false;a.z8=true;a.f=f;a.varw=nullptr;
     a.re=nrdraw::restart_eff_of(prim,indexed);a.active_colors=active_colors;a.t=&t;
@@ -65,16 +72,18 @@ void learn(const Pass &p){
     if(answering)return;
     if(!(nrdesc::z_out==NRZD_HIT || nrdesc::z_out==NRZD_BUILT)){if(was)++x.p_lost;return;}   // NR-08 did not serve this draw: there is no entry to name
     nrdesc::Plan *pl=nrdesc::plan_for();const nrdraw::Hand &H=nrdraw::H;
-    if(!pl || pl->last<0 || !pl->layout || !H.have_ent || !H.ent || H.qpat || H.ui){if(was)++x.p_lost;return;}
+    if(!pl || pl->last<0 || !pl->layout || !H.have_ent || !H.ent || H.qpat || H.ui || !lane_ok){if(was)++x.p_lost;return;}
     nrn_ans now;memset(&now,0,sizeof now);
     now.plan=uint64_t(uintptr_t(pl));now.pent=uint64_t(uintptr_t(H.ent));now.did=pl->last;now.frag=uint8_t(desc_frag_only_shaders());now.passdef=uint64_t(uintptr_t(p.definition));
+    {uint32_t ac=0;for(int i=0;i<state.rt.n;i++)if(state.rt.color[i])ac|=1u<<i;   // the lane word from what the lane itself used (its tail, its pass, its restart word)
+     now.lane=nrn_lane_word(H.t.key,unsigned(lane_prim),unsigned(p.samples),unsigned(state.rt.n),ac,state.rt.depth?unsigned(state.rt.depth->d.format):0u,state.restart_eff);}
     for(unsigned i=0;i<5;i++)now.sh[i]=uint64_t(uintptr_t(state.shader[i]));nrdesc::fixed_words(now.f);
     if(was){
         if(nrn_ans_same(&P.a,&now))++x.p_same;
         else{++x.p_bad;if(told<16){++told;
-            xbg_logf("【红】[nr] native: the row of a card is not what the path without it resolved (pass %s, card %016llx, frame %llu): plan %p / %p, NR-08 entry %d / %d, pipeline entry %p / %p, "
+            xbg_logf("【红】[nr] native: the row of a card is not what the path without it resolved (pass %s, card %016llx, frame %llu): plan %p / %p, NR-08 entry %d / %d, pipeline entry %p / %p, lane word %016llx / %016llx, "
                 "fragment-only reads %d / %d, pass definition %p / %p, vs=%s ps=%s - the card does not describe this draw",nrn_pass_name(cur.pass),(unsigned long long)cur.card,
-                (unsigned long long)stats.presents.load(),(void*)uintptr_t(P.a.plan),(void*)pl,P.a.did,now.did,(void*)uintptr_t(P.a.pent),(const void*)H.ent,int(P.a.frag),int(now.frag),
+                (unsigned long long)stats.presents.load(),(void*)uintptr_t(P.a.plan),(void*)pl,P.a.did,now.did,(void*)uintptr_t(P.a.pent),(const void*)H.ent,(unsigned long long)P.a.lane,(unsigned long long)now.lane,int(P.a.frag),int(now.frag),
                 (void*)uintptr_t(P.a.passdef),(void*)uintptr_t(now.passdef),state.shader[0]?state.shader[0]->key.c_str():"-",state.shader[4]?state.shader[4]->key.c_str():"-");}}}
     uint64_t st[NRN_STAMPS];stamps(st);sync(st);
     if(nrdraw::epoch!=nbpipe::epoch)return;   // the caches moved inside this draw
@@ -130,7 +139,7 @@ void pre(const uint8_t *p,size_t n,const nbd_hdr &h,const uint8_t *binds){
     nrn_tail t;if(!nrn_tail_get(p,n,nrn_tail_off(&h),h.flags,&t) || !(t.rsv&NRN_T_SHORT))return;
     nrn_bstat &x=b[t.pass];++x.shorts;
     nrn_short_ext sx;const bool ext=nrn_short_ext_get(p,n,nrn_tail_off(&h)+NRN_TAIL_BYTES,&sx)!=0;
-    int made=0;nrn_row *r=nrn_rows_get(&R,t.card,t.pass,&made);Img *I=r && !made?img_of(r):nullptr;
+    int made=0;nrn_row *r=nrn_rows_get(&R,t.card,t.pass,&made);Img *I=r && !made?img_of(r):nullptr;pre_row=r;pre_card=r?t.card:0;
     if(!I || !ext){++x.s_noimg;if(told<16){++told;xbg_logf("【红】[nr] native: a short record %s (pass %s, card %016llx, frame %llu) - the state and the textures it left out are whatever State holds",
         ext?"of a card that has no image":"without its list of what was left out",nrn_pass_name(t.pass),(unsigned long long)t.card,(unsigned long long)stats.presents.load());}return;}
     uint32_t tm[NRN_TEX_STAGES]={};for(int k=0;k<2;k++)if(sx.st[k]!=0xff)tm[sx.st[k]]|=sx.tm[k];
@@ -144,8 +153,12 @@ void image(){
     nrn_bstat &x=b[cur.pass];
     int made=0;nrn_row *r=nrn_rows_get(&R,cur.card,cur.pass,&made);
     if(!r){++x.img_full;if(!full_told){full_told=true;xbg_logf("【红】[nr] native: the rows of the cards are full (%u) - new cards get no row (drawn by the path without it; raise DM_NRN_MAX)",R.cap);}return;}
+    cur_row=r;
     const size_t i=size_t(r-R.e);if(imgs.size()<R.cap)imgs.resize(R.cap);
     Img *I=imgs[i].get();
+    // series CN (CN_a0: the translator paid more for the images than the rows saved): in apply mode the image of a published card is
+    // compared on 1 long record in 8, in verify mode on every one (the image is only ever READ by a short record of the card)
+    if(I && mode[cur.pass]==1 && !r->unstable && (++img_tick&7)){++x.img_skip;return;}
     if(I){unsigned ts=0;const int f=img_walk(*I,W.m,W.tex,false,ts);
         if(f<0){++x.img_same;return;}
         ++x.img_bad;r->unstable=1;nrn_pub_drop(&PUB,cur.card);
@@ -156,7 +169,14 @@ void image(){
     nrstate3::snap_of(&I->s,&state,missing_program);
     for(unsigned st=0;st<NRN_TEX_STAGES;st++)memcpy(I->tex[st],state.tex[st],sizeof I->tex[st]);
     if(!r->unstable)nrn_pub_set(&PUB,cur.card);}
-void img_release(){imgs.clear();imgs.shrink_to_fit();W=Wrote{};full_told=false;}
+void img_release(){imgs.clear();imgs.shrink_to_fit();W=Wrote{};full_told=false;cur_row=pre_row=nullptr;pre_card=0;}
+// Eviction (nr_nrn.h): once a submission. The images follow their rows into the rebuilt table.
+std::vector<std::unique_ptr<Img>> imgs2;uint64_t ev_told=0;
+void ev_move(void *,uint32_t from,uint32_t to){if(from<imgs.size() && imgs[from]){if(imgs2.size()<R.cap)imgs2.resize(R.cap);imgs2[to]=std::move(imgs[from]);}}
+void evict_tick(){
+    const int k=nrn_rows_tick(&R,&PUB,&idle,ev_move,nullptr,nullptr);
+    if(k!=2)return;
+    imgs.swap(imgs2);imgs2.clear();cur_row=pre_row=nullptr;pre_card=0;P.valid=false;full_told=false;}
 // From nbdraw::apply after the draw: a prediction whose draw never reached the lane's tail (the old tail finished it, a prologue dropped it).
 void lost(){W=Wrote{};if(P.valid){P.valid=false;++b[cur.pass].p_lost;}}   // (W: what was written since the previous draw record starts again)
 void exec_tick(){
@@ -168,12 +188,13 @@ void exec_tick(){
             "the pass began anew %llu); verify: predicted %llu (%.1f%%), the path without the row resolved the same %llu, BAD %llu, not compared (the draw left the short path) %llu; not asked / "
             "refused: %s; rows learnt %llu, replaced %llu, confirmed %llu; table %u of %u rows; the game thread saw the card published for %llu records - %llu of them "
             "answered / predicted here, %llu not; part 2: SHORT records %llu (State changed by the image %llu, WITHOUT an image %llu); images of long records: new %llu, the same as State %llu, "
-            "DIFFER %llu, not kept (table full) %llu",
+            "DIFFER %llu, not kept (table full) %llu, not compared (apply: 1 in 8 is) %llu; eviction: rows retired %llu, removed %llu, revived %llu, idle limit %u ticks",
             nrn_pass_name(p),nrn_pass_name(p),int(mode[p]),(unsigned long long)x.asked,(unsigned long long)ans,100.*double(ans)/as,(unsigned long long)x.answered[1],(unsigned long long)x.answered[2],
             (unsigned long long)x.answered[3],(unsigned long long)x.predicted,100.*double(x.predicted)/as,(unsigned long long)x.p_same,(unsigned long long)x.p_bad,(unsigned long long)x.p_lost,
             w.empty()?"none":w.c_str(),(unsigned long long)x.learned,(unsigned long long)x.relearned,(unsigned long long)x.kept,R.n,R.cap,
             (unsigned long long)x.ready,(unsigned long long)x.ready_ans,(unsigned long long)x.ready_not,(unsigned long long)x.shorts,(unsigned long long)x.s_changed,(unsigned long long)x.s_noimg,
-            (unsigned long long)x.img_new,(unsigned long long)x.img_same,(unsigned long long)x.img_bad,(unsigned long long)x.img_full);
+            (unsigned long long)x.img_new,(unsigned long long)x.img_same,(unsigned long long)x.img_bad,(unsigned long long)x.img_full,(unsigned long long)x.img_skip,
+            (unsigned long long)R.retired,(unsigned long long)R.removed,(unsigned long long)R.revived,idle);
         b[p]=nrn_bstat{};}}
 }
 extern "C" const void *xbg_nrn_pub(void){return &nrn::PUB;}

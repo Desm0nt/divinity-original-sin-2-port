@@ -426,9 +426,67 @@ static void test_pub(void) {
     }
 }
 
+// (7) eviction (phone series CN_v2: walking filled the table and no new card got a row). The game thread walks through a large
+// population of cards; a record is written short when its card is published at that moment and is executed EV_LAG frames later.
+// Every short record must find the row of its card with the image the row was given; rows must keep being learnt to the end.
+enum { EV_CAP = 256, EV_LAG = 30, EV_FRAMES = 6000, EV_PER = 24 };
+static uint64_t g_ev_img[EV_CAP], g_ev_img2[EV_CAP];
+static void ev_move(void *u, uint32_t from, uint32_t to) { (void)u; g_ev_img2[to] = g_ev_img[from]; }
+static void test_evict(void) {
+    nrn_rows T; nrn_pub *P = (nrn_pub *)calloc(1, sizeof *P); CHECK(P && nrn_rows_init(&T, EV_CAP) == 0, "eviction: table");
+    typedef struct { uint64_t card; uint8_t shrt; } rec;
+    static rec q[EV_LAG + 1][EV_PER];
+    uint32_t idle = 4; uint64_t shorts = 0, longs = 0, norow_late = 0, late = 0, compactions = 0, lost = 0;
+    memset(g_ev_img, 0, sizeof g_ev_img);
+    for (int f = 0; f < EV_FRAMES; f++) {
+        // the backend executes the frame written EV_LAG frames ago
+        if (f > EV_LAG) { rec *r = q[f % (EV_LAG + 1)];
+            for (int i = 0; i < EV_PER; i++) { int made = 0; nrn_row *e = nrn_rows_get(&T, r[i].card, 0, &made);
+                if (r[i].shrt) { shorts++;
+                    const int ok = e && !made && g_ev_img[e - T.e] == r[i].card;
+                    if (!ok) lost++;
+                    CHECK(ok, "eviction: a short record finds the row and the image of its card (frame %d)", f);
+                    if (e && made) { e->card = 0; T.n--; }   // (a failing run: do not let the made row hide the next miss)
+                } else { longs++; if (f > EV_FRAMES / 2) { late++; if (!e) norow_late++; }
+                    if (e) { g_ev_img[e - T.e] = r[i].card; if (!e->unstable) nrn_pub_set(P, r[i].card); } } } }
+        // eviction, once a frame
+        memset(g_ev_img2, 0, sizeof g_ev_img2);
+        const int k = nrn_rows_tick(&T, P, &idle, ev_move, NULL, NULL);
+        if (k == 2) { memcpy(g_ev_img, g_ev_img2, sizeof g_ev_img); compactions++;
+            for (uint32_t i = 0; i < T.cap; i++) CHECK(!T.e[i].card || g_ev_img[i] == T.e[i].card || !g_ev_img[i], "eviction: the image followed its row");
+            for (uint32_t i = 0; i < T.cap; i++) CHECK(!T.e[i].retiring, "eviction: no retiring row survives a compaction"); }
+        // the game thread writes this frame: a window of the population that moves on (walking), with a few cards that come back
+        rec *w = q[f % (EV_LAG + 1)];   // the slot the backend just emptied: executed EV_LAG + 1 frames from now
+        for (int i = 0; i < EV_PER; i++) { const uint64_t id = (uint64_t)(f / 3) + rn(40) + (rn(50) ? 0 : rn(2000));
+            w[i].card = (id + 1) * 0x9e3779b97f4a7c15ull | 1; w[i].shrt = (uint8_t)nrn_pub_ready(P, w[i].card); }
+        if (g_fail > 12) break;
+    }
+    CHECK(compactions > 20 && shorts > (uint64_t)EV_FRAMES * EV_PER / 3, "eviction: the table was compacted %llu times, short records %llu of %llu (without an image %llu)", compactions, shorts, shorts + longs, lost);
+    CHECK(norow_late * 20 < late + 1, "eviction: new cards keep getting rows (%llu of %llu long records of the second half found the table full)", norow_late, late);
+    CHECK(T.removed && T.revived, "eviction: rows were removed (%llu) and rows in flight were revived (%llu)", T.removed, T.revived);
+    // the pieces alone
+    { nrn_rows t; nrn_rows_init(&t, 64); nrn_pub *p2 = (nrn_pub *)calloc(1, sizeof *p2); int made;
+      const uint64_t a = 0x1111000011110001ull, b = 0x2222000022220001ull;
+      nrn_rows_get(&t, a, 0, &made); nrn_rows_get(&t, b, 0, &made); nrn_pub_set(p2, a); nrn_pub_set(p2, b);
+      t.now = 100; nrn_rows_get(&t, b, 0, &made);   // b was just used
+      CHECK(nrn_rows_retire(&t, p2, 50) == 1 && !nrn_pub_ready(p2, a) && nrn_pub_ready(p2, b), "retire: the idle row leaves the publication, the used one stays");
+      CHECK(!nrn_rows_compact_due(&t), "compact: not before the quarantine");
+      t.now += NRN_QUARANTINE; CHECK(nrn_rows_compact_due(&t) && nrn_rows_compact(&t, NULL, NULL, NULL) == 1 && t.n == 1, "compact: the retired row is removed after the quarantine");
+      nrn_row *rb = nrn_rows_get(&t, b, 0, &made); CHECK(rb && !made, "compact: the kept row is found again");
+      nrn_rows_get(&t, a, 0, &made); CHECK(made, "compact: the removed card gets a fresh row");
+      t.now += 100; nrn_rows_retire(&t, p2, 50); nrn_rows_get(&t, a, 0, &made); t.now += NRN_QUARANTINE;
+      CHECK(nrn_rows_compact(&t, NULL, NULL, NULL) == 1 && nrn_rows_get(&t, a, 0, &made) && !made, "a retiring row that was touched stays");
+      nrn_rows_free(&t); free(p2); }
+    { nrn_ans x, y; memset(&x, 0, sizeof x); x.lane = nrn_lane_word(7, 4, 1, 1, 0, 0x32, 0); y = x; y.lane = nrn_lane_word(8, 4, 1, 1, 0, 0x32, 0);
+      CHECK(x.lane != y.lane && !nrn_ans_same(&x, &y), "another NR-09 key id is another answer (series CN: the pipeline entry moved under the card)");
+      CHECK(nrn_lane_word(7, 4, 1, 1, 0, 0x32, 0) != nrn_lane_word(7, 5, 1, 1, 0, 0x32, 0) && nrn_lane_word(7, 4, 1, 1, 0, 0x32, 0) != nrn_lane_word(7, 4, 1, 1, 1, 0x32, 0) &&
+            nrn_lane_word(7, 4, 1, 1, 0, 0x32, 0) != nrn_lane_word(7, 4, 1, 1, 0, 0x33, 0) && nrn_lane_word(7, 4, 1, 1, 0, 0x32, 0) != nrn_lane_word(7, 4, 1, 1, 0, 0x32, 1), "the lane word reads every variant word"); }
+    nrn_rows_free(&T); free(P);
+}
+
 int main(void) {
     objects();
-    test_tail(); test_pass(); test_env(); test_equiv(); test_journal(); test_rows(); test_pub();
+    test_tail(); test_pass(); test_env(); test_equiv(); test_journal(); test_rows(); test_pub(); test_evict();
     printf("nr_nrn_test%s: %llu checks, %llu failed: %s\n", NRN_MUTATE ? " (mutation)" : "", g_checks, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

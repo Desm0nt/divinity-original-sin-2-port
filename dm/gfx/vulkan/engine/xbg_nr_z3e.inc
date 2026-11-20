@@ -17,6 +17,7 @@
 //              3  does not exist: nothing is drawn differently, there is nothing to poison (red line, off)
 //   DM_NR_Z3C_MAX  entries of the view table (4096; a power of two, 256..65536; 88 bytes each)
 // Lines: "[nr] DM_NR_Z3B=... DM_NR_Z3C=... DM_NR_Z3D=..." at the start, "[nr] z3 epochs: ..." every 10 s, red "【红】[nr] z3 epochs: ...".
+#include "../../nr/nr_nrn.h"   // [DOS2] NR-NATIVE DM_NRN_LIVE: nrn_env_modes (a pure C header, guarded)
 namespace nrzx{
 nrz_vtab vt{};uint32_t vmax=4096;uint64_t next_ns=0;bool read=false;
 void red(const char *fmt,...){if(told>=16)return;++told;char b[640];va_list ap;va_start(ap,fmt);vsnprintf(b,sizeof b,fmt,ap);va_end(ap);
@@ -27,7 +28,13 @@ void init(int desc_mode,int draw_mode,int ui_mode){
     auto num=[](const char *n,int d){const char *e=getenv(n);int v=e && *e?atoi(e):d;
         if(v==3){xbg_logf("【红】[nr] %s=3 does not exist (nothing is drawn differently, nothing to poison; =2 compares): off",n);v=0;}
         if(v<0 || v>2){xbg_logf("【红】[nr] %s=%d: only 0 / 1 / 2: off",n,v);v=0;}return v;};
-    int b=num("DM_NR_Z3B",xbg_nr_z3b_default()),c=num("DM_NR_Z3C",xbg_nr_z3c_default()),d=num("DM_NR_Z3D",xbg_nr_z3d_default());
+    // [DOS2] NR-NATIVE DM_NRN_LIVE (default 0, xbg_nrn_live_default): with a pass of DM_NRN at 1 the three words below default to its value
+    // (1 apply / 2 verify) - the live steps a card-answered draw still runs; a switch set by hand wins
+    int live=num("DM_NRN_LIVE",xbg_nrn_live_default());
+    if(live){uint8_t m[NRN_P_N];unsigned bad=0;bool apply=false;nrn_env_modes([](const char *k)->const char*{return getenv(k);},xbg_nrn_default(),m,&bad);for(int p=0;p<NRN_P_N;p++)apply|=m[p]==1;
+        if(!apply){xbg_logf("[nr] DM_NRN_LIVE=%d: no pass of DM_NRN is at 1 (the rows answer nothing) - off",live);live=0;}
+        else xbg_logf("[nr] DM_NRN_LIVE=%d (NR-NATIVE: the live steps of an answered draw): the image word, the mesh view table and the ring word (DM_NR_Z3B / Z3C / Z3D) default to %d",live,live);}
+    int b=num("DM_NR_Z3B",live?live:xbg_nr_z3b_default()),c=num("DM_NR_Z3C",live?live:xbg_nr_z3c_default()),d=num("DM_NR_Z3D",live?live:xbg_nr_z3d_default());
     if(b && desc_mode!=1){xbg_logf("【红】[nr] DM_NR_Z3B=%d needs DM_NR_DESC=1 (now %d): off",b,desc_mode);b=0;}
     if(d && desc_mode!=1){xbg_logf("【红】[nr] DM_NR_Z3D=%d needs DM_NR_DESC=1 (now %d): off",d,desc_mode);d=0;}
     if(d && nrbuf::ring_mode!=nrbuf::RING_INPLACE){xbg_logf("[nr] DM_NR_Z3D=%d: the constant ring is not served in place on this device (the mirror copies granules at their first bind - nothing to remember): off",d);d=0;}

@@ -52,6 +52,7 @@
 #include "../../nr/nr_sort.h"
 namespace nbord{extern const uint8_t *stop;}   // xbg_nb_order.inc (later in this unit): execute() returns before the record at stop
 void execute(const uint8_t *pc,unsigned depth,uint64_t &budget);
+#include "../../nr/nr_nrn_shc.h"   // [DOS2] NR-NATIVE shadows DM_NRN_SHC: the tape of the structure hash (pure C)
 namespace nrshc{
 int mode=-1;bool live=false;   // mode: -1 not read yet, 0 off, 1-3 on, -2 switch off after this range, -3 switched off (the images go at the next FRAME)
 nrshc_par par=nrshc_par_default();int verify_every=30;
@@ -126,9 +127,11 @@ unsigned reds=0;uint64_t next_ns=0;
 void red(const char *fmt,...) __attribute__((format(printf,1,2)));
 void red(const char *fmt,...){if(reds++>=16)return;char b[512];va_list a;va_start(a,fmt);vsnprintf(b,sizeof b,fmt,a);va_end(a);xbg_logf("【红】[nr] shcache: %s",b);}
 inline uint64_t img_key(const tex_t *t){return t?uint64_t(uintptr_t(t->mem)):0;}
+void ser_init();   // [DOS2] NR-NATIVE shadows: DM_NRN_SHC (below, next to the hash)
 void init(){
     const char *e=getenv("DM_NR_SHCACHE");int m=e && *e?atoi(e):xbg_nr_shcache_default(gpu_policy);if(m<0 || m>=NRSHC_MODES){xbg_logf("【红】[nr] shcache: DM_NR_SHCACHE=%d is not 0-3: off",m);m=0;}
     auto num=[](const char *n,uint32_t def,uint32_t lo,uint32_t hi){const char *v=getenv(n);if(!v || !*v)return def;long x=atol(v);return x<long(lo)?lo:x>long(hi)?hi:uint32_t(x);};
+    ser_init();   // [DOS2] NR-NATIVE shadows: DM_NRN_SHC
     par.stable=num("DM_NR_SHCACHE_STABLE",3,1,60);par.min_static=num("DM_NR_SHCACHE_MIN",64,1,NRSHC_DRAWS);par.max_age=num("DM_NR_SHCACHE_AGE",120,1,100000);par.probe=num("DM_NR_SHCACHE_PROBE",8,0,1000);
     verify_every=int(num("DM_NR_SHCACHE_VERIFY",30,0,100000));diag_every=num("DM_NR_SHCACHE_DIAG",64,0,100000);if(diag_every==1)diag_every=2;
     cpuw=int(num("DM_NR_SHCACHE_CPUW",1,0,2));if(cpuw==1 && !nvn_dirty_version)cpuw=0;   // [shc4] no tracker: CPU-writable ranges are no members
@@ -204,6 +207,30 @@ void again_run(int how,const uint8_t *stop,uint64_t &budget){
     if(mode>0 && ord!=rg->ndraw && rg->ndraw<=NRSHC_DRAWS){++s.desync;red("execution 2 met %u draws, execution 1 had %u (range seq %u node %d, cascade %d, %s, how %d, updates %u) - switch off",
         ord,rg->ndraw,R.seq,int(R.node),R.k,rg->action==NRSHC_A_HIT?"hit":rg->action==NRSHC_A_BUILD?"build":"normal",how,ud?ud->n:0u);switch_off();}
     put(*end,end_missing);delete end;cur_op=saved_op;}
+// ---- [DOS2] NR-NATIVE shadows, DM_NRN_SHC (docs/dos2/nr/NR-NATIVE.md section 11): the structure hash of a draw from its card ----
+// Phone 20.11 (N_v1 / CN): 861 cascade draws a frame are hashed at 1.37 us each - 1.2 ms of the translation thread - and about a third
+// of that is the hashing of words that do not change from frame to frame for one engine draw: shaders, vertex format and buffers, the
+// fixed-function state, viewport, texture handles. hash_ser() below is hash() with every such word written to a TAPE instead of being
+// mixed (generated from the text of hash() by tools/dos2_shc_ser.py, so it reads exactly the same inputs in the same order). The tape
+// of the last draw with the same card (the record's NR-NATIVE card; without one, a key of the first words) is kept with the hash it
+// gave: a tape equal byte for byte gives the same structure hash without one multiply - exact by construction, the card is only where
+// to look. Anything else is hashed from the tape as hash() would have (the same value). The uniform contents, the content versions,
+// the taints and the order test are not on the tape: they run as in hash().
+//   DM_NRN_SHC  0  default (xbg_nrn_shc_default): hash() as before, nothing here runs.
+//               2  verify: hash() decides; hash_ser() runs first without side effects and its structure hash, full hash and taint
+//                  must be hash()'s - red line (first 16) and a count.
+//               1  apply: hash_ser() instead of hash().
+nrnt *TP=nullptr;int tape_on=0;uint64_t kcard=0,ser_cmp=0,ser_bad=0;   // the tape (dm/gfx/nr/nr_nrn_shc.h); kcard: the card of the record in hand (nrn::record), 0 = none
+inline void ser_begin(){nrnt_begin(TP);}
+inline void SM(uint64_t v){nrnt_word(TP,v);}
+inline void SB(const void *p,size_t n){nrnt_bytes(TP,p,n);}
+inline uint64_t ser_end(){return nrnt_end(TP,kcard);}
+void ser_init(){const char *e=getenv("DM_NRN_SHC");int v=e && *e?atoi(e):xbg_nrn_shc_default();
+    if(v<0 || v>2){xbg_logf("【红】[nr] shcache: DM_NRN_SHC=%d is not 0 / 1 / 2: off",v);v=0;}
+    if(v && !TP){TP=static_cast<nrnt*>(malloc(sizeof(nrnt)));if(!TP || nrnt_init(TP)){free(TP);TP=nullptr;xbg_logf("【红】[nr] shcache: DM_NRN_SHC=%d: no memory for the tapes: off",v);v=0;}}
+    tape_on=v;
+    if(v)xbg_logf("[nr] DM_NRN_SHC=%d (NR-NATIVE shadows: %s): the words hash() mixes into the structure hash of a cascade draw go to a tape; a tape equal to the last one of the draw's card gives "
+        "its hash without hashing (%d tapes of up to %d bytes); uniform contents, content versions, taints and the order test run as before",v,v==1?"apply":"verify - hash() decides, the tape's result must be the same",int(NRNT_ENT),int(NRNT_CAP));}
 // ---- the hash of a draw (see nr_shc.h: everything its depth output depends on) and its order-freedom ----
 uint64_t ubo(uint64_t addr,size_t n){Memo &m=memo[((addr>>8)^(addr>>20))&1023];if(m.gen==memo_gen && m.addr==addr && m.n==n){++s.ubo_memo;return m.h;}
     const void *p=reinterpret_cast<const void*>(uintptr_t(addr));evguard::EngineRead er(p,n);const uint64_t h=nrshc_bytes(0x55424f,p,n);s.ubo_bytes+=n;
@@ -321,6 +348,56 @@ uint64_t hash(int prim,int first,int count,const p_draw_idx *ix,uint32_t inst,ui
     {const int nw=nrs_why(&in);if(nw!=NRS_OK){if(!tw)nrs_last=nw;taint(NRSHC_T_ORDER);}}
     if(wv)V.t=nrshc_mix(V.t,memo_bump[1]);   // [shc4] a sampler registration changed somewhere (its parameters are read by handle)
     hs=h;return nrshc_mix(h,hu);}
+// ---- generated by tools/dos2_shc_ser.py from hash(): do not edit ----
+uint64_t hash_ser(int prim,int first,int count,const p_draw_idx *ix,uint32_t inst,uint32_t first_inst,bool gi,int &tw,uint64_t &hs,bool wv,Ver &V,bool dry){
+    auto taint=[&tw](int w){if(!tw)tw=w;};uint64_t hu=0x55424f;if(!dry)ncu=0;uint32_t vseen=0;
+    ser_begin();SM(uint64_t(uint32_t(prim))|uint64_t(uint32_t(count))<<32);SM(uint64_t(uint32_t(first))|uint64_t(inst)<<32);SM(first_inst);
+    if(ix){SM(ix->ibuf);SM(uint64_t(uint32_t(ix->itype))|uint64_t(uint32_t(ix->base_vertex))<<32);SM(uint64_t(uint32_t(ix->base_instance))|uint64_t(uint32_t(ix->instances))<<32);
+        if(wv && count>0 && ix->itype>=0 && ix->itype<=2){const uint64_t q0=tsplit?timing_clock():0;rv(ix->ibuf,uint64_t(uint32_t(count))<<ix->itype,V);if(tsplit)s.sp_vtx+=timing_clock()-q0;}}   // [shc4] the index bytes
+    if(gi)taint(NRSHC_T_INDIRECT);   // indirect arguments live in GPU memory
+    // the target: the atlas only, the tile as viewport
+    if(img_key(state.rt.depth)!=R.atlas)taint(NRSHC_T_TARGET);for(int i=0;i<state.rt.n && i<8;i++)if(state.rt.color[i])taint(NRSHC_T_COLOUR);
+    SM(uint64_t(uintptr_t(state.rt.depth)));if(state.rt.has_dview)SB(&state.rt.dview,sizeof state.rt.dview);
+    if(state.viewport.x!=float(R.rect[0]) || state.viewport.y!=float(R.rect[1]) || state.viewport.width!=float(R.rect[2]) || state.viewport.height!=float(R.rect[3]))taint(NRSHC_T_VIEWPORT);
+    for(int st=0;st<5;st++)SM(uint64_t(uintptr_t(state.shader[st])));
+    // vertex fetch: the attributes the vertex shader reads and their streams (stale binds of other slots do not count)
+    const Shader *vs=state.shader[0];
+    auto stream=[&](unsigned k){if(k>=16){taint(NRSHC_T_VERTEX);return;}SM(uint64_t(state.stream[k].stride)|uint64_t(state.stream[k].divisor)<<32);SM(state.vb[k].address);SM(state.vb[k].size);
+        if(wv && !(vseen>>k&1)){vseen|=1u<<k;const uint64_t q0=tsplit?timing_clock():0;rv(state.vb[k].address,state.vb[k].size,V);if(tsplit)s.sp_vtx+=timing_clock()-q0;}};   // [shc4] the vertex bytes (each stream once)
+    if(vs && !vs->inputs.empty()){for(uint32_t loc:vs->inputs){if(loc>=16){taint(NRSHC_T_VERTEX);continue;}const uint32_t a=state.attrib[loc];SM(uint64_t(a)|uint64_t(loc)<<32);stream((a>>27)&31u);}}
+    else for(unsigned k=0;k<16;k++){SM(state.attrib[k]);stream(k);}
+    // fixed function
+    SB(&state.poly,sizeof state.poly);SB(&state.ds,sizeof state.ds);SB(state.bias,sizeof state.bias);
+    SB(&state.viewport,sizeof state.viewport);SB(&state.scissor,sizeof state.scissor);SB(&state.color,sizeof state.color);
+    SB(&state.ms,sizeof state.ms);SB(&state.mask,sizeof state.mask);SB(&state.alpha_ref,sizeof state.alpha_ref);
+    SM(uint64_t(state.depth_clamp)|uint64_t(state.rast_discard)<<32);SB(&state.restart,sizeof state.restart);SB(&state.bounds,sizeof state.bounds);
+    SB(state.stencil_compare,sizeof state.stencil_compare);SB(state.stencil_write,sizeof state.stencil_write);SB(state.stencil_ref,sizeof state.stencil_ref);
+    SM(uint64_t(uintptr_t(state.texture_pool.pool))^uint64_t(state.texture_pool.off)<<1);SM(uint64_t(uintptr_t(state.sampler_pool.pool))^uint64_t(state.sampler_pool.off)<<1);
+    // what the shaders read: the content of each declared uniform range, each texture / sampler handle (+ the texture's registration)
+    for(int st=0;st<5;st++){const Shader *sh=state.shader[st];if(!sh)continue;const unsigned ns=nvn_stage[st];if(!sh->storage_writes.empty())taint(NRSHC_T_STORAGE);
+        for(const auto &b:sh->bindings){
+            if(b.type==VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || b.type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER || b.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || b.type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)taint(NRSHC_T_STORAGE);
+            if(b.source==XBG_SOURCE_DRIVER2){for(unsigned i=0;i<128;i++){if(state.tex[ns][i]){SM(state.tex[ns][i]^uint64_t(i)<<56);SM(texrev(state.tex[ns][i]));}if(state.samp[ns][i])SM(state.samp[ns][i]^uint64_t(i)<<56);}continue;}
+            for(unsigned e=0;e<b.count;e++){const unsigned slot=b.slot+e;
+                switch(b.source){
+                case XBG_SOURCE_UNIFORM:{if(slot>=16){taint(NRSHC_T_BINDING);break;}const NVNbufferRange &r=state.ub[ns][slot];
+                    if(!r.address || !r.size){SM(0x55420000u+slot);break;}const size_t n=std::min<size_t>(r.size,b.bytes?b.bytes:65536);
+                    SM(0x55430000u+slot+(uint64_t(st)<<8)+(uint64_t(n)<<32));const uint64_t q0=tsplit?timing_clock():0;const uint64_t uh=ubo(r.address,n);if(tsplit)s.sp_ubo+=timing_clock()-q0;hu=nrshc_mix(hu,uh);   // the structure keeps (stage, slot, size); the bytes go to hu
+                    if(!dry && R.diag && ncu<sizeof cu/sizeof cu[0])cu[ncu++]=CurU{uint8_t(st),uint8_t(slot),uint32_t(n),r.address,uh};break;}
+                case XBG_SOURCE_TEXTURE:{if(slot>=128){taint(NRSHC_T_BINDING);break;}const uint64_t t=state.tex[ns][slot];const uint64_t q0=tsplit?timing_clock():0;SM(t);SM(texrev(t));if(wv)texver(t,b.type,V);if(tsplit)s.sp_tex+=timing_clock()-q0;   // [shc4] its content
+                    if(b.sampler_slot!=UINT32_MAX){if(b.sampler_slot>=128){taint(NRSHC_T_BINDING);break;}SM(state.samp[ns][b.sampler_slot]);}break;}
+                case XBG_SOURCE_SUPPORT:case XBG_SOURCE_C1:break;   // viewport size / alpha function (above); the shader's own constants (its pointer)
+                default:taint(NRSHC_T_BINDING);   // storage buffers, images, the storage table, bindless sources: what they read is not known here
+                }}}}
+    // order-freedom (nr_sort.h nrs_why): depth only, min or no depth effect, nothing reads the attachment
+    nrs_in in{};in.query=open_occlusion.cmd!=VK_NULL_HANDLE || state.count_samples;
+    in.condr=(condr::cg.mode>0 && condr::cg.kind!=CONDR_K_ON) || (nrocc::mode>0 && (nrocc::kind!=CONDR_K_ON || nrocc::in_pair()));
+    in.storage=!storage_images_bound.empty();in.depth_att=state.rt.depth!=nullptr;in.depth_fixed=A.bpp!=0;
+    in.st=state.ds.st;in.bounds=state.bounds.enable!=0;in.a2c=state.ms.a2c!=0;in.dt=state.ds.dt;in.dw=state.ds.dw;in.op=state.ds.df>=1 && state.ds.df<=8?uint8_t(state.ds.df-1):uint8_t(255);
+    {const int nw=nrs_why(&in);if(nw!=NRS_OK){if(!tw && !dry)nrs_last=nw;taint(NRSHC_T_ORDER);}}
+    if(wv)V.t=nrshc_mix(V.t,memo_bump[1]);   // [shc4] a sampler registration changed somewhere (its parameters are read by handle)
+    hs=ser_end();return nrshc_mix(hs,hu);}
+// ---- end of the generated block ----
 // ---- the range ----
 void arm(){R.armed=true;
     // [shc2] the target's shape (nr_shc.h nrshc_shape_why, every refusal counted by reason). DOS2 binds the atlas as SetRenderTargets(1, {NULL},
@@ -413,7 +490,13 @@ bool draw(int prim,int first,int count,const p_draw_idx *ix,uint32_t inst,uint32
     if(!R.armed){arm();if(R.refused)return false;}
     if(rg->blind && !again)return false;   // a quiet cascade between its probes: not hashed
     const bool timed=!(s.hashed&63);const uint64_t t0=timed?timing_clock():0;tsplit=timed && (s.hashed>>6&1);   // [NR-ZERO] 1 in 128: the hash by part
-    int tw=NRSHC_T_OK;uint64_t hs=0;Ver V;const uint64_t hn=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);
+    int tw=NRSHC_T_OK;uint64_t hs=0;Ver V;uint64_t hn;
+    if(__builtin_expect(tape_on==1,0))hn=hash_ser(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V,false);   // [DOS2] NR-NATIVE shadows DM_NRN_SHC=1: the structure hash from the tape of the card
+    else if(__builtin_expect(tape_on==2,0)){int tw2=NRSHC_T_OK;uint64_t hs2=0;Ver V2;const uint64_t h2=hash_ser(prim,first,count,ix,inst,first_inst,gi,tw2,hs2,false,V2,true);   // =2: first, without side effects
+        hn=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);++ser_cmp;
+        if(h2!=hn || hs2!=hs || tw2!=tw){++ser_bad;red("DM_NRN_SHC: the tape gave structure hash %016llx / full %016llx / taint %d, hash() %016llx / %016llx / %d (card %016llx, range seq %u, execution %d)",
+            (unsigned long long)hs2,(unsigned long long)h2,tw2,(unsigned long long)hs,(unsigned long long)hn,tw,(unsigned long long)kcard,R.seq,again?2:1);}}
+    else hn=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);
     // [shc4] the content version: execution 1 computes it (a draw whose inputs have no version now gets a salt: new every time, never a
     // member), execution 2 takes execution 1's for the same ordinal
     uint64_t v;if(again)v=nrshc_again_v(rg,ord);else{v=nrshc_mix(nrshc_mix(nrshc_mix(V.j,V.p),V.t),V.salt?nrshc_mix(0x5A17,++salt_n):0);if(V.salt)++s.salted;}
@@ -533,6 +616,11 @@ void frame(const p_nb_frame &f){if(mode==-1)init();if(mode==-3){release();mode=0
         s.ubo_bytes/fr/1024.,(unsigned long long)s.ubo_memo,s.copies/fr,(unsigned long long)s.verify_eq,(unsigned long long)s.verify_ne,(unsigned long long)s.side_builds,
         (unsigned long long)s.unrepairable,(unsigned long long)s.desync,reds);
     why_line(fr);
+    if(tape_on){const uint64_t *tc=TP->c,all=tc[NRNT_C_EQUAL]+tc[NRNT_C_KEPT]+tc[NRNT_C_LONG];   // [DOS2] NR-NATIVE shadows
+        xbg_logf("[nr] shcache tape (DM_NRN_SHC=%d, NR-NATIVE shadows, last 10 s): %.0f structure hashes a frame from the tape - equal to the kept tape of the card %llu (%.1f%%: no hashing), hashed and kept %llu, "
+            "too long to keep %llu, keyed without a card %llu; verify: compared %llu, BAD %llu",tape_on,double(all)/fr,(unsigned long long)tc[NRNT_C_EQUAL],all?100.*double(tc[NRNT_C_EQUAL])/double(all):0.,(unsigned long long)tc[NRNT_C_KEPT],
+            (unsigned long long)tc[NRNT_C_LONG],(unsigned long long)tc[NRNT_C_NOCARD],(unsigned long long)ser_cmp,(unsigned long long)ser_bad);
+        memset(TP->c,0,sizeof TP->c);ser_cmp=ser_bad=0;}
     // [NR-ZERO] DM_NR_SHC_MEMO: the memos' answers and the hash by part (split draws, 1 in 128: their clock reads are in the parts)
     if(zmode || s.sp_n){const double sn=s.sp_n?double(s.sp_n):1.;const double all=s.sp_all/sn/1000.,ub=s.sp_ubo/sn/1000.,vx=s.sp_vtx/sn/1000.,tx=s.sp_tex/sn/1000.;
         xbg_logf("[nr] shcache memo (DM_NR_SHC_MEMO=%d, NR-ZERO, last 10 s): texture nodes asked %.0f a frame, memo %.0f (%.1f %%), compared %llu bad %llu; pool tables asked %.0f, memo %.0f, bad %llu; "

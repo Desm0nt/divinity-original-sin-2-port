@@ -37,6 +37,9 @@ void learn(const Pass &p);void lost();void exec_tick();
 // part 2 (the image of a card, the short record): what a state record wrote, a record before its binds are applied, the image of a long record, release
 void state_rec(const uint8_t *p,size_t n);void pre(const uint8_t *p,size_t n,const nbd_hdr &h,const uint8_t *binds);void image();void img_release();
 nrn_tail cur{};uint64_t cur_ibuf=0;   // the record whose draw is running
+// series CN (20.11): the row of the record in hand, found once (record / image / pre) and used by draw(); the lane word of its draw
+nrn_row *cur_row=nullptr,*pre_row=nullptr;uint64_t pre_card=0,lane_cur=0;bool lane_ok=false;uint32_t idle=600,img_tick=0;
+void evict_tick();
 nrn_pstat s[NRN_P_N]{};uint32_t last_seq[NRN_P_N]{};uint64_t next_ns=0,cards_seen=0;unsigned told=0;
 const char *env(const char *k){return getenv(k);}
 void init(int draw_mode){read_env=true;
@@ -59,11 +62,13 @@ void init(int draw_mode){read_env=true;
 void release(){if(rows_ok){nrn_pub_bump(&PUB);img_release();nrn_rows_free(&R);rows_ok=false;}if(tab_ok){nrn_tab_free(&T);tab_ok=false;}on=false;have=false;memset(mode,0,sizeof mode);}
 // From nbdraw::apply: the record whose draw() runs next (p / n: its payload, h: its header).
 inline void record(const uint8_t *p,size_t n,const nbd_hdr &h){
-    have=false;
+    have=false;nrshc::kcard=0;
     if(!(h.flags&NBD_F_NRN) || !(h.flags&NBD_F_NR))return;
     nrn_tail t;
     if(!nrn_tail_get(p,n,nrn_tail_off(&h),h.flags,&t) || !mode[t.pass])return;
-    cur=t;cur_ibuf=h.ibuf;have=true;pgd=false;answering=false;
+    cur=t;cur_ibuf=h.ibuf;have=true;pgd=false;answering=false;lane_ok=false;
+    nrshc::kcard=t.card;   // NR-NATIVE shadows (DM_NRN_SHC): where the shadow cache looks for the tape of this draw
+    cur_row=(t.rsv&NRN_T_SHORT) && pre_card==t.card?pre_row:nullptr;pre_card=0;   // a short record: pre() found the row of its image
     if(!(t.rsv&NRN_T_SHORT))image();   // part 2: the State this long record left is the image of its card (compared when the card has one)
     if(t.rsv&NRN_T_READY)++b[t.pass].ready;
     ++s[t.pass].records;nrn_seq_note(&s[t.pass],&last_seq[t.pass],t.seq);}
@@ -88,6 +93,7 @@ void draw_end(VkPipeline pipe,uint16_t used,const VkBuffer *vb,const uint64_t *v
             "does not describe this draw",w,nrn_pass_name(cur.pass),(unsigned long long)cur.card,(unsigned long long)stats.presents.load(),
             state.shader[0]?state.shader[0]->key.c_str():"-",state.shader[4]?state.shader[4]->key.c_str():"-");}}
 void tick(){   // every submission (nrdraw::tick)
+    if(rows_ok)evict_tick();   // series CN: rows no card asked for leave the table (two steps, see nr_nrn.h)
     const uint64_t now=timing_clock();
     if(!next_ns){next_ns=now+10000000000ull;return;}
     if(now<next_ns)return;

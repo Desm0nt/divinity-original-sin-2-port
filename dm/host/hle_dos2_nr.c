@@ -131,6 +131,7 @@ static void nrd_ident_cmp(uint64_t r, uint64_t lr);
 static void nrd_report(uint64_t frames);
 static int nrn_on(void); static void nrn_rc55(uint64_t handle, uint64_t name); static void nrn_report(uint64_t frames);   // NR-NATIVE (hle_dos2_nrn.inc)
 static void nrnev_report(uint64_t frames);   // [DOS2] NR-NATIVE step E (hle_dos2_nrn_ev.inc)
+void dm_nrnd_tex_epoch(void);   // [DOS2] NR-NATIVE step D (hle_dos2_nrn_d.inc): a texture record was made / died
 // NR-09S (hle_dos2_nr_state.inc): DM_NR_STATE; 0 = off (no native opcode handler)
 static int g_nrs;
 static void nrs_report(uint64_t frames);
@@ -632,6 +633,7 @@ static uint8_t nr_u8(uint64_t v) { return (uint32_t)v > 255 ? 255 : (uint8_t)v; 
 static void nr_tex_commit(uint64_t r, uint64_t handle, const nr_tex_desc *e, const nr_nvn_tex *nvn, int nnvn) {
     uint8_t rb[0x18]; int have = 0;
     if (g_dm_nr == 2 && r) { const uint64_t rec = nr_record(r, 0, 0x28, handle); have = rec && nr_peek(rb, rec, sizeof rb); }
+    dm_nrnd_tex_epoch();   // [DOS2] NR-NATIVE step D: a texture record was (re)made - the key of the chain's memo moves
     pthread_mutex_lock(&g_nr_mu);
     nr_tex *t = nr_tex_put(g_reg, handle, e, nvn, nnvn);
     NRNEV_TEX(handle);   // [DOS2] NR-NATIVE step E
@@ -699,6 +701,7 @@ NR_HOOK nr_h_dt(NR_A) {   // deferred texture destroy: x1 = a copy of the record
     const uint64_t obj = a1 ? nr_peek64(a1) : 0;
     if (g_dm_nr_tex && obj) { pthread_mutex_lock(&g_nrt_mu); nr_tex_engine_gone(g_nrt, obj); pthread_mutex_unlock(&g_nrt_mu); }   // NR-05: queued = engine-dead
     const uint64_t v = g_o_dt(NR_F);
+    if (v & 0xff) dm_nrnd_tex_epoch();   // [DOS2] NR-NATIVE step D: a texture record died - the key of the chain's memo moves
     if ((v & 0xff) && obj) { pthread_mutex_lock(&g_nr_mu); nr_tex_kill_obj(g_reg, obj); pthread_mutex_unlock(&g_nr_mu); }
     return v;
 }
@@ -874,9 +877,11 @@ NR_HOOK nr_h_srt(NR_A) {   // SetRenderTargets(r, n, u64 color[], layers, mips, 
 }
 
 // ---- engine opcode 55 (resource transition) through the shared ExecuteRenderCommand chain ----
+static int g_nrnd; static void nrnd_pkt(unsigned op, uint64_t pkt);   // [DOS2] NR-NATIVE step D (hle_dos2_nrn_d.inc)
 static void nr_rc_pre(uint64_t list, unsigned op, uint64_t pkt) {
     NRNEV_RC(list, op, pkt);   // [DOS2] NR-NATIVE step E: the opcodes that write a buffer / a texture, the ring's head
     (void)list;
+    if (__builtin_expect(g_nrnd, 0)) nrnd_pkt(op, pkt);   // [DOS2] NR-NATIVE step D: every packet the thread executes (a packet outside a noted group breaks the chain)
     if (op != 55 || !pkt) return;
     const uint8_t *p = (const uint8_t *)(uintptr_t)pkt;   // the packet the engine's handler reads next
     uint64_t handle, name; memcpy(&handle, p + 8, 8); memcpy(&name, p + 0x10, 8);
@@ -925,6 +930,7 @@ static const struct nr_site { uint32_t off; uint32_t pro[4]; const char *name; v
 enum { NR_SITES = sizeof k_nr_site / sizeof k_nr_site[0] };
 
 #include "hle_dos2_nrn.inc"   // NR-NATIVE: DM_NRN_<PASS> (the card of an engine draw; nothing while every pass is 0)
+#include "hle_dos2_nrn_d.inc"   // [DOS2] NR-NATIVE step D: DM_NRN_LIST (the note of list construction; nothing while it is 0)
 #include "hle_dos2_nr_key.inc"   // NR-02: DM_NR_KEY (draw identity; nothing while it is 0)
 #include "hle_dos2_nr_nocall.inc"   // NR-23: DM_NR_NOCALL (the engine's own NVN calls at a draw; nothing while it is 0)
 #include "hle_dos2_nr_ubo.inc"   // NR-09U: DM_NR_UBO (the uniform blocks of a direct draw as native code; nothing while it is 0)
@@ -975,6 +981,7 @@ void dm_dos2_nr_install(void) {
     if (key) nk_install(m, key, rc == 0);
     nk_draw_install(m, rc == 0);   // NR-09: DM_NR_DRAW (after DM_NR_KEY: the identity comes from its hook, or from the hook alone)
     nrn_arm(g_nr_draw != 0);   // NR-NATIVE: DM_NRN_<PASS> (after DM_NR_DRAW: the card follows its tail)
+    nrnd_arm(m, rc == 0);   // [DOS2] NR-NATIVE step D: DM_NRN_LIST (after the passes are armed and the ExecuteRenderCommand handler is registered)
     nc_install();   // NR-23: after the flush hook (needs it)
     nrd_install();   // NR-09R: after DM_NR_DRAW and NR-23 (needs the identity; =1 takes the draw hook's native handler)
     nru_install(g_nrd, g_nrd_parts);   // NR-09U: inside NR-09R's native draw handler

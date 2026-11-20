@@ -2779,7 +2779,7 @@ def nrshc_check():
     tv = inc[inc.index('void texver(uint64_t hd,uint32_t type,Ver &V){'):inc.index('// [shc4] wv: execution 1')]
     assert tv.index('Image &im=get_image(&t,true);') < tv.index('im.nrshc_up') and 'if(im.gpu_written){V.salt=true;' in tv, 'NR-SHCACHE shc4: an image is checked before its upload number is read; GPU-written = no member'
     assert re.search(r'if\(wv && !\(vseen>>k&1\)\)\{vseen\|=1u<<k;(const uint64_t q0=tsplit\?timing_clock\(\):0;)?rv\(state\.vb\[k\]\.address,state\.vb\[k\]\.size,V\);', inc) and 'rv(ix->ibuf,uint64_t(uint32_t(count))<<ix->itype,V);' in inc and 'if(wv)texver(t,b.type,V);' in inc, 'NR-SHCACHE shc4: vertex streams, index range and textures versioned'
-    assert 'uint64_t v;if(again)v=nrshc_again_v(rg,ord);else{' in inc and 'const uint64_t hn=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);' in inc, 'NR-SHCACHE shc4: execution 2 reuses the version of execution 1'
+    assert 'uint64_t v;if(again)v=nrshc_again_v(rg,ord);else{' in inc and 'else hn=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);' in inc, 'NR-SHCACHE shc4: execution 2 reuses the version of execution 1'   # (NR-NATIVE shadows: the DM_NRN_SHC branches stand before it, block nrn_shc_check)
     assert 'if(m.cls==1){++s.v_nocpu;return;}' in inc and 'if(nvn_dirty_version(p,size_t(n),&g,&inc)){' in inc and re.search(r'int nvn_dirty_version\(const void \*addr, size_t len, uint64_t \*gen, uint64_t \*inc\)', (root / 'gfx/nvn/nvn_dirty.c').read_text(encoding='utf-8')), 'NR-SHCACHE shc4: CPU-writable pools versioned by the tracker'
     assert 'if(!one){if(A.key && h.draws){for(unsigned i=0;i<h.natt && i<NB_REC_ATT;i++)if(h.att[i]==A.key){dirty=true;++s.outside;break;}}return;}' in inc, 'NR-SHCACHE shc4: an atlas pass outside a range dirties the frame'
     assert 'xbg_logf("[nr] shcache why (last 10 s): %s",t.b);' in inc and 'why_line(fr);' in inc, 'NR-SHCACHE shc2: the reasons line'
@@ -3987,6 +3987,65 @@ def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md):
     return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 executes a draw from the row of its card through the answered half of nrz3 (step B; never a draw the prologue changed), =2 compares the row with the path; a published card of a pass at 1 is written SHORT (no state record, no texture bind of its flush: the backend writes exactly what the record names from the image of the card); off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
 print('PASS: '+nrn_check())
 
+def nrn_cn_check():   # [DOS2] NR-NATIVE after phone series CN (docs/dos2/nr/NR-NATIVE.md section 10): eviction of rows, the lane word, DM_NRN_LIVE
+    h = (root / 'gfx/nr/nr_nrn.h').read_text(encoding='utf-8')
+    a = (root / 'gfx/vulkan/engine/xbg_nr_nrn.inc').read_text(encoding='utf-8')
+    e = (root / 'gfx/vulkan/engine/xbg_nr_nrn_exec.inc').read_text(encoding='utf-8')
+    z = (root / 'gfx/vulkan/engine/xbg_nr_z3e.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    sm = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    # eviction: two steps, the publication first, a quarantine before a row is removed, a touched row stays
+    ret = h[h.index('static inline uint32_t nrn_rows_retire('):h.index('static inline int nrn_rows_compact_due(')]
+    assert 'nrn_pub_drop(p, e->card)' in ret and 't->retire_at = t->now;' in ret, 'NRN-CN: a retired row leaves the publication at once'
+    assert 't->now - t->retire_at >= NRN_QUARANTINE' in h and 'enum { NRN_QUARANTINE = 64 };' in h, 'NRN-CN: rows are removed only after the quarantine'
+    assert 'if (e->retiring && NRN_MUTATE != 19) { e->retiring = 0;' in h and h.count('nrn_row_touch(t, e)') == 2, 'NRN-CN: a row asked for again is revived (find and get)'
+    assert 'if (e->retiring) { gone++;' in h and 'if (t->n * 4 >= t->cap * 3) return NULL;' in h, 'NRN-CN: only retiring rows are removed; a full table still makes no row'
+    assert a.index('if(rows_ok)evict_tick();') < a.index('const uint64_t now=timing_clock();'), 'NRN-CN: eviction runs once a submission, between records'
+    ev = e[e.index('void evict_tick(){'):e.index('void lost(){')]
+    assert 'imgs.swap(imgs2);' in ev and 'cur_row=pre_row=nullptr;' in ev and 'imgs2[to]=std::move(imgs[from]);' in e, 'NRN-CN: the images follow their rows; no row pointer survives a compaction'
+    # the lane word: taken at the hook, kept by learn(), compared before the row answers (and before the verify prediction)
+    d = e[e.index('int draw(Commands &c'):e.index('// From the lane')]
+    assert d.index('lane_cur=nrdraw::cur?nrn_lane_word(') < d.index('if(pgd)return out(NRN_BW_GUARD);') and d.index('nrn_ans_live(&r->a,') < d.index('if(r->a.lane!=lane_cur)return out(NRN_BW_LANE);') < d.index('if(mode[cur.pass]==2){P.valid=true;'), 'NRN-CN: the lane word is compared before the row answers or predicts'
+    assert 'now.lane=nrn_lane_word(H.t.key,' in e and '|| !lane_ok){if(was)++x.p_lost;return;}' in e and '(a->lane == b->lane || NRN_MUTATE == 20)' in h, 'NRN-CN: the row keeps the lane word of the draw that taught it'
+    # one probe a record; the image compare sampled only in apply mode
+    assert d.count('nrn_rows_find(') == 1 and 'nrn_row *r=cur_row;' in d and 'r->card==cur.card' in d, 'NRN-CN: draw() takes the row record() found'
+    im = e[e.index('void image(){'):e.index('void img_release(){')]
+    assert 'if(I && mode[cur.pass]==1 && !r->unstable && (++img_tick&7)){++x.img_skip;return;}' in im and im.index('cur_row=r;') < im.index('++x.img_skip'), 'NRN-CN: =2 compares every long record with the image, =1 one in 8'
+    # DM_NRN_LIVE: default 0 by the policy function, safe-mode step 2, only the defaults of the three words, the app silent
+    assert 'inline int xbg_nrn_live_default(){return 0;}' in pol and 'int live=num("DM_NRN_LIVE",xbg_nrn_live_default());' in z and z.count('getenv("DM_NRN_LIVE")') == 0, 'NRN-LIVE: default by the policy function'
+    assert 'num("DM_NR_Z3B",live?live:xbg_nr_z3b_default())' in z and 'num("DM_NR_Z3C",live?live:xbg_nr_z3c_default())' in z and 'num("DM_NR_Z3D",live?live:xbg_nr_z3d_default())' in z, 'NRN-LIVE: it only moves the defaults of Z3b / Z3c / Z3d'
+    assert 'if(!apply){' in z and 'add("DM_NRN_LIVE","0");' in sm and sm.index('if(step>=2){') < sm.index('add("DM_NRN_LIVE","0")') < sm.index('if(step>=3){'), 'NRN-LIVE: needs a pass at 1; safe-mode step 2'
+    for src in (root / 'android').rglob('*.java'):
+        assert 'DM_NRN_LIVE' not in src.read_text(encoding='utf-8', errors='ignore'), 'NRN-LIVE: the app does not set the switch (%s)' % src.name
+    return 'NR-NATIVE after series CN: rows leave the publication, then the table after a quarantine, a touched row stays, the images follow; the lane word (NR-09 key id + variant words) is part of the answer and compared before the row answers; one probe a record; DM_NRN_LIVE default 0 / safe-mode step 2 / moves only the defaults of Z3b / Z3c / Z3d'
+print('PASS: '+nrn_cn_check())
+
+def nrn_shc_check():   # [DOS2] NR-NATIVE shadows DM_NRN_SHC (docs/dos2/nr/NR-NATIVE.md section 11): the structure hash of a cascade draw from the tape of its card
+    import subprocess, sys as _sys
+    shc = (root / 'gfx/vulkan/engine/xbg_nr_shc.inc').read_text(encoding='utf-8')
+    h = (root / 'gfx/nr/nr_nrn_shc.h').read_text(encoding='utf-8')
+    a = (root / 'gfx/vulkan/engine/xbg_nr_nrn.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    sm = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    r = subprocess.run([_sys.executable, str(root.parent / 'tools/dos2_shc_ser.py'), '--check'], capture_output=True, text=True)
+    assert r.returncode == 0, 'NRN-SHC: hash_ser() is not hash() run through tools/dos2_shc_ser.py (%s)' % r.stdout.strip()
+    assert 'inline int xbg_nrn_shc_default(){return 0;}' in pol and 'atoi(e):xbg_nrn_shc_default();' in shc and shc.count('getenv("DM_NRN_SHC")') == 1, 'NRN-SHC: default 0 by the policy function, read once'
+    assert 'add("DM_NRN_SHC","0");' in sm and sm.index('if(step>=2){') < sm.index('add("DM_NRN_SHC","0")') < sm.index('if(step>=3){'), 'NRN-SHC: safe-mode step 2'
+    for src in (root / 'android').rglob('*.java'):
+        assert 'DM_NRN_SHC' not in src.read_text(encoding='utf-8', errors='ignore'), 'NRN-SHC: the app does not set the switch (%s)' % src.name
+    d = shc[shc.index('bool draw(int prim,int first,int count,const p_draw_idx *ix,uint32_t inst,uint32_t first_inst,bool gi){'):shc.index('// [shc3] an OP_UPDATE_UB inside an open range')]
+    assert d.count('hash_ser(') == 2 and d.count('=hash(prim,first,count,ix,inst,first_inst,gi,tw,hs,!again,V);') == 2, 'NRN-SHC: three ways - the tape, the tape next to hash(), hash() alone'
+    assert d.index('if(__builtin_expect(tape_on==1,0))hn=hash_ser(') < d.index('else if(__builtin_expect(tape_on==2,0)){') < d.index('else hn=hash(prim,'), 'NRN-SHC: 0 = hash() as before behind two not-taken branches'
+    v = d[d.index('else if(__builtin_expect(tape_on==2,0)){'):d.index('else hn=hash(prim,')]
+    assert v.index('hash_ser(prim,first,count,ix,inst,first_inst,gi,tw2,hs2,false,V2,true)') < v.index('hn=hash(prim,') and 'if(h2!=hn || hs2!=hs || tw2!=tw){++ser_bad;red(' in v, 'NRN-SHC: =2 runs the tape first without side effects (no versions, dry), hash() decides, three words compared'
+    assert 'if(!dry)ncu=0;' in shc and 'if(!dry && R.diag && ncu<' in shc and 'if(!tw && !dry)nrs_last=nw;' in shc, 'NRN-SHC: the dry run leaves the diagnostics of hash() alone'
+    assert "e->key == key && e->n == n && (NRNT_MUTATE == 1 || !memcmp(e->b, t->b, n))" in h and 'if ((t->part && NRNT_MUTATE != 4) || t->n > NRNT_CAP || !t->tab)' in h, 'NRN-SHC: a kept tape answers only when it is equal byte for byte; a tape folded in parts is never kept'
+    assert 'nrshc::kcard=t.card;' in a and 'have=false;nrshc::kcard=0;' in a, 'NRN-SHC: the key is the card of the record in hand, none for a record without one'
+    inc = [l for l in h.splitlines() if l.startswith('#include')]
+    assert inc == ['#include <stddef.h>', '#include <stdint.h>', '#include <stdlib.h>', '#include <string.h>'], 'NRN-SHC: nr_nrn_shc.h is pure C'
+    return 'NR-NATIVE shadows DM_NRN_SHC: default 0 by the policy function / safe-mode step 2 / not set by the app; hash_ser() is hash() through tools/dos2_shc_ser.py (same inputs, same order); a kept tape answers only when equal byte for byte; =2 runs the tape dry before hash() and compares structure hash, full hash and taint'
+print('PASS: '+nrn_shc_check())
+
 def nrnev_check():   # [DOS2] NR-NATIVE step E DM_NRN_EV (docs/dos2/nr/NR-NATIVE-E.md): resources by engine events instead of page tracking
     g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
     b = (root / 'gfx/vulkan/engine/xbg_nr_nrn_ev.inc').read_text(encoding='utf-8')
@@ -4033,6 +4092,63 @@ def nrnev_check():   # [DOS2] NR-NATIVE step E DM_NRN_EV (docs/dos2/nr/NR-NATIVE
     assert inc == ['#include <stddef.h>', '#include <stdint.h>', '#include <string.h>'], 'NRN-EV: nr_nrn_ev.h is pure C'
     return 'NR-NATIVE step E DM_NRN_EV: default 0 by the policy function / safe-mode step 2 / not set by the app; off = one load at each host line, no hook, no table; creation after the original, CPU copies before and after; the backend journals its own writes in stream order; rv() asks the events before the tracker, =1 takes a tagged epoch only for a range wholly inside a non-scratch engine buffer, =2 only compares; a static copy takes its epoch before it reads; the backend half protects no page'
 print('PASS: '+nrnev_check())
+def nrnd_check():   # [DOS2] NR-NATIVE step D (docs/dos2/nr/NR-NATIVE-D.md): DM_NRN_LIST (the note of list construction, the chain's card) and DM_NRN_REC (the record composed directly)
+    import re
+    h = (root / 'gfx/nr/nr_nrn_d.h').read_text(encoding='utf-8')
+    f = (root / 'host/hle_dos2_nrn_d.inc').read_text(encoding='utf-8')
+    fn = (root / 'host/hle_dos2_nrn.inc').read_text(encoding='utf-8')
+    nr = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    nat = (root / 'host/hle_dos2_native.c').read_text(encoding='utf-8')
+    dr = (root / 'host/hle_dos2_nr_direct.inc').read_text(encoding='utf-8')
+    nv = (root / 'gfx/nvn/nvn_nrn_d.inc').read_text(encoding='utf-8')
+    rec = (root / 'gfx/nvn/nvn_nb_draw.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    safe = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    # defaults: 0 by the policy functions, the front end reads the environment only, safe-mode step 2 forces 0, the app sets neither
+    assert 'inline int xbg_nrn_list_default(){return 0;}' in pol and 'inline int xbg_nrn_rec_default(){return 0;}' in pol, 'NRN-D: the defaults are the policy functions, 0'
+    assert 'add("DM_NRN_LIST","0");add("DM_NRN_REC","0");' in safe, 'NRN-D: safe-mode step 2 forces both switches to 0'
+    assert f.count('const int v = e && *e ? atoi(e) : 0;') == 2 and f.count('getenv("DM_NRN_LIST")') == 1 and f.count('getenv("DM_NRN_REC")') == 1, 'NRN-D: unset = 0'
+    for sub in ('android/app', 'android/dos2'):
+        d = root / sub
+        if d.exists():
+            for q in d.rglob('*'):
+                if q.is_file() and q.suffix in ('.java', '.kt', '.json', '.xml', '.txt', '.env', '.properties'):
+                    t = q.read_text(encoding='utf-8', errors='ignore')
+                    assert 'DM_NRN_LIST' not in t and 'DM_NRN_REC' not in t, 'NRN-D: the app sets neither switch (%s)' % q
+    # the length table is the one of hle_dos2_native.c
+    def table(text, name):
+        m = re.search(name + r'\[64\] = \{(.*?)\};', text, re.S)
+        return [int(x, 16) if x.startswith('0x') else int(x) for x in re.findall(r'0x[0-9a-f]+|\d+', m.group(1))]
+    assert table(h, 'k_nrnd_len') == table(nat, 'k_len') and len(table(h, 'k_nrnd_len')) == 64, 'NRN-D: the packet lengths are hle_dos2_native.c k_len'
+    assert 'enum { DN_OP_NOTE = 0x40 };' in nat and 'NRND_OP = 0x40' in h, 'NRN-D: one opcode for the note'
+    # the engine never meets the note: it leaves the hook before every handler and before the original; registered only with the hook in
+    hook = nat[nat.index('static uint64_t dn_rc_hook('):nat.index('// ---- DM_NATIVE_DRAW=1 / 2 ----')]
+    assert hook.index('if (__builtin_expect(c == DN_OP_NOTE, 0) && g_rc_note) return g_rc_note(list, pkt);') < hook.index('g_rc_h[i]->pre') < hook.index('g_rc_orig(list, op, pkt'), 'NRN-D: the note leaves the hook first'
+    assert 'if (!g_rc_orig || g_rc_note) return -1;' in nat, 'NRN-D: the note handler needs the ExecuteRenderCommand hook'
+    arm = f[f.index('static void nrnd_arm('):]
+    assert arm.index('dn_words_ok(m, k_nrnd_site[i].off') < arm.index('dn_install_rc_note(nrnd_exec_note)') < arm.index('dn_hook(m, k_nrnd_site[i].off') < arm.index('__atomic_store_n(&g_nrnd, v'), 'NRN-D: every site is compared, then the note handler, then the hooks, then the switch'
+    assert 'if (!rc_ok)' in arm and 'if (!nrn_on())' in arm, 'NRN-D: needs the hook chain and a pass that is on'
+    # list construction touches the list of the context argument and thread-locals only
+    beg = f[f.index('static int nrnd_begin('):f.index('static nr_fn g_o_d23a')]
+    assert 'const uint64_t list = ctx ? nrnd_r64(ctx) : 0;' in beg and '*(const uint8_t *)(uintptr_t)(list + 0x30)' in beg and 'g_nrnd_alloc(list, NRND_NOTE_BYTES, NRND_NOTE_ALIGN)' in beg, "NRN-D: the note goes into the list of the context, only a recorded one, by the engine's AllocCommand"
+    assert 't_nrnd.' not in beg and 't_nrnd_memo' not in beg, 'NRN-D: the building threads never touch the run or the memo'
+    assert f.count('NRND_WRAP(nr_h_d23') == 7 and f.count('NRND_BRACKET(nr_h_d') == 3 and f.count('(void *)nr_h_') == 10, 'NRN-D: seven wrappers, three brackets, ten sites'
+    assert 'static __thread nrnd_run t_nrnd;' in f and 'static __thread nrnd_memo *t_nrnd_memo;' in f, 'NRN-D: the run and the memo belong to the executing thread'
+    # execution: every packet passes the run; the card and the pass are taken in nrn_pre only
+    assert 'if (__builtin_expect(g_nrnd, 0)) nrnd_pkt(op, pkt);' in nr and nr.index('nrnd_pkt(op, pkt);   //') < nr.index('if (op != 55 || !pkt) return;'), 'NRN-D: the run sees every packet (first line of the opcode-55 handler)'
+    pre = fn[fn.index('static void nrn_pre('):fn.index('#define NRN_PRE(R)')]
+    assert pre.index('nrnd_take()') < pre.index('nrnd_pass(note, R)') < pre.index('nrnd_skip(note)') < pre.index('nrnd_card(note, R)'), 'NRN-D: note, pass, card in nrn_pre'
+    assert 'const int ld = __builtin_expect(g_nrnd, 0);' in pre and ': nrn_pass_of_r(R, &g_nrn_rt);' in pre and ': nrn_card_of(R, g_nrn_words);' in pre, 'NRN-D: off = the old pass and the old card'
+    card = f[f.index('static uint64_t nrnd_card('):f.index('static void nrnd_skip(')]
+    assert 'if (pred && g_nrnd == 1 && !audit)' in card and 'card = nrn_card_of(R, g_nrn_words);' in card and '__atomic_store_n(&g_nrnd_memo_off, 1' in card, 'NRN-D: =2 always hashes the cache; =1 audits and switches the memo off on a difference'
+    assert 'nrnd_run_drawn(&t_nrnd, n, card);' in card, 'NRN-D: the chain goes on from the card taken'
+    assert nr.count('dm_nrnd_tex_epoch();') == 2, 'NRN-D: a texture made / dead moves the key of the memo'
+    # half b: the composer in nbd_draw - =1 one pass, =2 the old writers then the compare; nothing else of nbd_draw changes
+    assert rec.index('uint8_t *p = (uint8_t *)rec(c, OP_X_NB_DRAW, size);') < rec.index('NRND_REC_APPLY(nr, nrn)') < rec.index('nbd_pack(&t_nbd.s, p, size);') < rec.index('NRND_REC_CHECK(') < rec.index('Z5G_DRAW(nr &&'), 'NRN-D: the composer sits between rec() and the old writers, the compare before Z5 patches the record'
+    assert '#define NRND_REC_APPLY(nr, nrn) (__builtin_expect(g_nrnd_rec == 1, 0) && (nr) && (nrn) && !t_nbd_chk)' in nv and '__builtin_expect(g_nrnd_rec == 2, 0) && (nr) && (nrn) && !t_nbd_chk' in nv, 'NRN-D: only a record with the identity and a card, never a checked bracket'
+    assert dr.count('NRND_TJ') == 6 and '#define NRND_TJ0(timed) do { if (__builtin_expect(g_nrnd_rec == 2, 0) && (timed))' in fn, 'NRN-D: the timers of the big-stack call run in =2 only'
+    return "NR-NATIVE step D: DM_NRN_LIST / DM_NRN_REC default 0 by the policy functions / safe-mode step 2 / not set by the app; the note packet is put into the list of the context argument by the engine's AllocCommand and leaves the ExecuteRenderCommand hook before any handler; the run sees every packet; =2 hashes the cache at every draw and compares, =1 audits 1 in 64; the composer writes only records with a card (=2: after the old writers, compared before anything patches the record)"
+print('PASS: '+nrnd_check())
 def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
     z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
     h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')
