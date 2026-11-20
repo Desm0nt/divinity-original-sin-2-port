@@ -234,6 +234,9 @@ static const tu_def k_touch[] = {
     {0x0e, 0, "dialog_p", "GUI/dialog.swf"}, {0x88, 0, "reward_p", "GUI/reward.swf"}, {0x15, 0, "itemSplitter_p", "GUI/itemSplitter.swf"},
     // the video window: its skip hint says "Double tap to skip" (tools/dos2_ptouch_gaps.py; the double tap itself: hle_dos2_touch_gaps.c)
     {0x20, 0, "subtitles_p", "GUI/subtitles.swf"},
+    // the loading screen: one of our own touch tips before every second engine tip (tools/dos2_ptouch_tips.py; the keyboard-only engine tips
+    // leave the pick in hle_dos2_touch_tips.c)
+    {0x17, 0, "loadingScreen_p", "GUI/loadingScreen.swf"},
     {0, 0, NULL, NULL}   // end
 };
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed
@@ -718,11 +721,31 @@ static const uint32_t k_tg_tail_b[6] = {0x9400014c /* bl 0x10a6fc0 */, 0xf940826
 static const uint32_t k_tg_get[3] = {0x94019c86 /* bl 0x110e1f0: the tooltip UI or NULL */, 0xaa0003f4, 0xb4000140 /* cbz x0, return it */};
 static const uint32_t k_tg_use[2] = {0x3907927f /* strb wzr,[x19,#0x1e4]: x19 = that object, unchecked */, 0xf9400288};
 static const uint32_t k_tg_checked[2] = {0x97ffffcc /* bl 0x10a6fc0 */, 0xb4000160 /* cbz x0: the caller that does check */};
+// Run 20.11 review (docs/dos2/TOUCH_MODES_PLAN.md "Прогон 20.11"): 0x10a6fc0 has nine callers; besides the three tails above and the two that
+// check (0x10a7090, 0x10a77b0) three more hand its NULL straight to a function of the tooltip class that uses it first:
+//   0x10a726c `bl 0x10a6fc0; mov x1,sp; bl 0x111f1e0`      0x111f1e0 starts with `ldr w8,[x0,#0x198]` (callers 0x109a3ec checked, 0x10a7274, 0x1120894)
+//   0x1323434 `bl 0x10a6fc0; ldr w2,..; mov x1,x21; bl 0x111fb40`   0x111fb40: `bl 0xaf0b20` then `ldr x8,[x19,#0x140]` (one caller)
+//   0x10a6a40 `bl 0x10a6fc0; ... bl 0x1121f20`             0x1121f20: returns at once for an empty handle (x1), else stores into x0 (one caller)
+// Every caller of these three ignores x0 afterwards (0x10a7278 epilogue / 0x10a6360 reads its own stack, 0x1323444 reads its stack, 0x10a6a64
+// `b 0x10a6940` epilogue), so the same entry stub ("x0 == 0: return to the caller") is safe there. They get it as a second group: a site of
+// this group that differs only leaves this group out (the first three stay guarded). The real cure is the tooltip object itself: in UI mode
+// TOUCH hle_dos2_touchui_hud.c makes it (type 0x2c, as the iPad's PC branch does); this guard is for the time before / without it.
+enum { TG_D = 0x111f1e0, TG_E = 0x111fb40, TG_F = 0x1121f20, TG_CALL_D = 0x10a726c, TG_CALL_E = 0x1323434, TG_CALL_F = 0x10a6a40, TG_F_CHK = 0x1121f48 };
+static const uint32_t k_tg_d[4] = {0xd10503ff /* sub sp,sp,#0x140 */, 0x6d0d23e9, 0xa90e6ffc, 0xa90f67fa};
+static const uint32_t k_tg_e[4] = {0xd10643ff /* sub sp,sp,#0x190 */, 0x6d1223e9, 0xa9136ffc, 0xa91467fa};
+static const uint32_t k_tg_f[4] = {0xd10583ff /* sub sp,sp,#0x160 */, 0xfd0073ea /* str d10,[sp,#0xe0] */, 0x6d0f23e9, 0xa9106ffc};
+static const uint32_t k_tg_call_d[3] = {0x97ffff55 /* bl 0x10a6fc0 */, 0x910003e1 /* mov x1,sp */, 0x9401dfdb /* bl 0x111f1e0 */};
+static const uint32_t k_tg_call_e[4] = {0x97f60ee3 /* bl 0x10a6fc0 */, 0xb940ba62, 0xaa1503e1, 0x97f7f1c0 /* bl 0x111fb40 */};
+static const uint32_t k_tg_call_f[9] = {0x94000160 /* bl 0x10a6fc0 */, 0xf85f8e68, 0xf9401508, 0xaa0003f4 /* x20 = it */, 0xaa1303e0, 0xd63f0100, 0xaa0003e1, 0xaa1403e0, 0x9401ed30 /* bl 0x1121f20 */};
+static const uint32_t k_tg_f_chk[2] = {0xf260543f /* tst x1,#0x3fffff00000000 */, 0x54000161};
 static _Atomic unsigned g_tg_n;
-static uint64_t tu_tip_null(uint64_t a0, uint64_t a1) {   // reached with x0 == 0 only; returns to the game's caller
+static module_t *g_tg_main;
+static uint64_t tu_tip_null(uint64_t a0, uint64_t a1) {   // reached with x0 == 0 only; returns to the game's caller (the stub jumped with br: lr is the game's)
     (void)a0;
     const unsigned n = atomic_fetch_add(&g_tg_n, 1);
-    if (n < 8 || (n & (n - 1)) == 0) LOG("[touchui] tooltip guard: no tooltip UI object for handle %#llx, call skipped (#%u; the game would have crashed at main+%#x)", (unsigned long long)a1, n + 1, TG_USE);
+    const uintptr_t lr = (uintptr_t)__builtin_return_address(0), mb = g_tg_main ? (uintptr_t)g_tg_main->base : 0;
+    if (n < 8 || (n & (n - 1)) == 0) LOG("[touchui] tooltip guard: no tooltip UI object (x1 %#llx), call skipped (#%u; returns to main+%#llx; the game would have used a NULL object, crash of run tu03 at main+%#x)",
+                                         (unsigned long long)a1, n + 1, (unsigned long long)(lr >= mb ? lr - mb : 0), TG_USE);
     return 0;
 }
 void dm_dos2_touch_guard_install(void);   // main.c host_preload, after dm_dos2_touchui_install (which may turn DM_DOS2_TOUCH on)
@@ -733,28 +756,36 @@ void dm_dos2_touch_guard_install(void) {
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
     if (!m) return;
+    g_tg_main = m;
     static const tu_site ck[] = {{TG_A, 4, k_tg_a}, {TG_B, 4, k_tg_b}, {TG_TAIL_A, 6, k_tg_tail_a}, {TG_TAIL_B, 6, k_tg_tail_b}, {TG_GET, 3, k_tg_get}, {TG_USE, 2, k_tg_use}, {TG_CHECKED, 2, k_tg_checked}, {TG_C, 4, k_tg_c}, {TG_TAIL_C, 11, k_tg_tail_c}};
     for (unsigned i = 0; i < sizeof ck / sizeof *ck; i++)
         if ((uint64_t)ck[i].off + 4ull * ck[i].n > m->text_end || memcmp(m->base + ck[i].off, ck[i].want, 4ull * ck[i].n)) {
             LOG("【红】[touchui] main+%#x differs: no tooltip guard (a mouse hover over the controller HUD may crash)", ck[i].off); return; }
+    // the second group (run 20.11 review, above): all its sites or none of it
+    static const tu_site ck2[] = {{TG_D, 4, k_tg_d}, {TG_E, 4, k_tg_e}, {TG_F, 4, k_tg_f}, {TG_CALL_D, 3, k_tg_call_d}, {TG_CALL_E, 4, k_tg_call_e}, {TG_CALL_F, 9, k_tg_call_f}, {TG_F_CHK, 2, k_tg_f_chk}};
+    int nf = 6;
+    for (unsigned i = 0; i < sizeof ck2 / sizeof *ck2; i++)
+        if ((uint64_t)ck2[i].off + 4ull * ck2[i].n > m->text_end || memcmp(m->base + ck2[i].off, ck2[i].want, 4ull * ck2[i].n)) {
+            LOG("【红】[touchui] main+%#x differs: the second tooltip guard group (main+%#x / %#x / %#x) is left out", ck2[i].off, TG_D, TG_E, TG_F); nf = 3; break; }
     uint32_t *t = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (t == MAP_FAILED) { LOG("【红】[touchui] mmap failed: no tooltip guard"); return; }
-    const struct { uint32_t off; const uint32_t *pro; } f[3] = {{TG_A, k_tg_a}, {TG_B, k_tg_b}, {TG_C, k_tg_c}};
+    const struct { uint32_t off; const uint32_t *pro; } f[6] = {{TG_A, k_tg_a}, {TG_B, k_tg_b}, {TG_C, k_tg_c}, {TG_D, k_tg_d}, {TG_E, k_tg_e}, {TG_F, k_tg_f}};
     const uint64_t host = (uint64_t)(uintptr_t)(void *)tu_tip_null;
-    for (int i = 0; i < 3; i++) {   // stub: cbz x0, null; <4 prologue instructions>; jump to function + 16;  null: jump to the host (it returns to the caller)
+    for (int i = 0; i < nf; i++) {   // stub: cbz x0, null; <4 prologue instructions>; jump to function + 16;  null: jump to the host (it returns to the caller)
         uint32_t *s = t + 16 * i; const uint64_t rest = (uint64_t)(uintptr_t)(m->base + f[i].off + 16);
         s[0] = 0xb4000120 /* cbz x0, +9 words */; memcpy(s + 1, f[i].pro, 16);
         s[5] = 0x58000050 /* ldr x16,#8 */; s[6] = 0xd61f0200 /* br x16 */; s[7] = (uint32_t)rest; s[8] = (uint32_t)(rest >> 32);
         s[9] = 0x58000050; s[10] = 0xd61f0200; s[11] = (uint32_t)host; s[12] = (uint32_t)(host >> 32);
     }
     if (mprotect(t, 0x4000, PROT_READ | PROT_EXEC)) { LOG("【红】[touchui] mprotect RX failed: no tooltip guard"); munmap(t, 0x4000); return; }
-    __builtin___clear_cache((char *)t, (char *)(t + 48));
-    for (int i = 0; i < 3; i++) {
+    __builtin___clear_cache((char *)t, (char *)(t + 16 * 6));
+    for (int i = 0; i < nf; i++) {
         const uint64_t to = (uint64_t)(uintptr_t)(t + 16 * i);
         const uint32_t jump[4] = {0x58000050, 0xd61f0200, (uint32_t)to, (uint32_t)(to >> 32)};
         if (tu_poke(m, f[i].off, jump, 4)) { LOG("【红】[touchui] mprotect RW failed: tooltip guard not complete (main+%#x)", f[i].off); return; }
     }
-    LOG("[touchui] tooltip guard: main+%#x, main+%#x and main+%#x return when the tooltip UI object is NULL (pending tooltip main+0x10a6920 with no tooltip UI: crash of run tu03 at main+%#x; hot bar slot tap in TOUCH 20.11 at main+0x111fee4)", TG_A, TG_B, TG_C, TG_USE);
+    LOG("[touchui] tooltip guard: main+%#x, main+%#x and main+%#x return when the tooltip UI object is NULL (pending tooltip main+0x10a6920 with no tooltip UI: crash of run tu03 at main+%#x; hot bar slot tap in TOUCH 20.11 at main+0x111fee4)%s",
+        TG_A, TG_B, TG_C, TG_USE, nf == 6 ? "; also main+0x111f1e0 / 0x111fb40 / 0x1121f20 (the other unchecked users of main+0x10a6fc0, review of 20.11)" : "");
 }
 
 int dm_dos2_touchui_on(void);

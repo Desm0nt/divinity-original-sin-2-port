@@ -621,6 +621,8 @@ def mock(src, path, W=2400, F=None, made=None):
 import dos2_ppanel_trade; dos2_ppanel_trade.install(sys.modules[__name__])
 # iPad functions the Switch classes have no handler for (trade long press, container context menu): tools/dos2_ptouch_gaps.py patches the built movies
 import dos2_ptouch_gaps; dos2_ptouch_gaps.install(sys.modules[__name__])
+# the loading screen's touch tips (loadingScreen_p: ours before every second engine tip): tools/dos2_ptouch_tips.py adds its movie
+import dos2_ptouch_tips; dos2_ptouch_tips.install(sys.modules[__name__])
 
 
 def main():

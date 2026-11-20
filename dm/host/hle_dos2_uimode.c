@@ -102,6 +102,8 @@ void dm_dos2_uimode_poll(void) {
     { void dm_dos2_touchui_hud_poll(void); dm_dos2_touchui_hud_poll(); }
     // UI mode TOUCH: a double tap during a video = the subtitles class's SkipVideo (hle_dos2_touch_gaps.c)
     { void dm_dos2_touch_gaps_poll(void); dm_dos2_touch_gaps_poll(); }
+    // UI mode TOUCH: the loading screen tips that need a keyboard leave the engine's PC pick (hle_dos2_touch_tips.c)
+    { void dm_dos2_touch_tips_poll(void); dm_dos2_touch_tips_poll(); }
 }
 
 // JNI (DmActivity.nativeDos2UiMode, the UI thread): mode < 0 = the requested mode now; else the request, answered by the game thread within
