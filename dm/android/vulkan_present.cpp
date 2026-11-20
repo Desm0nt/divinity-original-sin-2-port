@@ -46,8 +46,14 @@ static VkResult dm_present_wait_fences(VkDevice d,uint32_t n,const VkFence *f,Vk
 #include "../gfx/nr/nr_rotate.h"    // [DOS2] NR-20 DM_NR_ROTATE: decisions and geometry of the pre-rotation (namespace nrr)
 #include <cstdarg>
 static std::atomic<int> pt_cfg{0};static std::mutex pt_queue_mutex;static thread_local bool pt_on_thread=false;
+// [DOS2] VK-NATIVE (DM_VK_NATIVE != 0, dm/gfx/vkn): a second renderer submits on the one VkQueue from the engine's render thread, so the
+// queue lock is real in every present-thread mode once dm_vk_queue_force(1) was called (install time, before any Vulkan use).
+static std::atomic<int> vkn_qforce{0};
+extern "C" void dm_vk_queue_force(int on){vkn_qforce.store(on?1:0);}
+extern "C" int dm_vk_queue_forced(void){return vkn_qforce.load(std::memory_order_relaxed);}
+static inline bool pt_qlock_on(void){return pt_cfg.load(std::memory_order_relaxed)!=0 || vkn_qforce.load(std::memory_order_relaxed)!=0;}
 static void pt_mark_submitted(void);static void pt_stamp_present(void);
-struct PtQLock{bool on;PtQLock():on(pt_cfg.load(std::memory_order_relaxed)!=0){if(on)pt_queue_mutex.lock();}~PtQLock(){if(on)pt_queue_mutex.unlock();}};
+struct PtQLock{bool on;PtQLock():on(pt_qlock_on()){if(on)pt_queue_mutex.lock();}~PtQLock(){if(on)pt_queue_mutex.unlock();}};
 static VkResult pt_queue_submit(VkQueue q,uint32_t n,const VkSubmitInfo *s,VkFence f){VkResult r;{PtQLock l;r=vkQueueSubmit(q,n,s,f);}if(r==VK_SUCCESS && pt_on_thread)pt_mark_submitted();return r;}
 static VkResult pt_queue_present(VkQueue q,const VkPresentInfoKHR *p){VkResult r;{PtQLock l;r=vkQueuePresentKHR(q,p);}if(pt_on_thread)pt_stamp_present();return r;}
 static VkResult pt_queue_wait_idle(VkQueue q){PtQLock l;return vkQueueWaitIdle(q);}
@@ -929,8 +935,10 @@ extern "C" void dm_present_nrp_stats(uint64_t out[6]){out[0]=nrp::parks.load();o
 extern "C" uint64_t dm_present_wait_submitted(void){return pt::q.wait_submitted();}
 extern "C" uint64_t dm_present_drain(void){return pt::q.drain();}
 extern "C" int dm_present_last_error(void){return pt::q.err.load();}
-extern "C" void dm_present_queue_lock(void){if(pt_cfg.load(std::memory_order_relaxed))pt_queue_mutex.lock();}
-extern "C" void dm_present_queue_unlock(void){if(pt_cfg.load(std::memory_order_relaxed))pt_queue_mutex.unlock();}
+extern "C" void dm_present_queue_lock(void){if(pt_qlock_on())pt_queue_mutex.lock();}
+extern "C" void dm_present_queue_unlock(void){if(pt_qlock_on())pt_queue_mutex.unlock();}
+// [DOS2] VK-NATIVE: the device of this front end for the native backend (dm/gfx/vkn/vkn_core.c). 1 = the device exists.
+extern "C" int dm_vk_handles(VkInstance *i,VkPhysicalDevice *p,VkDevice *d,VkQueue *q,uint32_t *f){if(!device)return 0;*i=instance;*p=physical;*d=device;*q=queue;*f=family;return 1;}
 // Totals since start: presents run by the thread (or inline with =2), the thread's time in them, the engine's waits on a full hand-off ring
 // (ns), and on a not yet submitted blit (ns, dm_present_wait_submitted).
 extern "C" void dm_present_thread_stats(uint64_t out[4]){out[0]=pt::q.jobs.load()+pt::inline_jobs.load();out[1]=pt::q.busy_ns.load();out[2]=pt::q.full_ns.load();out[3]=pt::q.wait_ns.load();}

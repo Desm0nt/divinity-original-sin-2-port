@@ -189,6 +189,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_touch_world_install(void); dm_dos2_touch_world_install(); }   // [DOS2] DM_DOS2_TOUCH_WORLD=3: PC world clicks by touch in controller mode: picking from the cursor, Action1 (hle_dos2_touch_world.c)
     { void dm_dos2_touch_guard_install(void); dm_dos2_touch_guard_install(); }   // [DOS2] with DM_DOS2_TOUCH: NULL check the game lacks in its pending-tooltip path (hle_dos2_touchui.c, run tu03 crash)
     { void dm_dos2_touch_install(void); dm_dos2_touch_install(); }   // [DOS2] DM_DOS2_TOUCH: touches as mouse records through the engine's InjectInput (hle_dos2_touch.c)
+    { void dm_dos2_vkn_install(void); dm_dos2_vkn_install(); }   // [DOS2] DM_VK_NATIVE: the native Vulkan backend behind the engine's renderer (hle_dos2_vkn.c); LAST: its hooks chain over the others'
 #endif
     uint64_t ta = now_ns();
 #ifndef DM_GAME_DOOM   // [DOOM] D2R-only: probes / tick hash (diag.c), target ranking (hle_target.c)

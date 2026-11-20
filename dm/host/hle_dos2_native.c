@@ -230,6 +230,20 @@ int dn_hook(module_t *m, uint32_t off, const uint32_t pro[4], void *hook, void *
     if (dn_jump(m, off, hook)) { *orig = NULL; munmap(t, 0x4000); return -1; }
     return 0;
 }
+// [DOS2] VK-NATIVE: a hook on a site that may already carry one of ours. Words equal to pro: dn_hook. Words equal to the 16-byte jump
+// dn_jump wrote (an earlier dn_hook of another module): the jump's target is replaced by hook and *orig = the earlier hook (it has the
+// function's own signature and calls the function through its own trampoline) - the new hook runs first. Install time only. 0 = in.
+int dn_hook_chain(module_t *m, uint32_t off, const uint32_t pro[4], void *hook, void **orig);
+int dn_hook_chain(module_t *m, uint32_t off, const uint32_t pro[4], void *hook, void **orig) {
+    if (!m || m->text_end < off + 16) return -1;
+    if (dn_words_ok(m, off, pro)) return dn_hook(m, off, pro, hook, orig);
+    uint32_t w[4]; memcpy(w, m->base + off, 16);
+    if (w[0] != 0x58000050 || w[1] != 0xd61f0200) return -1;   // neither the function's own words nor our jump
+    void *prev = (void *)(uintptr_t)((uint64_t)w[2] | (uint64_t)w[3] << 32);
+    if (dn_jump(m, off, hook)) return -1;
+    *orig = prev;
+    return 0;
+}
 // Adds a handler to the one ExecuteRenderCommand hook (installs the hook on the first call). 0 = registered.
 int dn_install_rc(const dn_rc_handler *h) {
     if (g_rc_nh >= DN_RC_MAX) { LOG("【红】[native] ExecuteRenderCommand: more than %d handlers", DN_RC_MAX); return -1; }

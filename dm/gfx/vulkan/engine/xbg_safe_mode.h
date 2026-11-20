@@ -78,7 +78,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
         add("DM_NR_Z3","0");add("DM_NR_Z5","0");   // NR-ZERO Z3 / Z5: resolved draws from a table / the packet from the game thread (they sit on NR-09)
         add("DM_NRN","0");add("DM_NRN_LIVE","0");add("DM_NRN_SHC","0");add("DM_NRN_EV","0");   /* [DOS2] NR-NATIVE step E */add("DM_NRN_LIST","0");add("DM_NRN_REC","0");/* [DOS2] NR-NATIVE step D */add("DM_NRN_NOBODY","0");/* [DOS2] NR-NATIVE step D half b */add("DM_NRN_PKT","0");/* [DOS2] NR-NATIVE step D half c */add("DM_NRN_SHORT","0");add("DM_NRN_SHADOW","0");add("DM_NRN_PREPASS","0");add("DM_NRN_GBUF","0");add("DM_NRN_LIGHT","0");add("DM_NRN_POST","0");add("DM_NRN_OTHER","0");   // NR-NATIVE: the card of an engine draw (sits on NR-09)
-        add("DM_NR_Z8","0");   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
+        add("DM_NR_Z8","0");add("DM_VK_NATIVE","0");/* [DOS2] VK-NATIVE: the native backend (dm/gfx/vkn) */   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
         add("DM_NR_Z8_THREAD","0");   // NR-ZERO Z8, section 28: the walk on its own thread
         add("DM_NR_Z8_IMG","0");      // section 29: the read word of an NR-08 entry
         add("DM_NR_Z8_VIEW","0");     // section 30: views by the range's number in its submission

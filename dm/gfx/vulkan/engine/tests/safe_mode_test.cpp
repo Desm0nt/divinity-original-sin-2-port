@@ -11,7 +11,7 @@
 static int fails=0;
 #define CHECK(c) do{if(!(c)){printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#c);++fails;}}while(0)
 
-static std::string sw(int step,XbgGpuFamily f){XbgSafeSwitch s[96];const int n=xbg_safe_switches(step,f,s,96);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
+static std::string sw(int step,XbgGpuFamily f){XbgSafeSwitch s[128];const int n=xbg_safe_switches(step,f,s,128);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
 static bool has(const std::string &s,const char *kv){return s.find(std::string(kv)+" ")!=std::string::npos;}
 static int count_key(const std::string &s,const char *k){int c=0;for(size_t p=s.find(k);p!=std::string::npos;p=s.find(k,p+1))if((p==0 || s[p-1]==' ') && s[p+strlen(k)]=='=')++c;return c;}
 
@@ -57,9 +57,9 @@ int main(){
         for(const char *kv:{"DM_GFX_PIPE_SERIAL=1","DM_NB_MT=0","DM_GFX_GS_PASSTHRU=0","DM_NR=0","DM_NR_BUF=0","DM_NR_DESC=0","DM_NR_HEAT=0","DM_NR_SEED=0","DM_NB=0",
             "DM_NB_PIPE=0","DM_NB_DESC=0","DM_NB_UBO=0","DM_NB_OWN=0","DM_NB_POST=0","DM_NB_POST_AA=0","DM_GFX_PRESENT_THREAD=0"}){CHECK(has(s3,kv));CHECK(!has(s2,kv));}
         // every key once per step
-        XbgSafeSwitch a[96];const int n=xbg_safe_switches(3,f,a,96);
+        XbgSafeSwitch a[128];const int n=xbg_safe_switches(3,f,a,128);
         for(int i=0;i<n;i++){CHECK(count_key(s3,a[i].key)==1);CHECK(!strncmp(a[i].key,"DM_",3));CHECK(*a[i].value=='0' || *a[i].value=='1');}
-        CHECK(n<96-16);}   // room in the engine's array (xbg_safe_mode.inc: 96) for the switches to come
+        CHECK(n<128-16);}   // room in the engine's array (xbg_safe_mode.inc: 128) for the switches to come
     // PowerVR-only items: the colour mask of output-less shaders (the d2r #179 fix stays on Mali), dynamic UBOs / NR-08b
     CHECK(has(sw(3,XBG_GPU_POWERVR),"DM_GFX_NOOUT_MASK=0") && sw(3,XBG_GPU_MALI).find("NOOUT_MASK")==std::string::npos);
     CHECK(sw(3,XBG_GPU_MALI).find("UBO_DYNAMIC")==std::string::npos && sw(3,XBG_GPU_MALI).find("UBODYN")==std::string::npos);

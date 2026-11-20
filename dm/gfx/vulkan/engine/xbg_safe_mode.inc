@@ -92,7 +92,7 @@ extern "C" void xbg_safe_mode_boot(uint32_t vendor,const char *name){
         xbg_logf("NVN safe mode: not used on %s (Mali / PowerVR only, DM_GFX_SIM_GPU=%s; %d graphics failure(s) counted in %s)",xbg_gpu_family_name(family),
             getenv("DM_GFX_SIM_GPU")?getenv("DM_GFX_SIM_GPU"):"-",count,path[0]?path:"-");
         return;}
-    XbgSafeSwitch sw[96];const int n=xbg_safe_switches(step,family,sw,96);   /* (64 until the NR-ZERO Z8 parts: with them step 3 on PowerVR is exactly 64 switches - the list must never be cut) */std::string set,player;
+    XbgSafeSwitch sw[128];const int n=xbg_safe_switches(step,family,sw,128);   /* (64 until the NR-ZERO Z8 parts: with them step 3 on PowerVR is exactly 64 switches - the list must never be cut) */std::string set,player;
     for(int i=0;i<n;i++){const char *have=getenv(sw[i].key);const int pl=dm_env_player?dm_env_player(sw[i].key):-1;
         if(!xbg_safe_should_set(have,pl)){player+=" ";player+=sw[i].key;player+="=";player+=have?have:"?";continue;}
         setenv(sw[i].key,sw[i].value,1);set+=" ";set+=sw[i].key;set+="=";set+=sw[i].value;

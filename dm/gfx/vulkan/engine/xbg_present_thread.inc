@@ -17,7 +17,9 @@ extern "C" __attribute__((weak)) uint64_t dm_present_drain(void);
 extern "C" __attribute__((weak)) int dm_present_last_error(void);
 extern "C" __attribute__((weak)) void dm_present_queue_lock(void);
 extern "C" __attribute__((weak)) void dm_present_queue_unlock(void);
+extern "C" __attribute__((weak)) int dm_vk_queue_forced(void);   // [DOS2] VK-NATIVE: the queue lock is real in every mode (vulkan_present.cpp)
 extern "C" __attribute__((weak)) void dm_present_thread_stats(uint64_t out[4]);
+static inline bool vkn_forced(){return dm_vk_queue_forced && dm_vk_queue_forced();}
 namespace {
 namespace ptq {
 int mode=0;uint64_t wait_ns=0,waits=0,drain_ns=0,drains=0,handed=0;
@@ -31,8 +33,8 @@ void init(){
 void check(){if(int e=dm_present_last_error())xbg_fatalf("Game presentation failed: %d (present thread)",e);}
 void before_submit(){if(!mode)return;const uint64_t w=dm_present_wait_submitted();if(w){wait_ns+=w;++waits;}check();}
 void drain(){if(!mode)return;const uint64_t w=dm_present_drain();if(w){drain_ns+=w;++drains;}check();}
-VkResult submit(VkQueue q,uint32_t n,const VkSubmitInfo *si,VkFence f){if(!mode)return vkQueueSubmit(q,n,si,f);dm_present_queue_lock();const VkResult r=vkQueueSubmit(q,n,si,f);dm_present_queue_unlock();return r;}
-VkResult wait_idle(VkQueue q){if(!mode)return vkQueueWaitIdle(q);dm_present_queue_lock();const VkResult r=vkQueueWaitIdle(q);dm_present_queue_unlock();return r;}
+VkResult submit(VkQueue q,uint32_t n,const VkSubmitInfo *si,VkFence f){if(!mode && !vkn_forced())return vkQueueSubmit(q,n,si,f);dm_present_queue_lock();const VkResult r=vkQueueSubmit(q,n,si,f);dm_present_queue_unlock();return r;}
+VkResult wait_idle(VkQueue q){if(!mode && !vkn_forced())return vkQueueWaitIdle(q);dm_present_queue_lock();const VkResult r=vkQueueWaitIdle(q);dm_present_queue_unlock();return r;}
 int handoff(VkImage source,VkFormat format,uint32_t width,uint32_t height,const int32_t crop[4],int32_t interval){++handed;return dm_present_async(source,format,width,height,crop,interval);}
 // Per frame over the NVN PERF window (f frames): presents handed, the present thread's time in a present, the translation thread's waits
 // for a free hand-off slot / for the handed blits before a submission (count a frame) / for the thread to finish (finish, shutdown).
