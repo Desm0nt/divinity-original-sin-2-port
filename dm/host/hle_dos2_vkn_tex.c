@@ -23,7 +23,9 @@
 // game's NVN table (same in-place object layout, no translator side effects); WriteTexels copies nothing, the data reaches the
 // native image here from the engine arguments. The engine's own bookkeeping (pool-id bitmap, A at object +0xe0, records) is unchanged.
 // Stage 4 (both modes, devices without BC and DM_GFX_SIM_GPU=mali / powervr): vkn_tex looks packaged BC1..BC3 2D textures up in the
-// setup ASTC pack (vkn_astc.h; DM_VK_NATIVE_ASTC=0 = always decode); the census adds a "tex BC:" line (native / pack / decoded).
+// setup ASTC pack (vkn_astc.h; DM_VK_NATIVE_ASTC=0 = always decode), then the GPU routes (vkn_bcgpu.h: GPU decode + ASTC 4x4 encode,
+// GPU decode to RGBA8), then the CPU decode; the census adds the lines "tex BC:" (textures and MB by storage, time on the creating
+// threads, why the pack did not take them) and "tex BC gpu:" (the device's decisions, self-tests, GPU work recorded).
 // Not covered here: 0x914bb0 shared RT storage (every target gets its own memory, VK-NATIVE.md 3.3), texture updates after creation
 // (UI WriteTexels / CopyBufferToTexture, packets 0x2c / 0x2d: stage 3).
 #ifdef DM_GAME_DOS2
@@ -34,6 +36,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_astc.h"
+#include "../gfx/vkn/vkn_bcgpu.h"
 #include "hle_dos2_vkn.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
@@ -235,23 +238,43 @@ static void tex_census(void) {
              s.bytes[VKN_TC_DEPTH] / mb, s.bytes[VKN_TC_WINDOW] / mb, (unsigned long long)s.created, (unsigned long long)s.destroyed, (unsigned long long)s.uploads, s.upload_bytes / mb,
              s.upload_ns / 1e6, (unsigned long long)s.deswizzled, (unsigned long long)s.decoded, (unsigned long long)s.widened, (unsigned long long)s.swaps, s.samplers,
              (unsigned long long)s.samplers_made, (unsigned long long)s.failed, (unsigned long long)s.samplers_failed);
-    // stage 4: BC textures by storage (native BC / ASTC from the setup pack / CPU-decoded), why the decoded ones were decoded, the pack
-    const uint64_t bcm = s.bc_made[VKN_BC_NATIVE] + s.bc_made[VKN_BC_PACK] + s.bc_made[VKN_BC_DECODED];
+    // stage 4: BC textures by storage (native BC / ASTC from the setup pack / GPU decode + ASTC 4x4 encode / GPU decode to RGBA8 / CPU
+    // decode): alive (MB), made, creation time on the creating threads, staged MB; why the pack did not take the others; the pack
+    uint64_t bcm = 0; for (int k = 0; k < VKN_BC_N; k++) bcm += s.bc_made[k];
     if (bcm) {
         vkn_astc_stats a; vkn_astc_get_stats(&a);
         static const char *const k_state[4] = {"not opened", "ready", "none", "unreadable"};
-        vkn_logf("tex BC: alive native %u (%.1f MB) / ASTC pack %u (%.1f MB) / CPU-decoded %u (%.1f MB), made %llu / %llu / %llu; decoded because: no pack %llu, "
-                 "BC4-BC7 %llu, not packaged %llu, not 2D one layer %llu, pack has no such shape %llu / bytes %llu, block size %llu; mip tails as ASTC %llu; "
+        static const char *const k_kind[VKN_BC_N] = {"native", "ASTC pack", "CPU-decoded", "GPU ASTC", "GPU RGBA8"};
+        char kinds[640]; size_t at = 0; kinds[0] = 0;
+        for (int k = 0; k < VKN_BC_N && at + 120 < sizeof kinds; k++)
+            at += (size_t)snprintf(kinds + at, sizeof kinds - at, "%s%s %u (%.1f MB) made %llu, %.0f ms, staged %.1f MB", k ? " / " : "", k_kind[k], s.bc_alive[k],
+                                   s.bc_bytes[k] / mb, (unsigned long long)s.bc_made[k], s.bc_ns[k] / 1e6, s.bc_upload[k] / mb);
+        vkn_logf("tex BC: alive %s; not from the pack because: no pack %llu, "
+                 "BC4-BC7 %llu, not packaged %llu, not 2D one layer %llu, pack has no such shape %llu / bytes %llu, block size %llu; mip tails re-made %llu; "
                  "pack %s (%u entries, %.1f MB): lookups %llu, hits %llu, hashed %.1f MB in %.1f ms, read %llu (%.1f MB in %.1f ms), read errors %llu, "
                  "zero blocks fixed %llu; pack path %.1f ms",
-                 s.bc_alive[VKN_BC_NATIVE], s.bc_bytes[VKN_BC_NATIVE] / mb, s.bc_alive[VKN_BC_PACK], s.bc_bytes[VKN_BC_PACK] / mb, s.bc_alive[VKN_BC_DECODED],
-                 s.bc_bytes[VKN_BC_DECODED] / mb, (unsigned long long)s.bc_made[VKN_BC_NATIVE], (unsigned long long)s.bc_made[VKN_BC_PACK],
-                 (unsigned long long)s.bc_made[VKN_BC_DECODED], (unsigned long long)s.dec_why[VKN_DW_OFF], (unsigned long long)s.dec_why[VKN_DW_FMT],
+                 kinds, (unsigned long long)s.dec_why[VKN_DW_OFF], (unsigned long long)s.dec_why[VKN_DW_FMT],
                  (unsigned long long)s.dec_why[VKN_DW_SRC], (unsigned long long)s.dec_why[VKN_DW_SHAPE], (unsigned long long)s.dec_why[VKN_DW_MISS_SHAPE],
                  (unsigned long long)s.dec_why[VKN_DW_MISS_KEY], (unsigned long long)s.dec_why[VKN_DW_BLOCK], (unsigned long long)s.pack_tail,
                  a.state >= 0 && a.state < 4 ? k_state[a.state] : "?", a.entries, a.pack_bytes / mb, (unsigned long long)a.lookups, (unsigned long long)a.hits,
                  a.hash_bytes / mb, a.hash_ns / 1e6, (unsigned long long)a.reads, a.read_bytes / mb, a.read_ns / 1e6, (unsigned long long)a.read_fails,
                  (unsigned long long)a.zero_fixed, s.pack_ns / 1e6);
+        vkn_bcgpu_stats g; vkn_bcgpu_get_stats(&g);
+        if (g.ready) {
+            static const char *const k_why[VKN_BCGW_N] = {"DM_GFX_BC_DECODE=cpu", "no doors", "BC4/BC5/BC6H", "3D/1D/MS", "device", "pipeline/self-test"};
+            static const char *const k_kept[VKN_BCAK_N] = {"DM_GFX_BC_ASTC=0", "auto on Qualcomm", "ASTC features", "encoder", "family", "shape", "image props"};
+            char why[256], kept[256]; size_t wa = 0, ka = 0; why[0] = kept[0] = 0;
+            for (int k = 0; k < VKN_BCGW_N; k++) if (g.why[k]) wa += (size_t)snprintf(why + wa, sizeof why - wa, " %s %llu", k_why[k], (unsigned long long)g.why[k]);
+            for (int k = 0; k < VKN_BCAK_N; k++) if (g.kept[k]) ka += (size_t)snprintf(kept + ka, sizeof kept - ka, " %s %llu", k_kept[k], (unsigned long long)g.kept[k]);
+            vkn_logf("tex BC gpu: decode %s (self-test ok %#x bad %#x by NVN format - 0x41), ASTC encode %s%s%s; routed ASTC %llu / RGBA8 %llu / CPU %llu (CPU because:%s; "
+                     "RGBA8 because:%s); jobs %llu, batches %llu (decode %llu, encode %llu dispatches), blocks %llu, BC in %.1f MB, copies %llu, recorded %llu; "
+                     "job build %.1f ms, device set-up + self-tests %.1f ms; scratch %.1f MB",
+                     g.ready > 0 ? "on" : "off", g.kat_ok, g.kat_bad, g.astc > 0 ? "on" : g.astc < 0 ? "off" : "undecided", g.line[0] ? ": " : "", g.line,
+                     (unsigned long long)g.routed[VKN_BCG_ASTC], (unsigned long long)g.routed[VKN_BCG_RGBA8], (unsigned long long)g.routed[VKN_BCG_NONE],
+                     wa ? why : " -", ka ? kept : " -", (unsigned long long)g.jobs, (unsigned long long)g.batches, (unsigned long long)g.dec_dispatch,
+                     (unsigned long long)g.enc_dispatch, (unsigned long long)g.blocks, g.in_bytes / mb, (unsigned long long)g.copies, (unsigned long long)g.recorded,
+                     g.build_ns / 1e6, g.prep_ns / 1e6, g.scratch_bytes / mb);
+        }
     }
     if (s.failed || s.samplers_failed) vkn_logf(RED "tex: %llu texture / %llu sampler creations failed so far (the first 16 of each are logged)", (unsigned long long)s.failed,
                                                 (unsigned long long)s.samplers_failed);

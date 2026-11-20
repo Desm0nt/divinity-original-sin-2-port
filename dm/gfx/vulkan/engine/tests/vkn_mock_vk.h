@@ -123,11 +123,13 @@ enum { MK_E_BEGIN_CB = 1, MK_E_END_CB, MK_E_SUBMIT, MK_E_PRESENT, MK_E_PRESENT_W
        MK_E_CLEAR_COLOR_IMG, MK_E_CLEAR_DS_IMG, MK_E_BEGIN_RP, MK_E_END_RP, MK_E_CLEAR_ATT, MK_E_BIND_PIPE, MK_E_BIND_SETS, MK_E_BIND_VB,
        MK_E_BIND_IB, MK_E_VIEWPORT, MK_E_SCISSOR, MK_E_DRAW, MK_E_DRAW_IDX, MK_E_DISPATCH, MK_E_RESET_QP, MK_E_TIMESTAMP, MK_E_WAIT,
        MK_E_BEGIN_Q, MK_E_END_Q, MK_E_COPY_Q, MK_E_BEGIN_COND, MK_E_END_COND,   // [stage 4: queries]
+       MK_E_COPY_BUF, MK_E_PUSH,                                                 // [stage 4: GPU BC route] buffer copies, push constants
        MK_E_N };
 static const char *const mk_ev_name[MK_E_N] MK_U = {"?", "begin", "end", "submit", "present", "present-wait", "barrier", "copy-buf-img", "copy-img",
     "blit", "clear-color-img", "clear-ds-img", "begin-rp", "end-rp", "clear-att", "bind-pipe", "bind-sets", "bind-vb", "bind-ib", "viewport",
     "scissor", "draw", "draw-idx", "dispatch", "reset-qp", "timestamp", "fence-wait",
-    "begin-query", "end-query", "copy-query", "begin-cond", "end-cond"};   // [stage 4: queries]
+    "begin-query", "end-query", "copy-query", "begin-cond", "end-cond",   // [stage 4: queries]
+    "copy-buf", "push"};                                                 // [stage 4: GPU BC route]
 typedef struct mk_ev {
     int op; VkCommandBuffer cb; uint64_t seq;
     uint64_t a[4];                 // handles (image / buffer / pipeline / set / pass / framebuffer / fence), by op
@@ -736,6 +738,39 @@ void vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t ic, uint32_t inst, uint32_t f
 }
 void vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDispatch", MK_E_DISPATCH); e->u[0] = x; e->u[1] = y; e->u[2] = z; pthread_mutex_unlock(&mk_mu);
+}
+// [stage 4: GPU BC route] buffer copies (a[0] source, a[1] destination, off[0..2] source offset / destination offset / size; the source
+// bytes stay readable through mk_buf_cpu while the source block lives), push constants (u[0..3] the first four words, u[4] offset, u[5] size)
+void vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n, const VkBufferCopy *r) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdCopyBuffer", MK_E_COPY_BUF);
+    mk_obj *os = mk_find(MK_H(src), MK_BUFFER), *od = mk_find(MK_H(dst), MK_BUFFER);
+    if (!os || !od) mk_err("vkCmdCopyBuffer: dead buffer");
+    if (n != 1) mk_err("vkCmdCopyBuffer: %u regions (the backend copies one)", n);
+    if (os && r[0].srcOffset + r[0].size > os->size) mk_err("vkCmdCopyBuffer: source range outside the buffer");
+    if (od && r[0].dstOffset + r[0].size > od->size) mk_err("vkCmdCopyBuffer: destination range outside the buffer");
+    e->a[0] = MK_H(src); e->a[1] = MK_H(dst); e->off[0] = r[0].srcOffset; e->off[1] = r[0].dstOffset; e->off[2] = r[0].size; e->n = n;
+    pthread_mutex_unlock(&mk_mu);
+}
+void vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout l, VkShaderStageFlags st, uint32_t off, uint32_t size, const void *v) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdPushConstants", MK_E_PUSH);
+    if (!mk_find(MK_H(l), MK_PL)) mk_err("vkCmdPushConstants: dead pipeline layout");
+    (void)st; e->a[0] = MK_H(l); e->u[4] = off; e->u[5] = size; memcpy(e->u, v, size < 16 ? size : 16);
+    pthread_mutex_unlock(&mk_mu);
+}
+static MK_U const uint8_t *mk_buf_cpu(VkBuffer b) { pthread_mutex_lock(&mk_mu); mk_obj *o = mk_find(MK_H(b), MK_BUFFER); pthread_mutex_unlock(&mk_mu); return o ? (const uint8_t *)o->cpu : NULL; }
+static int mk_img_props_fail;   // vkGetPhysicalDeviceImageFormatProperties reports VK_ERROR_FORMAT_NOT_SUPPORTED
+VkResult vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice p, VkFormat f, VkImageType t, VkImageTiling tl, VkImageUsageFlags u, VkImageCreateFlags fl,
+                                                  VkImageFormatProperties *o) {
+    (void)f; (void)t; (void)tl; (void)u; (void)fl; if (p != MK_PHYS) mk_err("image format properties of %p", (void *)p);
+    memset(o, 0, sizeof *o);
+    if (mk_img_props_fail) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    o->maxExtent = (VkExtent3D){16384, 16384, 1}; o->maxMipLevels = 15; o->maxArrayLayers = 2048; o->sampleCounts = VK_SAMPLE_COUNT_1_BIT; o->maxResourceSize = 1ull << 32;
+    return VK_SUCCESS;
+}
+void vkUnmapMemory(VkDevice d, VkDeviceMemory m) {
+    (void)d; pthread_mutex_lock(&mk_mu); mk_obj *om = mk_find(MK_H(m), MK_MEMORY);
+    if (!om || !om->mapped) mk_err("vkUnmapMemory: memory not mapped"); else om->mapped = 0;
+    pthread_mutex_unlock(&mk_mu);
 }
 VkResult vkCreateShaderModule(VkDevice d, const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *a, VkShaderModule *out) {
     (void)a; mk_dev_check(d, "vkCreateShaderModule");

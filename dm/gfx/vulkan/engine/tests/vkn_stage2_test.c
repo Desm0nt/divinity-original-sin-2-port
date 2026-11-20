@@ -18,6 +18,12 @@
 //            zero-block fix, the sRGB twin, 6x6 with two levels, key miss with an entry of another byte count, level count in the key /
 //            shape filter without hashing, block size the device lacks, linear / BC4 / cube never looked up, an update refused, the mip
 //            reduction re-made as ASTC + its tail copy, no pack / corrupt entry / bad magic / DM_VK_NATIVE_ASTC=0, a short read);
+//   BC GPU   stage 4, the GPU routes after the pack (vkn_bcgpu.c, translator doors stubbed here): route 3 (auto on the mock's Qualcomm)
+//            with its command sequence, staged region table + blocks and copies, decoder self-test once per format (a failed one -> CPU),
+//            BC4 / BC6H on the CPU, route 2 (DM_GFX_BC_ASTC=1: decode + encode dispatches, ASTC 4x4 UNORM / sRGB, the encoder self-test with
+//            the zero re-read and re-run, the family's both pipelines), an update of a GPU-ASTC texture through the GPU, the module's shape
+//            rule (BC3 array) and image properties -> RGBA8, a failed encoder self-test / =0 / DM_GFX_BC_DECODE=cpu / no doors, bands of a
+//            level bigger than a batch, the pack first and a mip reduction re-made from GPU ASTC 4x4 into the pack's 6x6;
 //   state    blend factors / ops, depth-stencil funcs / ops, cull / fill (MAP-1 §3.2, 0x922530 / 0x922d10 / 0x923360; expected tables
 //            written here from the doc's NVN numbers, not from the code), vertex formats (MAP-1 §3.1, 0x9181d0; the engine's own
 //            fullscreen-mesh element list of 0x1f58698), the write-mask rule (0x9282c0, MAP-2), the primitive table 0x1f58640, the render
@@ -34,7 +40,7 @@
 // From the repository root (one command line; wrapped here):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage2_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage2_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c
-//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/vkn/vkn_astc.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
+//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
 //       dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage2_test
 // (the game defines of the dos2 build, dm/android/CMakeLists.txt: nvn_tex.c's layout rules depend on DM_GAME_D3; -fsanitize=address,undefined
 // works the same way.)
@@ -52,6 +58,7 @@
 #include "../../../vkn/vkn_buf.h"
 #include "../../../vkn/vkn_tex.h"
 #include "../../../vkn/vkn_astc.h"
+#include "../../../vkn/vkn_bcgpu.h"
 #include "../../../vkn/vkn_shader.h"
 #include "../../../vkn/vkn_state.h"
 #include "../../../vkn/vkn_mirror.h"
@@ -1415,6 +1422,293 @@ static void test_tex_shapes(void) {
     flush_logged(); frames(3);
 }
 
+// ---- stage 4: the GPU BC route (vkn_bcgpu.c) on a device without BC: pack > GPU ASTC 4x4 > GPU RGBA8 > CPU ----
+// The translator doors (xbg_game.cpp [DOS2] VK-NATIVE export) are stubbed here: td_on = 0 (the default for every other test) is a build
+// without them (blob NULL: no GPU route, the CPU decode as before). The self-tests themselves are device-side: here their verdicts are
+// what the stubs say, the test checks what the backend does with them (one submission each, the zero re-read / re-run, route off).
+static int td_on, td_dec_bad, td_enc_good = 1, td_enc_zero, td_dec_kat_calls, td_enc_kat_calls, td_enc_checks;
+static const uint32_t td_blob[16] = {0x07230203};
+const uint32_t *xbg_vkn_bc_blob(int which, size_t *bytes) {
+    if (bytes) *bytes = td_on && which >= 0 && which <= 2 ? sizeof td_blob : 0;
+    return td_on && which >= 0 && which <= 2 ? td_blob : NULL;
+}
+static int td_rgba8(uint32_t f) { return (f >= 0x41 && f <= 0x48) || f == 0x4d || f == 0x4e; }
+int xbg_vkn_bc_kat_input(uint32_t fmt, void *in, size_t in_cap, size_t *in_bytes, size_t *out_bytes, uint32_t push[4]) {
+    if (!td_rgba8(fmt) || in_cap < 64) return -1;
+    td_dec_kat_calls++;
+    memset(in, 0, 64); *in_bytes = 64; *out_bytes = 2048u * 64;
+    push[0] = 1; push[1] = 2048; push[2] = 4; push[3] = fmt == 0x41 || fmt == 0x42 || fmt == 0x45 || fmt == 0x46 ? 2 : 4;
+    return 0;
+}
+int xbg_vkn_bc_kat_check(uint32_t fmt, const void *out, size_t out_bytes, char *line, size_t cap) {
+    (void)out; (void)out_bytes; if (line && cap) snprintf(line, cap, "stub");
+    return fmt == (uint32_t)td_dec_bad ? 7 : 0;
+}
+int xbg_vkn_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba, size_t rgba_cap, size_t *rgba_bytes, uint32_t push[][4], uint32_t max_disp,
+                          uint32_t *ndisp, uint32_t *blocks) {
+    if (in_cap < 256 || rgba_cap < 285 * 64 || max_disp < 6) return -1;
+    td_enc_kat_calls++;
+    memset(in, 0, 256); memset(rgba, 0, 285 * 64); *in_bytes = 256; *rgba_bytes = 285 * 64; *ndisp = 6; *blocks = 285;
+    static const uint32_t first[7] = {0, 29, 77, 125, 173, 221, 285};
+    for (int i = 0; i < 6; i++) { push[i][0] = 6; push[i][1] = first[i]; push[i][2] = first[i + 1]; push[i][3] = (i == 1 || i == 2 ? 1u : i == 3 || i == 4 ? 2u : 0u) | 4u << 8; }
+    return 0;
+}
+int xbg_vkn_bca_kat_check(const void *enc, uint32_t cands, int *zero, char *line, size_t cap) {
+    (void)enc; td_enc_checks++;
+    if (zero) *zero = td_enc_zero > 0;
+    if (td_enc_zero > 0) td_enc_zero--;
+    if (line && cap) snprintf(line, cap, "stub candidates=%u", cands);
+    return td_enc_good;
+}
+uint32_t xbg_vkn_bca_flags(uint32_t nvn) {   // xbg_bc_astc_flags
+    switch (nvn) { case 0x41: case 0x42: case 0x45: case 0x46: return 1 | 2 << 8; case 0x43: case 0x44: case 0x47: case 0x48: return 2 | 4 << 8;
+                   case 0x4d: case 0x4e: return 4 << 8; default: return 0; }
+}
+const char *xbg_vkn_bca_shape(uint32_t nvn, int target, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, int samples, int storage, int vt) {   // xbg_bc_astc_shape
+    if (samples > 1) return "multisample";
+    if (storage) return "storage";
+    if (target == 0 || target == 2 || target == 3) return "not-2d";
+    if (!vt && levels == 1 && w >= 4096 && h >= 4096) return "vt-cache-shape";
+    if (!vt && (nvn == 0x44 || nvn == 0x48) && (target == 4 || layers > 1)) return "bc3-array";
+    return NULL;
+}
+static void ev_clear(void) { pthread_mutex_lock(&mk_mu); mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu); }
+// The commands recorded since ev_clear, of the ops that matter here (barriers of other images left out), as a compact string.
+static void ev_seq(VkImage img, char *out, size_t cap) {
+    size_t at = 0; out[0] = 0;
+    pthread_mutex_lock(&mk_mu);
+    for (uint64_t q = mk_ev_base; q < mk_seq && at + 24 < cap; q++) {
+        const mk_ev *e = &mk_evs[q - mk_ev_base]; const char *n = NULL;
+        switch (e->op) {
+        case MK_E_BARRIER: n = !e->a[0] ? "mb" : e->a[0] == MK_H(img) ? "ib" : NULL; break;
+        case MK_E_COPY_BUF: n = "cb"; break;
+        case MK_E_BIND_PIPE: n = "bp"; break;
+        case MK_E_BIND_SETS: n = "bs"; break;
+        case MK_E_PUSH: n = "pc"; break;
+        case MK_E_DISPATCH: n = "d"; break;
+        case MK_E_COPY_BUF_IMG: n = e->a[0] == MK_H(img) ? "ci" : NULL; break;
+        default: break;
+        }
+        if (n) at += (size_t)snprintf(out + at, cap - at, "%s%s", at ? " " : "", n);
+    }
+    pthread_mutex_unlock(&mk_mu);
+}
+static const mk_ev *ev_nth(int op, int k) {   // the k-th entry of an op since ev_clear (NULL = none)
+    const mk_ev *r = NULL;
+    pthread_mutex_lock(&mk_mu);
+    for (uint64_t q = mk_ev_base; q < mk_seq; q++) if (mk_evs[q - mk_ev_base].op == op && !k--) { r = &mk_evs[q - mk_ev_base]; break; }
+    pthread_mutex_unlock(&mk_mu);
+    return r;
+}
+static int ev_count(int op) { int n = 0; pthread_mutex_lock(&mk_mu); for (uint64_t q = mk_ev_base; q < mk_seq; q++) n += mk_evs[q - mk_ev_base].op == op; pthread_mutex_unlock(&mk_mu); return n; }
+static vkn_tex *bc_lin(uint64_t handle, uint32_t nvn, uint32_t tg, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, const uint8_t *data, uint64_t cookie, uint32_t pool) {
+    // linear BC data: every (level, layer) tight block rows of `data` (the same bytes for each)
+    vkn_tex_region r[32]; uint32_t n = 0;
+    const uint32_t ly = tg == 8 ? 6 : layers;
+    for (uint32_t l = 0; l < ly; l++) for (uint32_t m = 0; m < levels && n < 32; m++) {
+        r[n].level = m; r[n].layer = l; r[n].z = 0; r[n].w = (w >> m) ? (w >> m) : 1; r[n].h = (h >> m) ? (h >> m) : 1; r[n].d = 1; r[n].src = data; n++;
+    }
+    vkn_tex_desc d = tdesc(55, tg, w, h, levels, layers, VKN_TC_SAMPLED, cookie, pool); d.nvn_fmt = nvn;
+    const vkn_tex_src s = {VKN_SRC_REGIONS, r, n, NULL, 0, 0, 0};
+    const char *why = NULL; vkn_tex *t = vkn_tex_create(handle, &d, &s, &why);
+    if (!t) printf("  bc_lin: %s\n", why ? why : "?");
+    return t;
+}
+static void bcg_reset(const char *astc, const char *decode, const char *batch) {
+    flush_logged();   // (vkn_bcgpu_reset: no job may be pending)
+    if (astc) setenv("DM_GFX_BC_ASTC", astc, 1); else unsetenv("DM_GFX_BC_ASTC");
+    if (decode) setenv("DM_GFX_BC_DECODE", decode, 1); else unsetenv("DM_GFX_BC_DECODE");
+    if (batch) setenv("DM_GFX_BC_BATCH_MB", batch, 1); else unsetenv("DM_GFX_BC_BATCH_MB");
+    vkn_bcgpu_reset();
+}
+static void test_tex_bcgpu(void) {
+    char seq[1024]; vkn_bcgpu_stats g; vkn_tex_stats ts0, ts;
+    static uint8_t data[1 << 20];
+    for (unsigned i = 0; i < sizeof data; i++) data[i] = (uint8_t)(i * 31 + 7);
+    mk_bc = 0; mk_astc = 7; td_on = 1; td_dec_bad = 0; td_enc_good = 1; td_enc_zero = 0;
+    flush_logged(); frames(3);
+    vkn_tex_get_stats(&ts0);
+
+    // (a) auto on the mock's Qualcomm: route 2 off ("only simulated here"), route 3 = GPU decode to RGBA8; decoder self-test once per format
+    bcg_reset(NULL, NULL, NULL);
+    td_dec_kat_calls = td_enc_kat_calls = 0;
+    const int sub0 = mk_submits;
+    vkn_tex *A = bc_lin(H(400, 1), 0x44, 1, 16, 8, 2, 1, data, 0x4A0, 4000);   // BC3 16x8, 2 levels
+    CHECK(A != NULL);
+    vkn_bcgpu_get_stats(&g);
+    CHECK_EQ(g.ready, 1); CHECK_EQ(g.astc, -1); CHECK_EQ(g.astc_off, VKN_BCAK_QCOM); CHECK_EQ(td_dec_kat_calls, 1); CHECK_EQ(td_enc_kat_calls, 0);
+    CHECK_EQ(mk_submits - sub0, 1);   // one self-test submission (the format's pipeline)
+    CHECK_EQ(g.kat_ok, 1u << (0x44 - 0x41)); CHECK_EQ(g.routed[VKN_BCG_RGBA8], 1); CHECK_EQ(g.kept[VKN_BCAK_QCOM], 1);
+    if (A) {
+        CHECK_EQ(A->format, VK_FORMAT_R8G8B8A8_UNORM); CHECK_EQ(A->bcgpu, VKN_BCG_RGBA8); CHECK_EQ(A->decoded, 1); CHECK_EQ(A->astc, 0);
+        CHECK_EQ(vkn_upload_pending_bytes(), 2 * 32 + 128 + 32);   // one batch: table 2 regions x 32 bytes, then 8 + 2 blocks x 16
+        mk_log_reset(); ev_clear(); CHECK(vkn_upload_flush() >= 1);
+        ev_seq(A->image, seq, sizeof seq);
+        CHECK(!strcmp(seq, "ib mb cb mb bp bs pc d mb ci ib"));
+        if (strcmp(seq, "ib mb cb mb bp bs pc d mb ci ib")) printf("  seq: %s\n", seq);
+        const mk_ev *pc = ev_nth(MK_E_PUSH, 0), *dp = ev_nth(MK_E_DISPATCH, 0), *cb = ev_nth(MK_E_COPY_BUF, 0);
+        CHECK(pc && pc->u[0] == 2 && pc->u[1] == 10 && pc->u[2] == 4 && pc->u[3] == 4);   // regions, blocks (8 + 2), bytes a pixel, words a block
+        CHECK(dp && dp->u[0] == 1);
+        CHECK(cb && cb->off[1] == 0 && cb->off[2] == 2 * 32 + 128 + 32);
+        // the staged input: the region table (input offsets past the table) and the blocks of both levels
+        const uint8_t *st = cb ? mk_buf_cpu((VkBuffer)(uintptr_t)cb->a[0]) : NULL;
+        CHECK(st != NULL);
+        if (st) {
+            const uint32_t *w = (const uint32_t *)(st + cb->off[0]);
+            CHECK(w[0] == 0 && w[1] == 4 && w[2] == 8 && w[3] == 2 && w[4] == 16 && w[5] == 0 && w[6] == 16 && w[7] == 8);
+            CHECK(w[8] == 8 && w[9] == 2 && w[10] == 2 && w[11] == 1 && w[12] == 16 + 32 && w[13] == 8 * 64 / 4 && w[14] == 8 && w[15] == 2);
+            CHECK(!memcmp(st + cb->off[0] + 64, data, 128)); CHECK(!memcmp(st + cb->off[0] + 64 + 128, data, 32));
+        }
+        CHECK_EQ(copies_of(A->image), 2);
+        const mk_copy_t *c0 = copy_of(A->image, 0, 0, 0), *c1 = copy_of(A->image, 1, 0, 0);
+        CHECK(c0 && c1);
+        if (c0 && c1) {
+            CHECK_EQ(c0->c.bufferOffset, 0); CHECK_EQ(c0->c.bufferRowLength, 16); CHECK_EQ(c0->c.bufferImageHeight, 8); CHECK_EQ(c0->c.imageExtent.width, 16);
+            CHECK_EQ(c0->c.imageExtent.height, 8); CHECK_EQ(c1->c.bufferOffset, 8 * 64); CHECK_EQ(c1->c.bufferRowLength, 8); CHECK_EQ(c1->c.bufferImageHeight, 4);
+            CHECK_EQ(c1->c.imageExtent.width, 8); CHECK_EQ(c1->c.imageExtent.height, 4);
+        }
+        CHECK_EQ(A->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // a CPU-side update of a GPU-RGBA8 texture: the CPU decoder into the same RGBA8 image (one copy, no dispatch)
+        mk_log_reset(); ev_clear();
+        CHECK_EQ(vkn_tex_update(A, 0, 0, 4, 4, 4, 4, data, 16), 0); vkn_upload_flush();
+        CHECK_EQ(ev_count(MK_E_DISPATCH), 0); CHECK_EQ(copies_of(A->image), 1);
+    }
+    vkn_bcgpu_get_stats(&g); CHECK_EQ(g.jobs, 1); CHECK_EQ(g.batches, 1); CHECK_EQ(g.recorded, 1); CHECK_EQ(g.dec_dispatch, 1); CHECK_EQ(g.enc_dispatch, 0); CHECK_EQ(g.blocks, 10);
+    // the same format again: no second self-test; BC4 / BC6H -> CPU; a format whose decode fails its self-test -> CPU
+    td_dec_bad = 0x41;
+    vkn_tex *B = bc_lin(H(401, 1), 0x44, 1, 8, 8, 1, 1, data, 0x4A1, 4001), *C = bc_lin(H(402, 1), 0x49, 1, 8, 8, 1, 1, data, 0x4A2, 4002),
+            *D = bc_lin(H(403, 1), 0x41, 1, 8, 8, 1, 1, data, 0x4A3, 4003), *E = bc_lin(H(404, 1), 0x50, 1, 8, 8, 1, 1, data, 0x4A4, 4004);
+    CHECK(B && C && D && E);
+    vkn_bcgpu_get_stats(&g);
+    CHECK_EQ(td_dec_kat_calls, 2); CHECK_EQ(g.kat_bad, 1u << 0); CHECK_EQ(g.why[VKN_BCGW_FMT], 2); CHECK_EQ(g.why[VKN_BCGW_PIPE], 1);
+    if (B) { CHECK_EQ(B->bcgpu, VKN_BCG_RGBA8); }
+    if (C) { CHECK_EQ(C->bcgpu, 0); CHECK_EQ(C->decoded, 1); CHECK_EQ(C->format, VK_FORMAT_R8_UNORM); }
+    if (D) { CHECK_EQ(D->bcgpu, 0); CHECK_EQ(D->decoded, 1); CHECK_EQ(D->format, VK_FORMAT_R8G8B8A8_UNORM); }
+    if (E) { CHECK_EQ(E->bcgpu, 0); CHECK_EQ(E->format, VK_FORMAT_R16G16B16A16_SFLOAT); }
+    ev_clear(); flush_logged();
+    if (D) CHECK_EQ(copies_of(D->image), 1);
+    CHECK_EQ(ev_count(MK_E_DISPATCH), 1);   // B's decode; C / D / E decoded on the CPU at creation
+    td_dec_bad = 0;
+    vkn_tex_destroy_cookie(0x4A0); vkn_tex_destroy_cookie(0x4A1); vkn_tex_destroy_cookie(0x4A2); vkn_tex_destroy_cookie(0x4A3); vkn_tex_destroy_cookie(0x4A4);
+
+    // (b) DM_GFX_BC_ASTC=1: route 2 - decode, encode, ASTC blocks into an ASTC 4x4 image; the encoder self-test once (zero re-read + re-run)
+    bcg_reset("1", NULL, NULL);
+    td_dec_kat_calls = td_enc_kat_calls = td_enc_checks = 0; td_enc_zero = 2;
+    const int sub1 = mk_submits;
+    vkn_tex *F = bc_lin(H(405, 1), 0x45, 1, 16, 8, 1, 1, data, 0x4A5, 4005);   // BC1 sRGB
+    CHECK(F != NULL);
+    vkn_bcgpu_get_stats(&g);
+    CHECK_EQ(g.astc, 1); CHECK_EQ(td_enc_kat_calls, 1); CHECK_EQ(td_enc_checks, 3);   // read, re-read (zero), re-run
+    CHECK_EQ(mk_submits - sub1, 1 + 2 + 1);   // the format's decoder test, the encoder test twice, the twin's decoder test (family)
+    CHECK_EQ(td_dec_kat_calls, 2);            // 0x45 and its linear twin 0x41 (both pipelines of the family)
+    if (F) {
+        CHECK_EQ(F->format, VK_FORMAT_ASTC_4x4_SRGB_BLOCK); CHECK_EQ(F->astc, 4); CHECK_EQ(F->bcgpu, VKN_BCG_ASTC); CHECK_EQ(F->decoded, 0);
+        mk_log_reset(); ev_clear(); vkn_upload_flush();
+        ev_seq(F->image, seq, sizeof seq);
+        CHECK(!strcmp(seq, "ib mb cb mb bp bs pc d mb bp bs pc d mb ci ib"));
+        if (strcmp(seq, "ib mb cb mb bp bs pc d mb bp bs pc d mb ci ib")) printf("  seq: %s\n", seq);
+        const mk_ev *pd = ev_nth(MK_E_PUSH, 0), *pe = ev_nth(MK_E_PUSH, 1), *b0 = ev_nth(MK_E_BIND_PIPE, 0), *b1 = ev_nth(MK_E_BIND_PIPE, 1);
+        CHECK(pd && pd->u[0] == 1 && pd->u[1] == 8 && pd->u[2] == 4 && pd->u[3] == 2);
+        CHECK(pe && pe->u[0] == 1 && pe->u[1] == 0 && pe->u[2] == 8 && pe->u[3] == (1 | 2 << 8));   // regions, first, end, flags (direct BC1, 2 words)
+        CHECK(b0 && b1 && b0->a[0] != b1->a[0] && b0->u[0] == VK_PIPELINE_BIND_POINT_COMPUTE);
+        const mk_copy_t *c0 = copy_of(F->image, 0, 0, 0);
+        CHECK(c0 && c0->c.bufferOffset == 0 && c0->c.bufferRowLength == 16 && c0->c.bufferImageHeight == 8 && c0->c.imageExtent.width == 16);
+        CHECK(c0 && c0->buf != (VkBuffer)(uintptr_t)ev_nth(MK_E_COPY_BUF, 0)->a[1]);   // from the ASTC scratch, not the input scratch
+        // an update of a GPU-ASTC texture: its BC rows through the GPU decode + encode (one region at 4, 4)
+        mk_log_reset(); ev_clear();
+        vkn_tex_update_stats us0; vkn_tex_update_stats_get(&us0);
+        CHECK_EQ(vkn_tex_update(F, 0, 0, 4, 4, 8, 4, data, 16), 0); vkn_upload_flush();
+        CHECK_EQ(ev_count(MK_E_DISPATCH), 2);
+        const mk_copy_t *u0 = copy_of(F->image, 0, 0, 0);
+        CHECK(u0 && u0->c.imageOffset.x == 4 && u0->c.imageOffset.y == 4 && u0->c.imageExtent.width == 8 && u0->c.imageExtent.height == 4);
+        vkn_tex_update_stats us; vkn_tex_update_stats_get(&us); CHECK_EQ(us.dropped_fmt, us0.dropped_fmt); CHECK_EQ(us.queued, us0.queued + 1);
+    }
+    // BC7 / BC2 ASTC; a BC3 array stays RGBA8 (the module's shape rule), a storage texture too; image properties refused -> RGBA8
+    vkn_tex *G = bc_lin(H(406, 1), 0x4d, 1, 8, 8, 1, 1, data, 0x4A6, 4006), *I = bc_lin(H(407, 1), 0x44, 4, 8, 8, 1, 2, data, 0x4A7, 4007);
+    mk_img_props_fail = 1;
+    vkn_tex *J = bc_lin(H(408, 1), 0x43, 1, 8, 8, 1, 1, data, 0x4A8, 4008);
+    mk_img_props_fail = 0;
+    CHECK(G && I && J);
+    if (G) { CHECK_EQ(G->bcgpu, VKN_BCG_ASTC); CHECK_EQ(G->format, VK_FORMAT_ASTC_4x4_UNORM_BLOCK); }
+    if (I) { CHECK_EQ(I->bcgpu, VKN_BCG_RGBA8); CHECK_EQ(I->format, VK_FORMAT_R8G8B8A8_UNORM); CHECK_EQ(I->layers, 2); }
+    if (J) { CHECK_EQ(J->bcgpu, VKN_BCG_RGBA8); }
+    vkn_bcgpu_get_stats(&g); CHECK_EQ(g.kept[VKN_BCAK_SHAPE], 1); CHECK_EQ(g.kept[VKN_BCAK_PROPS], 1);
+    flush_logged();
+    if (I) { CHECK_EQ(copies_of(I->image), 2); const mk_copy_t *l1 = copy_of(I->image, 0, 1, 0); CHECK(l1 && l1->c.imageSubresource.baseArrayLayer == 1); }
+    vkn_tex_get_stats(&ts);
+    CHECK_EQ(ts.bc_made[VKN_BC_GPU_ASTC] - ts0.bc_made[VKN_BC_GPU_ASTC], 2); CHECK_EQ(ts.bc_made[VKN_BC_GPU_RGBA8] - ts0.bc_made[VKN_BC_GPU_RGBA8], 4);
+    CHECK_EQ(ts.bc_alive[VKN_BC_GPU_ASTC], 2); CHECK(ts.bc_bytes[VKN_BC_GPU_ASTC] > 0);
+    for (uint64_t c = 0x4A5; c <= 0x4A8; c++) vkn_tex_destroy_cookie(c);
+
+    // (c) the encoder self-test fails: route 2 off for the process, the same textures RGBA8
+    bcg_reset("1", NULL, NULL); td_enc_good = 0; td_enc_zero = 0;
+    vkn_tex *K = bc_lin(H(409, 1), 0x44, 1, 8, 8, 1, 1, data, 0x4A9, 4009);
+    CHECK(K && K->bcgpu == VKN_BCG_RGBA8);
+    vkn_bcgpu_get_stats(&g); CHECK_EQ(g.astc, -1); CHECK_EQ(g.astc_off, VKN_BCAK_ENC); CHECK_EQ(g.kept[VKN_BCAK_ENC], 1);
+    td_enc_good = 1;
+    vkn_tex_destroy_cookie(0x4A9);
+    // DM_GFX_BC_ASTC=0 -> RGBA8; DM_GFX_BC_DECODE=cpu -> CPU; no doors -> CPU
+    bcg_reset("0", NULL, NULL);
+    vkn_tex *L = bc_lin(H(410, 1), 0x44, 1, 8, 8, 1, 1, data, 0x4AA, 4010);
+    CHECK(L && L->bcgpu == VKN_BCG_RGBA8); vkn_bcgpu_get_stats(&g); CHECK_EQ(g.astc_off, VKN_BCAK_OFF);
+    bcg_reset("1", "cpu", NULL);
+    vkn_tex *M = bc_lin(H(411, 1), 0x44, 1, 8, 8, 1, 1, data, 0x4AB, 4011);
+    CHECK(M && M->bcgpu == 0 && M->decoded == 1); vkn_bcgpu_get_stats(&g); CHECK_EQ(g.ready, -1); CHECK_EQ(g.why[VKN_BCGW_OFF], 1);
+    td_on = 0; bcg_reset("1", NULL, NULL);
+    vkn_tex *N = bc_lin(H(412, 1), 0x44, 1, 8, 8, 1, 1, data, 0x4AC, 4012);
+    CHECK(N && N->bcgpu == 0 && N->decoded == 1); vkn_bcgpu_get_stats(&g); CHECK_EQ(g.why[VKN_BCGW_DOOR], 1);
+    td_on = 1;
+    flush_logged();
+    for (uint64_t c = 0x4AA; c <= 0x4AC; c++) vkn_tex_destroy_cookie(c);
+
+    // (d) a level bigger than a batch: bands of block rows, one batch each (DM_GFX_BC_BATCH_MB=4: 4 MB of RGBA8 a batch)
+    bcg_reset("1", NULL, "4");
+    vkn_tex *P = bc_lin(H(413, 1), 0x41, 1, 2048, 1024, 1, 1, data, 0x4AD, 4013);   // BC1: 512 x 256 blocks, 8 MB decoded
+    CHECK(P != NULL);
+    if (P) {
+        mk_log_reset(); ev_clear(); vkn_upload_flush();
+        CHECK_EQ(ev_count(MK_E_DISPATCH), 4);   // 2 bands x (decode + encode)
+        CHECK_EQ(copies_of(P->image), 2);
+        const mk_copy_t *a = &mk_copy[0], *b = &mk_copy[1];
+        CHECK(a->c.imageOffset.y == 0 && a->c.imageExtent.height == 512 && b->c.imageOffset.y == 512 && b->c.imageExtent.height == 512);
+        CHECK(a->c.bufferOffset == 0 && b->c.bufferOffset == 0 && a->c.bufferImageHeight == 512 && a->c.bufferRowLength == 2048);
+        vkn_tex_destroy_cookie(0x4AD);
+    }
+
+    // (e) the pack first: a texture the pack holds stays from the pack with the GPU route on; its mip reduction (made without data:
+    // GPU ASTC 4x4 by its own route) is re-made in the pack entry's 6x6 and gets the tail copy
+    bcg_reset("1", NULL, NULL);
+    {
+        const char *path = "/tmp/vkn_bcgpu_test.pack";
+        uint64_t ns_ = 0; uint8_t *sx = tp_storage(0x42, 24, 24, 2, 1, 4, &ns_);
+        uint8_t dy[320]; memset(dy, 0x41, sizeof dy);   // 6x6 blocks: 4 x 4 x 16 + 2 x 2 x 16
+        tp_ent e1 = tp_of(sx, ns_, 0x42, 24, 24, 2, 6, dy, 256 + 64);
+        tp_write(path, &e1, 1, "D3AC");
+        setenv("DM_ASTC_CACHE_PATH", path, 1); unsetenv("DM_VK_NATIVE_ASTC"); vkn_astc_reset();
+        const char *why = NULL;
+        vkn_tex *Q = tp_create(H(414, 1), 0x42, 24, 24, 2, 1, sx, ns_, 0x4AE, 4014, &why);
+        CHECK(Q && Q->astc == 6 && Q->bcgpu == 0 && Q->format == VK_FORMAT_ASTC_6x6_UNORM_BLOCK);
+        vkn_tex_desc dn = tdesc(55, 1, 12, 12, 1, 1, VKN_TC_SAMPLED, 0x4AF, 4015); dn.nvn_fmt = 0x42;
+        vkn_tex *R = vkn_tex_create(H(415, 1), &dn, NULL, &why);
+        CHECK(R && R->bcgpu == VKN_BCG_ASTC && R->astc == 4);
+        flush_logged();
+        vkn_tex_stats t1; vkn_tex_get_stats(&t1);
+        CHECK_EQ(vkn_tex_swap_reduced(H(414, 1), 0x4AE, 0x4AF), 0);
+        vkn_tex *R2 = vkn_tex_get(H(414, 1));
+        CHECK(R2 && R2 != R && R2->astc == 6 && R2->bcgpu == 0 && R2->format == VK_FORMAT_ASTC_6x6_UNORM_BLOCK);
+        vkn_tex_get_stats(&ts); CHECK_EQ(ts.pack_tail - t1.pack_tail, 1);
+        flush_logged();
+        CHECK_EQ(mk_nicopy, 1);
+        vkn_tex_destroy_cookie(0x4AE); vkn_tex_destroy_cookie(0x4AF);
+        unsetenv("DM_ASTC_CACHE_PATH"); vkn_astc_reset(); remove(path); free(sx);
+    }
+
+    // back to a build without doors for everything after this; the module's device objects go
+    flush_logged(); frames(3);
+    td_on = 0; bcg_reset(NULL, NULL, NULL);
+    unsetenv("DM_GFX_BC_ASTC"); unsetenv("DM_GFX_BC_DECODE"); unsetenv("DM_GFX_BC_BATCH_MB");
+    mk_bc = 1;
+}
 static void test_textures(void) {
     test_tex_shapes();
     test_tex_formats();
@@ -1422,6 +1716,7 @@ static void test_textures(void) {
     test_tex_widen_bc();
     test_tex_packaged();
     test_tex_astc_pack();
+    test_tex_bcgpu();
     test_tex_targets();
     test_tex_lifetime();
     test_samplers();
