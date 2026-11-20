@@ -19,6 +19,8 @@
 #include "vkn_pass.h"
 #include "vkn_frame.h"
 #include "vkn_state.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
@@ -96,13 +98,119 @@ static void end_open(void) {
 }
 static void on_begin(void) { g_open = 0; g_open_cb = VK_NULL_HANDLE; }   // a new recording: nothing of the last one is open
 
+// ---- debug aid: DM_VK_NATIVE_DUMP=k1[,k2,k3,k4] - the colour targets of the k-th "heavy" presented frame (40 passes or more: a
+// level frame) as small pictures. At the end of that frame every texture that was a colour attachment in it (first 64, in the order
+// of first use) is blitted (level 0, layer 0, NEAREST) into a 480x216 RGBA8 image and read back; 4 frames later the pictures are
+// written as <DM_VK_NATIVE_DUMP_DIR | DM_RUNTIME_DIR | dm>/vkn_<k>_<nn>_<handle>_<w>x<h>_f<format>_c<class>.ppm. HDR values clamp
+// to 0..1; integer formats and depth are skipped. Costs nothing while the switch is unset. ----
+enum { DUMP_W = 480, DUMP_H = 216, DUMP_MAX = 64 };
+static struct {
+    int init, nat, active; uint32_t at[4], heavy, passes_frame, k;
+    vkn_tex *t[DUMP_MAX]; uint32_t nt;
+    VkImage img; VkDeviceMemory mem;
+    int live; vkn_block b; uint64_t frame; uint32_t n, pk;
+    struct { uint64_t h; uint32_t w, hh, fmt, cls; } e[DUMP_MAX];
+} g_dump;
+static void dump_note(vkn_tex *t) {
+    if (!g_dump.active || !t || is_depth(t) || fmt_int(t->format) || g_dump.nt >= DUMP_MAX) return;
+    for (uint32_t i = 0; i < g_dump.nt; i++) if (g_dump.t[i] == t) return;
+    g_dump.t[g_dump.nt++] = t;
+}
+static void dump_write(void) {
+    const char *d = getenv("DM_VK_NATIVE_DUMP_DIR"); if (!d || !*d) d = getenv("DM_RUNTIME_DIR"); if (!d || !*d) d = "dm";
+    for (uint32_t i = 0; i < g_dump.n; i++) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/vkn_%u_%02u_%llx_%ux%u_f%u_c%u.ppm", d, g_dump.pk, i, (unsigned long long)g_dump.e[i].h, g_dump.e[i].w, g_dump.e[i].hh, g_dump.e[i].fmt, g_dump.e[i].cls);
+        FILE *f = fopen(path, "wb"); if (!f) { vkn_logf(RED "dump: cannot write %s", path); break; }
+        fprintf(f, "P6\n%d %d\n255\n", DUMP_W, DUMP_H);
+        const uint8_t *px = (const uint8_t *)g_dump.b.cpu + (size_t)i * DUMP_W * DUMP_H * 4;
+        for (uint32_t k = 0; k < DUMP_W * DUMP_H; k++) fwrite(px + 4 * k, 1, 3, f);
+        fclose(f);
+    }
+    vkn_logf("dump: heavy frame %u: %u targets written to %s/vkn_%u_*.ppm", g_dump.pk, g_dump.n, d, g_dump.pk);
+    vkn_block_free(&g_dump.b); g_dump.live = 0;
+}
+static void dump_begin(void) {   // begin listener: a new recording
+    if (!g_dump.init) {
+        g_dump.init = 1;
+        const char *e = getenv("DM_VK_NATIVE_DUMP");
+        while (e && *e && g_dump.nat < 4) { char *end = NULL; const unsigned long v = strtoul(e, &end, 10); if (v) g_dump.at[g_dump.nat++] = (uint32_t)v; if (end && *end == ',') e = end + 1; else break; }
+    }
+    if (!g_dump.nat) return;
+    if (g_dump.live && vkn_frame() >= g_dump.frame + 4) dump_write();
+    if (g_dump.passes_frame >= 40) g_dump.heavy++;
+    g_dump.passes_frame = 0; g_dump.active = 0; g_dump.nt = 0;
+    if (!vkn_rec_presented() || g_dump.live) return;
+    for (int i = 0; i < g_dump.nat; i++) if (g_dump.at[i] == g_dump.heavy + 1 && g_dump.k != g_dump.at[i]) { g_dump.active = 1; g_dump.k = g_dump.at[i]; }
+}
+static void dump_close(void) {   // close listener (after vkn_pass_end): the frame's targets are final
+    if (!g_dump.active) return;
+    g_dump.active = 0;
+    if (g_dump.passes_frame < 40) { g_dump.k = 0; return; }   // not a heavy frame after all: the next one is tried
+    VkCommandBuffer cb = vkn_cb(); const vkn_dev *dv = vkn_device();
+    if (!cb || !dv || !g_dump.nt) return;
+    if (!g_dump.img) {
+        const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {DUMP_W, DUMP_H, 1},
+            .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        if (vkCreateImage(dv->dev, &ci, NULL, &g_dump.img) != VK_SUCCESS || vkn_image_mem(g_dump.img, &g_dump.mem, NULL)) { g_dump.img = VK_NULL_HANDLE; return; }
+    }
+    if (vkn_block_alloc(VKN_ARENA_STAGING, (uint64_t)g_dump.nt * DUMP_W * DUMP_H * 4, 16, &g_dump.b)) return;
+    end_open();
+    VkImageMemoryBarrier sb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = g_dump.img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    g_dump.n = 0;
+    for (uint32_t i = 0; i < g_dump.nt; i++) {
+        vkn_tex *t = g_dump.t[i];
+        if (t->dead || t->layout == VK_IMAGE_LAYOUT_UNDEFINED || t->samples > 1) continue;
+        const VkImageLayout prev = t->layout;
+        if (prev != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        sb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
+        const VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)t->w, (int32_t)t->h, 1}},
+                                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {DUMP_W, DUMP_H, 1}}};
+        vkCmdBlitImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_dump.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
+        sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
+        const VkBufferImageCopy bc = {.bufferOffset = g_dump.b.off + (uint64_t)g_dump.n * DUMP_W * DUMP_H * 4, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {DUMP_W, DUMP_H, 1}};
+        vkCmdCopyImageToBuffer(cb, g_dump.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_dump.b.buf, 1, &bc);
+        if (prev != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) barrier(cb, t, prev);
+        g_dump.e[g_dump.n].h = t->handle; g_dump.e[g_dump.n].w = t->w; g_dump.e[g_dump.n].hh = t->h; g_dump.e[g_dump.n].fmt = (uint32_t)t->format; g_dump.e[g_dump.n].cls = t->cls;
+        g_dump.n++;
+    }
+    g_dump.live = 1; g_dump.frame = vkn_frame(); g_dump.pk = g_dump.k;
+    vkn_logf("dump: heavy frame %u (frame %llu): %u colour targets read back", g_dump.k, (unsigned long long)g_dump.frame, g_dump.n);
+}
+
 void vkn_pass_init(void) {
     if (g_inited) return;
     g_inited = 1;
     vkn_rec_on_close(vkn_pass_end);
+    vkn_rec_on_close(dump_close);
     vkn_rec_on_begin(on_begin);
+    vkn_rec_on_begin(dump_begin);
 }
 void vkn_pass_end(void) { end_open(); }
+
+// A render target that was never written and never cleared is about to be read (sampled, or loaded by a pass that blends into it).
+// On the Switch its memory is fresh pool memory: zeros. A new VkImage holds garbage, and garbage in a history target (adapted
+// luminance, a previous-frame buffer) can be NaN and never leave it again: the phone run V3_b showed the level for a moment and
+// then black for good, with "sampled undefined 4". So such a target is filled with zeros first (every level and layer), outside
+// any pass. Returns 1 when it filled.
+static uint32_t g_red_zero;
+static int zero_fill(VkCommandBuffer cb, vkn_tex *t) {
+    if (!cb || t->layout != VK_IMAGE_LAYOUT_UNDEFINED || t->pass_ever) return 0;
+    if (t->cls != VKN_TC_COLOR && t->cls != VKN_TC_WINDOW && t->cls != VKN_TC_DEPTH) return 0;   // (a sampled texture without data: its format may be compressed)
+    end_open();
+    barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkImageSubresourceRange rg = {t->aspect, 0, t->mips, 0, t->layers};
+    if (is_depth(t)) { const VkClearDepthStencilValue v = {0.0f, 0}; vkCmdClearDepthStencilImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &rg); }
+    else { VkClearColorValue v; memset(&v, 0, sizeof v); vkCmdClearColorImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &rg); }
+    g_st2.sampled_undefined++;
+    if (red_ok(&g_red_zero)) vkn_logf("pass: target %#llx (%ux%u, %u levels, %u layers, format %d, class %u) read before it was ever written: filled with zeros", (unsigned long long)t->handle, t->w, t->h, t->mips, t->layers, (int)t->format, t->cls);
+    return 1;
+}
 
 // Executes the remembered clears of t as commands of their own (outside any pass). 0 = done or nothing to do; -1 = no recording
 // (they stay remembered).
@@ -195,6 +303,7 @@ static int begin_set(const tset *s) {
         float rgba[4];
         if (s->mip[i] == 0 && clr_find(t, s->layer[i], rgba, 0)) { k.load[i] = VK_ATTACHMENT_LOAD_OP_CLEAR; cv[nv].color = clear_color(t->format, rgba); g_st.clear++; g_st.clears_folded++; }
         else if (has_content(t)) { k.load[i] = VK_ATTACHMENT_LOAD_OP_LOAD; g_st.load++; if (t->pass_written != vkn_frame() + 1) g_st2.load_stale++; }
+        else if (zero_fill(cb, t)) { k.load[i] = VK_ATTACHMENT_LOAD_OP_LOAD; g_st.load++; }   // never written: zeros, as fresh memory on the Switch
         else { k.load[i] = VK_ATTACHMENT_LOAD_OP_DONT_CARE; g_st.dontcare++; }
         k.store[i] = VK_ATTACHMENT_STORE_OP_STORE;
         k.color[i] = (uint32_t)t->format;
@@ -206,6 +315,7 @@ static int begin_set(const tset *s) {
     k.samples = (uint8_t)(samples ? samples : 1);
     if (s->d) {
         vkn_tex *t = s->d;
+        if (!has_content(t) && (t->pass_dclr & 3) != 3) zero_fill(cb, t);   // an aspect that is neither cleared nor ever written: zeros
         const int hd = (t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0, hs = (t->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, content = has_content(t);
         k.depth = (uint32_t)t->format;
         k.depth_load = (t->pass_dclr & 1) && hd ? VK_ATTACHMENT_LOAD_OP_CLEAR : content ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -241,6 +351,8 @@ static int begin_set(const tset *s) {
     inf.pass = rp; inf.compat = compat; inf.ncolor = ncolor; inf.width = W; inf.height = H; inf.samples = k.samples;
     g_info = inf;
     g_st.passes++;
+    g_dump.passes_frame++;
+    if (g_dump.active) for (uint32_t i = 0; i < s->n; i++) dump_note(s->c[i]);
     return 0;
 }
 
@@ -287,7 +399,7 @@ int vkn_pass_sample(vkn_tex *t) {
     if (g_open) { end_open(); g_st.breaks_sample++; }
     flush_clears(t);
     if (t->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return 0;
-    if (t->layout == VK_IMAGE_LAYOUT_UNDEFINED) g_st2.sampled_undefined++;   // never written, never uploaded: its content is undefined (as on NVN)
+    if (t->layout == VK_IMAGE_LAYOUT_UNDEFINED && !zero_fill(cb, t)) g_st2.sampled_undefined++;   // (not a target: counted, content undefined)
     barrier(cb, t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     return 0;
 }

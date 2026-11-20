@@ -370,21 +370,23 @@ static void test_pass(void) {
     if (!(A && B && D && D2 && DZ && M && U && S && C && E && CS && CD && AS && AD && MS && MD && MF && MB)) return;
     vkn_pass_stats p0, p1; vkn_pass_stats2 q0, q1; vkn_pass_stats_get(&p0); vkn_pass_stats2_get(&q0);
     const VkCommandBuffer cb = fbegin(1);
-    // ---- lazy begin: nothing at the targets, the pass at the first ready; DONT_CARE for never-written targets
+    // ---- lazy begin: nothing at the targets, the pass at the first ready; never-written targets are filled with zeros first
+    // (fresh memory on the Switch; garbage in a history target never leaves it: phone run V3_b) and then LOADed
     uint64_t m = mark();
     targets(A, NULL, D);
     NO_OPS(m, cb);
     vkn_pass_info pi; memset(&pi, 0, sizeof pi);
     CHECK_EQ(vkn_pass_ready(&pi), 0);
-    OPS(m, cb, MK_E_BARRIER, MK_E_BARRIER, MK_E_BEGIN_RP);
-    const mk_ev *ba = barrier_of(m, A->image, 0), *bd = barrier_of(m, D->image, 0), *rp = nth(m, cb, MK_E_BEGIN_RP, 0);
-    CHECK(ba && ba->l0 == VK_IMAGE_LAYOUT_UNDEFINED && ba->l1 == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && ba->r.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT);
+    OPS(m, cb, MK_E_BARRIER, MK_E_CLEAR_COLOR_IMG, MK_E_BARRIER, MK_E_BARRIER, MK_E_CLEAR_DS_IMG, MK_E_BARRIER, MK_E_BEGIN_RP);
+    const mk_ev *ba = barrier_of(m, A->image, 0), *ba2 = barrier_of(m, A->image, 1), *bd = barrier_of(m, D->image, 1), *rp = nth(m, cb, MK_E_BEGIN_RP, 0);
+    CHECK(ba && ba->l0 == VK_IMAGE_LAYOUT_UNDEFINED && ba->l1 == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && ba->r.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT);
+    CHECK(ba2 && ba2->l0 == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && ba2->l1 == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     CHECK(bd && bd->l1 == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL && bd->r.aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
     if (att_of(rp, 1)) {
         CHECK_EQ(rp_of(rp)->natt, 2);
-        CHECK_EQ(att_of(rp, 0)->format, VK_FORMAT_R8G8B8A8_UNORM); CHECK_EQ(att_of(rp, 0)->loadOp, VK_ATTACHMENT_LOAD_OP_DONT_CARE); CHECK_EQ(att_of(rp, 0)->storeOp, VK_ATTACHMENT_STORE_OP_STORE);
-        CHECK_EQ(att_of(rp, 0)->initialLayout, VK_IMAGE_LAYOUT_UNDEFINED);
-        CHECK_EQ(att_of(rp, 1)->format, VK_FORMAT_D24_UNORM_S8_UINT); CHECK_EQ(att_of(rp, 1)->loadOp, VK_ATTACHMENT_LOAD_OP_DONT_CARE); CHECK_EQ(att_of(rp, 1)->stencilLoadOp, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+        CHECK_EQ(att_of(rp, 0)->format, VK_FORMAT_R8G8B8A8_UNORM); CHECK_EQ(att_of(rp, 0)->loadOp, VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(att_of(rp, 0)->storeOp, VK_ATTACHMENT_STORE_OP_STORE);
+        CHECK_EQ(att_of(rp, 0)->initialLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        CHECK_EQ(att_of(rp, 1)->format, VK_FORMAT_D24_UNORM_S8_UINT); CHECK_EQ(att_of(rp, 1)->loadOp, VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(att_of(rp, 1)->stencilLoadOp, VK_ATTACHMENT_LOAD_OP_LOAD);
     }
     CHECK_EQ(rp->rect.offset.x, 0); CHECK_EQ(rp->rect.extent.width, 64); CHECK_EQ(rp->rect.extent.height, 32);
     mk_obj *fb = fb_of(rp); CHECK(fb && fb->fb_n == 2 && fb->fb_view[0] == A->att && fb->fb_view[1] == D->att && fb->fb_w == 64 && fb->fb_h == 32 && fb->fb_layers == 1);
@@ -400,7 +402,7 @@ static void test_pass(void) {
     m = mark();
     vkn_pass_ready(&pi);
     rp = nth(m, cb, MK_E_BEGIN_RP, 0);
-    CHECK(att_of(rp, 1) && att_of(rp, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE && att_of(rp, 1)->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD &&
+    CHECK(att_of(rp, 1) && att_of(rp, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD && att_of(rp, 1)->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD &&
           att_of(rp, 1)->stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD && att_of(rp, 1)->initialLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     CHECK_EQ(pi.write_mask[0], 0xf);
     targets(A, NULL, D); m = mark(); vkn_pass_ready(&pi);
@@ -466,7 +468,7 @@ static void test_pass(void) {
     const int32_t rneg[4] = {-4, -4, 8, 8};
     m = mark();
     vkn_pass_clear_color(C, 0, green, rneg);
-    OPS(m, cb, MK_E_END_RP, MK_E_BARRIER, MK_E_BEGIN_RP, MK_E_CLEAR_ATT, MK_E_END_RP);
+    OPS(m, cb, MK_E_END_RP, MK_E_BARRIER, MK_E_CLEAR_COLOR_IMG, MK_E_BARRIER, MK_E_BEGIN_RP, MK_E_CLEAR_ATT, MK_E_END_RP);   // (C never written: zeros first)
     rp = nth(m, cb, MK_E_BEGIN_RP, 0); ca = nth(m, cb, MK_E_CLEAR_ATT, 0);
     CHECK(rp_of(rp) && rp_of(rp)->natt == 1 && rp_of(rp)->att[0].format == VK_FORMAT_R8G8B8A8_UNORM);
     CHECK(ca->cr[0].rect.offset.x == 0 && ca->cr[0].rect.offset.y == 0 && ca->cr[0].rect.extent.width == 4 && ca->cr[0].rect.extent.height == 4);
