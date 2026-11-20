@@ -1,0 +1,592 @@
+// [DOS2] VK-NATIVE stage 2: textures and samplers (vkn_tex.h). No game addresses, no engine record offsets, no NVN objects: the NVN
+// format / target NUMBERS the engine used are plain enum values the host file passes; the Switch block-linear layout of packaged
+// storage comes from the pure helpers nvn/nvn_tex.c + tex/nvn_deswizzle.c, CPU BC decoding from tex/nvn_bcdec.c.
+// Tables (one mutex g_mu): handle index -> linked texture (vkn_tab), cookie -> texture (chained hash), texture slot -> texture, engine
+// texture-pool id -> (slot, view) (pages of 4096 u32 over the engine's 0x100000 ids), sampler handle -> (pool id, VkSampler) and
+// sampler-pool id -> VkSampler (0x1000 ids).
+// Lifetime: a texture has one reference for the engine (dropped by its destroy event) and one per queued upload (dropped once the
+// upload is recorded); at zero it goes to vkn_retire (destroyed 3 frames later). An upload of a texture the engine already destroyed
+// records nothing.
+#ifdef DM_GAME_DOS2
+#include "vkn_tex.h"
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../nvn/nvn_tex.h"
+#include "../tex/nvn_deswizzle.h"
+#include "../tex/nvn_bcdec.h"
+
+#define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
+
+// ---- formats ----
+// Engine format 0..62 -> NVN format number {linear, sRGB} (the engine's 0x919c20 rule; 0xffff = the engine traps on it, 0 = none).
+static const uint16_t k_efmt_nvn[63][2] = {
+    {0, 0}, {0x01, 0x01}, {0x0d, 0x0d}, {0x19, 0x19}, {0x25, 0x38},                 //  0 None, R8, RG8, RGB8, RGBA8
+    {0x06, 0x06}, {0x12, 0x12}, {0x1e, 0x1e}, {0x2a, 0x2a},                         //  5 R16, RG16, RGB16, RGBA16
+    {0x02, 0x02}, {0x0e, 0x0e}, {0x1a, 0x1a}, {0x26, 0x26},                         //  9 R8S, RG8S, RGB8S, RGBA8S
+    {0x07, 0x07}, {0x13, 0x13}, {0x1f, 0x1f}, {0x2b, 0x2b},                         // 13 R16S .. RGBA16S
+    {0x05, 0x05}, {0x11, 0x11}, {0x1d, 0x1d}, {0x29, 0x29},                         // 17 R16F .. RGBA16F
+    {0x0a, 0x0a}, {0x16, 0x16}, {0x22, 0x22}, {0x2e, 0x2e},                         // 21 R32F .. RGBA32F
+    {0x09, 0x09}, {0x15, 0x15}, {0x21, 0x21}, {0x2d, 0x2d},                         // 25 R16I .. RGBA16I
+    {0x0c, 0x0c}, {0x18, 0x18}, {0x24, 0x24}, {0x30, 0x30},                         // 29 R32I .. RGBA32I
+    {0x08, 0x08}, {0x14, 0x14}, {0x20, 0x20}, {0x2c, 0x2c},                         // 33 R16UI .. RGBA16UI
+    {0x0b, 0x0b}, {0x17, 0x17}, {0x23, 0x23}, {0x2f, 0x2f},                         // 37 R32UI .. RGBA32UI
+    {0, 0}, {0x40, 0x40}, {0x3f, 0x3f}, {0x95, 0x95}, {0x39, 0x39}, {0x3d, 0x3d},   // 41 RGBE8, RGB9E5, RG11B10F, RGB565, RGBA4, RGB10A2
+    {0xffff, 0xffff}, {0x98, 0x98},                                                 // 47 BGR10A2 (trap), A1RGB5
+    {0x32, 0x32}, {0x33, 0x33}, {0x35, 0x35}, {0x34, 0x34},                         // 49 D16, D24, D24S8, D32F
+    {0x41, 0x45}, {0x43, 0x47}, {0x44, 0x48}, {0x49, 0x49}, {0x4b, 0x4b}, {0x50, 0x50}, {0x4d, 0x4d},   // 53 DXT1, DXT3, DXT5, BC4U, BC5U, BC6H, BC7
+    {0x99, 0x99}, {0x9a, 0x9c}, {0xffff, 0xffff},                                   // 60 BGR8, BGRA8, D32FS8 (trap)
+};
+// NVN format number -> VkFormat (the translator's order, xbg_game.cpp format()). x: alpha reads as one (RGBX formats).
+static VkFormat nvn_vk(uint32_t f, int *x) {
+    static const VkFormat t[0x37] = {VK_FORMAT_UNDEFINED,
+        VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UINT, VK_FORMAT_R8_SINT,
+        VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SNORM, VK_FORMAT_R16_UINT, VK_FORMAT_R16_SINT,
+        VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_SINT,
+        VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8_SINT,
+        VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_SINT,
+        VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SINT,
+        VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8_SNORM, VK_FORMAT_R8G8B8_UINT, VK_FORMAT_R8G8B8_SINT,
+        VK_FORMAT_R16G16B16_SFLOAT, VK_FORMAT_R16G16B16_UNORM, VK_FORMAT_R16G16B16_SNORM, VK_FORMAT_R16G16B16_UINT, VK_FORMAT_R16G16B16_SINT,
+        VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32_SINT,
+        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_R8G8B8A8_UINT, VK_FORMAT_R8G8B8A8_SINT,
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_UINT, VK_FORMAT_R16G16B16A16_SINT,
+        VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT,
+        VK_FORMAT_S8_UINT, VK_FORMAT_D16_UNORM, VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT};
+    *x = 0;
+    if (f < 0x37) return t[f];
+    if (f >= 0x41 && f <= 0x50) {   // DXT1 RGB / RGBA, DXT3, DXT5, the same four sRGB, RGTC1 U / S, RGTC2 U / S, BPTC unorm / sRGB, BPTC sfloat / ufloat
+        static const VkFormat bc[16] = {VK_FORMAT_BC1_RGB_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
+            VK_FORMAT_BC1_RGB_SRGB_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_BC2_SRGB_BLOCK, VK_FORMAT_BC3_SRGB_BLOCK, VK_FORMAT_BC4_UNORM_BLOCK,
+            VK_FORMAT_BC4_SNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_BC5_SNORM_BLOCK, VK_FORMAT_BC7_UNORM_BLOCK, VK_FORMAT_BC7_SRGB_BLOCK,
+            VK_FORMAT_BC6H_SFLOAT_BLOCK, VK_FORMAT_BC6H_UFLOAT_BLOCK};
+        return bc[f - 0x41];
+    }
+    if (f >= 0x79 && f <= 0x94) { const int k = (int)(f - 0x79) % 14; return (VkFormat)((int)VK_FORMAT_ASTC_4x4_UNORM_BLOCK + 2 * k + (f >= 0x87)); }
+    switch (f) {
+    case 0x37: *x = 1; return VK_FORMAT_R8G8B8A8_SRGB;            // RGBX8 sRGB
+    case 0x38: return VK_FORMAT_R8G8B8A8_SRGB;
+    case 0x3d: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    case 0x3e: return VK_FORMAT_A2B10G10R10_UINT_PACK32;
+    case 0x3f: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    case 0x40: return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+    case 0x6d: *x = 1; return VK_FORMAT_R8G8B8A8_UNORM;           // RGBX8
+    case 0x9a: return VK_FORMAT_B8G8R8A8_UNORM;
+    case 0x99: *x = 1; return VK_FORMAT_B8G8R8A8_UNORM;           // BGRX8 (engine "BGR8", 4 bytes a pixel)
+    case 0x9b: *x = 1; return VK_FORMAT_B8G8R8A8_SRGB;
+    case 0x9c: return VK_FORMAT_B8G8R8A8_SRGB;
+    // 16-bit packed formats: never reached the translator (it has no mapping for them); bit orders are guesses (LSB-first names).
+    case 0x95: return VK_FORMAT_R5G6B5_UNORM_PACK16;              // BGR565 (engine RGB565)
+    case 0x3c: return VK_FORMAT_B5G6R5_UNORM_PACK16;              // RGB565
+    case 0x98: return VK_FORMAT_A1R5G5B5_UNORM_PACK16;            // A1BGR5 (engine A1RGB5)
+    case 0x39: return VK_FORMAT_R4G4B4A4_UNORM_PACK16;            // RGBA4 (swizzled in the view, see fmt_swizzle)
+    default: return VK_FORMAT_UNDEFINED;
+    }
+}
+VkFormat vkn_tex_nvn_format(uint32_t nvn) { int x; return nvn_vk(nvn, &x); }
+VkFormat vkn_tex_engine_format(uint32_t efmt, int srgb, uint32_t *nvn_out) {
+    const uint32_t n = efmt < 63 ? k_efmt_nvn[efmt][srgb ? 1 : 0] : 0;
+    if (nvn_out) *nvn_out = n == 0xffff ? 0 : n;
+    return n && n != 0xffff ? vkn_tex_nvn_format(n) : VK_FORMAT_UNDEFINED;
+}
+static int fmt_is_bc(uint32_t f) { return f >= 0x41 && f <= 0x50; }
+static int fmt_is_depth(VkFormat f) {
+    return f == VK_FORMAT_S8_UINT || f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D24_UNORM_S8_UINT ||
+           f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT;
+}
+static VkImageAspectFlags fmt_aspect(VkFormat f) {
+    if (f == VK_FORMAT_S8_UINT) return VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT) return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (fmt_is_depth(f)) return VK_IMAGE_ASPECT_DEPTH_BIT;
+    return VK_IMAGE_ASPECT_COLOR_BIT;
+}
+// 3-component formats the device may not sample: the 4-component format, the component size and the bit pattern of alpha = 1.
+static int widen_of(uint32_t f, VkFormat *to, uint32_t *cs, uint32_t *one) {
+    static const struct { uint8_t f, cs; uint32_t one; VkFormat to; } w[] = {
+        {0x19, 1, 0xff, VK_FORMAT_R8G8B8A8_UNORM}, {0x1a, 1, 0x7f, VK_FORMAT_R8G8B8A8_SNORM}, {0x1b, 1, 1, VK_FORMAT_R8G8B8A8_UINT}, {0x1c, 1, 1, VK_FORMAT_R8G8B8A8_SINT},
+        {0x1d, 2, 0x3c00, VK_FORMAT_R16G16B16A16_SFLOAT}, {0x1e, 2, 0xffff, VK_FORMAT_R16G16B16A16_UNORM}, {0x1f, 2, 0x7fff, VK_FORMAT_R16G16B16A16_SNORM},
+        {0x20, 2, 1, VK_FORMAT_R16G16B16A16_UINT}, {0x21, 2, 1, VK_FORMAT_R16G16B16A16_SINT},
+        {0x22, 4, 0x3f800000u, VK_FORMAT_R32G32B32A32_SFLOAT}, {0x23, 4, 1, VK_FORMAT_R32G32B32A32_UINT}, {0x24, 4, 1, VK_FORMAT_R32G32B32A32_SINT}};
+    for (unsigned i = 0; i < sizeof w / sizeof *w; i++) if (w[i].f == f) { *to = w[i].to; *cs = w[i].cs; *one = w[i].one; return 1; }
+    return 0;
+}
+// BC decoded on the CPU: the format nvn_bc_decode writes (its bytes per pixel come from nvn_bc_unpacked).
+static VkFormat bc_decoded(uint32_t f) {
+    switch (f) {
+    case 0x41: case 0x42: case 0x43: case 0x44: case 0x4d: return VK_FORMAT_R8G8B8A8_UNORM;
+    case 0x45: case 0x46: case 0x47: case 0x48: case 0x4e: return VK_FORMAT_R8G8B8A8_SRGB;
+    case 0x49: return VK_FORMAT_R8_UNORM;
+    case 0x4a: return VK_FORMAT_R8_SNORM;
+    case 0x4b: return VK_FORMAT_R8G8_UNORM;
+    case 0x4c: return VK_FORMAT_R8G8_SNORM;
+    case 0x4f: case 0x50: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    default: return VK_FORMAT_UNDEFINED;
+    }
+}
+static VkFormatFeatureFlags fmt_feat(VkFormat f) {
+    const vkn_dev *d = vkn_device(); if (!d || f == VK_FORMAT_UNDEFINED) return 0;
+    VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(d->phys, f, &p);
+    VkFormatFeatureFlags v = p.optimalTilingFeatures;
+    // TRANSFER_DST is a 1.1 bit (KHR_maintenance1): a 1.0 driver does not report it, copies into a sampled format work there anyway.
+    if (d->props.apiVersion < VK_API_VERSION_1_1 && (v & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) v |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    return v;
+}
+static VkComponentMapping fmt_swizzle(uint32_t nvn, int x) {
+    VkComponentMapping m = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    if (x) m.a = VK_COMPONENT_SWIZZLE_ONE;
+    if (nvn == 0x39) { m.r = VK_COMPONENT_SWIZZLE_A; m.g = VK_COMPONENT_SWIZZLE_B; m.b = VK_COMPONENT_SWIZZLE_G; m.a = VK_COMPONENT_SWIZZLE_R; }   // R in the low bits (guess)
+    return m;
+}
+
+// ---- tables ----
+enum { TEX_HANDLES = 1u << 17, TEX_SLOTS = 1u << 17, COOKIE_BUCKETS = 1u << 16, ID_PAGE = 4096, ID_PAGES = 0x100000 / ID_PAGE, SAMP_IDS = 0x1000, SAMP_HANDLES = 1u << 14 };
+typedef struct samp_rec { VkSampler s; uint32_t id; } samp_rec;
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_init;                                // 1 ok, -1 failed
+static vkn_tab g_handles;                         // vkn_tex * by engine handle
+static vkn_tex **g_slot; static uint32_t *g_free_slot, g_nfree, g_slot_hi;
+static vkn_tex *g_cookie[COOKIE_BUCKETS];
+static uint32_t *g_id_page[ID_PAGES];             // (slot + 1) << 3 | view (0 whole, 1..7 layer i - 1)
+static vkn_tab g_samp; static VkSampler g_samp_by_id[SAMP_IDS];
+static vkn_tex_stats g_st;
+
+static int tables_init_locked(void) {
+    if (g_init) return g_init > 0 ? 0 : -1;
+    g_init = -1;
+    if (vkn_tab_init(&g_handles, TEX_HANDLES, sizeof(vkn_tex *))) return -1;
+    if (vkn_tab_init(&g_samp, SAMP_HANDLES, sizeof(samp_rec))) return -1;
+    g_slot = (vkn_tex **)calloc(TEX_SLOTS, sizeof *g_slot); g_free_slot = (uint32_t *)malloc(sizeof(uint32_t) * TEX_SLOTS);
+    if (!g_slot || !g_free_slot) return -1;
+    g_init = 1;
+    return 0;
+}
+static uint32_t cookie_bucket(uint64_t c) { return (uint32_t)((c >> 4) ^ (c >> 20)) & (COOKIE_BUCKETS - 1); }
+static void cookie_unlink_locked(vkn_tex *t) {
+    vkn_tex **p = &g_cookie[cookie_bucket(t->cookie)];
+    while (*p && *p != t) p = &(*p)->hnext;
+    if (*p) *p = t->hnext;
+    t->hnext = NULL;
+}
+static vkn_tex *cookie_find_locked(uint64_t c) {
+    for (vkn_tex *t = g_cookie[cookie_bucket(c)]; t; t = t->hnext) if (t->cookie == c && !t->dead) return t;
+    return NULL;
+}
+static uint32_t *id_cell_locked(uint32_t id, int make) {
+    if (id >= 0x100000) return NULL;
+    uint32_t **pg = &g_id_page[id / ID_PAGE];
+    if (!*pg) { if (!make) return NULL; *pg = (uint32_t *)calloc(ID_PAGE, sizeof(uint32_t)); if (!*pg) return NULL; }
+    return &(*pg)[id % ID_PAGE];
+}
+static void ids_set_locked(vkn_tex *t) {
+    uint32_t *c = t->pool_id != ~0u ? id_cell_locked(t->pool_id, 1) : NULL;
+    if (c) *c = (t->slot + 1) << 3;
+    for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
+        if (t->layer_ids[i] != ~0u && t->layer_view[i] && (c = id_cell_locked(t->layer_ids[i], 1))) *c = (t->slot + 1) << 3 | (uint32_t)(i + 1);
+}
+static void ids_clear_locked(vkn_tex *t) {   // only the cells that still name this texture (an id may have gone to a newer texture)
+    uint32_t *c = t->pool_id != ~0u ? id_cell_locked(t->pool_id, 0) : NULL;
+    if (c && *c >> 3 == t->slot + 1) *c = 0;
+    for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
+        if (t->layer_ids[i] != ~0u && (c = id_cell_locked(t->layer_ids[i], 0)) && *c >> 3 == t->slot + 1) *c = 0;
+}
+// Unlinks t from its handle (if it is the one linked there).
+static void handle_unlink_locked(vkn_tex *t) {
+    if (!t->linked) return;
+    vkn_tex **r = (vkn_tex **)vkn_tab_get(&g_handles, t->handle);
+    if (r && *r == t) { *r = NULL; vkn_tab_kill(&g_handles, t->handle); }
+    t->linked = 0;
+}
+static void handle_link_locked(vkn_tex *t, uint64_t handle) {
+    int alive = 0;
+    vkn_tex **r = (vkn_tex **)vkn_tab_put(&g_handles, handle, &alive);
+    if (!r) return;
+    if (alive && *r && *r != t) (*r)->linked = 0;   // the previous texture of this index stays known by its cookie
+    *r = t; t->handle = handle; t->linked = 1;
+}
+
+static void tex_free(void *ctx) {
+    vkn_tex *t = (vkn_tex *)ctx; const vkn_dev *d = vkn_device();
+    if (d) {
+        if (t->view) vkDestroyImageView(d->dev, t->view, NULL);
+        if (t->att) vkDestroyImageView(d->dev, t->att, NULL);
+        for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) if (t->layer_view[i]) vkDestroyImageView(d->dev, t->layer_view[i], NULL);
+        if (t->image) vkDestroyImage(d->dev, t->image, NULL);
+        if (t->mem) vkFreeMemory(d->dev, t->mem, NULL);
+    }
+    free(t);
+}
+static void unref_locked(vkn_tex *t) { if (t->refs && !--t->refs) vkn_retire(tex_free, t); }
+static void unref(vkn_tex *t) { pthread_mutex_lock(&g_mu); unref_locked(t); pthread_mutex_unlock(&g_mu); }
+// The engine is done with t: out of every table, its engine reference dropped.
+static void kill_locked(vkn_tex *t) {
+    if (t->dead) return;
+    t->dead = 1;
+    handle_unlink_locked(t); cookie_unlink_locked(t); ids_clear_locked(t);
+    if (t->slot < TEX_SLOTS && g_slot[t->slot] == t) { g_slot[t->slot] = NULL; g_free_slot[g_nfree++] = t->slot; }
+    if (t->cls < VKN_TC_N) { g_st.alive[t->cls]--; g_st.bytes[t->cls] -= t->bytes; }
+    g_st.destroyed++;
+    unref_locked(t);
+}
+
+// ---- uploads ----
+typedef struct up_ctx { vkn_tex *t; vkn_block blk; int have_blk; uint32_t n; VkBufferImageCopy c[]; } up_ctx;
+static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout from, VkImageLayout to) {
+    const VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, .oldLayout = from, .newLayout = to, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = t->image, .subresourceRange = {t->aspect, 0, t->mips, 0, t->layers}};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+}
+static void up_run(VkCommandBuffer cb, void *ctx) {
+    up_ctx *u = (up_ctx *)ctx; vkn_tex *t = u->t;
+    if (!t->dead) {   // (read without the lock: dead only ever goes 0 -> 1, and a dead texture's image lives until its last reference)
+        barrier(cb, t, t->layout, u->n ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (u->n) {
+            vkCmdCopyBufferToImage(cb, u->blk.buf, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, u->n, u->c);
+            barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    if (u->have_blk) vkn_retire_block(&u->blk);
+    unref(t); free(u);
+}
+
+// ---- data preparation: every region into one staging block ----
+static uint64_t lcm16(uint32_t b) { uint64_t a = 16; while (a % (b ? b : 1)) a += 16; return a; }
+static uint32_t mipdim(uint32_t s, uint32_t l) { s >>= l; return s ? s : 1; }
+typedef struct prep { const vkn_tex_desc *d; vkn_tex *t; uint32_t nvn; int bw, bh, bpb; int mode; uint32_t cs, one, dbpb; uint64_t align; } prep;   // mode 0 copy, 1 BC decode, 2 widen
+// Destination bytes of a (w, h, d) region.
+static uint64_t dst_bytes(const prep *p, uint32_t w, uint32_t h, uint32_t d) {
+    if (p->mode == 0) return (uint64_t)((w + p->bw - 1) / p->bw) * ((h + p->bh - 1) / p->bh) * p->bpb * d;
+    return (uint64_t)w * h * d * p->dbpb;
+}
+// Converts one region of tight block rows (src) into dst (tight in the destination format).
+static int convert(const prep *p, const uint8_t *src, uint32_t w, uint32_t h, uint32_t d, uint8_t *dst) {
+    const uint64_t srow = (uint64_t)((w + p->bw - 1) / p->bw) * p->bpb, srows = (h + p->bh - 1) / p->bh;
+    if (p->mode == 0) { memcpy(dst, src, (size_t)(srow * srows * d)); return 0; }
+    for (uint32_t z = 0; z < d; z++) {
+        const uint8_t *s = src + z * srow * srows; uint8_t *o = dst + (uint64_t)z * w * h * p->dbpb;
+        if (p->mode == 1) { if (nvn_bc_decode(p->nvn, s, (size_t)srow, w, h, o, (size_t)w * p->dbpb)) return -1; continue; }
+        for (uint64_t i = 0, n = (uint64_t)w * h; i < n; i++) {   // widen RGB -> RGBA with alpha = one
+            memcpy(o + i * 4 * p->cs, s + i * 3 * p->cs, 3 * p->cs);
+            if (p->cs == 1) o[i * 4 + 3] = (uint8_t)p->one; else if (p->cs == 2) { const uint16_t v = (uint16_t)p->one; memcpy(o + i * 8 + 6, &v, 2); } else memcpy(o + i * 16 + 12, &p->one, 4);
+        }
+    }
+    return 0;
+}
+
+// A region inside the image (others are skipped, in both passes alike).
+static int reg_ok(const vkn_tex_region *r, uint32_t w, uint32_t h, uint32_t dep, uint32_t mips, uint32_t layers) {
+    if (!r->src || r->level >= mips || r->layer >= layers || !r->w || !r->h) return 0;
+    const uint32_t d = r->d ? r->d : 1;
+    return r->w <= mipdim(w, r->level) && r->h <= mipdim(h, r->level) && r->z + d <= mipdim(dep, r->level);
+}
+
+// ---- creation ----
+static VkImageView make_view(VkDevice dev, vkn_tex *t, VkImageViewType type, VkImageAspectFlags asp, uint32_t lv0, uint32_t nlv, uint32_t l0, uint32_t nl, VkComponentMapping m) {
+    const VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = t->image, .viewType = type, .format = t->format, .components = m,
+                                      .subresourceRange = {asp, lv0, nlv, l0, nl}};
+    VkImageView v = VK_NULL_HANDLE;
+    return vkCreateImageView(dev, &vi, NULL, &v) == VK_SUCCESS ? v : VK_NULL_HANDLE;
+}
+
+vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const char **why) {
+    const char *dummy; if (!why) why = &dummy;
+    *why = "no device";
+    const vkn_dev *dv = vkn_device(); if (!dv) goto fail0;
+    pthread_mutex_lock(&g_mu); const int ti = tables_init_locked(); pthread_mutex_unlock(&g_mu);
+    if (ti) { *why = "no memory for the tables"; goto fail0; }
+    const uint64_t t0 = vkn_now_ns();
+
+    // format: the engine's NVN number, device fallbacks
+    uint32_t nvn = d->nvn_fmt; VkFormat fmt;
+    if (nvn) fmt = vkn_tex_nvn_format(nvn); else fmt = vkn_tex_engine_format(d->efmt, d->srgb, &nvn);
+    int x = 0; nvn_vk(nvn, &x);
+    if (fmt == VK_FORMAT_UNDEFINED || !nvn) { *why = "format without a Vulkan equivalent"; goto fail0; }
+    prep p = {.d = d, .nvn = nvn};
+    p.bpb = nvn_fmt_bpb((int)nvn, &p.bw, &p.bh);
+    if (!p.bpb) { *why = "format without a block size"; goto fail0; }
+    const int rt = d->cls == VKN_TC_COLOR || d->cls == VKN_TC_DEPTH || d->cls == VKN_TC_WINDOW;
+    VkFormatFeatureFlags ff = fmt_feat(fmt);
+    const VkFormatFeatureFlags want_s = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    uint8_t decoded = 0, widened = 0;
+    if (fmt_is_bc(nvn) && (ff & want_s) != want_s) {   // no native BC sampling: decoded once here
+        int bpp = 0; uint32_t pf = 0;
+        if (!nvn_bc_unpacked(nvn, &pf, &bpp) || (fmt = bc_decoded(nvn)) == VK_FORMAT_UNDEFINED) { *why = "BC format the CPU decoder does not know"; goto fail0; }
+        p.mode = 1; p.dbpb = (uint32_t)bpp; decoded = 1; ff = fmt_feat(fmt);
+    } else if ((ff & want_s) != want_s && !rt) {
+        VkFormat to;
+        if (widen_of(nvn, &to, &p.cs, &p.one)) { p.mode = 2; p.dbpb = 4 * p.cs; fmt = to; widened = 1; ff = fmt_feat(fmt); }
+    }
+    if (d->cls == VKN_TC_DEPTH && !(ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {   // D24 stand-ins (Mali / PowerVR class drivers)
+        if (fmt == VK_FORMAT_X8_D24_UNORM_PACK32) fmt = VK_FORMAT_D32_SFLOAT; else if (fmt == VK_FORMAT_D24_UNORM_S8_UINT) fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
+        ff = fmt_feat(fmt);
+        if (!(ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) { *why = "depth format not renderable"; goto fail0; }
+    }
+    if ((d->cls == VKN_TC_COLOR || d->cls == VKN_TC_WINDOW) && !(ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) { *why = "colour format not renderable"; goto fail0; }
+    if (!rt && (ff & want_s) != want_s) { *why = "format not sampled by the device"; goto fail0; }
+    p.align = lcm16(p.mode ? p.dbpb : (uint32_t)p.bpb);   // bufferOffset: a multiple of 4 and of the texel block (12-byte texels -> 48)
+
+    // shape
+    const uint32_t tg = d->nvn_target;
+    const int cube = tg == 8 || tg == 9, d3 = tg == 2, d1 = tg == 0 || tg == 3;
+    uint32_t layers = tg == 8 ? 6 : tg == 9 ? 6 * (d->layers ? d->layers : 1) : (tg == 3 || tg == 4 || tg == 6) ? (d->layers ? d->layers : 1) : 1;
+    uint32_t w = d->w ? d->w : 1, h = d1 ? 1 : (d->h ? d->h : 1), dep = d3 ? (d->depth ? d->depth : 1) : 1, mips = d->mips ? d->mips : 1, maxm = 1;
+    for (uint32_t m = w > h ? w : h, mm = m > dep ? m : dep; mm > 1; mm >>= 1) maxm++;
+    if (mips > maxm) mips = maxm;
+    VkSampleCountFlagBits samples = d->samples == 2 ? VK_SAMPLE_COUNT_2_BIT : d->samples == 4 ? VK_SAMPLE_COUNT_4_BIT : d->samples == 8 ? VK_SAMPLE_COUNT_8_BIT : VK_SAMPLE_COUNT_1_BIT;
+    if (samples != VK_SAMPLE_COUNT_1_BIT) mips = 1;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (d->cls == VKN_TC_COLOR || d->cls == VKN_TC_WINDOW) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (d->cls == VKN_TC_DEPTH) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (d->storage && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == VK_SAMPLE_COUNT_1_BIT) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cube && w == h ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+        .imageType = d3 ? VK_IMAGE_TYPE_3D : d1 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, dep}, .mipLevels = mips, .arrayLayers = layers,
+        .samples = samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+
+    vkn_tex *t = (vkn_tex *)calloc(1, sizeof *t);
+    if (!t) { *why = "no memory"; goto fail0; }
+    t->cookie = d->cookie; t->format = fmt; t->aspect = fmt_aspect(fmt); t->w = w; t->h = h; t->depth = dep; t->mips = mips; t->layers = layers;
+    t->samples = (uint32_t)samples; t->efmt = d->efmt; t->nvn_fmt = nvn; t->nvn_target = tg; t->cls = d->cls < VKN_TC_N ? d->cls : VKN_TC_SAMPLED; t->cube = (uint8_t)cube;
+    t->decoded = decoded; t->widened = widened; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
+    memcpy(t->layer_ids, d->layer_ids, sizeof t->layer_ids);
+    p.t = t;
+    if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; *why = "vkCreateImage failed"; goto fail1; }
+    if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { *why = "no device memory"; goto fail1; }
+
+    // views
+    const VkComponentMapping sw = fmt_swizzle(nvn, x && !decoded);
+    const VkImageAspectFlags sasp = t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect;   // a depth-stencil texture samples depth
+    const VkImageViewType vt = d3 ? VK_IMAGE_VIEW_TYPE_3D : tg == 0 ? VK_IMAGE_VIEW_TYPE_1D : tg == 3 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : (tg == 4 || tg == 6) ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                             : tg == 8 && (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? VK_IMAGE_VIEW_TYPE_CUBE
+                             : tg == 9 && (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    if (usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) {
+        if (!(t->view = make_view(dv->dev, t, vt, sasp, 0, mips, 0, layers, sw))) { *why = "vkCreateImageView failed"; goto fail1; }
+        if (!d3)
+            for (uint32_t i = 0; i < VKN_TEX_LAYER_IDS && i < layers; i++)
+                if (d->layer_ids[i] != ~0u && !(t->layer_view[i] = make_view(dv->dev, t, d1 ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D, sasp, 0, mips, i, 1, sw))) { *why = "layer view failed"; goto fail1; }
+    }
+    if (rt && !d3 && !(t->att = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0}))) { *why = "attachment view failed"; goto fail1; }
+
+    // data -> one staging block
+    up_ctx *u = NULL; uint64_t total = 0; uint32_t nc = 0;
+    const int has_data = src && ((src->kind == VKN_SRC_REGIONS && src->nreg) || (src->kind == VKN_SRC_PACKAGED && src->storage));
+    if (has_data && samples == VK_SAMPLE_COUNT_1_BIT) {
+        nvn_texdesc nd = {0}; nvn_texlayout L = {0};
+        uint32_t maxc = src->kind == VKN_SRC_REGIONS ? src->nreg : mips * (d3 ? 1 : layers);
+        if (src->kind == VKN_SRC_PACKAGED) {
+            nd.target = (int)tg; nd.format = (int)nvn; nd.width = d->w; nd.height = d->h; nd.depth = src->nvn_depth ? src->nvn_depth : 1; nd.levels = mips;
+            nd.pkg_block_h = src->pkg_block_h;
+            nvn_tex_layout(&nd, &L);
+            if (!L.size || L.size > src->storage_bytes) { *why = "packaged storage smaller than its layout"; goto fail1; }
+        }
+        // sizes first (one block)
+        for (uint32_t i = 0; i < maxc; i++) {
+            uint32_t lw, lh, ld;
+            if (src->kind == VKN_SRC_REGIONS) { const vkn_tex_region *r = &src->reg[i]; if (!reg_ok(r, w, h, dep, mips, layers)) continue; lw = r->w; lh = r->h; ld = r->d ? r->d : 1; }
+            else { const uint32_t m = i % mips; lw = mipdim(w, m); lh = mipdim(h, m); ld = d3 ? mipdim(dep, m) : 1; }
+            total = (total + p.align - 1) / p.align * p.align + dst_bytes(&p, lw, lh, ld);
+        }
+        u = (up_ctx *)calloc(1, sizeof *u + sizeof(VkBufferImageCopy) * maxc);
+        if (!u) { *why = "no memory"; goto fail1; }
+        if (total && vkn_block_alloc(VKN_ARENA_STAGING, total, (uint32_t)p.align, &u->blk)) { free(u); *why = "no staging memory"; goto fail1; }
+        u->have_blk = total != 0;
+        uint8_t *tmp = NULL; uint64_t tmp_bytes = 0, off = 0;
+        for (uint32_t i = 0; i < maxc && total; i++) {
+            uint32_t lw, lh, ld, lv, ly, z = 0; const uint8_t *s;
+            if (src->kind == VKN_SRC_REGIONS) {
+                const vkn_tex_region *r = &src->reg[i]; if (!reg_ok(r, w, h, dep, mips, layers)) continue;
+                lw = r->w; lh = r->h; ld = r->d ? r->d : 1; lv = r->level; ly = r->layer; z = r->z; s = (const uint8_t *)r->src;
+            } else {
+                lv = i % mips; ly = i / mips; lw = mipdim(w, lv); lh = mipdim(h, lv); ld = d3 ? mipdim(dep, lv) : 1;
+                const uint64_t lin = (uint64_t)((lw + p.bw - 1) / p.bw) * p.bpb * ((lh + p.bh - 1) / p.bh) * ld;
+                if (p.mode) { if (lin > tmp_bytes) { free(tmp); tmp = (uint8_t *)malloc((size_t)lin); tmp_bytes = tmp ? lin : 0; } if (!tmp) { *why = "no memory"; goto fail2; } }
+                off = (off + p.align - 1) / p.align * p.align;
+                uint8_t *to = p.mode ? tmp : (uint8_t *)u->blk.cpu + off;
+                if (nvn_deswizzle_gob(&nd, lv, ly, src->storage, to, (size_t)((lw + p.bw - 1) / p.bw) * p.bpb)) { *why = "deswizzle refused the layout"; goto fail2; }
+                s = to;
+            }
+            off = (off + p.align - 1) / p.align * p.align;
+            if (src->kind == VKN_SRC_REGIONS || p.mode) {
+                if (off + dst_bytes(&p, lw, lh, ld) > total) { *why = "staging overflow"; goto fail2; }
+                if (convert(&p, s, lw, lh, ld, (uint8_t *)u->blk.cpu + off)) { *why = "BC decode failed"; goto fail2; }
+            }
+            VkBufferImageCopy *c = &u->c[nc++];
+            c->bufferOffset = u->blk.off + off; c->bufferRowLength = 0; c->bufferImageHeight = 0;
+            c->imageSubresource = (VkImageSubresourceLayers){t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect, lv, d3 ? 0 : ly, 1};
+            c->imageOffset = (VkOffset3D){0, 0, d3 ? (int32_t)z : 0};
+            c->imageExtent = (VkExtent3D){lw, d1 ? 1 : lh, ld};
+            off += dst_bytes(&p, lw, lh, ld);
+        }
+        free(tmp);
+        if (src->kind == VKN_SRC_PACKAGED) __atomic_add_fetch(&g_st.deswizzled, 1, __ATOMIC_RELAXED);
+        if (0) { fail2: free(tmp); if (u->have_blk) vkn_block_free(&u->blk); free(u); goto fail1; }
+    } else if (!rt) u = (up_ctx *)calloc(1, sizeof *u);   // a sampled texture without data: only the layout change (content undefined, as on the engine)
+    if (u) { u->t = t; u->n = nc; }
+
+    // tables
+    pthread_mutex_lock(&g_mu);
+    vkn_tex *old = cookie_find_locked(t->cookie);
+    if (old) kill_locked(old);   // the engine object was reused without a destroy event we saw: the old texture is gone
+    if (g_nfree) t->slot = g_free_slot[--g_nfree]; else if (g_slot_hi < TEX_SLOTS) t->slot = g_slot_hi++; else t->slot = ~0u;
+    if (t->slot != ~0u) g_slot[t->slot] = t;
+    handle_link_locked(t, handle);
+    const uint32_t b = cookie_bucket(t->cookie); t->hnext = g_cookie[b]; g_cookie[b] = t;
+    if (t->slot != ~0u) ids_set_locked(t);
+    g_st.alive[t->cls]++; g_st.bytes[t->cls] += t->bytes; g_st.created++;
+    if (u) { t->refs++; g_st.uploads += nc ? 1 : 0; g_st.upload_bytes += total; g_st.decoded += decoded; g_st.widened += widened; g_st.upload_ns += vkn_now_ns() - t0; }
+    pthread_mutex_unlock(&g_mu);
+    if (u) vkn_upload_push(up_run, u, total);
+    *why = NULL;
+    return t;
+fail1:
+    t->refs = 0; tex_free(t);
+fail0:
+    __atomic_add_fetch(&g_st.failed, 1, __ATOMIC_RELAXED);
+    return NULL;
+}
+
+vkn_tex *vkn_tex_get(uint64_t handle) {
+    pthread_mutex_lock(&g_mu);
+    vkn_tex **r = g_init > 0 ? (vkn_tex **)vkn_tab_get(&g_handles, handle) : NULL; vkn_tex *t = r ? *r : NULL;
+    pthread_mutex_unlock(&g_mu);
+    return t;
+}
+vkn_tex *vkn_tex_by_cookie(uint64_t cookie) {
+    pthread_mutex_lock(&g_mu); vkn_tex *t = g_init > 0 ? cookie_find_locked(cookie) : NULL; pthread_mutex_unlock(&g_mu);
+    return t;
+}
+VkImageView vkn_tex_view_by_id(uint32_t pool_id, vkn_tex **tex) {
+    VkImageView v = VK_NULL_HANDLE; vkn_tex *t = NULL;
+    pthread_mutex_lock(&g_mu);
+    const uint32_t *c = g_init > 0 ? id_cell_locked(pool_id, 0) : NULL;
+    if (c && *c) {
+        const uint32_t s = (*c >> 3) - 1, vi = *c & 7;
+        t = s < TEX_SLOTS ? g_slot[s] : NULL;
+        if (t) v = vi ? t->layer_view[vi - 1] : t->view;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (tex) *tex = t;
+    return v;
+}
+int vkn_tex_destroy_cookie(uint64_t cookie) {
+    pthread_mutex_lock(&g_mu);
+    vkn_tex *t = g_init > 0 ? cookie_find_locked(cookie) : NULL;
+    if (t) kill_locked(t);
+    pthread_mutex_unlock(&g_mu);
+    return t != NULL;
+}
+int vkn_tex_destroy_handle(uint64_t handle) {
+    pthread_mutex_lock(&g_mu);
+    vkn_tex **r = g_init > 0 ? (vkn_tex **)vkn_tab_get(&g_handles, handle) : NULL; vkn_tex *t = r ? *r : NULL;
+    if (t) kill_locked(t);
+    pthread_mutex_unlock(&g_mu);
+    return t != NULL;
+}
+
+// ---- mip reduction: re-link and copy the level tail ----
+typedef struct tail_ctx { vkn_tex *src, *dst; uint32_t n; VkImageCopy c[16]; } tail_ctx;
+static void tail_run(VkCommandBuffer cb, void *ctx) {
+    tail_ctx *u = (tail_ctx *)ctx;
+    if (!u->dst->dead) {
+        barrier(cb, u->src, u->src->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        barrier(cb, u->dst, u->dst->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdCopyImage(cb, u->src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, u->dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, u->n, u->c);
+        barrier(cb, u->src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        barrier(cb, u->dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        u->src->layout = u->dst->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    pthread_mutex_lock(&g_mu); unref_locked(u->src); unref_locked(u->dst); pthread_mutex_unlock(&g_mu);
+    free(u);
+}
+int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cookie) {
+    tail_ctx *u = (tail_ctx *)calloc(1, sizeof *u); if (!u) return -1;
+    pthread_mutex_lock(&g_mu);
+    vkn_tex *o = g_init > 0 ? cookie_find_locked(old_cookie) : NULL, *n = g_init > 0 ? cookie_find_locked(new_cookie) : NULL;
+    if (!n) { pthread_mutex_unlock(&g_mu); free(u); return -1; }
+    if (!o) {   // the old texture is unknown (its creation failed): the handle still owns the new one, without its level tail
+        handle_unlink_locked(n); handle_link_locked(n, handle); g_st.swaps++;
+        pthread_mutex_unlock(&g_mu); free(u); return -1;
+    }
+    handle_unlink_locked(n);          // the temporary handle of the engine call
+    handle_unlink_locked(o);
+    handle_link_locked(n, handle);
+    g_st.swaps++;
+    // engine 0x920b00 rule: same format only; one level each -> one copy (smaller depth); else new level i <- old level (n_old - n_new + i)
+    int ok = o->format == n->format && n->mips <= o->mips;
+    if (ok)
+        for (uint32_t i = 0; i < n->mips && u->n < 16; i++) {
+            const uint32_t sl = o->mips - n->mips + i, nl = o->layers < n->layers ? o->layers : n->layers;
+            VkImageCopy *c = &u->c[u->n++];
+            c->srcSubresource = (VkImageSubresourceLayers){o->aspect, sl, 0, nl}; c->dstSubresource = (VkImageSubresourceLayers){n->aspect, i, 0, nl};
+            const uint32_t dd = mipdim(n->depth, i), sd = mipdim(o->depth, sl);
+            c->extent = (VkExtent3D){mipdim(n->w, i), mipdim(n->h, i), dd < sd ? dd : sd};
+            if (mipdim(o->w, sl) != c->extent.width || mipdim(o->h, sl) != c->extent.height) { ok = 0; break; }
+        }
+    if (ok && u->n) { u->src = o; u->dst = n; o->refs++; n->refs++; }
+    pthread_mutex_unlock(&g_mu);
+    if (!ok || !u->n) { free(u); return ok ? 0 : -2; }
+    vkn_upload_push(tail_run, u, 0);
+    return 0;
+}
+
+// ---- samplers ----
+static void sampler_free(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroySampler(d->dev, (VkSampler)(uintptr_t)ctx, NULL); }
+int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso, uint32_t compare) {
+    const vkn_dev *d = vkn_device(); if (!d) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    pthread_mutex_lock(&g_mu); const int ti = tables_init_locked(); pthread_mutex_unlock(&g_mu);
+    if (ti) return -1;
+    // engine 0x921e40: filter 1..5 -> min linear (mip nearest for 1, 2, 4; mip linear for 3, 5), mag linear; 0 / other -> nearest, mip nearest
+    const int lin = filter >= 1 && filter <= 5, mipl = filter == 3 || filter == 5;
+    // wrap: 0 repeat, 1 clamp to edge, 2 mirrored repeat, 3 clamp to border (border colour 0); anything else repeat
+    static const VkSamplerAddressMode k_wrap[4] = {VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
+                                                   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER};
+    const float lim = d->props.limits.maxSamplerAnisotropy;
+    float an = (float)max_aniso; if (an > lim) an = lim;
+    const VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .minFilter = lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+        .mipmapMode = mipl ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = k_wrap[wrap_u < 4 ? wrap_u : 0],
+        .addressModeV = k_wrap[wrap_v < 4 ? wrap_v : 0], .addressModeW = k_wrap[wrap_w < 4 ? wrap_w : 0], .mipLodBias = 0.0f,
+        .anisotropyEnable = an > 1.0f && d->feat.samplerAnisotropy ? VK_TRUE : VK_FALSE, .maxAnisotropy = an > 1.0f ? an : 1.0f,
+        // compare: engine n (1..7) = VkCompareOp n (less, equal, less-or-equal, greater, not-equal, greater-or-equal, always); 0 = off;
+        // above 7 the engine enables the compare with "never"
+        .compareEnable = compare ? VK_TRUE : VK_FALSE, .compareOp = compare <= 7 ? (VkCompareOp)compare : VK_COMPARE_OP_NEVER,
+        .minLod = 0.0f, .maxLod = VK_LOD_CLAMP_NONE, .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, .unnormalizedCoordinates = VK_FALSE};
+    VkSampler s = VK_NULL_HANDLE;
+    if (vkCreateSampler(d->dev, &si, NULL, &s) != VK_SUCCESS) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    pthread_mutex_lock(&g_mu);
+    int alive = 0; samp_rec *r = (samp_rec *)vkn_tab_put(&g_samp, handle, &alive);
+    if (r && alive && r->s) {   // a record of this index we never saw destroyed
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) g_samp_by_id[r->id] = VK_NULL_HANDLE;
+        vkn_retire(sampler_free, (void *)(uintptr_t)r->s); g_st.samplers--;
+    }
+    if (r) { r->s = s; r->id = pool_id; g_st.samplers++; g_st.samplers_made++; }
+    if (r && pool_id < SAMP_IDS) g_samp_by_id[pool_id] = s;
+    pthread_mutex_unlock(&g_mu);
+    if (!r) { vkDestroySampler(d->dev, s, NULL); __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    return 0;
+}
+int vkn_sampler_destroy(uint64_t handle) {
+    pthread_mutex_lock(&g_mu);
+    samp_rec *r = g_init > 0 ? (samp_rec *)vkn_tab_get(&g_samp, handle) : NULL; int known = 0;
+    if (r && r->s) {
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) g_samp_by_id[r->id] = VK_NULL_HANDLE;
+        vkn_retire(sampler_free, (void *)(uintptr_t)r->s); r->s = VK_NULL_HANDLE; g_st.samplers--; known = 1;
+    }
+    if (r) vkn_tab_kill(&g_samp, handle);
+    pthread_mutex_unlock(&g_mu);
+    return known;
+}
+VkSampler vkn_sampler_by_id(uint32_t id) {
+    if (id >= SAMP_IDS) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_mu); const VkSampler s = g_samp_by_id[id]; pthread_mutex_unlock(&g_mu);
+    return s;
+}
+
+void vkn_tex_get_stats(vkn_tex_stats *s) {
+    pthread_mutex_lock(&g_mu);
+    *s = g_st;
+    s->pending = 0;
+    if (g_init > 0) for (uint32_t i = 0; i < g_slot_hi; i++) if (g_slot[i] && !g_slot[i]->linked) s->pending++;
+    pthread_mutex_unlock(&g_mu);
+}
+#endif
