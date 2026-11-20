@@ -516,6 +516,7 @@ static const cmd_slot k_slots[] = { CMD_SLOTS(X_ROW) };
 // with x8 unwritten, and a hook does not forward x8 (tools/dos2_nr_check.py rejects that site); 0x938330 forwards cleanly. ----
 static vkn_fn g_o_init;
 static int g_fills;
+void dm_vkn_glue_repoint(void) __attribute__((weak));
 static void *g_stub[TABLE_SLOTS];   // the host-stack stub of each repointed slot's function (dm_vkn_cmd_register)
 static void repoint(uint64_t init) {
     uint64_t *tab = (uint64_t *)(void *)(dm_vkn_base() + M_TABLE);
@@ -530,6 +531,7 @@ static void repoint(uint64_t init) {
         __atomic_store_n(&tab[s->idx], mine, __ATOMIC_RELEASE);
         n++;
     }
+    if (dm_vkn_glue_repoint) dm_vkn_glue_repoint();   // hle_dos2_vkn_glue.c: nvnTextureGetStride noted (textures written through their storage)
     cnt(A_REPOINT);
     vkn_logf("cmd: game NVN table main+%#x after device init %d (object %#llx): %d of %zu command / queue / sync entries repointed to the native "
              "front end (%d were null); creation-time entries stay HLE NVN", M_TABLE, ++g_fills, (unsigned long long)init, n, sizeof k_slots / sizeof k_slots[0], nul);
