@@ -4213,6 +4213,54 @@ NRNB_PINS = {
     'void nvn_nrd_bind(uint64_t cb, int stage, int slot, int32_t tex, int32_t smp) {': '70fc9d3ed2ba1d23',
 }
 print('PASS: '+nrnb_check())
+def nrnk_check():   # [DOS2] NR-NATIVE step D half c (docs/dos2/nr/NR-NATIVE-D.md section 13): DM_NRN_PKT (one packet instead of the group, the packet models)
+    import re
+    h = (root / 'gfx/nr/nr_pkt.h').read_text(encoding='utf-8')
+    f = (root / 'host/hle_dos2_nrn_c.inc').read_text(encoding='utf-8')
+    d = (root / 'host/hle_dos2_nrn_d.inc').read_text(encoding='utf-8')
+    nat = (root / 'host/hle_dos2_native.c').read_text(encoding='utf-8')
+    nr = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    orc = (root / 'gfx/vulkan/engine/tests/nr_pkt_oracle.py').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    safe = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    assert 'inline int xbg_nrn_pkt_default(){return 0;}' in pol and 'add("DM_NRN_PKT","0");' in safe, 'NRN-C: default 0 by the policy function, safe-mode step 2 forces 0'
+    assert f.count('getenv("DM_NRN_PKT")') == 1 and 'const int v = e && *e ? atoi(e) : 0;' in f, 'NRN-C: unset = 0'
+    for sub in ('android/app', 'android/dos2'):
+        dd = root / sub
+        if dd.exists():
+            for q in dd.rglob('*'):
+                if q.is_file() and q.suffix in ('.java', '.kt', '.json', '.xml', '.txt', '.env', '.properties'):
+                    assert 'DM_NRN_PKT' not in q.read_text(encoding='utf-8', errors='ignore'), 'NRN-C: the app does not set the switch (%s)' % q
+    # the code table of the front end is the one the oracle hashes from main.raw
+    rows = re.findall(r'\{(0x[0-9a-f]+), (0x[0-9a-f]+), 0x[0-9a-f]{16}ull, "([^"]+)"\}', f)
+    assert len(rows) == 3 and 'enum { NRPK_CODE_N = 3' in f, 'NRN-C: three rows of code'
+    for off, end, name in rows:
+        assert ("(%s, %s, '%s')" % (off, end, name)) in orc.replace('P15', '0x9243d0').replace('P28', '0x924bb0'), 'NRN-C: the oracle checks the row %s' % name
+    arm = f[f.index('static void nrnk_arm('):]
+    assert arm.index('if (!list_mode)') < arm.index('nrpk_fnv(m->base + code[i].off') < arm.index('dn_install_rc_model(') < arm.index('__atomic_store_n(&g_nrnk, v'), 'NRN-C: the note, the code, the models, then the switch'
+    # the hook: the model or the native opcode handler (their opcodes never overlap), else the engine's function - in the walker's hook and in the note's inner call alike
+    hook = nat[nat.index('static uint64_t dn_rc_hook('):nat.index('// ---- DM_NATIVE_DRAW=1 / 2 ----')]
+    assert hook.count('g_rc_take(list, c, pkt, &len)') == 2 and hook.count('g_rc_model(list, c, pkt, &len)') == 2 and hook.count("g_rc_h[i]->pre(list, c, pkt)") == 2 and hook.count('g_rc_h[i]->post(list, c, pkt, len)') == 2, 'NRN-C: the inner call is the hook without the note line'
+    inner = hook[hook.index('uint64_t dn_rc_inner(uint64_t list, unsigned op, uint64_t pkt) {'):]
+    assert inner.index('->pre(') < inner.index('g_rc_model(') < inner.index('g_rc_take(') < inner.index('g_rc_orig(list, c, pkt, 0, 0, 0)') < inner.index('->post('), 'NRN-C: the order inside the inner call'
+    assert 'if (!g_rc_orig || g_rc_model || (mask & g_rc_take_ops)) return -1;' in nat, 'NRN-C: the models need the hook and never an opcode the native handler takes'
+    # construction: decided after the scan, before the note is written back; only memory of the builder's list and atomics
+    end = d[d.index('static void nrnd_end('):d.index('static nr_fn g_o_d23a')]
+    assert end.index('nrnd_scan(&n, seg, ns);') < end.index('nrnk_built(&n, o->chunk, o->cnt, whole ? ns : 0, o->seq);') < end.index('memcpy(o->note, &n, sizeof n);'), 'NRN-C: the merge sits between the scan and the note'
+    built = f[f.index('static void nrnk_built('):f.index('// ---- execution')]
+    assert built.index('nrpk_merge_ok(1, nseg, n->npkt, count_note, count_now)') < built.index('if (g_nrnk != 1)') < built.index('% NRNK_YARD') < built.index('memcpy((void *)(uintptr_t)(chunk + 0x10), &c, 4);') < built.index('n->flags |= NRND_F_ONE;'), 'NRN-C: =2 changes nothing; the yardstick; count then flag'
+    assert 't_nrnk' not in built and 't_nrnd.' not in built, 'NRN-C: the builders touch no state of the executing thread'
+    assert 'return full && (nseg == 1 || NRPK_MUTATE == 9) && npkt && count_now == count_note + npkt;' in h, 'NRN-C: one chunk and the count moved by exactly the group'
+    # execution: the note runs a merged group itself; a model executes only inside one; =2 only journals
+    ex = d[d.index('static uint64_t nrnd_exec_note('):]
+    assert ex.index('nrnd_run_note(&t_nrnd, list,') < ex.index('if (__builtin_expect(g_nrnk, 0)) return nrnk_note(list, pkt);') < ex.index('return NRND_NOTE_BYTES;'), 'NRN-C: the chain sees the note first; off = the old length'
+    note = f[f.index('static uint64_t nrnk_note('):f.index('// The models (hle_dos2_native.c')]
+    assert note.index('if (!one) return NRND_NOTE_BYTES;') < note.index('t_nrnk_in = 1;') < note.index('nrpk_group_run(pkt, n->npkt, nrnk_one,') < note.index('t_nrnk_in = 0;'), 'NRN-C: only a merged note runs packets'
+    model = f[f.index('static int nrnk_model('):f.index('// =2, after the engine')]
+    assert model.index('if (g_nrnk == 1) {') < model.index('if (!t_nrnk_in) return 0;') < model.index('nrpk_exec(NULL, r, pkt, gdef)') < model.index('nrpk_exec(&t_nrnk_m.j, r, pkt, gdef)') and model.rstrip().endswith('return 0;\n}'.rstrip()), 'NRN-C: =1 executes inside a merged group only, =2 journals and lets the engine run'
+    assert nr.index('nrnk_pkt(list, op, pkt);   //') < nr.index('nrnd_pkt(op, pkt);   //'), 'NRN-C: every delivered packet passes the verify walk'
+    return 'NR-NATIVE step D half c: DM_NRN_PKT default 0 by the policy function / safe-mode step 2 / not set by the app; the code table is the oracle\'s; a modelled opcode never reaches the engine\'s function, from the hook and from the inner call alike; the merge is decided after the scan from the builder\'s own list; only a merged note runs packets and only there a model executes; =2 journals and compares'
+print('PASS: '+nrnk_check())
 def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
     z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
     h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')

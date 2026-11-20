@@ -123,13 +123,15 @@ static const dn_rc_handler k_count = {dn_count_pre, dn_count_post}, k_mark_h = {
 // ---- the shared ExecuteRenderCommand hook: one jump at 0x93e5f0, the registered handlers around the original ----
 // Handlers run in registration order (pre before the original, post after it), all on the thread that executes the list. Registration
 // happens at install time only (before any guest code runs), so the list is read without locks.
-enum { DN_RC_MAX = 4 };
+enum { DN_RC_MAX = 6 };   // [DOS2] NR-NATIVE step D half c: + the verify handler of DM_NRN_PKT=2 (was 4)
 static const dn_rc_handler *g_rc_h[DN_RC_MAX];
 static int g_rc_nh;
 // [DOS2] NR-09S (DM_NR_STATE): an optional native handler of some opcodes (g_rc_take_ops, bit = opcode): take() = 1 - the packet was
 // executed (*len = its length), the original does not run; 0 - the original runs as before. The pre / post handlers run either way.
 static int (*g_rc_take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
 static uint64_t g_rc_take_ops;
+static uint64_t g_rc_model_ops;   // [DOS2] NR-NATIVE step D half c (DM_NRN_PKT): the opcodes nr_pkt.h models; model() = 1 - executed, *len its length
+static int (*g_rc_model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
 // [DOS2] NR-NATIVE step D (DM_NRN_LIST, hle_dos2_nrn_d.inc): the packet of opcode DN_OP_NOTE that the wrappers of the engine's
 // draw-yourself functions put into a list is ours - the engine's switch and the handlers never see it. NULL: no such packet exists.
 enum { DN_OP_NOTE = 0x40 };
@@ -139,7 +141,20 @@ static uint64_t dn_rc_hook(uint64_t list, uint64_t op, uint64_t pkt, uint64_t a3
     if (__builtin_expect(c == DN_OP_NOTE, 0) && g_rc_note) return g_rc_note(list, pkt);   // [DOS2] NR-NATIVE step D
     for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
     uint64_t len;
+    if (__builtin_expect(g_rc_model_ops != 0, 0) && c < 64 && (g_rc_model_ops >> c & 1) && g_rc_model(list, c, pkt, &len)) { } else   // [DOS2] NR-NATIVE step D half c: a modelled opcode (never one the native handler takes)
     if (!(__builtin_expect(g_rc_take_ops != 0, 0) && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, op, pkt, a3, a4, a5);
+    for (int i = 0; i < n; i++) if (g_rc_h[i]->post) g_rc_h[i]->post(list, c, pkt, len);
+    return len;
+}
+// [DOS2] NR-NATIVE step D half c (DM_NRN_PKT=1): one packet of a merged group, from the note's handler - what the hook does for a
+// packet the walker delivers (every handler before, the native opcode / the model / the engine's function, every handler after).
+uint64_t dn_rc_inner(uint64_t list, unsigned op, uint64_t pkt);
+uint64_t dn_rc_inner(uint64_t list, unsigned op, uint64_t pkt) {
+    const unsigned c = op & 0xff; const int n = g_rc_nh;
+    for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
+    uint64_t len;
+    if (g_rc_model_ops != 0 && c < 64 && (g_rc_model_ops >> c & 1) && g_rc_model(list, c, pkt, &len)) { } else
+    if (!(g_rc_take_ops != 0 && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, c, pkt, 0, 0, 0);
     for (int i = 0; i < n; i++) if (g_rc_h[i]->post) g_rc_h[i]->post(list, c, pkt, len);
     return len;
 }
@@ -242,6 +257,14 @@ int dn_install_rc_take(uint64_t mask, int (*take)(uint64_t list, unsigned op, ui
 }
 // [DOS2] NR-NATIVE step D: the handler of the note packet (only once the ExecuteRenderCommand hook is in: without it the engine's
 // switch would return length 0 for the opcode and the list walker would never advance). Install time only. 0 = in.
+// [DOS2] NR-NATIVE step D half c: the models of the opcodes in mask (asked after the native opcode handler, before the engine's
+// function; 1 = executed, *len its length). Needs the hook. Install time only. 0 = in.
+int dn_install_rc_model(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len));
+int dn_install_rc_model(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len)) {
+    if (!g_rc_orig || g_rc_model || (mask & g_rc_take_ops)) return -1;
+    g_rc_model = model; g_rc_model_ops = mask;
+    return 0;
+}
 int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt));
 int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt)) {
     if (!g_rc_orig || g_rc_note) return -1;

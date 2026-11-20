@@ -878,9 +878,11 @@ NR_HOOK nr_h_srt(NR_A) {   // SetRenderTargets(r, n, u64 color[], layers, mips, 
 
 // ---- engine opcode 55 (resource transition) through the shared ExecuteRenderCommand chain ----
 static int g_nrnd; static void nrnd_pkt(unsigned op, uint64_t pkt);   // [DOS2] NR-NATIVE step D (hle_dos2_nrn_d.inc)
+static int g_nrnk; static void nrnk_pkt(uint64_t list, unsigned op, uint64_t pkt);   // [DOS2] NR-NATIVE step D half c (hle_dos2_nrn_c.inc)
 static void nr_rc_pre(uint64_t list, unsigned op, uint64_t pkt) {
     NRNEV_RC(list, op, pkt);   // [DOS2] NR-NATIVE step E: the opcodes that write a buffer / a texture, the ring's head
     (void)list;
+    if (__builtin_expect(g_nrnk, 0)) nrnk_pkt(list, op, pkt);   // [DOS2] NR-NATIVE step D half c: the clock of a timed group, =2 the walker's packet against the note's walk
     if (__builtin_expect(g_nrnd, 0)) nrnd_pkt(op, pkt);   // [DOS2] NR-NATIVE step D: every packet the thread executes (a packet outside a noted group breaks the chain)
     if (op != 55 || !pkt) return;
     const uint8_t *p = (const uint8_t *)(uintptr_t)pkt;   // the packet the engine's handler reads next

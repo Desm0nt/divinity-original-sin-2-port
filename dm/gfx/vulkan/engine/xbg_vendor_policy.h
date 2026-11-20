@@ -198,6 +198,10 @@ inline int xbg_nrn_rec_default(){return 0;}
 // bodies of the NVN entry points and without the big stack. Read by the front end (dm/host/hle_dos2_nrn_b.inc, dm/gfx/nvn/nvn_nrn_b.inc);
 // 0 on every device unless asked: =2 (the fold against the bodies, word for word) has not run on a phone.
 inline int xbg_nrn_nobody_default(){return 0;}
+// [DOS2] NR-NATIVE step D half c (docs/dos2/nr/NR-NATIVE-D.md section 13): DM_NRN_PKT - a noted group of packets becomes the payload of its note
+// (one packet for the engine's list walker) and its texture / parameter packets are executed by models. Read by the front end
+// (dm/host/hle_dos2_nrn_c.inc); 0 on every device unless asked: =2 has not run on a phone.
+inline int xbg_nrn_pkt_default(){return 0;}
 // [DOS2] NR-ZERO Z8, the parts of section 28 on (each its own switch; all 0 on every family until the phone runs; the app sets none;
 // safe-mode step 2 forces 0): DM_NR_Z8_THREAD - the walk on a thread of its own instead of the submitting thread.
 inline int xbg_nr_z8_thread_default(){return 0;}

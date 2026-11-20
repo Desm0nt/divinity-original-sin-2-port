@@ -41,9 +41,10 @@ void dm_nrnd_tex_epoch(void);
 void dm_nrnd_tex_epoch(void) { __atomic_fetch_add(&g_nrnd_epoch, 1, __ATOMIC_RELAXED); }
 
 // ---- list construction (any thread) ----
-typedef struct { uint8_t *note; uint64_t list, chunk; uint32_t at; uint64_t t0; } nrnd_open;
+typedef struct { uint8_t *note; uint64_t list, chunk; uint32_t at, cnt, seq; uint64_t t0; } nrnd_open;   // cnt / seq: [DOS2] NR-NATIVE step D half c
 static inline uint64_t nrnd_r64(uint64_t a) { uint64_t v; memcpy(&v, (const void *)(uintptr_t)a, 8); return v; }
 static inline uint32_t nrnd_r32(uint64_t a) { uint32_t v; memcpy(&v, (const void *)(uintptr_t)a, 4); return v; }
+#include "hle_dos2_nrn_c.inc"   // [DOS2] NR-NATIVE step D half c: DM_NRN_PKT (one packet instead of the group; nothing while it is 0)
 // Before the engine's function: the note packet in front of the group. 0 = no note (the list calls NVN at once, no memory).
 static int nrnd_begin(nrnd_open *o, int kind, uint64_t obj, uint64_t ctx) {
     const uint64_t list = ctx ? nrnd_r64(ctx) : 0;
@@ -57,6 +58,7 @@ static int nrnd_begin(nrnd_open *o, int kind, uint64_t obj, uint64_t ctx) {
     nrnd_note_init(&n, kind, cflags, cmask, b == NRND_B_CASCADE ? (uint32_t)NRND_VT_CASCADE : b ? (uint32_t)NRND_VT_GBUF_STAGE : 0u, t_nrnd_build.sub, obj);
     memcpy(p, &n, sizeof n);   // flags 0: not filled yet
     o->note = p; o->list = list; o->chunk = nrnd_r64(list + 8); o->at = nrnd_r32(o->chunk + 0xc);
+    o->cnt = nrnd_r32(o->chunk + 0x10); o->seq = t_nrnd_n;   // [DOS2] NR-NATIVE step D half c: the chunk's packet count with the note in it
     return 1;
 }
 // After it: the packets it appended, from the byte after the note to the list's cursor (chunk: +0 data, +0xc used, +0x18 next).
@@ -72,6 +74,7 @@ static void nrnd_end(const nrnd_open *o) {
     }
     nrnd_note n; memcpy(&n, o->note, sizeof n);
     if (whole) nrnd_scan(&n, seg, ns); else n.flags = NRND_F_DONE;
+    if (__builtin_expect(g_nrnk, 0)) nrnk_built(&n, o->chunk, o->cnt, whole ? ns : 0, o->seq);   // [DOS2] NR-NATIVE step D half c: the group becomes the note's payload (=1) / would (=2)
     memcpy(o->note, &n, sizeof n);
     NR_INC(g_nrndc[NRNDC_NOTES]); NR_INC(g_nrnd_kind[n.kind < NRND_K_N ? n.kind : 0]);
     if (!(n.flags & NRND_F_FULL)) NR_INC(g_nrndc[NRNDC_PART]); else if (!(n.flags & NRND_F_DRAW)) NR_INC(g_nrndc[NRNDC_NODRAW]);
@@ -121,6 +124,7 @@ enum { NRND_SITES = sizeof k_nrnd_site / sizeof k_nrnd_site[0] };
 static uint64_t nrnd_exec_note(uint64_t list, uint64_t pkt) {
     nrnd_run_note(&t_nrnd, list, (const nrnd_note *)(uintptr_t)pkt);
     NR_INC(g_nrndc[NRNDC_EXEC]);
+    if (__builtin_expect(g_nrnk, 0)) return nrnk_note(list, pkt);   // [DOS2] NR-NATIVE step D half c: a merged group is run here; the length covers it
     return NRND_NOTE_BYTES;
 }
 // Every other packet, from the opcode-55 handler's first line (nr_rc_pre: it runs before the engine's handler or the native one).
@@ -223,6 +227,7 @@ static void nrnd_rec_arm(void) {
 // From nrn_report (every 10 s).
 static void nrnd_report(uint64_t frames) {
     nrnd_rec_report(frames);
+    nrnk_report(frames);   // [DOS2] NR-NATIVE step D half c
     if (!g_nrnd) return;
     uint64_t c[NRNDC_N], kd[NRND_K_N];
     for (int i = 0; i < NRNDC_N; i++) c[i] = __atomic_exchange_n(&g_nrndc[i], 0, __ATOMIC_RELAXED);
@@ -274,6 +279,7 @@ static void nrnd_arm(module_t *m, int rc_ok) {
         *k_nrnd_site[i].orig = (nr_fn)o; in++;
     }
     __atomic_store_n(&g_nrnd, v, __ATOMIC_RELEASE);
+    nrnk_arm(m, v);   // [DOS2] NR-NATIVE step D half c: DM_NRN_PKT (needs the note)
     LOG("[nr] native list (NR-NATIVE step D, DM_NRN_LIST=%d: %s): %d of %d hooks in - the engine's draw-yourself functions put a note packet (opcode %#x, %d bytes) in front of the "
         "packets they append to a recorded list: the pass of their context, the group's draw packet and the hashes of the group; the card of a direct draw comes from the chain of "
         "groups (card of the previous draw + the packets in between) instead of a hash of the renderer's cache when nothing else ran in between",

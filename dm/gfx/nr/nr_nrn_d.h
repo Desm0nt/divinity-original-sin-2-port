@@ -111,7 +111,8 @@ static inline uint64_t nrnd_mix_pkt(uint64_t h, const uint8_t *p, uint32_t len) 
 // ---- the note ----
 enum { NRND_F_DONE = 1,     // filled (the engine's function returned and the group was scanned)
        NRND_F_FULL = 2,     // every packet of the group has a known length: lpre / lpost / npkt / draw are the whole group
-       NRND_F_DRAW = 4 };   // exactly one draw packet 36 / 37 in the group: `draw` is its address
+       NRND_F_DRAW = 4,     // exactly one draw packet 36 / 37 in the group: `draw` is its address
+       NRND_F_ONE = 8 };    // [DOS2] NR-NATIVE step D half c (DM_NRN_PKT=1, nr_pkt.h): the group is the payload of this packet - the chunk does not count its packets
 // kind: which function was wrapped (NRND_K_*: the report's breakdown). cflags / cmask: context +8 / +0xc. stage: the vtable of the
 // stage in the context (+0x18), as an offset in main (0 = none / not in main). sub: the cascade (stage +0xb8 + 2 x stage +0xb0) of
 // a cascade stage. npkt: packets of the group (the note not counted).
