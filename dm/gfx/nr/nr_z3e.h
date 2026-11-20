@@ -27,7 +27,10 @@
 // The mutation switch of the host test (never defined in the engine build; source_structure_test.py checks): NRZE_MUTATE = k drops
 // 1 the bump of nrz_rise, 2 of nrz_fall, 3 of nrz_leave, 4 of nrz_checked, 5 the epoch word of nrz_quiet_ok, 6 its submission word,
 // 7 its serial word, 8..11 stamp 0..3 of nrz_vfresh, 12 the address compare of nrz_vmatch, 13 its size compare, 14 the sticky scan of
-// nrz_ring_clean, 15 the alignment test of nrz_ring_off, 16 its upper bound.
+// nrz_ring_clean, 15 the alignment test of nrz_ring_off, 16 its upper bound; [NR-ZERO Z8 images] 17 the epoch word of nrz_rtq_ok, 18 its
+// submission word, 19 its serial word, 20 its fragment-only flag, 21 its count of other write marks, 22 its pass words; of nrz_rt_img_ok
+// 23 "in the layout sets read", 24 "not an attachment of the open pass", 25 "not written since the barrier the read sees", 26 "checked
+// in this submission", 27 "no pending clear".
 #ifndef NRZE_MUTATE
 #define NRZE_MUTATE 0
 #endif
@@ -79,6 +82,32 @@ static inline int nrz_quiet_ok(const nrz_quiet *q, uint64_t ep, uint64_t sub, ui
     return (NRZE_MUTATE == 5 || q->ep == ep) && q->ep != 0 && (NRZE_MUTATE == 6 || q->sub == sub) && (NRZE_MUTATE == 7 || q->serial == serial);
 }
 static inline void nrz_quiet_set(nrz_quiet *q, uint64_t ep, uint64_t sub, uint64_t serial) { q->ep = ep; q->sub = sub; q->serial = serial; }
+
+// ---- [NR-ZERO Z8 images, NR-ZERO.md section 29] "a walk of the entry would do nothing", also for images the GPU wrote ----
+// nrz_quiet stands only for entries whose images were never written by the GPU: an image that was (a render target that is sampled)
+// is sent to the read path at every draw - get_image and prepare_read - and for nearly every draw they do nothing. They do nothing
+// when the image is checked in this submission and has contents, is in the layout sets read, is no attachment of the open pass, has
+// no pending clear and was not written since the barrier the read sees. After a walk that left every image of the entry either
+// quiet or so, the word is set under: the image epoch (layout / uploaded / checked / an image destroyed: the fields of nrz_quiet's
+// types), the submission, the slot serial, the open pass (pass + framebuffer: the attachments), whether the read is fragment-only,
+// and the count of write marks OTHER than the marks a draw gives the attachments of the pass it continues (`other` = the engine's
+// write_seq - its count of those marks). Every write mark of an image takes a new write_seq, so while `other` stands no image
+// that is not an attachment of the open pass was written, and the barrier points only move forward: the walk would do nothing.
+typedef struct nrz_rtq { uint64_t ep, sub, serial, other, pass, fb; uint8_t frag; } nrz_rtq;   // ep 0 = never
+static inline int nrz_rtq_ok(const nrz_rtq *q, uint64_t ep, uint64_t sub, uint64_t serial, uint64_t other, uint64_t pass, uint64_t fb, int frag) {
+    return q->ep != 0 && (NRZE_MUTATE == 17 || q->ep == ep) && (NRZE_MUTATE == 18 || q->sub == sub) && (NRZE_MUTATE == 19 || q->serial == serial) &&
+           (NRZE_MUTATE == 20 || q->frag == (uint8_t)(frag != 0)) && (NRZE_MUTATE == 21 || q->other == other) && (NRZE_MUTATE == 22 || (q->pass == pass && q->fb == fb));
+}
+static inline void nrz_rtq_set(nrz_rtq *q, uint64_t ep, uint64_t sub, uint64_t serial, uint64_t other, uint64_t pass, uint64_t fb, int frag) {
+    q->ep = ep; q->sub = sub; q->serial = serial; q->other = other; q->pass = pass; q->fb = fb; q->frag = (uint8_t)(frag != 0);
+}
+// One image of the entry after the walk. skip: nr_dimg_skip answers SKIP; rt: it answers "written by the GPU at some time".
+typedef struct nrz_rt_in { uint8_t skip, rt, checked, content, general, in_open, written, pending; } nrz_rt_in;
+static inline int nrz_rt_img_ok(const nrz_rt_in *x) {
+    if (x->skip) return 1;
+    return x->rt && (NRZE_MUTATE == 26 || x->checked) && x->content && (NRZE_MUTATE == 23 || x->general) && (NRZE_MUTATE == 24 || !x->in_open) &&
+           (NRZE_MUTATE == 25 || !x->written) && (NRZE_MUTATE == 27 || !x->pending);
+}
 
 // ---- Z3c: (address, bytes) -> view ----
 enum { NRZV_NONE = 0, NRZV_STATIC = 1, NRZV_INPLACE = 2, NRZV_STAMPS = 4 };

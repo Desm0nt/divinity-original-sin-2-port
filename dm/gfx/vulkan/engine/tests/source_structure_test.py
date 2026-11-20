@@ -40,7 +40,7 @@ NB20A_DRAW_GLOBALS = {
       'creates depth_bounds_dropped depth_feedback_reads depth_idle_passes desc_abandoned desc_chained desc_memo_hits desc_memo_misses '
       'desc_memo_texel_fail desc_memo_why desc_ns dirty_pages fallbacks fb_creates fb_hits hits key_diff lazy_storage_saved '
       'memo_front_hits memo_simg_hits mid_chunk_ns mismatches missing_program_skips msaa_passes noload_passes noload_why noout_masked '
-      'offset_changed_at offset_changes pass_end_by pass_end_lines pass_fast_hits pending_misses perf pipe_draw_fast_hits pipe_memo_hits '
+      'nrz_pm offset_changed_at offset_changes pass_end_by pass_end_lines pass_fast_hits pending_misses perf pipe_draw_fast_hits pipe_memo_hits '
       'pipe_memo_misses pipe_pod_hits pipe_pod_misses pipeline_counts pipeline_fast_hits pipeline_ns read_break_why reversed_depth_draws '
       'set_bind_offsets set_binds set_binds_offsets_only skipped_draws snap_front_hits span_calls span_t0 stats texel_hits tile_war_barriers xmemo_hits '
       'xview_races s bytes draws hist idx inst multi plain u8 store_kept xlq_draw_pipes xlq_twin_pipes idvs_point_pipes',   # + DM_GFX_VTX_STATS counters (VERTEX.md)
@@ -3097,7 +3097,7 @@ def nrz3e_check():   # [DOS2] NR-ZERO Z3b / Z3c / Z3d (docs/dos2/nr/NR-ZERO.md s
         assert m.group(1) in ('slot_serial', '0'), 'Z3b: slot_use is only ever set to the slot serial (%s)' % m.group(0)
     assert nd.count('quiet_ask(e,hook)') == 1 and nd.count('quiet_done(e,hook,zq,nrd)') == 1 and z.count('nrdesc::quiet_ask(e,hook)') == 1 and z.count('nrdesc::quiet_done(e,hook,zq,nrd)') == 1, 'Z3b: both walks ask and report'
     assert 'if(hook || !nrz_quiet_ok(&e.quiet,nrz_img_ep,nrz_sub_now(),slot_serial))return false;' in nd and 'if(!nrd && !hook && !asked_quiet){nrz_quiet_set(&e.quiet,nrz_img_ep,nrz_sub_now(),slot_serial);' in nd, 'Z3b: the three words'
-    assert 'if(zq && nrzx::bmode==1){s.img+=e.img.size();s.img_skip+=e.img.size();}else{' in nd and 'if(!(zq && nrzx::bmode==1)){' in z, 'Z3b: only =1 leaves the walk out'
+    assert 'if(zq && nrzx::bmode==1){s.img+=e.img.size();s.img_skip+=e.img.size();}else{' in nd and 'if(!(zq && nrzx::bmode==1) && !(zr && zi==1)){' in z, 'Z3b: only =1 leaves the walk out (NR-ZERO Z8 images: or the read word at =1, for a draw the walk answered)'
     assert 'e=Ent{};e.plan=&pl;' in nd and 'nrz_quiet quiet{};' in nd, 'Z3b: a remade entry starts without the word'
     # Z3c: every event that can change an answer moves a word of its stamp
     for must in ('c.live=false;++live_ep;', 't.live=true;++live_ep;', 'if(!c.sticky[pg]){c.sticky[pg]=1;++c.st_ver;}++c.wr_ver;', '++trx::hot_adds;++c.wr_ver;}}', '++hits;last_chunk=int(c-table);return true;',
@@ -3281,8 +3281,8 @@ def nrz5g_check():   # [DOS2] NR-ZERO Z5, the game thread's half (docs/dos2/nr/N
     ts = zg[zg.index('namespace nrz5t{'):zg.index('#else')]
     assert not re.search(r'vkCmd\w+\(|nbmt::Cmd\w+\(', ts) and 'splice' not in ts and r.count('splice_spare(') == 1 and r.count('q->splice_spare(run.chunk); ++st.handed;') == 1, 'Z5 game: one hand-over'
     assert 'if(nbmt::cur!=cmd){no_take=1;++s.direct;}else if(ui){no_take=1;++s.ui;}else if(cond){no_take=1;++s.cond;}else if(nrsort::mode!=0 || nrmdi::mode>0){no_take=1;++s.gate;}' in ts, 'Z5 game: never taken - direct recording, UI, a conditional bracket, DM_NR_SORT / DM_NR_MDI'
-    assert ts.index('const int a=R.draw(mw,rv,holds,is_draw);') < ts.index('if(a==nrz5r::Reader::VALID){leave(bc,rv);++s.taken;sync_pend(cmd);return true;}') and ts.count('leave(bc,rv)') == 1, 'Z5 game: the bind cache gets the values only of a taken draw'
-    assert ts.index('if(gmode==1){\n        const int a=R.draw(') < ts.index('v_would=R.verify_begin(mw,rv,holds,is_draw,sig());'), 'Z5 game: =2 holds nothing'
+    assert ts.index('const int a=nrz8t::kmode==1?R.draw2(mw,rv,kp,holds,is_draw):R.draw(mw,rv,holds,is_draw);') < ts.index('if(a==nrz5r::Reader::VALID){leave(bc,rv);++s.taken;sync_pend(cmd);return true;}') and ts.count('leave(bc,rv)') == 1, 'Z5 game: the bind cache gets the values only of a taken draw'
+    assert ts.index('if(gmode==1){\n        const int a=nrz8t::kmode==1?R.draw2(') < ts.index('v_would=R.verify_begin(mw,rv,holds,is_draw,sig());'), 'Z5 game: =2 holds nothing'
     assert 'const nrz5_cache real=nrz5::conv(bc);return nrz5r::cache_holds(&sh,&real,&v);' in ts, 'Z5 game: the bind cache against the run\'s shadow, every field the draw reads'
     assert 'if(R.holding && gmode==1){if(!held){held=true;held_cmd=cmd;nrsort::pend.store(cmd,std::memory_order_relaxed);}}' in ts and 'void cut(){R.flush(nrz5r::CUT_WRITE);held=false;nrsort::pend.store(VK_NULL_HANDLE,std::memory_order_relaxed);}' in ts, 'Z5 game: a held chunk arms the wrappers\' hook'
     # the reader's rule (nr_z5r.h): values first, then the cache, then the packets up to the draw command; the shadow follows the taken draws
@@ -3739,5 +3739,113 @@ nrubwc_check()
 ports1119_check()
 inputatt_check()
 print('PASS: '+nrz8_check())
+def nrz9_check():   # [DOS2] NR-ZERO Z8, the parts of NR-ZERO.md section 28 on (branch dos2-z9): each behind its own switch, default 0
+    z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
+    h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')
+    r5 = (root / 'gfx/nr/nr_z5r.h').read_text(encoding='utf-8')
+    hle = (root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8')
+    tap = (root / 'gfx/nvn/nvn_nb_tap.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    sm = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    keys = [('DM_NR_Z8_THREAD', 'xbg_nr_z8_thread_default'), ('DM_NR_Z8_IMG', 'xbg_nr_z8_img_default'), ('DM_NR_Z8_VIEW', 'xbg_nr_z8_view_default'), ('DM_NR_Z8_VAL', 'xbg_nr_z8_val_default')]
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    z3 = (root / 'gfx/vulkan/engine/xbg_nr_z3.inc').read_text(encoding='utf-8')
+    e3 = (root / 'gfx/nr/nr_z3e.h').read_text(encoding='utf-8')
+    for key, fn in keys:
+        assert 'inline int %s(){return 0;}' % fn in pol and (z.count('getenv("%s")' % key) == 1 or z.count('part("%s",%s())' % (key, fn)) == 1) and fn + '()' in z, 'Z9: %s default 0 on every family, read once through the policy' % key
+        assert sm.index('if(step>=2){') < sm.index('add("%s","0");' % key) < sm.index('if(step>=3){'), 'Z9: %s off at safe-mode step 2' % key
+        assert key not in (root / 'android/jni_android.c').read_text(encoding='utf-8'), 'Z9: the app does not set %s' % key
+        for q in (root / 'android/java').rglob('*.java'):
+            assert key not in q.read_text(encoding='utf-8', errors='replace'), 'Z9: the app does not set %s (%s)' % (key, q.name)
+    # ---- part 1: the walk on its own thread ----
+    # the submitting thread posts under the front's lock where it walked; the walker writes nothing into the command memory
+    assert 'if(nrz8g::thread_mode)nrz8g::post(handles,n,sub);else nrz8g::submit(handles,n,sub);}' in z, 'Z9 thread: the post replaces the walk at the same place (under the front lock, before the job is queued)'
+    nd = z[z.index('    void nb_draw(uint8_t *rec,size_t n,bool top){'):z.index('// nvnQueueSubmitCommands, before the job of this recording is queued.')]
+    assert nd.index('if(thread_mode){') < nd.index('marks.put(rec,mv);}') < nd.index('else{\n        // the record\'s words') < nd.index('rec[offsetof(nbd_hdr,_pad0)]=g.stamp;') and nd.count('rec[') == 1 and nd.count('memcpy(rec+') == 3, \
+        'Z9 thread: a walk on its own thread puts the words into the marks; the record is written only by the walk on the submitting thread'
+    wm = z[z.index('void walker_main(){'):z.index('namespace nrz8t{', z.index('void walker_main(){'))]
+    assert wm.index('marks.begin(j.sub);') < wm.index('submit(j.big?j.big:j.in,j.n,j.sub);') < wm.index('marks.end();') and 'else{marks.pass(j.sub);' in wm, 'Z9 thread: every posted job leaves through marks.end() / marks.pass()'
+    # the translation thread: a record's words only from the entry of its place; a re-executed range is not counted; the wait at the end of a submission
+    rb = z[z.index('inline void rec_begin(nbd_hdr &h,const uint8_t *rec){'):z.index('// lane_tail, after the command section it ran itself')]
+    assert rb.index('if(nrshc::again!=NRSHC_R_NONE){++s.again;return;}') < rb.index('if(mr.sub!=cur_sub)mr.begin(cur_sub);') < rb.index('h._pad0=0;h._pad1=0;h._pad2=0;if(!(h.flags&NBD_F_COND))h.cond_addr=0;') < \
+        rb.index('if(!cur_sub || !mr.next(nrz8g::marks,rec,&mv))return;') < rb.index('h._pad0=nrz8::stamp_of(cur_sub);h._pad1=mv.mark;h._pad2=mv.slot1;if(!(h.flags&NBD_F_COND))h.cond_addr=mv.ca;'), \
+        'Z9 thread: the record in hand gets the walk\'s words only through MarkReader::next'
+    ed = z[z.index('void exec_done(uint64_t sub){'):z.index('void boot(){')]
+    assert ed.index('if(!nrz8g::thread_mode)return;') < ed.index('if(sub>nrz8g::posted.load(std::memory_order_acquire))return;') < ed.index('nrz8g::marks.done.load(std::memory_order_acquire)<sub') and 'usleep(50)' in ed, \
+        'Z9 thread: the translation thread waits for the walker at the end of a posted submission'
+    xs = hle[hle.index('static void x_submit(const uint64_t *h, int n, uint64_t sub, uint64_t host) {'):]
+    assert xs.index('Z8G_EXEC(sub);') < xs.index('    mtl_exec_rest(NULL, 0);\n    Z8G_DONE(sub);') < xs.index('uint64_t f = mtl_sub_commit();') and hle.count('Z8G_DONE(') == 1, 'Z9 thread: the wait is before the submission counts as executed'
+    assert tap.count('#define Z8G_DONE(') == 2 and '__atomic_load_n(&g_z8g_seen, __ATOMIC_ACQUIRE), 0) && xbg_nr_z8_exec_done) xbg_nr_z8_exec_done(sub);' in tap and '#define Z8G_DONE(sub) ((void)0)' in tap, \
+        'Z9 thread: Z8G_DONE costs one load without the switch and still waits for a walk posted before the switch went off'
+    # the marks: token cleared first and written last; the reader compares the token, the record, and the token again
+    mp = h[h.index('    void put(const uint8_t *rec, const MarkVal &v) {'):h.index('    void end() { done.store(wsub')]
+    assert mp.index('x.tok.store(0, std::memory_order_release);') < mp.index('x.rec.store(') < mp.index('x.aux.store(') < mp.rindex('x.tok.store(t, std::memory_order_release);'), 'Z9 thread: an entry is cleared, written, then named'
+    pr = h[h.index('    int probe(const Marks &m, uint32_t k, const uint8_t *rec, MarkVal *o) const {'):h.index('    // The next draw record the translation thread executes')]
+    assert 't != Marks::token(sub, k)) return 1;' in pr and 'x.tok.load(std::memory_order_acquire) != t) return 1;' in pr and 'r != uint64_t(uintptr_t(rec))) return 2;' in pr, 'Z9 thread: the reader\'s three checks'
+    assert 'if (max_tails && cur.tails >= max_tails) {' in r5 and 'uint32_t max_tails = 0;' in r5 and 'g.wr.max_tails=close?split0:0;' in z, 'Z9 thread: runs are split only for a walker whose reader is close (0 = never, the default of the writer)'
+    assert 'if(tm && o && *o && atoi(o)!=0){' in z, 'Z9 thread: not with DM_NB_OWN (the submission number of a frame\'s last submit is not known at the post)'
+    # ---- part 2: the read word of an NR-08 entry ----
+    # every write mark of an image takes a new write_seq; the marks of a draw that continues its pass are counted apart at both places
+    marks = re.findall(r'(?:\.|->)(?:last_write|storage_write|opw)=(?!=)([^;]*);', re.sub(r'//[^\n]*', '', g + ''.join(f.read_text(encoding='utf-8') for f in sorted((root / 'gfx/vulkan/engine').glob('*.inc')))))
+    assert len(marks) >= 11, 'Z9 images: the write marks were not found (%d)' % len(marks)
+    for m in marks:   # ('im.storage_write' and 'nrrp::lw(im)' fill the query struct of nb_hit, not an Image)
+        assert m in ('++write_seq', 'seq', 'im.storage_write', 'nrrp::lw(im)'),'Z9 images: a write mark that is not a new write_seq: %s' % m
+    assert 'void opbar_stamp(Image &im,bool write){const uint64_t seq=++write_seq;' in g, 'Z9 images: the op stamp takes a new write_seq'
+    assert g.count('nrz_pm+=') == 1 and z3.count('nrz_pm+=') == 1 and 'nrz_pm+=last_pass.pass.images.size();' in g and '++pass_fast_hits;nrz_pm+=zp.images.size();' in z3 and \
+        g.count('}++pass_fast_hits;') == 1 and z3.count('}++pass_fast_hits;') == 1, 'Z9 images: the marks of a draw that continues its pass are counted at create_pass\'s fast path and in nrz3::answered, nowhere else'
+    ib = z3[z3.index('     const int zi=a.z8?nrz8t::imode:0;'):z3.index('    read_frag_only=false;if(tm.sp)ti=timing_clock();')]
+    assert ib.index('nrz8t::img_ask(e,hook);') < ib.index('if(zr && zi==2)z0=nrz8t::img_snap(e);') < ib.index('if(!(zq && nrzx::bmode==1) && !(zr && zi==1)){') < ib.index('prepare_read(gi,c.command,-1);') < \
+        ib.index('nrz8t::img_done(e,hook,zr,z0,slot_serial==s0 && pass_continues(c));'), 'Z9 images: asked before the walk; =2 walks and compares; the word is set after the walk'
+    ia = z[z.index('inline bool img_ask(const nrdesc::Ent &e,bool hook){'):z.index('struct ImgSnap{')]
+    assert 'if(hook || !img_hooks_off()){++is.hooks;return false;}' in ia and 'nrz_rtq_ok(&e.rtq,nrz_img_ep,nrz_sub_now(),slot_serial,write_seq-nrz_pm,uint64_t(open_pass.pass),uint64_t(open_pass.framebuffer),read_frag_only)' in ia, 'Z9 images: the word\'s words'
+    assert 'inline bool img_hooks_off(){return !pclear_n && !draw_reads_on && nbtr::mode<=0 && !nbchk::armed && prepass::mode<=0 && !hist_on && nrrp::mode==0 && opbar::mode!=2 && nrpres::mode==0 && !passval::on();}' in z, \
+        'Z9 images: no word while a clear is pending or something notes every read'
+    pr = g[g.index('void prepare_read(Image &im,VkCommandBuffer cmd,int storage=-1){'):g.index('void mark_storage_images(){')]
+    for hk in ('if(nbtr::mode>0)nbtr::touch(', 'if(pgraph::armed)pgraph::read(', 'if(nbchk::armed)nbchk::read(im);', 'image_read_hook(im);if(draw_reads_on){', 'pass_prof_read(im);', 'if(opbar::mode)opbar_read(', 'if(nrrp::mode)nrrp_read('):
+        assert pr.count(hk) == 1, 'Z9 images: prepare_read\'s notes changed (img_hooks_off must name each): %s' % hk
+    assert pr.count('::') == sum(pr.count(x) for x in ('nbtr::', 'pgraph::', 'nbchk::', 'opbar::', 'nrrp::', 'pgm::', 'uix::', 'nroc::', 'std::')), 'Z9 images: prepare_read reads a namespace img_hooks_off does not know'
+    assert 'void image_read_hook(Image &im){if(prepass::mode>0)prepass::read(im.source.serial);if(nrpres::mode)nrpres::touch(im,NRP_T_READ);if(pclear_n)pclear_flush_image(im,0);if(hist_on)hist_note_read(im,\'s\');}' in g, \
+        'Z9 images: image_read_hook changed (img_hooks_off must name each of its notes)'
+    assert 'void pass_prof_read(const Image &im){Slot &s=slots[slot_index];if(!s.prof || !im.gpu_written || !passval::on())return;' in g, 'Z9 images: pass_prof_read notes only under passval::on()'
+    idn = z[z.index('inline void img_done(nrdesc::Ent &e,bool hook,bool stood,const ImgSnap &z0,bool cont){'):z.index('void guard(bool on)')]
+    assert idn.index('if(stood){++is.checked;') < idn.index('if(hook || !cont || !img_hooks_off() || !e.check_gen){') < idn.index('if(!nrz_rt_img_ok(&r)){') < idn.index('nrz_rtq_set(&e.rtq,'), 'Z9 images: the word is set only after every image passed'
+    assert 'uint64_t seen=fo?frag_seq:barrier_seq;if(opbar::mode==1)seen=nb_ob_seen(seen,fo?im.opvis_frag:im.opvis_full);' in idn and 'r.written=uint8_t(nrrp::lw(im)>seen || (!as_storage && im.storage_write>seen));' in idn and \
+        'uint64_t seen=read_frag_only?frag_seq:barrier_seq;if(opbar::mode==1)seen=nb_ob_seen(seen,read_frag_only?im.opvis_frag:im.opvis_full);' in pr and 'const bool written=nrrp::lw(im)>seen || (!as_storage && im.storage_write>seen);' in pr, \
+        'Z9 images: "written since the barrier the read sees" is prepare_read\'s own expression'
+    assert 'NRZE_MUTATE' not in z and 'nrz_rtq rtq{};' in (root / 'gfx/vulkan/engine/xbg_nr_desc.inc').read_text(encoding='utf-8') and 'typedef struct nrz_rtq { uint64_t ep, sub, serial, other, pass, fb; uint8_t frag; } nrz_rtq;' in e3, 'Z9 images: the word lives in the NR-08 entry'
+    # ---- part 3: the view of a range at the entry of its number ----
+    ze = (root / 'gfx/vulkan/engine/xbg_nr_z3e.inc').read_text(encoding='utf-8')
+    lane = (root / 'gfx/vulkan/engine/xbg_nr_draw.inc').read_text(encoding='utf-8')
+    va = ze[ze.index('Buffer view_at(nrz_view *e,uint64_t address,size_t bytes,int site,uint32_t stride,int cmode,Stats &s){'):ze.index('void tick(){')]
+    assert 'if(nrz_vmatch(e,address,bytes,uint32_t(site))){' in va and va.count('nrz_vfresh(e,st)!=0') == 2 and 'const uint64_t st[NRZV_STAMPS]={zc::live_ep,zc::table[e->chunk].wr_ver,slot_serial,hit_pend_gen};' in va and \
+        'const uint64_t st[NRZV_STAMPS]={snapshot_epoch,nrbuf::st_ep,0,hit_pend_gen};' in va and 'if(fresh && cmode==1){' in va and 'vt.' not in va, 'Z9 views: one function answers through an entry - the range and the words are compared whoever chose the entry'
+    assert '++s.c_asked;return view_at(nrz_vslot(&vt,address,bytes),address,bytes,site,stride,cmode,s);}' in ze and '++vs.c_asked;return nrzx::view_at(&vc[id],address,bytes,site,stride,vmode,vs);}' in z, 'Z9 views: Z3c through its table slot, Z8 through the entry of the range\'s number'
+    assert 'if(!id || id>=VC_N || snap_no_sync || nrbuf::busy || nrbuf::mode==2){++v_none;return nrzx::view_real(address,bytes,site,stride);}' in z and 'if(!vt.e || snap_no_sync || nrbuf::busy || nrbuf::mode==2)return view_real(address,bytes,site,stride);' in ze, \
+        'Z9 views: the same refusals as Z3c\'s table'
+    assert lane.count('else if(__builtin_expect(nrz8t::vmode!=0,0))b=nrz8t::view(') == 2 and 'b=nrz8t::view(r.address,r.size,1,H.stride[i],z8vk++);' in lane and 'b=nrz8t::view(uint64_t(indexed->ibuf),bytes,2,0,3);' in lane, 'Z9 views: asked at the lane\'s two places with the arguments of snapshot()'
+    assert rb.index('    cur_vw=0;') < rb.index('if(__builtin_expect(nrz8g::thread_mode,0)){') and 'cur_vw=mv.vw;' in rb and 'nrz8t::cur_vw=0;' in (root / 'gfx/vulkan/engine/xbg_nr_z5g.inc').read_text(encoding='utf-8'), \
+        'Z9 views: the numbers are the record\'s draw\'s only'
+    assert 'if(vmode && !nrz8g::view_ids){' in z and 'nrz8g::view_ids=tm && vm>=1 && vm<=2;' in z, 'Z9 views: only with the walker thread'
+    # ---- part 4: the verdict of a tail draw from the translation thread's own memory ----
+    z5g = (root / 'gfx/vulkan/engine/xbg_nr_z5g.inc').read_text(encoding='utf-8')
+    kn = z[z.index('bool known(const nbd_hdr &rh,const nrz5_vals &rv,nrz5r::Reader::Known *k){'):z.index('// The backend\'s init, right after `state` got its start values')]
+    assert 'if(!cur_pk || !ver || guarded || (rh.flags&(NBD_F_REN|NBD_F_COND)) || rh._pad2<=0 || uint32_t(rh._pad2-1)>=nrz8g::tab.n || priv[rh._pad2-1].ver!=ver)return false;' in kn and \
+        'nrz8::expect_diff([&x](unsigned j){return x.w[j].load(std::memory_order_relaxed);},&rv,rh.count,rh.instances,rh.first,rh.base_vertex,rh.base_instance,A{});' in kn, \
+        'Z9 values: named only from this thread\'s own slot at the record\'s version and from State, never for a draw whose State the prologue changed'
+    tl = z5g[z5g.index('bool tail(VkCommandBuffer cmd,BindCache &bc,bool ui,bool cond,'):z5g.index('// lane_tail, after the command section it ran itself (the draw was not taken).')]
+    assert tl.index('nrz5_vals rv;vals_of(rv,') < tl.index('if(__builtin_expect(z8 && nrz8t::kmode!=0,0) && mw && nrz8t::known(r_h,rv,&kn))kp=&kn;') < tl.index('R.chk=nrz8t::kmode==2 || gmode==2?kp:nullptr;') < \
+        tl.index('const int a=nrz8t::kmode==1?R.draw2(mw,rv,kp,holds,is_draw):R.draw(mw,rv,holds,is_draw);'), 'Z9 values: the values are resolved first; =1 takes by draw2, =2 and DM_NR_Z8=2 compare inside the old verdict'
+    sk = r5[r5.index('    template <class Holds> bool step_known('):r5.index('    static bool id_before(')]
+    assert sk.index('if (k.d) {') < sk.index('!holds(shadow, rv)') < sk.index('k.bytes > c->used - at') < sk.index('from = at; at += k.bytes; cmds += k.n;') and 'side' not in sk and 'data()' not in sk, \
+        'Z9 values: the known verdict asks the values, the bind cache and the chunk\'s length - and reads neither chunk'
+    d2 = r5[r5.index('    template <class Holds, class IsDraw> int draw2('):r5.index('    // A record of a recording that will never be executed (optional:')]
+    assert 'known_run = k != nullptr;' in d2 and 'if (!known_run) return step(rv, holds, is_draw, &why); if (!k) { ++st.known_cut; return false; } return step_known(rv, *k, holds, &why);' in d2 and \
+        'holding = true; known_run = false;' in r5, 'Z9 values: a run is followed one way from its first tail draw'
+    assert 'mv.pk=mark?uint64_t(g.wr.last_bytes)|uint64_t(g.wr.last_cmds)<<32:0;' in z and 'last_bytes = cur.chunk->used - u; last_cmds = cur.chunk->cmds - cm;' in r5 and 'cur_vw=mv.vw;cur_pk=mv.pk;' in z and \
+        'if(z8){nrz8t::cur_vw=0;nrz8t::cur_pk=0;}' in z5g, 'Z9 values: the packet count of a tail draw is the writer\'s own and the record\'s draw\'s only'
+    for src in (z, g, z3, z5g, lane, tap, hle):
+        assert 'NRZ8_TEST_MID_PUT' not in src, 'Z9: the test hook of Marks::put is the host test\'s only'
+    return 'NR-ZERO Z8 parts (sections 28-31): DM_NR_Z8_VAL default 0 / safe-mode step 2 / not set by the app; a tail draw\'s verdict is named from the translation thread\'s own slot (record\'s version) and State, taken by draw2 without reading the walker\'s chunks, a run followed one way; sections 28-30: DM_NR_Z8_VIEW default 0 / safe-mode step 2 / not set by the app; a range is answered through the entry of its number by Z3c\'s own function (range and words compared); sections 28-29: DM_NR_Z8_IMG default 0 / safe-mode step 2 / not set by the app; every write mark is a new write_seq, pass marks counted apart at their two places; the read word is asked before the walk, never while a clear is pending or a read is noted, set after every image passed with prepare_read\'s own "written"; section 28: DM_NR_Z8_THREAD default 0 / safe-mode step 2 / not set by the app; the post replaces the walk under the front lock; the walker writes only the marks, never the command memory; the translation thread takes words by the record\'s place and waits for the walker at the end of a posted submission'
+print('PASS: '+nrz9_check())
 _bad=delimiter_gate()
 assert not _bad,_bad

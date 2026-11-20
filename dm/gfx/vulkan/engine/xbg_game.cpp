@@ -7107,7 +7107,7 @@ struct Pass {
 // Draws inside the open pass with unchanged render-target state get the same Pass: non-draw ops end the pass, so nothing
 // else touched its attachments since. Only the attachments' write marks are refreshed (as prepare_attachment does).
 // Reset with every submission and image upgrade. create_pass ran in full for each of ~2200 draws per D2R camp frame.
-struct LastPass{decltype(state.rt) rt;Pass pass;bool valid=false;} last_pass;uint64_t pass_fast_hits=0;
+struct LastPass{decltype(state.rt) rt;Pass pass;bool valid=false;} last_pass;uint64_t pass_fast_hits=0;uint64_t nrz_pm=0;   /* [DOS2] NR-ZERO Z8 images: the write marks draws gave the attachments of the pass they continue (write_seq - nrz_pm = every other write mark) */
 void last_pass_reset(){last_pass.valid=false;}
 // 保留零值计数用于与旧版本日志比较；任意 guest draw 不再丢弃附件内容。
 // Keep zero counters for baseline logs; arbitrary guest draws retain attachment contents.
@@ -7135,6 +7135,7 @@ bool create_pass(Pass &p,Commands &c,int clear_color=-1,bool clear_depth=false,b
     const bool plain_draw=c.draw && clear_color<0 && !clear_depth && !soft && !provenance_file && !capture.active && !ab_off("passfast");
     const bool ua_detach=uiarea::mode && c.draw && clear_color<0 && !clear_depth && !soft && state.rt.depth && uiarea::detach(c.command);   // [DOS2] NB-18b-6: the pass without its unused depth-stencil
     if(plain_draw && !ua_detach && last_pass.valid && open_pass.cmd==c.command && open_pass.pass==last_pass.pass.pass && open_pass.framebuffer==last_pass.pass.framebuffer && !memcmp(&state.rt,&last_pass.rt,sizeof state.rt)){
+        nrz_pm+=last_pass.pass.images.size();   // [DOS2] NR-ZERO Z8 images: these marks are counted apart
         p=last_pass.pass;for(auto *im:p.images){im->prior_write=im->last_write;im->last_write=++write_seq;im->gpu_written=true;}++pass_fast_hits;return true;}
     // 仅显式设置DM_VK_TRACE_ATTACHMENTS=1时输出成功诊断；首次调用读取，错误始终记录。
     // Read once: opt in with DM_VK_TRACE_ATTACHMENTS=1; errors are always logged.

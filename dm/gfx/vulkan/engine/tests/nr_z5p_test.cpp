@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <vector>
 #include "../../../nr/nr_z5p.h"
@@ -171,9 +172,13 @@ static void interleave() {
     for (int j = NRZ5T_WORDS / 2; j < NRZ5T_WORDS; j++) x.w[j].store(wb[j]); x.ver.store(v + 2);
     CHECK(T.get(1, &t, &gv) && gv == v + 2 && !memcmp(&t, &tb, sizeof t), "the finished write is read whole");
     // put() itself leaves an even, larger version and makes it odd on the way (the mutation of the writer shows here)
-    struct Spy { static bool odd_seen(nrz5p::Table &T2, uint32_t i, const nrz5_tmpl *t2) { const uint32_t v0 = T2.s[i].ver.load(); std::atomic<bool> go{true}, saw{false};
-        std::thread th([&] { while (go.load(std::memory_order_relaxed)) if (T2.s[i].ver.load(std::memory_order_relaxed) & 1) saw.store(true); });
-        for (int n = 0; n < 400000 && !saw.load(); n++) { nrz5_tmpl u = *t2; u.pipe = 0x9000 + n; T2.put(i, &u); }
+    struct Spy { static bool odd_seen(nrz5p::Table &T2, uint32_t i, const nrz5_tmpl *t2) { const uint32_t v0 = T2.s[i].ver.load(); std::atomic<bool> go{true}, saw{false}, on{false};
+        std::thread th([&] { on.store(true); while (go.load(std::memory_order_relaxed)) if (T2.s[i].ver.load(std::memory_order_relaxed) & 1) saw.store(true); });
+        // (the spy must be running and must get a core while the puts go on: on a loaded host 400 000 puts could pass before it was
+        // scheduled once - the check failed 1 run in ~20 with nothing wrong. Now: wait for it, then put for up to 10 s.)
+        while (!on.load()) std::this_thread::yield();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int n = 0; !saw.load() && (n < 400000 || std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)); n++) { nrz5_tmpl u = *t2; u.pipe = 0x9000 + uint64_t(n); T2.put(i, &u); if (!(n & 1023)) std::this_thread::yield(); }
         go.store(false); th.join(); return saw.load() && T2.s[i].ver.load() > v0 && !(T2.s[i].ver.load() & 1); } };
     CHECK(Spy::odd_seen(T, 2, &ta), "a put passes through an odd version and ends on an even one");
 }

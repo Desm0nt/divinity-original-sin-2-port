@@ -1909,6 +1909,7 @@ static void x_submit(const uint64_t *h, int n, uint64_t sub, uint64_t host) {
     mtl_sub_index(h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest(h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
+    Z8G_DONE(sub);   // [DOS2] NR-ZERO Z8 DM_NR_Z8_THREAD=1: the walker thread has left this submission's command memory (nothing without the switch)
     uint64_t f = mtl_sub_commit();
     if (f != sub) { static int red; if (!red++) LOG("【红】翻译队列：第 %llu 次提交的 Metal 栅栏是 %llu，栅栏与提交数对不上，游戏等同步会提前 / 推迟放行", (unsigned long long)sub, (unsigned long long)f); }
     snap_tick(sub);

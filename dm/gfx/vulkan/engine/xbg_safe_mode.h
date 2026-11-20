@@ -78,6 +78,10 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
         add("DM_NR_Z3","0");add("DM_NR_Z5","0");   // NR-ZERO Z3 / Z5: resolved draws from a table / the packet from the game thread (they sit on NR-09)
         add("DM_NR_Z8","0");   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
+        add("DM_NR_Z8_THREAD","0");   // NR-ZERO Z8, section 28: the walk on its own thread
+        add("DM_NR_Z8_IMG","0");      // section 29: the read word of an NR-08 entry
+        add("DM_NR_Z8_VIEW","0");     // section 30: views by the range's number in its submission
+        add("DM_NR_Z8_VAL","0");      // section 31: the verdict of a tail draw without the walker's chunks
         add("DM_NR_Z3B","0");add("DM_NR_Z3C","0");add("DM_NR_Z3D","0");add("DM_NR_Z3K","0");   // NR-ZERO Z3b / Z3c / Z3d / Z3K: the image word, the mesh view table, the ring word, the cheap key
         // batch C defaults (19.11): shader twins, native state / uniform / translator / texture paths, AA with the outline
         add("DM_NR_SH_SURF","0");add("DM_NR_MAT","0");add("DM_NR_STATE","0");add("DM_NR_UBO","0");add("DM_NR_UBD","0");

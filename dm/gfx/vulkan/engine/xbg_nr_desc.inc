@@ -63,6 +63,7 @@ struct Var{int32_t node=-1;uint32_t gen=0;VkDescriptorSet set{};uint32_t tuple[N
 // var: the entry's set(s), each a node of its layout's recycler - the one of the texture part, or (static tuple words) the two last tuples
 // (field order, [NR-ZERO Z3K]: the words a hit checks first, then the offsets and the sets, the vectors of the image walk last)
 struct alignas(64) Ent{Plan *plan=nullptr;uint64_t check_gen=0;VkBuffer ring{};
+    nrz_rtq rtq{};       // [NR-ZERO Z8 images] the walk of img would do nothing, also for images the GPU wrote, under these words (nr_z3e.h; xbg_nr_z8.inc img_ask / img_done)
     nrz_quiet quiet{};   // [NR-ZERO Z3b] the walk of img found every image quiet under these words (nr_z3e.h); a remade entry starts empty
     uint8_t mru=0;bool live=false;uint32_t off[NRD_MAX_DYN]{};Var var[2];
     std::vector<MemoImage> img;std::vector<std::pair<uint64_t,const void*>> ids;std::vector<DescEntry> data;};

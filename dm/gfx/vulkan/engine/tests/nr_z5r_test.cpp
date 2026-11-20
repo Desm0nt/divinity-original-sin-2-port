@@ -322,7 +322,7 @@ static std::vector<std::vector<uint8_t>> with_game_thread(const std::vector<std:
 // ---------------- scripts: one thread, exact outcomes ----------------
 // n draws of one site (pipes[i]: the pipeline resolved for draw i), everything predicted right except where `wrong` says; the
 // translation thread's events: silent_before / other_before / dropped (draw indices, -1 none). Returns the outcomes, checks the log.
-static std::string script(const char *name, const std::vector<uint64_t> &pipes, int wrong, int silent_before, int other_before, int dropped) {
+static std::string script(const char *name, const std::vector<uint64_t> &pipes, int wrong, int silent_before, int other_before, int dropped, int alien = -1) {
     World w(42); std::vector<Ev> base = w.frame(); Ev d{}; for (const Ev &e : base) if (!e.kind && e.v.noff && e.v.noff <= NRZ5T_MAX_DYN) { d = e; break; }
     d.foreign = d.dropped = false;
     std::vector<Ev> p; for (size_t i = 0; i < pipes.size(); i++) {
@@ -337,7 +337,9 @@ static std::string script(const char *name, const std::vector<uint64_t> &pipes, 
     std::vector<Rec> recs(p.size()); { int di = 0; for (size_t i = 0; i < p.size(); i++) { if (p[i].kind) continue; Rec &rc = recs[i]; rc.pred = true; rc.pv = p[i].v; memcpy(rc.poff, p[i].offs, sizeof rc.poff); rc.pv.off = rc.poff;
         if (di == wrong) rc.pv.set ^= 0x100;
         auto emit = [&](nbmtq::Chunk *ch, nrz5_cache *m, const nrz5_vals *v) { nbmt::Build b{ch}; nbmt::Z5Sink sink{b}; return nrz5_emit(sink, m, v); };
-        rc.mark = W.draw(rc.pv, emit); ++di; } W.end_run(); }
+        rc.mark = W.draw(rc.pv, emit);
+        if (di == alien) rc.mark = nrz5r::mark_word(nrz5r::MARK_COVERED, nrz5r::id_of(rc.mark) + 7);   // this record claims to be covered by ANOTHER run
+        ++di; } W.end_run(); }
     Log lg; VkCommandBuffer c = reinterpret_cast<VkCommandBuffer>(&lg); nbmt::report_ns = nbmtq::now_ns(); nbmt::begin(c, true, false);
     std::string out; execute(R, p, recs, c, false, &out); nbmt::end(c);
     CHECK(lg.b == ref, "script %s: the calls are today's (%zu / %zu bytes)", name, lg.b.size(), ref.size());
@@ -357,6 +359,9 @@ int main(int argc, char **argv) {
       o = script("a wrong value at the first tail", {A, A, A, A}, 1, -1, -1, -1); CHECK(o == "RRRR", "a wrong first tail draw: nothing taken: %s", o.c_str());
       o = script("a silent cache reset", {A, A, A, A, A, A}, -1, 3, -1, -1); CHECK(o == "RVVRRR", "a cache reset without a command cuts the run: %s", o.c_str());
       o = script("a command in between", {A, A, A, A, A, A}, -1, -1, 4, -1); CHECK(o == "RVVVRR", "a command the game thread did not see cuts the run: %s", o.c_str());
+      // (mutation 9 - a covered record of another run taken as the next draw of the run in hand - was caught by nothing: in the two-thread
+      // runs a record of another run never meets a held run. Asked here directly.)
+      o = script("a record of another run", {A, A, A, A, A, A}, -1, -1, -1, -1, 3); CHECK(o == "RVVRRR", "a covered record of another run ends the run in hand and is recorded: %s", o.c_str());
       o = script("a dropped draw", {A, A, A, A, A, A}, -1, -1, -1, 2); CHECK(o == "RVDRRR", "a dropped draw cuts the run before it: %s", o.c_str()); }
     // ---- two threads ----
     uint64_t packets = 0, spliced = 0, vcmp = 0;
@@ -373,8 +378,12 @@ int main(int argc, char **argv) {
             setup(cf); { const auto logs = with_game_thread(prog, seed * 77 + cf.mode, false, ex);
                 for (size_t s = 0; s < prog.size(); s++) if (ex[s]) CHECK(logs[s] == ref[s], "%s: with the game thread the calls are today's in today's order (recording %zu: %zu / %zu bytes)", what, s, logs[s].size(), ref[s].size()); }
             const Tot t = tot; finish();
-            const bool starved = cf.chunk_kb > 64;   // (1 MB chunks: 32 spare ones - the game thread mostly finds none)
-            CHECK(starved ? t.valid > 0 : t.valid > 1000 && t.r.complete > 0 && t.r.handed > 0 && t.r.cut[nrz5r::CUT_CACHE] > 0 && t.r.cut[nrz5r::CUT_VALUES] > 0 && t.r.cut[nrz5r::CUT_RECORD] > 0 && t.r.cut[nrz5r::CUT_WRITE] > 0 && t.r.first_no > 0,
+            // (1 MB chunks: 32 spare ones - the game thread mostly finds none. The few runs it does write - 16 in a typical pass - are
+            // predicted up to three recordings ahead of the translation thread, and whether any of them survives its first tail draw
+            // depends on which thread was faster: "taken > 0" failed in 2 runs of 7 with every log and every chunk count right. The
+            // shape checks the protocol under starvation - logs, chunk accounting, below -, not a share.)
+            const bool starved = cf.chunk_kb > 64;
+            CHECK(starved ? t.valid == t.r.valid && t.r.started + t.g.w.no_chunk + t.g.w.ring_full > 0 : t.valid > 1000 && t.r.complete > 0 && t.r.handed > 0 && t.r.cut[nrz5r::CUT_CACHE] > 0 && t.r.cut[nrz5r::CUT_VALUES] > 0 && t.r.cut[nrz5r::CUT_RECORD] > 0 && t.r.cut[nrz5r::CUT_WRITE] > 0 && t.r.first_no > 0,
                   "%s: taken %llu draws; runs complete %llu, handed over %llu, cut by the cache %llu / values %llu / a record %llu / a write %llu, nothing taken %llu", what, (unsigned long long)t.valid, (unsigned long long)t.r.complete,
                   (unsigned long long)t.r.handed, (unsigned long long)t.r.cut[0], (unsigned long long)t.r.cut[1], (unsigned long long)t.r.cut[3], (unsigned long long)t.r.cut[4], (unsigned long long)t.r.first_no);
             CHECK(t.r.valid == t.valid && g_st.spliced == t.r.handed && g_st.alloc_fail == 0 && t.r.cut[nrz5r::CUT_CHUNK] == 0, "%s: chunks handed over %llu = runs with a taken draw %llu", what, (unsigned long long)g_st.spliced, (unsigned long long)t.r.handed);

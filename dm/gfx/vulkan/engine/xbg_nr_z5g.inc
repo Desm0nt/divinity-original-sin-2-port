@@ -123,6 +123,7 @@ void rec_end(){
     if(r_have && !r_done && r_h._pad1){++s.missed;
         if(R.holding){if(gmode==1){R.flush(nrz5r::CUT_RECORD);sync_pend(held_cmd);}else R.verify_miss();}
         else R.abandon(r_h._pad1);}
+    if(z8){nrz8t::cur_vw=0;nrz8t::cur_pk=0;}   // [NR-ZERO Z8 views / values] the places of the record's ranges and its packet count are the record's draw's only
     r_have=false;}
 inline uint64_t sig(){const nbmtq::Stats &q=nbmt::q.st;return q.cmds*8+q.sync[nbmtq::NBMT_SY_PNEXT]+q.sync[nbmtq::NBMT_SY_ALLOC]+q.sync[nbmtq::NBMT_SY_CALLER];}
 inline bool is_draw(uint16_t op){return op==nbmt::OP_Draw || op==nbmt::OP_DrawIndexed;}
@@ -157,8 +158,11 @@ bool tail(VkCommandBuffer cmd,BindCache &bc,bool ui,bool cond,VkPipeline pipe,ui
         return false;}
     nrz5_vals rv;vals_of(rv,pipe,used,vb,vbo,ib,ibo,it,vp,sc,layout,set,no,off,indexed,count,instances,first,vertex_offset,first_instance);
     auto holds=[&bc](const nrz5_cache &sh,const nrz5_vals &v){const nrz5_cache real=nrz5::conv(bc);return nrz5r::cache_holds(&sh,&real,&v);};
+    nrz5r::Reader::Known kn{};const nrz5r::Reader::Known *kp=nullptr;   // [NR-ZERO Z8 values] what this thread can say of the draw's verdict without the walker's chunks
+    if(__builtin_expect(z8 && nrz8t::kmode!=0,0) && mw && nrz8t::known(r_h,rv,&kn))kp=&kn;
+    R.chk=nrz8t::kmode==2 || gmode==2?kp:nullptr;
     if(gmode==1){
-        const int a=R.draw(mw,rv,holds,is_draw);
+        const int a=nrz8t::kmode==1?R.draw2(mw,rv,kp,holds,is_draw):R.draw(mw,rv,holds,is_draw);
         if(a==nrz5r::Reader::VALID){leave(bc,rv);++s.taken;sync_pend(cmd);return true;}
         sync_pend(cmd);return false;}
     v_would=R.verify_begin(mw,rv,holds,is_draw,sig());

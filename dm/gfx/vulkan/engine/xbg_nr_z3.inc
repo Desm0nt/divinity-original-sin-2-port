@@ -274,13 +274,16 @@ int answered(Stats &s,const Ans &a,Commands &c,Descriptors *&dp,Pass &p,int prim
     const uint64_t s0=slot_serial;uint32_t nrd=0;
     {const bool hook=!img_fast;   // serve()'s image loop, statement for statement: the read path only where it can do something
      const bool zq=__builtin_expect(nrzx::bmode!=0,0) && nrdesc::quiet_ask(e,hook);   // [Z3b] the image word, as in serve()
-     if(!(zq && nrzx::bmode==1)){
+     const int zi=a.z8?nrz8t::imode:0;const bool zr=__builtin_expect(zi!=0,0) && !(zq && nrzx::bmode==1) && nrz8t::img_ask(e,hook);   // [Z8 images] the read word: the walk would do nothing (=2: walked and compared)
+     nrz8t::ImgSnap z0;if(zr && zi==2)z0=nrz8t::img_snap(e);
+     if(!(zq && nrzx::bmode==1) && !(zr && zi==1)){
      for(const MemoImage &ti:e.img){Image &im=*ti.second;
         const nr_dimg_in x{im.last_write,im.storage_write,im.opw,uint8_t(im.checked_submission==stats.submissions),uint8_t(im.uploaded),uint8_t(im.gpu_written),uint8_t(im.layout==VK_IMAGE_LAYOUT_GENERAL),uint8_t(hook)};
         if(nr_dimg_skip(&x)==NRD_I_SKIP){im.slot_use=slot_serial;continue;}
         ++nrd;Image &gi=get_image(ti.first,true);prepare_read(gi,c.command,-1);
         if(&gi!=&im)e.check_gen=0;}
-     if(__builtin_expect(nrzx::bmode!=0,0))nrdesc::quiet_done(e,hook,zq,nrd);}}
+     if(__builtin_expect(nrzx::bmode!=0,0))nrdesc::quiet_done(e,hook,zq,nrd);
+     if(__builtin_expect(zi!=0,0))nrz8t::img_done(e,hook,zr,z0,slot_serial==s0 && pass_continues(c));}}
     read_frag_only=false;if(tm.sp)ti=timing_clock();
     if(slot_serial!=s0){c.command=recording_slot().cmd;return out(NRZW_IMAGE);}   // a get_image ended the submission: as descriptors_stable, the draw is built again in the new slot (by the path without the table)
     e.mru=uint8_t(sk);   // serve(): the set of this tuple
@@ -292,7 +295,7 @@ int answered(Stats &s,const Ans &a,Commands &c,Descriptors *&dp,Pass &p,int prim
         dp=&d;nrdesc::z_out=NRZD_NONE;++s.why[NRZW_PASS_LATE];return 3;}
     if(tm.sp)td=timing_clock();
     static Pass zp;zp=last_pass.pass;   // create_pass: the same Pass, the attachments' write marks (no heap: the image list keeps its capacity)
-    for(auto *im:zp.images){im->prior_write=im->last_write;im->last_write=++write_seq;im->gpu_written=true;}++pass_fast_hits;
+    for(auto *im:zp.images){im->prior_write=im->last_write;im->last_write=++write_seq;im->gpu_written=true;}++pass_fast_hits;nrz_pm+=zp.images.size();
     DRAW_MARK(2);
     // draw(): NR-PRESKIN's plan of this draw, at its place (after create_pass, before the lane); every draw, as there (its counters)
     if(__builtin_expect(nrps::mode!=0,0)){nrps::decide(active_colors,false,prim,count,indexed,instances);ps_called=true;}

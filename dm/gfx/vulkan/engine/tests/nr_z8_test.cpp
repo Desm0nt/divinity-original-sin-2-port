@@ -22,7 +22,24 @@
 //   VERIFY   (DM_NR_Z8=2) everything resolved and recorded by the model; the walk's answer against the model's, the packets of
 //            every draw =1 would take against the model's own: bad 0, logs TODAY's.
 //   TABLE    one writer and two readers on one slot: no torn template.
-// The mutation check: built with -DNRZ8_MUTATE=k (k = 1..14 but 9, nr_z8.h) this test must FAIL (9 - no vertex-range compare in match() -
+//   THREAD   (DM_NR_Z8_THREAD=1, NR-ZERO.md section 28) the walk runs on a THIRD thread while the translation thread executes the same
+//            frame: nothing is written into the command memory, the words of a draw record come through nr_z8.h Marks by the record's
+//            place in its submission. Who is ahead changes frame by frame (the walker one or two frames ahead, both starting together,
+//            the translation thread first; a ring of 256 marks that the walker laps); runs are split (Writer::max_tails). The call logs
+//            of APPLY and VERIFY must still be TODAY's, the walk's digest at every record whose words arrived is the model's State, the
+//            copy after every frame is State (the translation thread waits for the walker at the end of a frame, as x_submit does).
+//            Two fixed orders: the walker always ahead (the shares of the walk on the submitting thread) and the translation thread
+//            always first (nothing arrives, nothing is taken, every chunk comes back). The marks alone: places, another record at a
+//            place (found further on / not found), a submission not begun, a lapped ring, and a writer against a reader on 4 entries.
+//   RANGES   (DM_NR_Z8_VIEW, section 30) the walker numbers the vertex / index ranges of a frame's answered draws; the translation
+//            thread's State must bind, at every draw whose words arrived, exactly the range each number was given to (one range a
+//            number, one number a range, within the frame); the numbering alone (first use, a repeat, the next submission, full).
+//   VALUES   (DM_NR_Z8_VAL, section 31) the verdict of a tail draw from the translation thread's own memory: expect_diff over the
+//            slot's words and State against pv_diff over the side record the walker wrote, on random templates and one changed
+//            field at a time (the same code, field for field); in the THREAD runs the model takes tail draws by Reader::draw2 -
+//            neither the side chunk nor the chunk's packets are read - and the logs are still TODAY's; in VERIFY the old verdict
+//            finds in the chunks what the model named (k_bad 0).
+// The mutation check: built with -DNRZ8_MUTATE=k (k = 1..26 but 9, nr_z8.h) this test must FAIL (9 - no vertex-range compare in match() -
 // must PASS: those words only give values, which the reader compares again).
 // Build (Vulkan headers: any vulkan/ + vk_video/ include tree, e.g. the NDK sysroot's usr/include), from the repository root:
 //   clang++ -std=c++17 -O2 -Wall -Wextra -DDM_GAME_DOS2 -Idm/gfx/nvn/include -I<vk> dm/gfx/vulkan/engine/tests/nr_z8_test.cpp -o nr_z8_test && ./nr_z8_test
@@ -34,7 +51,9 @@
 #include <cstring>
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -58,6 +77,8 @@ extern "C" {
 #include "../../../nvn/nvn_obj.h"
 }
 #include "../../../nr/nr_z5r.h"
+static void (*g_mid_put)() = nullptr;   // marks_test: a reader in the middle of Marks::put
+#define NRZ8_TEST_MID_PUT() do { if (g_mid_put) g_mid_put(); } while (0)
 #include "../../../nr/nr_z8.h"
 
 static long fails = 0, checks = 0;
@@ -364,7 +385,8 @@ static nrz5_cache conv(const BindCache &bc) {
 static nrz5r::Ring g_ring; static nrz8::Table g_tab;
 struct Walk {
     Sh S; nrz8::Fix fix; nrz8::Walker<Walk> W; nrz5r::Writer wr; bool bad = false; uint8_t stamp = 0; uint64_t draws = 0, values = 0, miss[nrz8::M_N] = {}, fix_stale = 0;
-    std::vector<uint64_t> *dig = nullptr;
+    std::vector<uint64_t> *dig = nullptr; nrz8::Marks *marks = nullptr;   // marks: the walk on its own thread - the words go there, not into the record
+    nrz8::Ranges vr; uint64_t vw = 0;
     struct Acc { const Sh &S;
         bool ub(unsigned st, unsigned sl, uint64_t *a, uint64_t *z) const { if (st >= 6 || sl >= 16) return false; *a = S.ub[st][sl].address; *z = S.ub[st][sl].size; return true; }
         bool vb(unsigned i, uint64_t *a, uint64_t *z) const { if (i >= 16) return false; *a = S.vb[i].address; *z = S.vb[i].size; return true; }
@@ -376,7 +398,7 @@ struct Walk {
         nbd_hdr h; const uint8_t *b = nullptr; if (nbd_view(rec, n, &h, &b) != 0) { bad = true; return; }
         unsigned ts = 0, bs = 0; if (nbd_apply(&h, b, S.tex, S.samp, S.img, reinterpret_cast<nbd_range (*)[16]>(S.ub), &ts, &bs) != 0) { bad = true; return; }
         ++draws; if (dig) dig->push_back(digest(S));
-        nrd_tail t; const bool nr = nrd_tail_get(rec, n, &h, &t) != 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t ca = 0;
+        nrd_tail t; const bool nr = nrd_tail_get(rec, n, &h, &t) != 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t ca = 0; vw = 0;
         if (!top || !nr || !t.key || (h.flags & (NBD_F_REN | NBD_F_COND)) || h.count <= 0) wr.no_values();
         else {
             nrz5_site site; nrz5_site_make(&site, t.key, h.draw == NBD_DRAW_IDX ? NRZ5S_IDX : NRZ5S_ARRAYS, h.prim, h.itype, h.count, h.base_vertex, h.base_instance, h.instances, h.first, h.ibuf, S.vb[0].address);
@@ -386,17 +408,21 @@ struct Walk {
             if (!g_tab.get(s, w, &ver)) wr.no_values();
             else { const int m = nrz8::match(w, &site, fixid, h.count, h.instances, h.first, h.base_vertex, h.base_instance, Acc{S}, &v, off);
                 if (m) { ++miss[m]; wr.no_values(); }
-                else { ++values; ca |= uint64_t(ver) << 32; mark = wr.draw(v, [](nbmtq::Chunk *ch, nrz5_cache *mm, const nrz5_vals *vv) { nbmt::Build bb{ch}; nbmt::Z5Sink sink{bb}; return nrz5_emit(sink, mm, vv); }); } }
+                else { ++values; ca |= uint64_t(ver) << 32; mark = wr.draw(v, [](nbmtq::Chunk *ch, nrz5_cache *mm, const nrz5_vals *vv) { nbmt::Build bb{ch}; nbmt::Z5Sink sink{bb}; return nrz5_emit(sink, mm, vv); });
+                    vw = nrz8::ranges_word(vr, v.used, [this](uint32_t i, uint64_t *a, uint64_t *z) { *a = S.vb[i].address; *z = S.vb[i].size; return i < 16; }, h.draw == NBD_DRAW_IDX, h.ibuf, uint64_t(uint32_t(h.count)) << h.itype); } }
         }
+        if (marks) { nrz8::MarkVal mv; mv.ca = (h.flags & NBD_F_COND) ? 0 : ca; mv.mark = mark; mv.slot1 = slot1; mv.aux = digest(S) | 1; mv.vw = vw; mv.pk = mark ? uint64_t(wr.last_bytes) | uint64_t(wr.last_cmds) << 32 : 0; marks->put(rec, mv); return; }
         rec[offsetof(nbd_hdr, _pad0)] = stamp; memcpy(rec + offsetof(nbd_hdr, _pad1), &mark, 4); memcpy(rec + offsetof(nbd_hdr, _pad2), &slot1, 4);
         if (!(h.flags & NBD_F_COND)) memcpy(rec + offsetof(nbd_hdr, cond_addr), &ca, 8);
     }
-    void submit(const Frame &f, uint64_t sub) { stamp = nrz8::stamp_of(sub); uint64_t budget = 0; for (uint64_t hd : f.handles) { if (!W.walk(reinterpret_cast<const uint8_t *>(uintptr_t(hd)), 0, budget, true)) bad = true; wr.end_run(); } }
+    uint64_t walk_ns = 0;
+    void submit(const Frame &f, uint64_t sub) { const uint64_t t0 = nbmtq::now_ns(); submit_(f, sub); walk_ns += nbmtq::now_ns() - t0; }
+    void submit_(const Frame &f, uint64_t sub) { stamp = nrz8::stamp_of(sub); vr.begin(); uint64_t budget = 0; for (uint64_t hd : f.handles) { if (!W.walk(reinterpret_cast<const uint8_t *>(uintptr_t(hd)), 0, budget, true)) bad = true; wr.end_run(); } }
 };
 
 // ---------------- the translation thread ----------------
 struct Priv { uint32_t ver = 0; Answer a; uint32_t set_gen = 0, pipe_gen = 0; };
-struct Tot { uint64_t draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_N] = {}; } tot;
+struct Tot { uint64_t draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0, m_got = 0, m_not = 0, m_nobase = 0, m_desync = 0, m_resync = 0, waits = 0, splits = 0, walk_ns = 0, v_ask = 0, v_rep = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_N] = {}; } tot;
 static nrz5r::Reader *g_R = nullptr;
 static void pre_hook() { if (g_R && g_R->holding) g_R->flush(nrz5r::CUT_WRITE); }
 static uint64_t sig() { const nbmtq::Stats &q = nbmt::q.st; return q.cmds * 8 + q.sync[nbmtq::NBMT_SY_PNEXT] + q.sync[nbmtq::NBMT_SY_ALLOC] + q.sync[nbmtq::NBMT_SY_CALLER]; }
@@ -404,6 +430,20 @@ static bool is_draw(uint16_t op) { return op == nbmt::OP_Draw || op == nbmt::OP_
 struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
     TS S; nrz8::Def defs[NBS_KINDS][NBS_MAX_IDS] = {}; int mode = 0; nrz5r::Reader *R = nullptr; std::vector<Priv> priv; Gens g{}; uint8_t stamp = 0;
     VkCommandBuffer c{}; BindCache bc; const std::vector<uint64_t> *dig = nullptr; size_t dig_at = 0; std::string *outcome = nullptr;
+    const nrz8::Marks *marks = nullptr; nrz8::MarkReader mr;   // the walk on its own thread: the record's words by its place
+    struct RKey { uint64_t a, z; uint32_t tag; bool operator<(const RKey &o) const { return a != o.a ? a < o.a : z != o.z ? z < o.z : tag < o.tag; } bool operator==(const RKey &o) const { return a == o.a && z == o.z && tag == o.tag; } };
+    std::map<uint32_t, RKey> id2k; std::map<RKey, uint32_t> k2id; uint64_t cur_vw = 0;   // the ranges of the frame in hand, as their numbers arrive
+    uint64_t cur_pk = 0; int kmode = 0;   // the packets of the tail draw in hand; 1: tail draws are taken by Reader::draw2, 2: compared (Reader::chk)
+    // DM_NR_Z8_VAL: the verdict from this thread's own memory (the slot's words, State)
+    bool known(const nbd_hdr &h, uint32_t ver, const nrz5_vals &v, nrz5r::Reader::Known *k) {
+        if (!cur_pk || !ver || h._pad2 <= 0 || priv[h._pad2 - 1].ver != ver) return false;
+        const nrz8::Slot &x = g_tab.s[h._pad2 - 1];
+        struct A { const TS &S; bool ub(unsigned st, unsigned sl, uint64_t *a, uint64_t *z) const { if (st >= 6 || sl >= 16) return false; *a = S.ub[st][sl].address; *z = S.ub[st][sl].size; return true; } };
+        k->d = nrz8::expect_diff([&x](unsigned j) { return x.w[j].load(std::memory_order_relaxed); }, &v, h.count, h.instances, h.first, h.base_vertex, h.base_instance, A{S});
+        k->bytes = uint32_t(cur_pk); k->n = uint32_t(cur_pk >> 32); return true; }
+    void range(uint32_t id, const RKey &k) { ++tot.v_ask; auto a = id2k.find(id); auto b = k2id.find(k);
+        if (a == id2k.end() && b == k2id.end()) { id2k[id] = k; k2id[k] = id; return; }
+        ++tot.v_rep; CHECK(a != id2k.end() && b != k2id.end() && a->second == k && b->second == id, "ranges: number %u names one range of the frame and that range has one number", id); }
     void other(uint32_t op, const uint8_t *p) { uint32_t z; memcpy(&z, p, 4);
         if (op == OP_T_SILENT) { bc = BindCache{}; return; }
         if (op == OP_T_PASS) { nbmt::CmdEndRenderPass(c); VkRenderPassBeginInfo b{}; b.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; b.renderPass = hnd<VkRenderPass>(z & 7); b.renderArea.extent = {640, 360}; nbmt::CmdBeginRenderPass(c, &b, VK_SUBPASS_CONTENTS_INLINE); bc = BindCache{}; }
@@ -422,8 +462,18 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         nbd_hdr h; const uint8_t *b = nullptr; CHECK(nbd_view(rec, n, &h, &b) == 0, "record"); unsigned ts = 0, bs = 0; nbd_apply(&h, b, S.tex, S.samp, S.img, reinterpret_cast<nbd_range (*)[16]>(S.ub), &ts, &bs);
         if (dig && dig_at < dig->size()) { ++tot.dig_cmp; CHECK((*dig)[dig_at] == digest(S), "the walk's copy is State at draw record %zu", dig_at); ++dig_at; }
         nrd_tail t{}; nrd_tail_get(rec, n, &h, &t); const uint32_t key = t.key; ++tot.draws;
-        const bool mine = mode && h._pad0 == stamp; const uint32_t mw = mine ? h._pad1 : 0u, ver = mine && !(h.flags & NBD_F_COND) ? uint32_t(h.cond_addr >> 32) : 0u; if (!mine) h._pad2 = 0;
+        bool mine = mode && h._pad0 == stamp; cur_vw = 0; cur_pk = 0;
+        if (marks) {   // the record itself carries nothing (whatever an earlier run left in it is not read)
+            h._pad0 = 0; h._pad1 = 0; h._pad2 = 0; if (!(h.flags & NBD_F_COND)) h.cond_addr = 0;
+            nrz8::MarkVal mv; mine = mode && mr.next(*marks, rec, &mv);
+            if (mine) { h._pad0 = stamp; h._pad1 = mv.mark; h._pad2 = mv.slot1; if (!(h.flags & NBD_F_COND)) h.cond_addr = mv.ca; cur_vw = mv.vw; cur_pk = mv.pk;
+                ++tot.dig_cmp; CHECK(mv.aux == (digest(S) | 1), "thread: the walk's copy is State at the draw record whose words arrived (record %u of its frame)", mr.ord - 1); } }
+        const uint32_t mw = mine ? h._pad1 : 0u, ver = mine && !(h.flags & NBD_F_COND) ? uint32_t(h.cond_addr >> 32) : 0u; if (!mine) h._pad2 = 0;
         Plan p; const bool dropped = !plan_of(S, p) || mix(key, S.tprog[4]->serial) % 37 == 0;   // the prologue of draw() drops it (a function of State)
+        if (cur_vw && plan_of(S, p)) {   // the numbers the walker gave this draw's ranges name the ranges State binds (the lane's tail would ask for exactly these)
+            unsigned k = 0; for (uint32_t m = p.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); range(uint32_t(cur_vw >> (16 * k++)) & 0xffffu, RKey{S.vb[i].address, S.vb[i].size, 1}); }
+            CHECK(k <= nrz8::VW_MAX_VB && (cur_vw >> (16 * k) & ((1ull << (48 - 16 * k)) - 1)) == 0, "ranges: a number for every used binding and no other");
+            if (h.draw == NBD_DRAW_IDX) range(uint32_t(cur_vw >> 48), RKey{h.ibuf, uint64_t(uint32_t(h.count)) << h.itype, 2}); else CHECK((cur_vw >> 48) == 0, "ranges: no index range for a draw without indices"); }
         auto miss = [&] { if (!mode) return; if (R->holding) { if (mode == 2) R->verify_miss(); else R->flush(nrz5r::CUT_RECORD); } else R->abandon(mw); };
         if (dropped) { miss(); if (outcome) outcome->push_back('D'); return; }
         Answer a; bool answered = false;
@@ -438,6 +488,7 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         if (!mode || nbmt::cur != c) { if (mode) R->abandon(mw); ref_tail(c, bc, v); ++tot.recorded; if (mode) publish(h, key, p, a, v); if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; } if (outcome) outcome->push_back('R'); return; }
         auto holds = [&](const nrz5_cache &sh, const nrz5_vals &vv) { const nrz5_cache real = conv(bc); return nrz5r::cache_holds(&sh, &real, &vv); };
         char o = 'R';
+        nrz5r::Reader::Known kn{}; const nrz5r::Reader::Known *kp = kmode && mw && known(h, ver, v, &kn) ? &kn : nullptr; R->chk = kmode == 2 || mode == 2 ? kp : nullptr;
         if (mode == 2) {
             const bool would = R->verify_begin(mw, v, holds, is_draw, sig()); if (would) { ++tot.valid; o = 'V'; }
             nbmtq::Chunk *c0 = nbmt::q.cur; const uint32_t u0 = c0 ? c0->used : 0; const uint64_t ch0 = nbmt::q.st.chunks;
@@ -445,7 +496,7 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
             nbmtq::Chunk *cc = c0 ? c0 : nbmt::q.cur; const uint32_t from = c0 ? u0 : 0; const bool readable = cc && cc == nbmt::q.cur && ch0 == nbmt::q.st.chunks;
             R->verify_end(readable ? cc->data() + from : nullptr, readable ? cc->used - from : 0, [](const uint8_t *x, uint32_t na, const uint8_t *y, uint32_t nb) { uint32_t at = 0; return nbmt::same_stream(x, na, y, nb, &at); }, sig());
             publish(h, key, p, a, v);
-        } else if (R->draw(mw, v, holds, is_draw) == nrz5r::Reader::VALID) { leave(bc, v); ++tot.valid; o = 'V'; }
+        } else if ((kmode == 1 ? R->draw2(mw, v, kp, holds, is_draw) : R->draw(mw, v, holds, is_draw)) == nrz5r::Reader::VALID) { leave(bc, v); ++tot.valid; o = 'V'; }
         else { ref_tail(c, bc, v); ++tot.recorded; publish(h, key, p, a, v); }
         if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; }
         if (outcome) outcome->push_back(o);
@@ -487,18 +538,33 @@ static void finish() { nbmt::stop(); g_slow.store(0); nbmt::q.st = nbmtq::Stats{
 struct Item { size_t f; std::vector<uint64_t> dig; std::unique_ptr<Sh> end; };
 struct Handoff { std::mutex mu; std::condition_variable cv; std::deque<Item> q; bool done = false; };
 // One run of all frames. mode 0: today (no walk). Returns the logs; checks the fold after every frame.
-static std::vector<std::vector<uint8_t>> run(const std::vector<Frame> &prog, int mode, uint64_t seed, std::string *outcome = nullptr, bool threads = true) {
-    std::vector<std::vector<uint8_t>> logs(prog.size()); tot = Tot{};
+// wk: 0 the walk before the frame is executed, its words in the records (the walk on the submitting thread); 1 the walk on its own
+// thread, who is ahead changes frame by frame; 2 the same, the walker always a frame ahead; 3 the same, the translation thread first.
+static std::vector<std::vector<uint8_t>> run(const std::vector<Frame> &prog, int mode, uint64_t seed, std::string *outcome = nullptr, bool threads = true, int wk = 0) {
+    std::vector<std::vector<uint8_t>> logs(prog.size()); tot = Tot{}; if (!mode) wk = 0;
+    nrz8::Marks marks; std::mutex jm; std::condition_variable jc; std::deque<size_t> jobs; bool jdone = false; std::map<size_t, std::unique_ptr<Sh>> ends; std::thread wt; size_t posted = 0;
     auto X = std::make_unique<Xl>(); X->mode = mode; X->outcome = outcome; nrz5r::Reader R; R.q = &nbmt::q; R.ring = &g_ring; X->R = &R; Rng r{seed * 31 + 3};
     if (mode) { CHECK(g_tab.init(8192), "table"); X->priv.resize(g_tab.n); g_pre = mode == 1 ? pre_hook : nullptr; g_R = mode == 1 ? &R : nullptr; }
     auto W = std::make_unique<Walk>(); Handoff h; std::thread gt;
     auto walk_one = [&](size_t f) { Item it; it.f = f; if (mode) { W->dig = &it.dig; W->submit(prog[f], f + 1); W->dig = nullptr; it.end.reset(new Sh(W->S)); } return it; };
     if (mode) { CHECK(W->fix.init() && W->W.init(), "walk"); W->W.h = W.get(); W->wr.q = &nbmt::q; W->wr.ring = &g_ring; W->wr.min_tails = 1 + uint32_t(seed % 3); }
-    if (mode && threads) gt = std::thread([&] { for (size_t f = 0; f < prog.size(); f++) { Item it = walk_one(f); std::unique_lock<std::mutex> l(h.mu); h.cv.wait(l, [&] { return h.q.size() < 3; }); h.q.push_back(std::move(it)); h.cv.notify_all(); }
+    if (wk) {
+        CHECK(marks.init(wk == 1 && seed % 2 ? 256 : 65536), "marks"); W->marks = &marks; X->marks = &marks; X->kmode = mode == 2 ? 2 : 1 + int(seed / 7 % 2);   // (the verdict by draw2 / the old verdict compared with it)
+        wt = std::thread([&] { Rng wr{seed * 13 + 5};
+            for (;;) { size_t f; { std::unique_lock<std::mutex> l(jm); jc.wait(l, [&] { return !jobs.empty() || jdone; }); if (jobs.empty()) return; f = jobs.front(); jobs.pop_front(); }
+                marks.begin(f + 1); W->wr.max_tails = wr.upto(3) ? 1 + wr.upto(6) : 0; W->submit(prog[f], f + 1);
+                { std::lock_guard<std::mutex> l(jm); ends[f].reset(new Sh(W->S)); } marks.end(); } });
+    }
+    auto post = [&](size_t f) { while (posted <= f && posted < prog.size()) { { std::lock_guard<std::mutex> l(jm); jobs.push_back(posted); } jc.notify_one(); ++posted; } };
+    auto walked = [&](size_t f) { while (marks.done.load(std::memory_order_acquire) < f + 1) std::this_thread::yield(); };
+    if (mode && threads && !wk) gt = std::thread([&] { for (size_t f = 0; f < prog.size(); f++) { Item it = walk_one(f); std::unique_lock<std::mutex> l(h.mu); h.cv.wait(l, [&] { return h.q.size() < 3; }); h.q.push_back(std::move(it)); h.cv.notify_all(); }
         { std::lock_guard<std::mutex> l(h.mu); h.done = true; } h.cv.notify_all(); });
     for (size_t f = 0; f < prog.size(); f++) {
         Item it;
-        if (mode && threads) { std::unique_lock<std::mutex> l(h.mu); h.cv.wait(l, [&] { return !h.q.empty() || h.done; }); CHECK(!h.q.empty(), "a frame for every walk"); if (h.q.empty()) break; it = std::move(h.q.front()); h.q.pop_front(); h.cv.notify_all(); }
+        if (wk) { const uint32_t pol = wk == 1 ? r.upto(4) : wk == 2 ? 1u : 9u;   // who is ahead in this frame
+            if (pol < 4) post(f); if (pol == 2) post(f + 1); if (pol == 1) walked(f); if (pol == 3) std::this_thread::sleep_for(std::chrono::microseconds(30));
+            X->mr.begin(f + 1); X->id2k.clear(); X->k2id.clear(); it.f = f; }
+        else if (mode && threads) { std::unique_lock<std::mutex> l(h.mu); h.cv.wait(l, [&] { return !h.q.empty() || h.done; }); CHECK(!h.q.empty(), "a frame for every walk"); if (h.q.empty()) break; it = std::move(h.q.front()); h.q.pop_front(); h.cv.notify_all(); }
         else it = walk_one(f);
         const bool direct = mode == 1 && r.upto(16) == 2;   // this recording goes by direct calls: nothing written ahead is used
         Log lg; X->c = reinterpret_cast<VkCommandBuffer>(&lg); X->bc = BindCache{}; X->g = prog[f].g; X->stamp = nrz8::stamp_of(f + 1); X->dig = mode ? &it.dig : nullptr; X->dig_at = 0;
@@ -506,12 +572,17 @@ static std::vector<std::vector<uint8_t>> run(const std::vector<Frame> &prog, int
         for (uint64_t hd : prog[f].handles) { X->exec(reinterpret_cast<const uint8_t *>(uintptr_t(hd)), 0); if (mode) { if (R.holding) { if (mode == 2) R.verify_miss(); else R.flush(nrz5r::CUT_RECORD); } } }
         nbmt::end(X->c); logs[f] = std::move(lg.b);
         CHECK(!R.holding, "a run does not outlive its command buffer");
+        if (wk) {   // the end of the submission: the walker must have left it (x_submit waits here); then its copy is State
+            post(f); if (marks.done.load(std::memory_order_acquire) < f + 1) { ++tot.waits; walked(f); }
+            std::lock_guard<std::mutex> l(jm); it.end = std::move(ends[f]); ends.erase(f); CHECK(it.end != nullptr, "thread: the walker left frame %zu", f); if (!it.end) break; }
         if (mode) { CHECK(X->dig_at == it.dig.size(), "every draw record the walk saw was executed (%zu of %zu)", X->dig_at, it.dig.size());
             const char *d = state_diff(*it.end, X->S); CHECK(!d, "frame %zu: the walk's copy differs from State in %s", f, d ? d : "");
             for (unsigned st = 0; st < 6; st++) CHECK(it.end->sprog[st] == (X->S.tprog[st] ? X->S.tprog[st]->serial : 0), "frame %zu: program word of stage %u", f, st); }
     }
     if (gt.joinable()) gt.join();
-    if (mode) { R.drop(); g_R = nullptr; g_pre = nullptr; tot.r = R.st; tot.w_draws = W->draws; tot.w_values = W->values; tot.w_tails = W->wr.st.tails; tot.w_fix_stale = W->fix_stale; memcpy(tot.w_miss, W->miss, sizeof tot.w_miss);
+    if (wk) { { std::lock_guard<std::mutex> l(jm); jdone = true; } jc.notify_all(); wt.join(); tot.m_got = X->mr.got; tot.m_not = X->mr.not_there; tot.m_nobase = X->mr.no_base; tot.m_desync = X->mr.desync; tot.m_resync = X->mr.resync;
+        tot.splits = W->wr.splits; CHECK(X->mr.desync == 0 && X->mr.resync == 0, "thread: both threads count the draw records alike (%llu / %llu)", (unsigned long long)X->mr.desync, (unsigned long long)X->mr.resync); marks.destroy(); }
+    if (mode) { R.drop(); g_R = nullptr; g_pre = nullptr; tot.r = R.st; tot.walk_ns = W->walk_ns; tot.w_draws = W->draws; tot.w_values = W->values; tot.w_tails = W->wr.st.tails; tot.w_fix_stale = W->fix_stale; memcpy(tot.w_miss, W->miss, sizeof tot.w_miss);
         CHECK(!W->bad, "the walk followed every record"); CHECK(W->fix_stale == 0, "the fix id is the id of the copy's bytes at every draw (%llu stale)", (unsigned long long)W->fix_stale);
         CHECK(nbmt::q.spare_out.load() == 0, "every spare chunk came back (%u out)", nbmt::q.spare_out.load()); CHECK(g_ring.front() == nullptr, "the ring is empty");
         W->fix.destroy(); W->W.destroy(); g_tab.destroy(); }
@@ -532,6 +603,110 @@ static void table_race() {
     printf("table: 400000 puts, %llu whole reads by two readers, torn %llu\n", (unsigned long long)good.load(), (unsigned long long)torn.load());
     t.destroy();
 }
+// ---------------- the marks: a record's words by its place in the submission ----------------
+static uint8_t g_recs[64];
+static nrz8::MarkVal mval(uint64_t sub, uint32_t k) { nrz8::MarkVal v; v.ca = mix(sub, k) | 1; v.mark = uint32_t(mix(k, sub)); v.slot1 = int32_t(mix(sub * 3, k) & 0x7fff); v.aux = mix(sub * 7, k); return v; }
+static bool msame(const nrz8::MarkVal &a, const nrz8::MarkVal &b) { return a.ca == b.ca && a.mark == b.mark && a.slot1 == b.slot1 && a.aux == b.aux; }
+static nrz8::Marks *g_mp_m = nullptr; static bool g_mp_bad = false; static int g_mp_asked = 0;
+static void marks_test() {
+    { // a reader in the middle of a put that laps the ring onto an entry of the SAME record (a handle executed twice in a submission):
+      // the entry of place 4 must not be readable before its words are written - it still holds the words of place 0
+      nrz8::Marks m; CHECK(m.init(4), "marks"); m.begin(5); for (uint32_t k = 0; k < 4; k++) m.put(g_recs, mval(5, k));
+      g_mp_m = &m; g_mp_bad = false; g_mp_asked = 0;
+      g_mid_put = [] { nrz8::MarkReader q; q.begin(5); q.ord = 4; nrz8::MarkVal o; ++g_mp_asked; if (q.next(*g_mp_m, g_recs, &o) && !msame(o, mval(5, 4))) g_mp_bad = true;
+                       nrz8::MarkReader q0; q0.begin(5); if (q0.next(*g_mp_m, g_recs, &o)) g_mp_bad = true; };
+      m.put(g_recs, mval(5, 4)); g_mid_put = nullptr;
+      CHECK(g_mp_asked == 1 && !g_mp_bad, "marks: an entry being written is not there - neither as the place it held nor as the place it will hold");
+      nrz8::MarkReader q; q.begin(5); q.ord = 4; nrz8::MarkVal o; CHECK(q.next(m, g_recs, &o) && msame(o, mval(5, 4)), "marks: after the put it is the new place's"); m.destroy(); }
+    { nrz8::Marks m; CHECK(m.init(64), "marks"); nrz8::MarkReader rd; nrz8::MarkVal o;
+      rd.begin(5); CHECK(!rd.next(m, g_recs, &o) && rd.no_base == 1, "marks: a submission whose walk has not begun has no words");
+      m.begin(5); for (uint32_t k = 0; k < 10; k++) m.put(g_recs + k, mval(5, k)); m.end(); CHECK(m.done.load() == 5, "marks: done");
+      rd.begin(5); for (uint32_t k = 0; k < 3; k++) CHECK(rd.next(m, g_recs + k, &o) && msame(o, mval(5, k)), "marks: record %u has its words", k);
+      CHECK(rd.next(m, g_recs + 4, &o) && msame(o, mval(5, 4)) && rd.resync == 1 && rd.ord == 5, "marks: a record the reader did not execute is passed over");
+      CHECK(!rd.next(m, g_recs + 40, &o) && rd.desync == 1, "marks: a record the walk never saw has no words");
+      CHECK(rd.next(m, g_recs + 6, &o) && msame(o, mval(5, 6)), "marks: the place after it stands");
+      for (uint32_t k = 7; k < 10; k++) CHECK(rd.next(m, g_recs + k, &o), "marks: record %u", k);
+      CHECK(!rd.next(m, g_recs + 10, &o) && rd.not_there == 1, "marks: a record the walk has not reached has no words");
+      // the same addresses in the next submission: its entries are its own
+      m.begin(6); rd.begin(6); CHECK(!rd.next(m, g_recs, &o), "marks: nothing of submission 6 is written yet");
+      m.put(g_recs, mval(6, 0)); rd.begin(6); CHECK(rd.next(m, g_recs, &o) && msame(o, mval(6, 0)), "marks: submission 6, record 0");
+      rd.begin(5); CHECK(rd.next(m, g_recs, &o) && msame(o, mval(5, 0)), "marks: submission 5 is still there (64 entries)");
+      rd.begin(7); CHECK(!rd.next(m, g_recs, &o), "marks: submission 7 not begun"); m.destroy(); }
+    { // a ring of 8 lapped: submission 5 wrote places 0..7 for these addresses, submission 6 begins at the same entries
+      nrz8::Marks m; CHECK(m.init(8), "marks"); nrz8::MarkReader rd; nrz8::MarkVal o;
+      m.begin(5); for (uint32_t k = 0; k < 8; k++) m.put(g_recs + k, mval(5, k)); m.end();
+      m.begin(6); rd.begin(6); for (uint32_t k = 0; k < 8; k++) CHECK(!rd.next(m, g_recs + k, &o), "marks: an entry of submission 5 is not record %u of submission 6", k);
+      for (uint32_t k = 0; k < 20; k++) m.put(g_recs + k, mval(6, k)); m.end();
+      rd.begin(6); for (uint32_t k = 0; k < 12; k++) CHECK(!rd.next(m, g_recs + k, &o), "marks: lapped entry %u", k);
+      for (uint32_t k = 12; k < 20; k++) CHECK(rd.next(m, g_recs + k, &o) && msame(o, mval(6, k)), "marks: entry %u after the lap", k);
+      nrz8::MarkReader r2; r2.begin(6); CHECK(r2.next(m, g_recs + 12, &o) == false && r2.ord == 1, "marks: place 0 was lapped (its entry is place 16's)"); m.destroy(); }
+    { // a writer that laps a ring of 4 against a reader: words are whole or not there
+      nrz8::Marks m; CHECK(m.init(4), "marks"); std::atomic<bool> stop{false}; std::atomic<uint64_t> cur{0}; uint64_t good = 0, torn = 0;
+      std::thread wr([&] { for (uint64_t s = 1; !stop.load(std::memory_order_relaxed); s++) { m.begin(s); cur.store(s, std::memory_order_release); for (uint32_t k = 0; k < 6; k++) m.put(g_recs + (s + k) % 64, mval(s, k)); m.end(); } });
+      nrz8::MarkReader rd; nrz8::MarkVal o; const auto t0 = std::chrono::steady_clock::now();
+      while (good < 200000 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(20)) { const uint64_t s = cur.load(std::memory_order_acquire); if (!s) continue; rd.begin(s);
+          for (uint32_t k = 0; k < 6; k++) if (rd.next(m, g_recs + (s + k) % 64, &o)) { if (msame(o, mval(s, k))) ++good; else ++torn; } }
+      stop.store(true); wr.join();
+      CHECK(torn == 0 && good > 0, "marks: no torn words (%llu torn, %llu whole)", (unsigned long long)torn, (unsigned long long)good); CHECK(rd.desync == 0 && rd.resync == 0, "marks: a lapped entry is 'not there', never another record");
+      printf("marks: %llu whole reads against a lapping writer, torn %llu\n", (unsigned long long)good, (unsigned long long)torn); m.destroy(); }
+}
+// ---------------- the verdict without the walker's chunks: expect_diff against pv_diff over the side record ----------------
+static void values_test() {
+    Rng r{23}; long same = 0, differ = 0;
+    for (int it = 0; it < 200000; it++) {
+        nrz8::Desc d; nrz5_vals v; memset(&v, 0, sizeof v); uint32_t voff[nrz8::MAX_DYN];
+        const bool indexed = r.upto(4) != 0; const int32_t count = int32_t(3 + r.upto(900)), instances = indexed ? int32_t(1 + r.upto(2)) : 0, first = indexed ? 0 : int32_t(r.upto(60)), bv = int32_t(r.upto(50)), bi = indexed ? int32_t(r.upto(3)) : 0;
+        nrz5_site_make(&d.site, 1 + r.upto(40), indexed ? NRZ5S_IDX : NRZ5S_ARRAYS, 4, indexed ? 1 + int32_t(r.upto(2)) : 0, count, bv, bi, instances, first, indexed ? 0x7100000000ull + 64 * r.upto(64) : 0, 0x7200000000ull);
+        d.fixid = 1 + r.upto(9); d.noff = r.upto(nrz8::MAX_DYN + 1); d.k = r.upto(5); d.first_index = r.upto(7);
+        uint64_t ub[6][16] = {};
+        v.pipe = 0x1000 + r.upto(9); v.layout = 0x2000 + r.upto(4); v.set = 0x3000 + r.upto(7); v.noff = d.noff; v.off = voff; v.indexed = indexed;
+        for (unsigned i = 0; i < d.noff; i++) { d.dyn[i].st = uint8_t(i % 6); d.dyn[i].sl = uint8_t(i); voff[i] = 256 * r.upto(4000); d.dyn[i].addr = 0x7300000000ull + voff[i]; d.dyn[i].rbytes = 256; d.dyn[i].copy = 256; }
+        VkViewport vp{0, 0, float(640u << r.upto(2)), 360, 0, 1}; VkRect2D sc{{0, 0}, {640u << r.upto(2), 360}}; memcpy(v.vp, &vp, sizeof vp); memcpy(v.sc, &sc, sizeof sc);
+        v.used = uint16_t(1u << r.upto(4) | (r.upto(2) ? 1u << (4 + r.upto(4)) : 0u)); unsigned nvb = 0;
+        for (uint32_t m = v.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); v.vb[i] = 0x4000 + r.upto(4); v.vbo[i] = 64 * r.upto(1000); d.vb[nvb].at = uint8_t(i); d.vb[nvb].addr = 0x7200000000ull + 4096 * i; d.vb[nvb].size = 4096; ++nvb; }
+        d.nvb = nvb; d.nrow = r.upto(4); for (unsigned i = 0; i < d.nrow; i++) { d.row[i].ns = 1; d.row[i].slot = uint8_t(i); d.row[i].samp = 0xff; d.row[i].tex = 0x100 + i; d.row[i].smp = 0; }
+        if (indexed) { v.ib = 0x5000; v.ibo = 64 * r.upto(100); v.it = r.upto(2); }
+        d.v = &v; uint64_t w[nrz8::MAX_WORDS]; const unsigned nw = nrz8::pack(d, w); CHECK(nw != 0, "values: a template"); if (!nw) continue;
+        // the copy at a later draw of the site: the uniform blocks moved; the walk's values are match()'s
+        for (unsigned i = 0; i < d.noff; i++) ub[d.dyn[i].st][d.dyn[i].sl] = d.dyn[i].addr + 256 * r.upto(50);
+        struct A { uint64_t (*ub_)[16]; const nrz8::Desc *d;
+            bool ub(unsigned st, unsigned sl, uint64_t *a, uint64_t *z) const { if (st >= 6 || sl >= 16) return false; *a = ub_[st][sl]; *z = 256; return true; }
+            bool vb(unsigned i, uint64_t *a, uint64_t *z) const { for (unsigned j = 0; j < d->nvb; j++) if (d->vb[j].at == i) { *a = d->vb[j].addr; *z = d->vb[j].size; return true; } return false; }
+            uint64_t tex(unsigned, unsigned sl) const { return 0x100 + sl; } uint64_t samp(unsigned, unsigned) const { return 0; } };
+        nrz5_vals wv; uint32_t woff[nrz8::MAX_DYN]; const int m = nrz8::match(w, &d.site, d.fixid, count, instances, first, bv, bi, A{ub, &d}, &wv, woff); CHECK(m == nrz8::M_OK, "values: the template matches its site (%d)", m); if (m) continue;
+        uint8_t side[1024]; const uint32_t sn = nrz5r::pv_put(side, sizeof side, &wv); CHECK(sn != 0, "values: a side record");
+        // the values the translation thread resolves now: the walk's, or one field of them changed
+        nrz5_vals rv = wv; uint32_t roff[nrz8::MAX_DYN]; memcpy(roff, woff, sizeof roff); rv.off = roff;
+        switch (r.upto(14)) {
+        case 0: rv.pipe ^= 8; break; case 1: rv.set ^= 16; break; case 2: rv.layout ^= 32; break; case 3: if (rv.noff) roff[r.upto(rv.noff)] += 256; break;
+        case 4: rv.vp[r.upto(NRZ5_VP_BYTES)] ^= 1; break; case 5: rv.sc[r.upto(NRZ5_SC_BYTES)] ^= 1; break;
+        case 6: { const uint32_t i = uint32_t(__builtin_ctz(rv.used)); if (r.upto(2)) rv.vb[i] ^= 4; else rv.vbo[i] += 64; break; }
+        case 7: if (rv.indexed) { if (r.upto(2)) rv.ibo += 64; else rv.it ^= 1; } break; case 8: rv.count += 3; break; case 9: if (rv.indexed) rv.vertex_offset += 1; else rv.first += 1; break;
+        case 10: rv.first_instance += 1; break; default: break; }
+        const int a = nrz5r::pv_diff(side, sn, &rv);
+        const int b = nrz8::expect_diff([&w](unsigned j) { return w[j]; }, &rv, count, instances, first, bv, bi, A{ub, &d});
+        CHECK(a == b, "values: the verdict from the slot's words and State is the verdict from the side record (%d / %d)", b, a); if (a) ++differ; else ++same;
+    }
+    CHECK(same > 20000 && differ > 20000, "values: both verdicts were asked (%ld the same, %ld differ)", same, differ);
+    printf("values: %ld draws with the walk's values, %ld with one field changed: expect_diff = pv_diff over the side record\n", same, differ);
+}
+// ---------------- the ranges of a submission: a number a range ----------------
+static void ranges_test() {
+    auto R = std::make_unique<nrz8::Ranges>(); R->begin();
+    CHECK(R->id_of(0x1000, 64, 1) == 1 && R->id_of(0x2000, 64, 1) == 2 && R->id_of(0x1000, 64, 1) == 1 && R->id_of(0x1000, 128, 1) == 3 && R->id_of(0x1000, 64, 2) == 4 && R->id_of(0x2000, 64, 1) == 2, "ranges: numbers in the order of first use, a repeat keeps its number");
+    R->begin(); CHECK(R->id_of(0x2000, 64, 1) == 1 && R->id_of(0x1000, 64, 2) == 2 && R->id_of(0x1000, 64, 1) == 3, "ranges: the next submission numbers from 1");
+    Rng r{17}; std::map<std::pair<uint64_t, uint64_t>, uint32_t> seen; R->begin(); uint32_t n = 0; bool full = false;
+    for (int i = 0; i < 40000; i++) { const uint64_t a = 0x7000000 + 64 * r.upto(6000), z = 64 << r.upto(2); const uint32_t id = R->id_of(a, z, 1); auto it = seen.find({a, z});
+        if (!id) { full = true; CHECK(it == seen.end(), "ranges: a numbered range keeps its number when the table is full"); continue; }
+        if (it == seen.end()) { CHECK(id == ++n, "ranges: a new range takes the next number"); seen[{a, z}] = id; } else CHECK(it->second == id, "ranges: the same range, the same number"); }
+    CHECK(full && n <= nrz8::Ranges::MAX_ID, "ranges: the table fills up (%u numbers) and then answers 0", n);
+    for (int g = 0; g < 3; g++) { R->begin(); CHECK(R->id_of(0x7000000, 64, 1) == 1, "ranges: a full table is empty again in the next submission"); }
+    uint8_t used_vb = 0; auto vb = [&](uint32_t i, uint64_t *a, uint64_t *z) { used_vb |= uint8_t(1u << i); *a = 0x9000 + 0x100 * i; *z = 256; return true; };
+    R->begin(); const uint64_t w = nrz8::ranges_word(*R, 0x5, vb, true, 0xA000, 600);
+    CHECK(w == (1ull | 2ull << 16 | 3ull << 48) && used_vb == 0x5, "ranges: the word of a draw: bindings 0 and 2, then the index range (%#llx)", (unsigned long long)w);
+    CHECK(nrz8::ranges_word(*R, 0xf, vb, false, 0, 0) == 0, "ranges: more than three bindings have no word");
+    CHECK(nrz8::ranges_word(*R, 0x4, vb, false, 0, 0) == 2, "ranges: a repeat inside another draw");
+}
 // ---------------- the dictionary: ids by bytes, never handed out twice ----------------
 static void dict_test() {
     nrz8::Dict d; CHECK(d.init(256, 4096), "dict"); Rng r{99}; std::vector<std::pair<std::vector<uint8_t>, uint32_t>> seen; uint64_t maxid = 0;
@@ -549,8 +724,8 @@ int main(int argc, char **argv) {
     const int frames = argc > 1 ? atoi(argv[1]) : 60;
     for (int i = 0; i < 12; i++) { memset(&g_prog[i], 0, sizeof g_prog[i]); g_prog[i].nstage = 2; g_prog[i].serial = 100 + uint64_t(i); }
     for (int i = 0; i < 4; i++) { memset(&g_mem[i], 0, sizeof g_mem[i]); g_pool[i].pool = &g_mem[i]; g_pool[i].off = 64 * i; g_pool[i].n = 100 + i; }
-    dict_test(); table_race();
-    uint64_t taken = 0, answered = 0, draws = 0, vcmp = 0;
+    dict_test(); table_race(); marks_test(); ranges_test(); values_test();
+    uint64_t taken = 0, answered = 0, draws = 0, vcmp = 0, th_answered = 0, th_taken = 0, th_got = 0, th_asked = 0, th_waits = 0, th_vcmp = 0, th_dig = 0, th_splits = 0, th_vask = 0, th_vrep = 0, th_known = 0, th_kcmp = 0;
     for (uint64_t seed = 1; seed <= 3; seed++) {
         World w(seed); std::vector<Frame> prog; for (int i = 0; i < frames; i++) prog.push_back(w.frame());
         setup(Cfg{0, 256, 64, 64, 0}); const auto ref = run(prog, 0, seed); finish(); const uint64_t ref_draws = tot.recorded;
@@ -569,6 +744,40 @@ int main(int argc, char **argv) {
             CHECK(v.a_bad == 0 && (first ? v.a_cmp > v.draws / 4 : v.a_cmp > 0), "verify: answers compared %llu, bad %llu", (unsigned long long)v.a_cmp, (unsigned long long)v.a_bad);
             CHECK(v.r.v_bad == 0 && v.r.v_cmp > 0 && v.r.v_cmp == v.r.v_same, "verify: packets compared %llu, same %llu, bad %llu", (unsigned long long)v.r.v_cmp, (unsigned long long)v.r.v_same, (unsigned long long)v.r.v_bad);
             vcmp += v.r.v_cmp;
+            // ---- the walk on its own thread ----
+            setup(cf); { const auto logs = run(prog, 1, seed * 277 + cf.mode, nullptr, true, 1);
+                for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "thread apply: seed %llu queue mode %d flush %u: frame %zu's call log is today's (%zu / %zu bytes)", (unsigned long long)seed, cf.mode, cf.flush, f, logs[f].size(), ref[f].size()); }
+            const Tot ta = tot; finish();
+            CHECK(ta.valid + ta.recorded == ref_draws, "thread apply: every draw taken or recorded once (%llu + %llu of %llu)", (unsigned long long)ta.valid, (unsigned long long)ta.recorded, (unsigned long long)ref_draws);
+            CHECK(ta.m_got > 0 && ta.m_got == ta.dig_cmp, "thread apply: words arrived (%llu) and each came with the digest", (unsigned long long)ta.m_got);
+            th_vask += ta.v_ask; th_vrep += ta.v_rep; th_known += ta.r.known; th_kcmp += ta.r.k_cmp;
+            CHECK(ta.r.k_bad == 0, "values: what the model named for a tail draw is what the chunks hold (apply: %llu compared, %llu bad)", (unsigned long long)ta.r.k_cmp, (unsigned long long)ta.r.k_bad);
+            th_answered += ta.answered; th_taken += ta.valid; th_got += ta.m_got; th_asked += ta.draws; th_waits += ta.waits; th_dig += ta.dig_cmp; th_splits += ta.splits;
+            setup(cf); { const auto logs = run(prog, 2, seed * 377 + cf.mode, nullptr, true, 1);
+                for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "thread verify: seed %llu queue mode %d: frame %zu's call log is today's", (unsigned long long)seed, cf.mode, f); }
+            const Tot tv = tot; finish();
+            CHECK(tv.a_bad == 0 && tv.r.v_bad == 0 && tv.r.v_cmp == tv.r.v_same, "thread verify: answers compared %llu bad %llu, packets compared %llu bad %llu", (unsigned long long)tv.a_cmp, (unsigned long long)tv.a_bad, (unsigned long long)tv.r.v_cmp, (unsigned long long)tv.r.v_bad);
+            th_vcmp += tv.r.v_cmp; th_dig += tv.dig_cmp; th_kcmp += tv.r.k_cmp;
+            CHECK(tv.r.k_bad == 0, "values: verify - the old verdict finds in the chunks what the model named (%llu compared, %llu bad)", (unsigned long long)tv.r.k_cmp, (unsigned long long)tv.r.k_bad);
+            if (first) {
+                setup(cf); { const auto logs = run(prog, 1, seed * 477, nullptr, true, 2); for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "thread apply, walker ahead: frame %zu's call log is today's", f); }
+                const Tot tw = tot; finish();
+                CHECK(tw.m_got == tw.draws && tw.m_not == 0 && tw.m_nobase == 0, "thread, walker ahead: every record has its words (%llu of %llu)", (unsigned long long)tw.m_got, (unsigned long long)tw.draws);
+                CHECK(tw.answered > tw.draws / 4 && tw.valid > tw.draws / 8 && tw.valid + tw.recorded == ref_draws, "thread, walker ahead: the walk's answers are used as on the submitting thread (%llu answered, %llu taken of %llu)",
+                      (unsigned long long)tw.answered, (unsigned long long)tw.valid, (unsigned long long)tw.draws);
+                CHECK(tw.splits > 0, "thread: runs were split (%llu)", (unsigned long long)tw.splits);
+                CHECK(tw.v_ask > tw.draws / 4 && tw.v_rep > tw.v_ask / 10, "ranges: numbers arrived (%llu) and ranges repeat inside a frame (%llu)", (unsigned long long)tw.v_ask, (unsigned long long)tw.v_rep);
+                th_vask += tw.v_ask; th_vrep += tw.v_rep;
+                setup(cf); { const auto logs = run(prog, 1, seed * 577, nullptr, true, 3); for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "thread apply, translation thread first: frame %zu's call log is today's", f); }
+                const Tot tf = tot; finish();
+                CHECK(tf.m_got == 0 && tf.answered == 0 && tf.valid == 0 && tf.recorded == ref_draws && tf.waits == prog.size(), "thread, translation thread first: nothing arrives, nothing is taken, every frame waits for its walk (%llu words, %llu waits)",
+                      (unsigned long long)tf.m_got, (unsigned long long)tf.waits);
+                printf("seed %llu host clock: the walk %.0f ns a draw record on the submitting thread, %.0f ns on its own thread (all records of the frame: state, binds, fix id, template, packets)\n", (unsigned long long)seed,
+                       t.w_draws ? double(t.walk_ns) / double(t.w_draws) : 0., tw.w_draws ? double(tw.walk_ns) / double(tw.w_draws) : 0.);
+                printf("seed %llu thread: mixed order: words for %llu of %llu records (not yet written %llu, walk not begun %llu), answered %llu, packets taken %llu, runs split %llu, waits at a frame's end %llu; walker ahead: answered %llu (%.0f%%), taken %llu (%.0f%%)\n",
+                       (unsigned long long)seed, (unsigned long long)ta.m_got, (unsigned long long)ta.draws, (unsigned long long)ta.m_not, (unsigned long long)ta.m_nobase, (unsigned long long)ta.answered, (unsigned long long)ta.valid, (unsigned long long)ta.splits,
+                       (unsigned long long)ta.waits, (unsigned long long)tw.answered, 100. * double(tw.answered) / double(tw.draws), (unsigned long long)tw.valid, 100. * double(tw.valid) / double(tw.draws));
+            }
             if (&cf == &shapes[0]) printf("seed %llu: %llu draw records (%llu drawn); apply: answered without State %llu (%.0f%%), packets taken %llu (%.0f%%), runs %llu complete %llu, values differ %llu, cache %llu; "
                 "walk: values for %llu of %llu, misses site %llu fix %llu tex %llu vb %llu ubo %llu; verify: answers %llu bad %llu, packets %llu bad %llu, digests %llu\n", (unsigned long long)seed,
                 (unsigned long long)t.draws, (unsigned long long)ref_draws, (unsigned long long)t.answered, 100. * double(t.answered) / double(t.draws), (unsigned long long)t.valid, 100. * double(t.valid) / double(t.draws),
@@ -585,6 +794,12 @@ int main(int argc, char **argv) {
       size_t v2 = 0, v3 = 0; for (size_t i = 0; i < per; i++) { v2 += o[per + i] == 'V'; v3 += o[2 * per + i] == 'V'; CHECK((o[per + i] == 'D') == (o[2 * per + i] == 'D'), "script: the same draws are dropped in equal frames"); }
       CHECK(v3 > per / 3 && v3 >= v2, "script: the third frame is taken from the templates of the two before (%zu, then %zu of %zu)", v2, v3, per);
       printf("script: %zu draws a frame, taken 0 / %zu / %zu; answered %llu\n", per, v2, v3, (unsigned long long)t.answered); }
+    CHECK(th_got > 0 && th_answered > 0 && th_taken > 0, "thread: words arrived and were used in the mixed order (%llu words, %llu answered, %llu taken)", (unsigned long long)th_got, (unsigned long long)th_answered, (unsigned long long)th_taken);
+    printf("thread (the walk on its own thread, all shapes): %llu draw records, words arrived for %llu, answered without State %llu, packets taken %llu, runs split %llu, packets compared by verify %llu, digests compared %llu, waits for the walker %llu\n",
+           (unsigned long long)th_asked, (unsigned long long)th_got, (unsigned long long)th_answered, (unsigned long long)th_taken, (unsigned long long)th_splits, (unsigned long long)th_vcmp, (unsigned long long)th_dig, (unsigned long long)th_waits);
+    CHECK(th_known > 0 && th_kcmp > 0, "values: tail draws were taken by the verdict without the chunks (%llu) and compared with the old one (%llu)", (unsigned long long)th_known, (unsigned long long)th_kcmp);
+    printf("values (the verdict from the translation thread's own memory): %llu tail draws taken without reading the walker's chunks, %llu verdicts compared with the chunks\n", (unsigned long long)th_known, (unsigned long long)th_kcmp);
+    printf("ranges (the walker's numbers against the translation thread's State): %llu ranges asked by number, %llu of them a repeat inside their frame (%.0f%%)\n", (unsigned long long)th_vask, (unsigned long long)th_vrep, th_vask ? 100. * double(th_vrep) / double(th_vask) : 0.);
     printf("nr_z8_test: %ld checks, %ld failed; %llu draw records, %llu answered without State, %llu packets taken, %llu packets compared by verify\n", checks, fails, (unsigned long long)draws, (unsigned long long)answered,
            (unsigned long long)taken, (unsigned long long)vcmp);
     return fails ? 1 : 0;

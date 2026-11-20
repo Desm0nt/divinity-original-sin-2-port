@@ -45,9 +45,14 @@ void release(){nrz_vfree(&vt);bmode=cmode=dmode=0;read=false;s=Stats{};}
 // exactly the statement it replaces: snap_site, the hint, snapshot(), both cleared.
 inline Buffer view_real(uint64_t address,size_t bytes,int site,uint32_t stride){
     snap_site=unsigned(site);if(site==1)nrbuf::stride_hint=stride;const Buffer b=snapshot(address,bytes);if(site==1)nrbuf::stride_hint=0;snap_site=0;return b;}
+Buffer view_at(nrz_view *e,uint64_t address,size_t bytes,int site,uint32_t stride,int cmode,Stats &s);
 Buffer view(uint64_t address,size_t bytes,int site,uint32_t stride){
     if(!vt.e || snap_no_sync || nrbuf::busy || nrbuf::mode==2)return view_real(address,bytes,site,stride);
-    ++s.c_asked;nrz_view *e=nrz_vslot(&vt,address,bytes);bool fresh=false;
+    ++s.c_asked;return view_at(nrz_vslot(&vt,address,bytes),address,bytes,site,stride,cmode,s);}
+// The view of a range through the entry e, which may hold it: a slot of the table above (Z3c) or [NR-ZERO Z8 views, xbg_nr_z8.inc
+// nrz8t::view] the entry of the range's place among the ranges of its submission. cmode / s: the caller's switch (1 / 2) and counters.
+Buffer view_at(nrz_view *e,uint64_t address,size_t bytes,int site,uint32_t stride,int cmode,Stats &s){
+    bool fresh=false;
     if(nrz_vmatch(e,address,bytes,uint32_t(site))){
         if(e->kind==NRZV_INPLACE){
             if(zc::enabled>0 && nrbuf::st_mode<=0 && e->chunk>=0 && e->chunk<zc::MAX_CHUNKS){

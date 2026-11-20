@@ -133,13 +133,21 @@ struct Writer {
     nbmtq::Queue *q = nullptr; Ring *ring = nullptr;
     nrz5_cache model; bool in_run = false; Run cur; uint32_t next_id = 1; WStats st;
     uint32_t min_tails = 1;              // a tail shorter than this is not worth a hand-over: its run is published WITHOUT chunks (the reader records its records as today)
+    // [NR-ZERO Z8, the walk on its own thread] 0: no limit. A tail that reached this many draws is published at once and the draw in hand
+    // opens the next run on the model as it stands; the limit doubles at every split and ends above 2048. So a reader that follows close
+    // behind the writer finds the first runs of a recording published when it reaches them.
+    uint32_t max_tails = 0; uint64_t splits = 0;
+    uint32_t last_bytes = 0, last_cmds = 0;   // [NR-ZERO Z8 values] the packets the last draw() wrote into the run's chunk (0: a head draw)
+    // (The reader checks, per draw, that the real bind cache holds the run's model in every field the draw reads: a run that leans on the
+    // one before it is taken only if that one's draws - taken, or recorded by the reader itself - left the same values.)
+    void split() { end_run(); in_run = true; cur = Run{}; ++splits; }
     void head(const nrz5_vals &v) { nrz5_after(&model, &v); ++st.heads; }
     void restart() { end_run(); nrz5_cache_unknown(&model); in_run = true; cur = Run{}; }
     // An engine draw record is being written and the thread has values for it (v). emit(chunk, model, vals) writes the draw's packets
     // into the chunk over the model (nrz5_emit with a sink on the chunk): the number of commands, 0 = the chunk is full. Returns the
     // record's mark word.
     template <class Emit> uint32_t draw(const nrz5_vals &v, Emit &&emit) {
-        ++st.draws;
+        ++st.draws; last_bytes = last_cmds = 0;
         if (!in_run) { nrz5_cache_unknown(&model); in_run = true; cur = Run{}; }
         if (!cur.chunk) {
             if (nrz5_reads_unknown(&model, &v)) { head(v); return 0; }
@@ -149,6 +157,13 @@ struct Writer {
             if (!s) { if (c) q->give_back_spare(c); ++st.no_chunk; head(v); return 0; }
             cur.chunk = c; cur.side = s; cur.id = next_id; next_id = next_id == ID_MAX ? 1 : next_id + 1; cur.tails = 0; cur.at_splice = model;
         } else if (nrz5_reads_unknown(&model, &v)) { restart(); head(v); return 0; }   // a new unknown field after the tail began: this draw is the head of the next run
+        if (max_tails && cur.tails >= max_tails) {   // the limit: publish; this draw opens the next run (or stays a head draw when there is no room for one)
+            split(); max_tails = max_tails >= 2048 ? 0 : max_tails * 2;
+            if (!ring->room()) { ++st.ring_full; head(v); return 0; }
+            nbmtq::Chunk *c = q->take_spare(), *s = c ? q->take_spare() : nullptr;
+            if (!s) { if (c) q->give_back_spare(c); ++st.no_chunk; head(v); return 0; }
+            cur.chunk = c; cur.side = s; cur.id = next_id; next_id = next_id == ID_MAX ? 1 : next_id + 1; cur.tails = 0; cur.at_splice = model;
+        }
         const nrz5_cache saved = model; const uint32_t u = cur.chunk->used, cm = cur.chunk->cmds;
         uint32_t pvn = 0;
         if (!emit(cur.chunk, &model, &v) || !(pvn = pv_put(cur.side->data() + cur.side->used, cur.side->cap - cur.side->used, &v))) {   // a chunk is full: the run ends before this draw
@@ -156,7 +171,7 @@ struct Writer {
             if (!cur.tails) { q->give_back_spare(cur.chunk); q->give_back_spare(cur.side); cur.chunk = cur.side = nullptr; head(v); return 0; }   // (not even one draw fits)
             restart(); head(v); return 0;
         }
-        cur.side->used += pvn; ++st.tails; st.tail_bytes += cur.chunk->used - u; st.side_bytes += pvn;
+        cur.side->used += pvn; ++st.tails; st.tail_bytes += cur.chunk->used - u; st.side_bytes += pvn; last_bytes = cur.chunk->used - u; last_cmds = cur.chunk->cmds - cm;
         return mark_word(cur.tails++ ? MARK_COVERED : MARK_SPLICE, cur.id);
     }
     // An engine draw record the thread has no values for (its mark is 0): the run ends - what that draw leaves bound is not known.
@@ -174,7 +189,7 @@ struct Writer {
 
 enum { CUT_CACHE = 0, CUT_VALUES, CUT_CHUNK, CUT_RECORD, CUT_WRITE, CUT_N };   // why a run was cut: the real cache does not hold the shadow, the values differ, the chunk / side ends early, a record of the run did not come (or another draw record did), something else was written
 struct RStats { uint64_t runs = 0, started = 0, complete = 0, handed = 0, valid = 0, cut[CUT_N] = {}, diff[10] = {}, first_no = 0, gone = 0, unreached = 0, declined_writer = 0;
-                uint64_t v_cmp = 0, v_same = 0, v_bad = 0, v_skipped = 0; };
+                uint64_t v_cmp = 0, v_same = 0, v_bad = 0, v_skipped = 0, known = 0, known_cut = 0, k_cmp = 0, k_bad = 0; };
 struct Reader {
     enum { RECORD = 0, VALID = 1 };
     nbmtq::Queue *q = nullptr; Ring *ring = nullptr; RStats st;
@@ -182,6 +197,23 @@ struct Reader {
     Run run; uint32_t j = 0, at = 0, cmds = 0, side_at = 0, from = 0;   // valid draws so far; the chunk's bytes / packets they take; the side's; where the last valid draw's packets begin
     nrz5_cache shadow;
     bool v_this = false; uint64_t v_sig = 0;   // verify: the draw in hand would be valid; the stream position after the last compared draw
+    // [NR-ZERO Z8 values, NR-ZERO.md section 31] What the caller knows of the tail draw in hand WITHOUT the run's chunks: d - how the
+    // values the writer wrote the draw's packets from differ from the values resolved now (pv_diff's codes, 0 = the same), named
+    // from the caller's own memory (the template the writer read is the caller's own, and so are the words of State the writer
+    // folded); bytes / n - the draw's packets in the chunk, as the writer counted them. draw2() with it reads neither the side
+    // chunk nor the chunk's packets (both are memory another thread has just written). A run is followed one way from its first
+    // tail draw to its last (known_run); `chk` (verify of this part): step() compares what it finds in the chunks with it.
+    struct Known { int d; uint32_t bytes, n; };
+    bool known_run = false; const Known *chk = nullptr;
+    template <class Holds> bool step_known(const nrz5_vals &rv, const Known &k, Holds &&holds, int *why) {
+        nbmtq::Chunk *c = run.chunk;
+        if (k.d) { ++st.diff[k.d < 10 ? k.d : 9]; *why = CUT_VALUES; return false; }
+        if (NRZ5R_MUTATE != 5 && !holds(shadow, rv)) { *why = CUT_CACHE; return false; }
+        if (!k.bytes || !k.n || k.bytes > c->used - at) { *why = CUT_CHUNK; return false; }
+        from = at; at += k.bytes; cmds += k.n; ++j; ++st.valid; ++st.known;
+        if (NRZ5R_MUTATE != 7) nrz5_after(&shadow, &rv);
+        return true;
+    }
 
     static bool id_before(uint32_t a, uint32_t b) { return a != b && ((b - a) & uint32_t(ID_MAX)) < uint32_t(ID_MAX) / 2; }
     // The ring's run of a MARK_SPLICE record (as nr_z5w.h: ids are handed out in record order; an older run at the front belongs to a
@@ -201,11 +233,13 @@ struct Reader {
         nbmtq::Chunk *c = run.chunk, *s = run.side;
         if (side_at >= s->used) { *why = CUT_CHUNK; return false; }
         const int d = pv_diff(s->data() + side_at, s->used - side_at, &rv);
+        if (chk) { ++st.k_cmp; if (chk->d != d && d != 9) ++st.k_bad; }
         if (d) { ++st.diff[d]; *why = d == 9 ? CUT_CHUNK : CUT_VALUES; return false; }
         if (NRZ5R_MUTATE != 5 && !holds(shadow, rv)) { *why = CUT_CACHE; return false; }
         uint32_t end = at, n = 0; bool found = false;
         while (end < c->used) { const nbmtq::Pkt *p = reinterpret_cast<const nbmtq::Pkt *>(c->data() + end); if (p->size < sizeof(nbmtq::Pkt) || p->size > c->used - end) break; end += p->size; ++n; if (is_draw(p->op) || NRZ5R_MUTATE == 10) { found = true; break; } }
         if (!found) { *why = CUT_CHUNK; return false; }
+        if (chk && (chk->bytes != end - at || chk->n != n)) ++st.k_bad;
         Pv h; memcpy(&h, s->data() + side_at, sizeof h);
         from = at; at = end; cmds += n; side_at += h.bytes; ++j; ++st.valid;
         if (NRZ5R_MUTATE != 7) nrz5_after(&shadow, &rv);
@@ -214,7 +248,7 @@ struct Reader {
     bool begin_run(uint32_t id) {
         if (!next_run(id, run)) return false;
         if (!run.chunk) { ++st.declined_writer; return false; }
-        shadow = run.at_splice; j = 0; at = 0; cmds = 0; side_at = 0; holding = true; ++st.started;
+        shadow = run.at_splice; j = 0; at = 0; cmds = 0; side_at = 0; holding = true; known_run = false; ++st.started;
         return true;
     }
     // ---- apply ----
@@ -239,6 +273,22 @@ struct Reader {
         }
         if (m == MARK_SPLICE && begin_run(id)) {
             if (step(rv, holds, is_draw, &why)) { if (j == run.tails) flush(CUT_WRITE); return VALID; }
+            flush(why);
+        }
+        return RECORD;
+    }
+    // draw() when the caller may know the draw's verdict itself (k: null - it does not). A run whose first tail draw came with k is
+    // followed by step_known alone: a later draw of it without k ends it there.
+    template <class Holds, class IsDraw> int draw2(uint32_t mw, const nrz5_vals &rv, const Known *k, Holds &&holds, IsDraw &&is_draw) {
+        const unsigned m = mark_of(mw); const uint32_t id = id_of(mw); int why = CUT_RECORD;
+        auto one = [&] { if (!known_run) return step(rv, holds, is_draw, &why); if (!k) { ++st.known_cut; return false; } return step_known(rv, *k, holds, &why); };
+        if (holding) {
+            if (m == MARK_COVERED && id == run.id && one()) { if (j == run.tails) flush(CUT_WRITE); return VALID; }
+            flush(why);
+        }
+        if (m == MARK_SPLICE && begin_run(id)) {
+            known_run = k != nullptr;
+            if (one()) { if (j == run.tails) flush(CUT_WRITE); return VALID; }
             flush(why);
         }
         return RECORD;

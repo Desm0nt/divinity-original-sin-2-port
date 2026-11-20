@@ -259,13 +259,14 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     if(dr && dr->needs_writeback())return fail(NRW_WRITEBACK);
     // vertex streams and indices: the ranges the old tail snapshots, folded
     H.indexed=indexed!=nullptr;
-    uint64_t off[16]={};
+    uint64_t off[16]={};unsigned z8vk=0;   // [NR-ZERO Z8 views] the number of the binding among the draw's ranges
     for(uint32_t m=H.used;m;m&=m-1){const uint32_t i=uint32_t(__builtin_ctz(m));
         if(int(i)==H.zero){const uint32_t zero[4]={0};const Buffer z=stream_buffer(sizeof(zero),zero,sizeof(zero));H.vb[i]=z.buffer;off[i]=z.offset;continue;}
         if(__builtin_expect(nrpo::P.on,0) && i==nrpo::P.k){H.vb[i]=nrpo::P.view.buffer;off[i]=nrpo::P.view.offset;continue;}   // [DOS2] NR-POSONLY: the mesh's copy
         if(__builtin_expect(nrps::P.on,0) && i==nrps::P.k){H.vb[i]=nrps::P.view.buffer;off[i]=nrps::P.view.offset;continue;}   // [DOS2] NR-PRESKIN: the record
         const NVNbufferRange r=state.vb[i];if(!(r.address && r.size))return fail(NRW_VERTEX);
         Buffer b;if(__builtin_expect(nrzx::cmode!=0,0))b=nrzx::view(r.address,r.size,1,H.stride[i]);   // [NR-ZERO Z3c] the remembered view of the range
+        else if(__builtin_expect(nrz8t::vmode!=0,0))b=nrz8t::view(r.address,r.size,1,H.stride[i],z8vk++);   // [NR-ZERO Z8 views] the entry of the range's place in its submission
         else{snap_site=1;nrbuf::stride_hint=H.stride[i];b=snapshot(r.address,r.size);nrbuf::stride_hint=0;snap_site=0;}
         H.vb[i]=b.buffer;off[i]=b.offset;}
     int64_t base=indexed?int64_t(indexed->base_vertex):int64_t(first);
@@ -283,6 +284,7 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
         if(indexed->itype<1 || indexed->itype>2 || indexed->instances<=0 || indexed->base_instance<0 || !indexed->ibuf)return fail(NRW_VERTEX);
         const size_t bytes=size_t(count)*(1u<<indexed->itype);
         Buffer b;if(__builtin_expect(nrzx::cmode!=0,0))b=nrzx::view(uint64_t(indexed->ibuf),bytes,2,0);   // [NR-ZERO Z3c]
+        else if(__builtin_expect(nrz8t::vmode!=0,0))b=nrz8t::view(uint64_t(indexed->ibuf),bytes,2,0,3);   // [NR-ZERO Z8 views]
         else{snap_site=2;b=snapshot(uint64_t(indexed->ibuf),bytes);snap_site=0;}
         H.ib=b.buffer;H.it=indexed->itype==1?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32;nr_fold_index(b.offset,unsigned(indexed->itype),fold&1,&H.ibo,&H.first_index);}
     DRAW_MARK(4);if(sp)tb=timing_clock();

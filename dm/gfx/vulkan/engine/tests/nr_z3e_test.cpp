@@ -12,8 +12,14 @@
 //   4  Z3d, the ring word against the page walk (nb_ubo_view of nb_hit.h) on random chunks, sticky maps, rings, alignments and blocks:
 //      a block the word answers is served by the walk at the same offset; a page of the ring turning sticky ends the word
 // The mutation checks - this test must FAIL when built with
-//   -DNRZE_MUTATE=k    k = 1..16: one bump / one compared word of nr_z3e.h dropped
-//   -DNRZE_MODEL_DROP=k k = 1..7: the MODEL forgets to move one epoch where the engine moves it (1 the image epoch at ~Image, 2
+//   5  [NR-ZERO Z8 images, NR-ZERO.md section 29] the read word against a model of the walk with its read path (get_image's check,
+//      prepare_read: pending clear, attachment of the open pass, layout, written since the barrier the read sees - full or
+//      fragment-only -, the pass ended and the barrier recorded) on a random stream of draws of entries inside passes, pass changes,
+//      storage writes, copies, pending clears, barriers, guest writes, submissions: whenever the word of an entry stands, the walk
+//      would have done nothing - no image leaves SKIP / "already read", no pass is ended, no barrier, no clear lands
+//   -DNRZE_MUTATE=k    k = 1..27: one bump / one compared word of nr_z3e.h dropped
+//   -DNRZE_MODEL_DROP=k k = 8..9: [Z8 images] the model's engine forgets 8 the count of pass marks at a draw that continues its pass,
+//                      9 the question "is a clear pending" before it asks the word; k = 1..7: the MODEL forgets to move one epoch where the engine moves it (1 the image epoch at ~Image, 2
 //                      zc::live_ep at a retire / a new chunk, 3 the chunk's wr_ver at a replay write, 4 the pending-writeback generation,
 //                      5 nrbuf::st_ep at a demote / trim, 6 the snapshot epoch, 7 the chunk's st_ver at a page turning sticky) - what a
 //                      writer without its bump would do on the phone
@@ -137,6 +143,94 @@ static void z3b_random() {
     for (int i = 0; i < NI; i++) im[i]->~Img();
 }
 
+// ---------------- [NR-ZERO Z8 images] the read word ----------------
+namespace z8i {
+struct RImg : Img { bool pending = false; };
+struct REnt { std::vector<RImg *> img; nrz_rtq q{}; bool frag = false; };
+static uint64_t write_seq = 1, pm = 0, barrier_seq = 0, frag_seq = 0, pass_id = 0, fb_id = 0; static std::vector<RImg *> open; static unsigned pclear_n = 0;
+static long ended = 0, barriers = 0, landed = 0, checked_n = 0;
+static bool in_open(const RImg *im) { for (RImg *a : open) if (a == im) return true; return false; }
+static bool written(const RImg &im, bool frag) { const uint64_t seen = frag ? frag_seq : barrier_seq; return uint64_t(im.last_write) > seen || uint64_t(im.storage_write) > seen; }
+static void end_pass() { if (!open.empty()) { open.clear(); pass_id = 0; fb_id = 0; ++ended; } }
+// get_image(t, true) + prepare_read: returns whether anything was done
+static bool read_path(RImg &im, bool frag) {
+    bool did = false;
+    if (!(im.checked_submission == sub_now && (im.uploaded || im.gpu_written))) { im.uploaded = true; im.checked_submission = sub_now; did = true; ++checked_n; }
+    im.slot_use = serial_now;
+    if (im.pending) { im.pending = false; --pclear_n; im.last_write = ++write_seq; im.gpu_written = true; did = true; ++landed; }
+    const bool io = in_open(&im), wr = written(im, frag);
+    if (im.layout != L_GENERAL || wr || io) { end_pass(); im.layout = L_GENERAL; if (frag) frag_seq = write_seq; else barrier_seq = frag_seq = write_seq; ++barriers; did = true; }
+    return did;
+}
+static bool ask(const REnt &e) { return (NRZE_MODEL_DROP == 9 || !pclear_n) && !hook && nrz_rtq_ok(&e.q, nrz_img_ep, sub_now, serial_now, write_seq - pm, pass_id, fb_id, e.frag); }
+// the walk of an answered draw (the engine's loop) and, after it, the word. Returns whether the walk did anything.
+static bool walk(REnt &e) {
+    bool did = false;
+    for (RImg *im : e.img) { if (skip_of(*im) == NRD_I_SKIP) { if (im->slot_use != serial_now) did = true; im->slot_use = serial_now; continue; } did = read_path(*im, e.frag) || did; }
+    if (open.empty() || hook || pclear_n) return did;   // (the pass was ended: the draw is not answered; a hook; a pending clear)
+    for (RImg *im : e.img) { const int k = skip_of(*im);
+        const nrz_rt_in x{uint8_t(k == NRD_I_SKIP), uint8_t(k == NRD_I_RT), uint8_t(im->checked_submission == sub_now), uint8_t(im->uploaded || im->gpu_written), uint8_t(im->layout == L_GENERAL), uint8_t(in_open(im)), uint8_t(written(*im, e.frag)), uint8_t(im->pending)};
+        if (!nrz_rt_img_ok(&x)) return did; }
+    nrz_rtq_set(&e.q, nrz_img_ep, sub_now, serial_now, write_seq - pm, pass_id, fb_id, e.frag);
+    return did;
+}
+static void pass_marks() { for (RImg *a : open) { a->last_write = ++write_seq; a->gpu_written = true; } if (NRZE_MODEL_DROP != 8) pm += open.size(); }   // a draw that continues its pass
+static void random() {
+    enum { NI = 40, NE = 36 };
+    static unsigned char mem[NI][sizeof(RImg)]; RImg *im[NI]; for (int i = 0; i < NI; i++) im[i] = new (mem[i]) RImg();
+    static REnt ent[NE]; uint64_t next_pass = 100;
+    auto remake = [&](REnt &e) { unsigned n = 1 + rn(4); e.img.clear(); for (unsigned k = 0; k < n; k++) e.img.push_back(im[rn(NI)]); e.q = nrz_rtq{}; e.frag = rn(4) == 0; };
+    for (auto &e : ent) remake(e);
+    auto begin_pass = [&] { end_pass(); const unsigned n = 1 + rn(3); for (unsigned k = 0; k < n; k++) { RImg *a = im[rn(NI)]; if (!in_open(a)) open.push_back(a); }
+        for (RImg *a : open) { if (a->pending) { a->pending = false; --pclear_n; } a->layout = L_GENERAL; a->last_write = ++write_seq; a->gpu_written = true; a->uploaded = true; a->checked_submission = sub_now; }   // the slow path: marks that are not pass marks
+        pass_id = ++next_pass; fb_id = next_pass * 3; };
+    long stood = 0, asked = 0, rt_stood = 0;
+    for (long step = 0; step < 3000000; step++) {
+        const unsigned op = rn(30) ? rn(600) : 600 + rn(400);
+        RImg &t = *im[rn(NI)];
+        if (op < 600) {   // an engine draw of an entry
+            if (open.empty()) begin_pass();
+            REnt &e = ent[rn(NE)]; ++asked;
+            const bool st = ask(e);
+            if (st) { ++stood; bool rt = false; for (RImg *x : e.img) rt = rt || skip_of(*x) != NRD_I_SKIP; rt_stood += rt;
+                const long e0 = ended, b0 = barriers, l0 = landed, c0 = checked_n; const uint64_t ep0 = nrz_img_ep, ws0 = write_seq;
+                const bool did = walk(e);   // the walk the word stood for
+                CHECK(!did && e0 == ended && b0 == barriers && l0 == landed && c0 == checked_n && ep0 == nrz_img_ep && ws0 == write_seq); }
+            else walk(e);
+            if (!open.empty()) pass_marks(); else begin_pass();   // answered: the pass marks; else the draw goes the long way (a new pass)
+        }
+        else if (op < 640) begin_pass();
+        else if (op < 660) end_pass();
+        else if (op < 700) { t.storage_write = ++write_seq; t.gpu_written = true; }                 // a storage image written by a draw
+        else if (op < 730) { end_pass(); t.layout = L_XFER; t.last_write = ++write_seq; t.gpu_written = true; if (rn(2)) t.layout = L_GENERAL; }   // a copy / blit into the image
+        else if (op < 760) { if (!t.pending && !in_open(&t)) { t.pending = true; ++pclear_n; t.gpu_written = true; } }   // a clear left pending (no write mark until it lands)
+        else if (op < 790) { end_pass(); if (rn(2)) frag_seq = write_seq; else barrier_seq = frag_seq = write_seq; }
+        else if (op < 830) { make_quiet(t); t.slot_use = serial_now; if (t.pending) { t.pending = false; --pclear_n; } }   // a texture made again / uploaded: quiet
+        else if (op < 860) { t.uploaded = false; t.checked_submission = UINT64_MAX; }           // a guest write over the texture
+        else if (op < 880) t.checked_submission = rn(2) ? sub_now : sub_now - 1;
+        else if (op < 900) { if (t.pending) { t.pending = false; --pclear_n; } t.~RImg(); new (&t) RImg(); if (rn(2)) make_quiet(t); for (auto &a : open) if (a == &t) { end_pass(); break; } }
+        else if (op < 930) { end_pass(); ++serial_now; }
+        else if (op < 960) { end_pass(); ++sub_now; ++serial_now; barrier_seq = frag_seq = 0; }
+        else if (op < 965) hook = !hook;
+        else if (op < 985) pass_marks();                                                           // a draw of something else that continues the pass
+        else remake(ent[rn(NE)]);
+    }
+    hook = false;
+    CHECK(stood * 10 > asked && rt_stood * 40 > asked);   // the word stands, and stands for entries with GPU-written images
+    printf("  Z8 images random: %ld draws asked, the read word stood %ld (%ld of them for an entry with a GPU-written image); passes ended by a read %ld, barriers %ld, clears landed %ld\n", asked, stood, rt_stood, ended, barriers, landed);
+    for (int i = 0; i < NI; i++) im[i]->~RImg();
+    open.clear();
+}
+static void each() {
+    nrz_rtq q{}; CHECK(!nrz_rtq_ok(&q, 0, 0, 0, 0, 0, 0, 0)); nrz_rtq_set(&q, 3, 4, 5, 6, 7, 8, 1); CHECK(nrz_rtq_ok(&q, 3, 4, 5, 6, 7, 8, 1));
+    CHECK(!nrz_rtq_ok(&q, 9, 4, 5, 6, 7, 8, 1)); CHECK(!nrz_rtq_ok(&q, 3, 9, 5, 6, 7, 8, 1)); CHECK(!nrz_rtq_ok(&q, 3, 4, 9, 6, 7, 8, 1)); CHECK(!nrz_rtq_ok(&q, 3, 4, 5, 9, 7, 8, 1));
+    CHECK(!nrz_rtq_ok(&q, 3, 4, 5, 6, 9, 8, 1)); CHECK(!nrz_rtq_ok(&q, 3, 4, 5, 6, 7, 9, 1)); CHECK(!nrz_rtq_ok(&q, 3, 4, 5, 6, 7, 8, 0));
+    const nrz_rt_in good{0, 1, 1, 1, 1, 0, 0, 0}; CHECK(nrz_rt_img_ok(&good)); const nrz_rt_in sk{1, 0, 0, 0, 0, 1, 1, 1}; CHECK(nrz_rt_img_ok(&sk));
+    nrz_rt_in x = good; x.rt = 0; CHECK(!nrz_rt_img_ok(&x)); x = good; x.checked = 0; CHECK(!nrz_rt_img_ok(&x)); x = good; x.content = 0; CHECK(!nrz_rt_img_ok(&x)); x = good; x.general = 0; CHECK(!nrz_rt_img_ok(&x));
+    x = good; x.in_open = 1; CHECK(!nrz_rt_img_ok(&x)); x = good; x.written = 1; CHECK(!nrz_rt_img_ok(&x)); x = good; x.pending = 1; CHECK(!nrz_rt_img_ok(&x));
+}
+}
+
 // ---------------- Z3c ----------------
 // The model of snapshot() for a vertex / index range. Zero-copy: the chunk holding the address, when live, serves it in place unless a
 // replay write made its bytes "recent" (the class of NR-TRX: a function of the chunk's written ranges and the slot serial) or a
@@ -242,7 +336,7 @@ static void z3d_random() {
 int main() {
     // the quiet word: never stands before it was set; each of its three words
     { nrz_quiet q{}; CHECK(!nrz_quiet_ok(&q, 0, 0, 0)); nrz_quiet_set(&q, 3, 4, 5); CHECK(nrz_quiet_ok(&q, 3, 4, 5)); CHECK(!nrz_quiet_ok(&q, 4, 4, 5)); CHECK(!nrz_quiet_ok(&q, 3, 5, 5)); CHECK(!nrz_quiet_ok(&q, 3, 4, 6)); }
-    z3b_each(); z3b_random(); z3c_random(); z3d_random();
+    z3b_each(); z3b_random(); z3c_random(); z3d_random(); z8i::each(); z8i::random();
     printf("nr_z3e_test: %ld checks, %ld failed -> %s\n", checks, fails, fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

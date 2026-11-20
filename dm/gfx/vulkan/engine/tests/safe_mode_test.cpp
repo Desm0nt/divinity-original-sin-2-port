@@ -11,7 +11,7 @@
 static int fails=0;
 #define CHECK(c) do{if(!(c)){printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#c);++fails;}}while(0)
 
-static std::string sw(int step,XbgGpuFamily f){XbgSafeSwitch s[64];const int n=xbg_safe_switches(step,f,s,64);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
+static std::string sw(int step,XbgGpuFamily f){XbgSafeSwitch s[96];const int n=xbg_safe_switches(step,f,s,96);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
 static bool has(const std::string &s,const char *kv){return s.find(std::string(kv)+" ")!=std::string::npos;}
 static int count_key(const std::string &s,const char *k){int c=0;for(size_t p=s.find(k);p!=std::string::npos;p=s.find(k,p+1))if((p==0 || s[p-1]==' ') && s[p+strlen(k)]=='=')++c;return c;}
 
@@ -51,15 +51,15 @@ int main(){
     for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const std::string s1=sw(1,f),s2=sw(2,f),s3=sw(3,f);
         CHECK(s2.compare(0,s1.size(),s1)==0 && s3.compare(0,s2.size(),s2)==0);   // each step is the one before plus more, same order
         for(const char *kv:{"DM_GFX_NOLOAD=0","DM_GFX_STORE_HIST=0","DM_GFX_CLEAR_FOLD=0","DM_GFX_TILE_BARRIER=0","DM_GFX_LAZY_CLEAR=0","DM_NB_RP=0","DM_NB_OPBARRIER=0",
-            "DM_NB_UIAREA=0","DM_NR_DIRECT=0","DM_NR_DRAW=0","DM_NR_ROTATE=0","DM_NR_SH=0","DM_NR_Z3=0","DM_NR_Z5=0","DM_NR_Z8=0","DM_NR_Z3B=0","DM_NR_Z3C=0","DM_NR_Z3D=0","DM_NR_Z3K=0",
+            "DM_NB_UIAREA=0","DM_NR_DIRECT=0","DM_NR_DRAW=0","DM_NR_ROTATE=0","DM_NR_SH=0","DM_NR_Z3=0","DM_NR_Z5=0","DM_NR_Z8=0","DM_NR_Z8_THREAD=0","DM_NR_Z8_IMG=0","DM_NR_Z8_VIEW=0","DM_NR_Z8_VAL=0","DM_NR_Z3B=0","DM_NR_Z3C=0","DM_NR_Z3D=0","DM_NR_Z3K=0",
             "DM_NR_SH_SURF=0","DM_NR_MAT=0","DM_NR_STATE=0","DM_NR_UBO=0","DM_NR_UBD=0","DM_NR_TRX_STICKY=0","DM_NR_TRX_ZC=0","DM_NR_TAPSET=0",
             "DM_NR_TEX=0","DM_NR_TEXSTREAM=0","DM_NB_POST_AA_OUTLINE=0"}){CHECK(has(s2,kv));CHECK(!has(s1,kv));}
         for(const char *kv:{"DM_GFX_PIPE_SERIAL=1","DM_NB_MT=0","DM_GFX_GS_PASSTHRU=0","DM_NR=0","DM_NR_BUF=0","DM_NR_DESC=0","DM_NR_HEAT=0","DM_NR_SEED=0","DM_NB=0",
             "DM_NB_PIPE=0","DM_NB_DESC=0","DM_NB_UBO=0","DM_NB_OWN=0","DM_NB_POST=0","DM_NB_POST_AA=0","DM_GFX_PRESENT_THREAD=0"}){CHECK(has(s3,kv));CHECK(!has(s2,kv));}
         // every key once per step
-        XbgSafeSwitch a[64];const int n=xbg_safe_switches(3,f,a,64);
+        XbgSafeSwitch a[96];const int n=xbg_safe_switches(3,f,a,96);
         for(int i=0;i<n;i++){CHECK(count_key(s3,a[i].key)==1);CHECK(!strncmp(a[i].key,"DM_",3));CHECK(*a[i].value=='0' || *a[i].value=='1');}
-        CHECK(n<64);}
+        CHECK(n<96-16);}   // room in the engine's array (xbg_safe_mode.inc: 96) for the switches to come
     // PowerVR-only items: the colour mask of output-less shaders (the d2r #179 fix stays on Mali), dynamic UBOs / NR-08b
     CHECK(has(sw(3,XBG_GPU_POWERVR),"DM_GFX_NOOUT_MASK=0") && sw(3,XBG_GPU_MALI).find("NOOUT_MASK")==std::string::npos);
     CHECK(sw(3,XBG_GPU_MALI).find("UBO_DYNAMIC")==std::string::npos && sw(3,XBG_GPU_MALI).find("UBODYN")==std::string::npos);

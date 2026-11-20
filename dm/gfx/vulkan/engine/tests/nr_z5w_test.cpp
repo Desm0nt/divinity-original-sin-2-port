@@ -170,6 +170,7 @@ static nrz5w::WStats writer_thread(const std::vector<std::vector<Ev>> &prog, Han
     return W.st;
 }
 struct Tot { uint64_t draws = 0, recorded = 0, abandoned = 0, direct = 0; nrz5w::RStats r; nrz5w::WStats w; } tot;
+static uint64_t g_abandoned_all = 0;   // over every shape (one shape of 60 recordings may have none: 4 runs of the test in 24 on a loaded host)
 // All recordings with the writer ahead. verify: nothing is taken, the chunks are compared. Returns the logs (an abandoned recording: empty).
 static std::vector<std::vector<uint8_t>> with_writer(const std::vector<std::vector<Ev>> &prog, uint64_t seed, bool verify, std::vector<int> &executed, const int *fates = nullptr) {
     std::vector<std::vector<uint8_t>> logs(prog.size()); executed.assign(prog.size(), 0);
@@ -237,7 +238,10 @@ int main(int argc, char **argv) {
             setup(cf); { const auto logs = with_writer(prog, seed * 77 + cf.mode, false, ex);
                 for (size_t s = 0; s < prog.size(); s++) if (ex[s]) CHECK(logs[s] == ref[s], "%s: with the writer the calls are today's in today's order (recording %zu: %zu / %zu bytes)", what, s, logs[s].size(), ref[s].size()); }
             const Tot t = tot; finish();
-            CHECK(t.r.taken > 0 && t.r.covered > t.r.taken && (t.r.declined_cache > 0 || cf.chunk_kb > 64) && t.r.declined_stamp > 0 && t.abandoned > 0 && t.r.unreached > 0, "%s: runs taken %llu (covered %llu), declined by the cache %llu / the verdict %llu, recordings abandoned %llu, runs not reached %llu",
+            // (1 MB chunks: the writer finds a spare chunk for few runs, so whether one of them belongs to an abandoned recording - "not
+            // reached" - depends on which thread was faster: 1 run of the test in ~10 on a loaded host had none. As for "declined by the
+            // cache", that path is asked of the other shapes.)
+            CHECK(t.r.taken > 0 && t.r.covered > t.r.taken && (t.r.declined_cache > 0 || cf.chunk_kb > 64) && t.r.declined_stamp > 0 && (g_abandoned_all += t.abandoned, true) && (t.r.unreached > 0 || cf.chunk_kb > 64 || !t.abandoned), "%s: runs taken %llu (covered %llu), declined by the cache %llu / the verdict %llu, recordings abandoned %llu, runs not reached %llu",
                   what, (unsigned long long)t.r.taken, (unsigned long long)t.r.covered, (unsigned long long)t.r.declined_cache, (unsigned long long)t.r.declined_stamp, (unsigned long long)t.abandoned, (unsigned long long)t.r.unreached);
             CHECK(t.w.chunk_full > 0 && g_st.spliced == t.r.taken && g_st.alloc_fail == 0, "%s: runs ended by a full chunk %llu; chunks handed over %llu", what, (unsigned long long)t.w.chunk_full, (unsigned long long)g_st.spliced);
             if (cf.mode != 1) CHECK(g_ws.cmds + g_st.help_cmds == g_st.cmds && g_ws.chunks + g_st.help_chunks == g_st.chunks, "%s: every packet replayed once", what);
@@ -270,6 +274,7 @@ int main(int argc, char **argv) {
     { CHECK(nrz5w::mark_of(nrz5w::mark_word(nrz5w::MARK_COVERED, 77)) == nrz5w::MARK_COVERED && nrz5w::id_of(nrz5w::mark_word(nrz5w::MARK_SPLICE, nrz5w::ID_MAX)) == uint32_t(nrz5w::ID_MAX) && nrz5w::mark_word(nrz5w::MARK_NONE, 0) == 0, "mark word");
       static nrz5w::Ring rg; CHECK(rg.front() == nullptr && rg.room(), "empty ring"); nrz5w::Run x; for (uint32_t i = 0; i < nrz5w::Ring::N; i++) { CHECK(rg.room(), "room"); x.id = i + 1; rg.push(x); }
       CHECK(!rg.room() && rg.front() && rg.front()->id == 1, "full ring, first in first out"); rg.pop(); CHECK(rg.room() && rg.front()->id == 2, "pop"); }
+    CHECK(g_abandoned_all > 0, "recordings were abandoned in some shape (%llu)", (unsigned long long)g_abandoned_all);
     printf("nr_z5w_test: %ld checks, %ld failed, %llu packets (%llu of them in chunks written by the second thread), %llu tail draws compared by verify -> %s\n", checks, fails, (unsigned long long)packets,
            (unsigned long long)spliced, (unsigned long long)vcmp, fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

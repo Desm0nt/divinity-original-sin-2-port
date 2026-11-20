@@ -474,12 +474,18 @@ static int g_z8g_on;
 static pthread_mutex_t g_z8g_mu = PTHREAD_MUTEX_INITIALIZER;
 void xbg_nr_z8_game_submit(const uint64_t *handles, int n, uint64_t sub) __attribute__((weak));
 void xbg_nr_z8_exec_sub(uint64_t sub) __attribute__((weak));
+void xbg_nr_z8_exec_done(uint64_t sub) __attribute__((weak));
 void nvn_nr_z8_enable(int on);
-void nvn_nr_z8_enable(int on) { __atomic_store_n(&g_z8g_on, on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub, __ATOMIC_RELEASE); }
+static int g_z8g_seen;   // the switch was armed at some time (never cleared: a walk posted before it went off is still waited for)
+void nvn_nr_z8_enable(int on) { if (on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub) __atomic_store_n(&g_z8g_seen, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_z8g_on, on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub, __ATOMIC_RELEASE); }
 #define Z8G_ON() __builtin_expect(__atomic_load_n(&g_z8g_on, __ATOMIC_ACQUIRE), 0)
 #define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = Z8G_ON(); if (z8) { pthread_mutex_lock(&g_z8g_mu); xbg_nr_z8_game_submit((const uint64_t *)(h), (n), (next_sub)); } } while (0)
 #define Z8G_SUBMIT_END(z8) do { if (z8) pthread_mutex_unlock(&g_z8g_mu); } while (0)
 #define Z8G_EXEC(sub) do { if (Z8G_ON()) xbg_nr_z8_exec_sub(sub); } while (0)
+//   Z8G_DONE           the translation thread, after the last record of a submission: with DM_NR_Z8_THREAD=1 the walker thread must
+//                      have left the submission's command memory before the submission counts as executed
+#define Z8G_DONE(sub) do { if (__builtin_expect(__atomic_load_n(&g_z8g_seen, __ATOMIC_ACQUIRE), 0) && xbg_nr_z8_exec_done) xbg_nr_z8_exec_done(sub); } while (0)
 // ---- NB-15 (DM_NB_FOREIGN=1, default 0): the share of the fallback path, by caller class (classes: nvn_nb_tap.h NBF_*) ----
 // cmd_alloc (NBF_REC, after the NB-13a / NB-09 flushes, so their own records are classified first) files every record of every command
 // buffer; rec (NBF_DRAW) adds the draw records to the class of the record just filed. The packet bracket comes from the front end
@@ -587,6 +593,7 @@ static void nbf_draw(uint32_t op) {
 #define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = 0; } while (0)
 #define Z8G_SUBMIT_END(z8) ((void)(z8))
 #define Z8G_EXEC(sub) ((void)0)
+#define Z8G_DONE(sub) ((void)0)
 #define NBT(x) ((void)0)
 #define NBD_FOREIGN(o) ((void)0)
 #define NBD_TAKE(c) 0
