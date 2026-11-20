@@ -27,6 +27,8 @@
 
 // vkn_tex.c (weak: the shader-library host test links without it): the comparison twins made so far
 extern "C" void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed, uint32_t *alive) __attribute__((weak));
+// [stage 5.2 B3] DM_VK_NATIVE_POST=0 keeps the post entries translated (vkn_post.h; weak: the library test links without vkn_post.c)
+extern "C" int vkn_post_mobile(void) __attribute__((weak));
 
 #define NS_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 namespace {
@@ -127,6 +129,10 @@ int entry(const std::string &key) { const int i = key.size() == 16 ? nr_sh_find_
 bool apply(int i, const std::string &key, std::vector<uint8_t> &bytes) {
     const nr_sh_entry &e = nr_sh_table[i]; char v = nr_sh_variant(i, g_pcf); int was = 0;
     if (!v) { if (g_st[i].compare_exchange_strong(was, -1)) { c_kept++; L("%s (%s): translated kept (DM_VK_NATIVE_SH_PCF=0; 1 exact, 2 mobile, 3 dref)", e.name, key.c_str()); } return false; }
+    if (e.cls == NR_SH_POST && vkn_post_mobile && !vkn_post_mobile()) {   // [stage 5.2 B3] the Switch post shaders (DM_VK_NATIVE_POST=0)
+        if (g_st[i].compare_exchange_strong(was, -1)) { c_kept++; L("%s (%s): translated kept (DM_VK_NATIVE_POST=0: the Switch post shaders)", e.name, key.c_str()); }
+        return false;
+    }
     if (!nr_sh_enabled(i)) { if (g_st[i].exchange(-1) != -1) { c_off++; red("%s (%s): off - the engine named another shader with this key or name: translated used", e.name, key.c_str()); } return false; }
     char pk[32]; if (!nr_sh_pack_key(i, v, pk, sizeof pk)) return false;
     std::vector<uint8_t> nb; bool have = get(pk, nb);

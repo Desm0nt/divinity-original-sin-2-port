@@ -36,6 +36,7 @@
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
+//       dm/gfx/vkn/vkn_post.c dm/gfx/nb/nb_plan.c
 //       dm/gfx/nvn/nvn_tex.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -59,6 +60,8 @@
 #include "../../../vkn/vkn_ui.h"
 #include "../../../vkn/vkn_query.h"
 #include "../../../vkn/vkn_lightfuse.h"   // [stage 5.1 A4]
+#include "../../../vkn/vkn_post.h"     // [stage 5.2 B3] test_post (end of file)
+#include "../../../nb/nb_fused.h"
 
 static int g_checks, g_fails;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -2169,7 +2172,7 @@ static void test_a5_fx(void) {
         CHECK_EQ(cnt(m, cb, MK_E_BEGIN_COND), 1);   // (control: predicated)
         g_a5fx = 3; vkn_query_cond(0x5a500); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
         const mk_ev *dd = a5_last(m, cb, MK_E_DRAW_IDX), *bc = a5_last(m, cb, MK_E_BEGIN_COND);
-#ifdef A5_FIXME_NESTED_PREDICATE
+#if 1   // (was A5_FIXME_NESTED_PREDICATE: fixed in vkn_draw.c by the nesting counter g_fx_nest)
         // FIXME (vkn_draw.c, reported): the own draw runs vkn_query_draw_enter, which clears the predicate the engine's draw was given
         CHECK(dd && bc && bc->seq < dd->seq && dd->u[7] == 1);
 #else
@@ -2259,6 +2262,111 @@ static void test_a5_oracle(void) {
     vkn_query_init(VKN_COND_OFF); mk_cond_ext = 0; mk_draw_samples = 1;
     CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
 }
+// ================================================================================================================ [stage 5.2 B3] post
+// vkn_post.c (DM_VK_NATIVE_POST=4): the pure parts (classes, coverage, the arming rule) and one synthetic tail LUT -> Sight -> FXAA ->
+// Vignette -> Combine over the mock: 8 probation frames draw all five, then LUT and Vignette are skipped, Sight draws F1A with the
+// LUT's stash, the FXAA step is skipped (its target an alias of Sight's), Combine draws F2 with Vignette's stash (whose input is the
+// alias): 2 draws a frame; a LUT without its Sight is drawn from its stash (recovery); an engine copy of the alias image is counted.
+static xbg_vkn_stage *g_pf[3]; static nb_fx g_pm[3]; static const char *const g_pk[3] = {"F1.91eb2d97a304709a", "F1A.91eb2d97a304709a", "F2.98186c22a7209861"};
+static int post_load(const char *key, struct xbg_vkn_stage *out, void *meta) {
+    for (int i = 0; i < 3; i++) if (g_pf[i] && !strcmp(key, g_pk[i])) { *out = *g_pf[i]; memcpy(meta, &g_pm[i], sizeof g_pm[i]); return 0; }
+    return 1;
+}
+static void post_meta(nb_fx *m, const char *host, const char *elided, uint32_t flags) {
+    memset(m, 0, sizeof *m); memcpy(m->host_key, host, 16); memcpy(m->elided_key[0], elided, 16); m->n_elided = 1; m->flags = flags;
+}
+static void post_extra(nb_fx *m, uint32_t vkb, uint32_t type, uint8_t kind, uint32_t slot, uint8_t flags) {
+    nb_fx_extra *e = &m->extra[m->n_extra++]; e->vk_binding = vkb; e->vk_type = type; e->size = type == 6 ? 64 : 0; e->src_pass = 1; e->src_stage = 1; e->src_kind = kind; e->src_slot = slot; e->flags = flags;
+}
+static void test_post(void) {
+    // ---- pure parts
+    CHECK_EQ(vkn_post_class_key("921728a5bbb1c71b"), VKN_PC_LUT); CHECK_EQ(vkn_post_class_key("91eb2d97a304709a"), VKN_PC_SIGHT);
+    CHECK_EQ(vkn_post_class_key("43e8e8ed2b1df6c2"), VKN_PC_VIG); CHECK_EQ(vkn_post_class_key("98186c22a7209861"), VKN_PC_COMB);
+    CHECK_EQ(vkn_post_class_key("691768aa00000001"), VKN_PC_FXAA); CHECK_EQ(vkn_post_class_key("7b32101900000001"), VKN_PC_COPY);
+    CHECK_EQ(vkn_post_class_key("e94ea226e689801c"), VKN_PC_FOG); CHECK_EQ(vkn_post_class_key("010472595b342188"), VKN_PC_OUTLINE);
+    CHECK_EQ(vkn_post_class_key("f300000000000001"), VKN_PC_OTHER); CHECK_EQ(vkn_post_class_key("91eb2d97"), VKN_PC_OTHER); CHECK_EQ(vkn_post_class_key(NULL), VKN_PC_OTHER);
+    {
+        const float vp[4] = {0, 0, 1620, 729}; const int32_t sc[4] = {0, 0, 4096, 4096}; int32_t r[4];
+        vkn_post_cover(vp, sc, 2160, 972, r); CHECK(r[0] == 0 && r[1] == 0 && r[2] == 1620 && r[3] == 729);
+        const float vf[4] = {-10, -10, 3000, 3000}; const int32_t s2[4] = {8, 4, 100, 50};
+        vkn_post_cover(vf, s2, 64, 32, r); CHECK(r[0] == 8 && r[1] == 4 && r[2] == 64 && r[3] == 32);
+        vkn_post_arm a; memset(&a, 0, sizeof a);
+        for (uint64_t f = 1; f <= 7; f++) CHECK_EQ(vkn_post_arm_note(&a, f, 1), 0);
+        CHECK_EQ(vkn_post_arm_note(&a, 8, 1), 1); CHECK_EQ(vkn_post_arm_note(&a, 8, 1), 1); CHECK_EQ(a.good, 8);   // one verdict a frame
+        CHECK_EQ(vkn_post_arm_note(&a, 9, 0), 0); CHECK_EQ(vkn_post_arm_note(&a, 9, 1), 0);                         // a bad frame stops it
+        for (uint64_t f = 10; f <= 16; f++) vkn_post_arm_note(&a, f, 1);
+        CHECK_EQ(a.armed, 0); vkn_post_arm_note(&a, 18, 1); CHECK_EQ(a.good, 1);                                    // a gap starts over
+    }
+    // ---- the synthetic tail
+    setenv("DM_VK_NATIVE_POST", "4", 1);
+    CHECK_EQ(vkn_post_level(), 4); CHECK_EQ(vkn_post_mobile(), 1);
+    vkn_post_test_loader(post_load); vkn_post_install(); vkn_post_install();
+    g_fxm = 0;
+    const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    xbg_vkn_stage *vs = mk_bundle_add("a0a0a0a000000001", 0); mk_bind(vs, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392);
+    xbg_vkn_stage *lut = mk_bundle_add("921728a5bbb1c71b", 4); mk_bind(lut, 0, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(lut, 1, CIS, XBG_SOURCE_TEXTURE, 1, 0); mk_bind(lut, 2, UB, XBG_SOURCE_UNIFORM, 5, 64);
+    xbg_vkn_stage *sig = mk_bundle_add("91eb2d97a304709a", 4); mk_bind(sig, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(sig, 1, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(sig, 2, UB, XBG_SOURCE_UNIFORM, 5, 64);
+    xbg_vkn_stage *fxa = mk_bundle_add("691768aa00000001", 4); mk_bind(fxa, 0, CIS, XBG_SOURCE_TEXTURE, 0, 0);
+    xbg_vkn_stage *vig = mk_bundle_add("43e8e8ed2b1df6c2", 4); mk_bind(vig, 0, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(vig, 1, UB, XBG_SOURCE_UNIFORM, 5, 64);
+    xbg_vkn_stage *cmb = mk_bundle_add("98186c22a7209861", 4); mk_bind(cmb, 0, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(cmb, 1, CIS, XBG_SOURCE_TEXTURE, 1, 0);
+    for (int k = 0; k < 2; k++) {   // F1 / F1A: Sight's table + the LUT's two textures (spare slots 120, 121) and its block (spare 15)
+        xbg_vkn_stage *f = g_pf[k] = mk_bundle_add(k ? "e1a0000000000001" : "e100000000000001", 4);
+        mk_bind(f, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(f, 1, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(f, 2, UB, XBG_SOURCE_UNIFORM, 5, 64);
+        mk_bind(f, 3, CIS, XBG_SOURCE_TEXTURE, 120, 0); mk_bind(f, 4, CIS, XBG_SOURCE_TEXTURE, 121, 0); mk_bind(f, 5, UB, XBG_SOURCE_UNIFORM, 15, 64);
+        post_meta(&g_pm[k], "91eb2d97a304709a", "921728a5bbb1c71b", k ? NB_FX_F_APPROX : NB_FX_F_EXACT);
+        post_extra(&g_pm[k], 22, 1, NB_FX_K_TEX, 0, k ? NB_FX_E_LINEAR : 0); post_extra(&g_pm[k], 28, 1, NB_FX_K_TEX, 1, 0); post_extra(&g_pm[k], 34, 6, NB_FX_K_CBUF, 5, 0);
+    }
+    g_pf[2] = mk_bundle_add("e200000000000001", 4);   // F2: Combine's table + Vignette's input (spare 120) and block (spare 15)
+    mk_bind(g_pf[2], 0, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(g_pf[2], 1, CIS, XBG_SOURCE_TEXTURE, 1, 0);
+    mk_bind(g_pf[2], 2, CIS, XBG_SOURCE_TEXTURE, 120, 0); mk_bind(g_pf[2], 3, UB, XBG_SOURCE_UNIFORM, 15, 64);
+    post_meta(&g_pm[2], "98186c22a7209861", "43e8e8ed2b1df6c2", NB_FX_F_APPROX);
+    post_extra(&g_pm[2], 16, 1, NB_FX_K_TEX, 0, 0); post_extra(&g_pm[2], 22, 6, NB_FX_K_CBUF, 5, 0);
+    const vkn_shader *sl = mkshader(H(80, 1), "a0a0a0a000000001", "921728a5bbb1c71b", NULL), *ss = mkshader(H(81, 1), "a0a0a0a000000001", "91eb2d97a304709a", NULL);
+    const vkn_shader *sf = mkshader(H(82, 1), "a0a0a0a000000001", "691768aa00000001", NULL), *sv = mkshader(H(83, 1), "a0a0a0a000000001", "43e8e8ed2b1df6c2", NULL);
+    const vkn_shader *sc = mkshader(H(84, 1), "a0a0a0a000000001", "98186c22a7209861", NULL);
+    vkn_tex *hdr = mktex(800, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 800, 0), *lt = mktex(801, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 801, 0);
+    vkn_tex *X = mktex(802, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 802, 0), *S = mktex(803, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 803, 0);
+    vkn_tex *V = mktex(804, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 804, 0), *B = mktex(805, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 805, 0);
+    vkn_tex *ui = mktex(806, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 806, 0), *T = mktex(807, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 807, 0);
+    CHECK(sl && ss && sf && sv && sc && hdr && lt && X && S && V && B && ui && T);
+    if (!sl || !ss || !sf || !sv || !sc || !hdr || !lt || !X || !S || !V || !B || !ui || !T) return;
+    static int32_t tl[VKN_TEX_SLOTS], ts[VKN_TEX_SLOTS], tf[VKN_TEX_SLOTS], tv[VKN_TEX_SLOTS], tc[VKN_TEX_SLOTS], sm[VKN_TEX_SLOTS];
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) tl[i] = ts[i] = tf[i] = tv[i] = tc[i] = sm[i] = -1;
+    tl[0] = 800; tl[1] = 801; ts[0] = 802; tf[0] = 803; tv[0] = 802; tc[0] = 804; tc[1] = 806; sm[0] = sm[1] = 10;
+    vkn_draw_in in[5]; const uint64_t sh[5] = {H(80, 1), H(81, 1), H(82, 1), H(83, 1), H(84, 1)}; int32_t *const tx[5] = {tl, ts, tf, tv, tc};
+    for (int k = 0; k < 5; k++) {
+        memset(&in[k], 0, sizeof in[k]); in[k].shader = sh[k]; in[k].prim = 1; in[k].alpha_ref = -1.0f; in[k].tex[1] = tx[k]; in[k].smp[1] = sm;
+        in[k].viewport[2] = 64; in[k].viewport[3] = 32; in[k].scissor[2] = 64; in[k].scissor[3] = 32;
+    }
+    vkn_tex *const tgt[5] = {X, S, X, V, B};
+    const uint64_t val0 = mk_val_errors, err0 = mk_errors;
+    vkn_post_stats a, b; vkn_post_stats_get(&a);
+    int draws[24]; uint64_t m = 0;
+    for (int f = 0; f < 24; f++) {   // 0..19 the chain; 20 a LUT without its Sight; 21..23 the chain again (F1 earns its arming again: 8 frames later)
+        VkCommandBuffer cb = fbegin(1); m = mark();
+        uint32_t off; CHECK_EQ(vkn_ring_alloc(64, &off), 0); vkn_draw_ubo(1, 5, off, 64);
+        static const float one[4] = {1, 1, 1, 1}; vkn_pass_clear_color(hdr, 0, one, NULL);
+        if (f == 19) vkn_pass_copy(T, X);   // an engine copy of the alias image: seen at the next draw
+        for (int k = 0; k < 5; k++) {
+            if (f == 20 && k >= 1 && k <= 3) continue;
+            targets(tgt[k], NULL, NULL); CHECK_EQ(vkn_draw_arrays(&in[k], 0, 3), 0);
+        }
+        fsubmit(0);
+        draws[f] = cnt(m, cb, MK_E_DRAW);
+    }
+    vkn_post_stats_get(&b);
+    for (int f = 0; f < 9; f++) CHECK_EQ(draws[f], 5);                                          // probation: everything drawn
+    for (int f = 9; f < 19; f++) CHECK_EQ(draws[f], 2);                                         // LUT, FXAA, Vignette skipped
+    CHECK_EQ(draws[19], 3);                                                                     // the copy broke route A: Sight F1, FXAA, Combine F2
+    CHECK_EQ(draws[20], 2);                                                                     // LUT drawn from its stash at Combine + Combine
+    CHECK_EQ(b.fused[1] - a.fused[1], 10); CHECK_EQ(b.fused[0] - a.fused[0], 1); CHECK_EQ(b.step_skipped - a.step_skipped, 10);
+    CHECK_EQ(b.fused[2] - a.fused[2], 11); CHECK_EQ(b.recovered - a.recovered, 1);
+    CHECK(b.redirected - a.redirected >= 10);                                                    // Vignette's input read through the alias
+    CHECK_EQ(b.violations - a.violations, 2);                                                   // the copy of the alias, Combine reading the stale V
+    CHECK(b.twins == a.twins);
+    vkn_post_census();
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+}
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2285,6 +2393,7 @@ int main(void) {
     test_a5_shc();      // [stage 5.1 A5] (forked children: the cache's switches are read once per process)
     test_a5_fx();
     test_a5_oracle();
+    test_post();   // [stage 5.2 B3] last: it installs the post effect for the rest of the process
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
     CHECK_EQ(mk_qlock_depth, 0);
