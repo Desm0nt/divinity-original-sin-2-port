@@ -167,6 +167,7 @@ static vkn_tex *g_cookie[COOKIE_BUCKETS];
 static uint32_t *g_id_page[ID_PAGES];             // (slot + 1) << 3 | view (0 whole, 1..7 layer i - 1)
 static vkn_tab g_samp; static VkSampler g_samp_by_id[SAMP_IDS];
 static vkn_tex_stats g_st;
+static uint64_t g_up_serial;                      // [stage 5 A3] the upload numbers (vkn_tex.shc_up; atomic)
 // Shared render-target storage (vkn_tex_create_shared): an engine texture attached to another one's image is a name record - its
 // handle, cookie and pool ids resolve to that vkn_tex (cookie hash of names g_ncookie; the handle table and the pool-id cells hold the
 // vkn_tex itself). Images that sit on shared storage are chained by storage identity in g_store. g_share_mu serialises shared
@@ -403,6 +404,7 @@ static void up_run(VkCommandBuffer cb, void *ctx) {
             barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
         t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        __atomic_store_n(&t->shc_up, __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED), __ATOMIC_RELEASE);   // [stage 5 A3] new texels
     }
     if (u->job) vkn_bcgpu_job_free(u->job);   // (its staging retired: the GPU may still read it)
     if (u->have_blk) vkn_retire_block(&u->blk);
@@ -739,6 +741,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     if (g_nfree) t->slot = g_free_slot[--g_nfree]; else if (g_slot_hi < TEX_SLOTS) t->slot = g_slot_hi++; else t->slot = ~0u;
     if (t->slot != ~0u) g_slot[t->slot] = t;
     handle_link_locked(t, handle);
+    t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);   // [stage 5 A3]
     const uint32_t b = cookie_bucket(t->cookie); t->hnext = g_cookie[b]; g_cookie[b] = t;
     if (t->slot != ~0u) ids_set_locked(t);
     g_st.alive[t->cls]++; g_st.bytes[t->cls] += t->bytes; g_st.created++;
@@ -832,6 +835,7 @@ static void tail_run(VkCommandBuffer cb, void *ctx) {
         barrier(cb, u->src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         barrier(cb, u->dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         u->src->layout = u->dst->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        __atomic_store_n(&u->dst->shc_up, __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED), __ATOMIC_RELEASE);   // [stage 5 A3]
     }
     pthread_mutex_lock(&g_mu); unref_locked(u->src); unref_locked(u->dst); pthread_mutex_unlock(&g_mu);
     free(u);
@@ -1201,5 +1205,32 @@ vkn_tex *vkn_tex_create_shared(uint64_t handle, const vkn_tex_desc *d, const vkn
     t_share = NULL;
     pthread_mutex_unlock(&g_share_mu);
     return t;
+}
+// ==== [stage 5 A3] the shadow cache's own depth images (vkn_tex.h) ====
+vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char *name) {
+    const vkn_dev *dv = vkn_device();
+    if (!dv || !w || !h || !fmt_is_depth(fmt)) return NULL;
+    vkn_tex *t = (vkn_tex *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, 1}, .mipLevels = 1,
+        .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    t->usage = usage; t->format = fmt; t->aspect = fmt_aspect(fmt); t->w = w; t->h = h; t->depth = 1; t->mips = 1; t->layers = 1; t->samples = 1;
+    t->nvn_target = 1; t->cls = VKN_TC_DEPTH; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->slot = ~0u; t->pool_id = ~0u; t->sampler_id = ~0u;
+    memset(t->layer_ids, 0xff, sizeof t->layer_ids);
+    sname_set(t->sname, name);
+    if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; tex_free(t); return NULL; }
+    if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { tex_free(t); return NULL; }
+    if (!(t->att = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0}))) { tex_free(t); return NULL; }
+    t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);
+    t->refs = 1;
+    return t;
+}
+void vkn_tex_private_free(vkn_tex *t) {
+    if (!t) return;
+    pthread_mutex_lock(&g_mu);
+    if (!t->dead) { t->dead = 1; vkn_fb_forget_view(t->att); unref_locked(t); }
+    pthread_mutex_unlock(&g_mu);
 }
 #endif

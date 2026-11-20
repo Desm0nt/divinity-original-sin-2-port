@@ -35,6 +35,9 @@ static int g_inited;
 static uint32_t g_red_target, g_red_size, g_red_samples, g_red_copy, g_red_clear;
 
 static int red_ok(uint32_t *c) { return (*c)++ < 16; }
+// [stage 5 A3] the watched texture of the shadow cache (vkn_pass_watch, end of file): WATCH(t, ev, depth) before a use of t
+static vkn_tex *g_watch_t; static vkn_pass_watch_fn g_watch_fn; static int g_watch_in;
+#define WATCH(t, ev, d) do { if ((t) == g_watch_t && (t) && g_watch_fn && !g_watch_in) { g_watch_in = 1; g_watch_fn((t), (ev), (d)); g_watch_in = 0; } } while (0)
 static uint32_t mipdim(uint32_t s, uint32_t l) { s >>= l; return s ? s : 1; }
 static int has_content(const vkn_tex *t) { return t->pass_ever || t->layout != VK_IMAGE_LAYOUT_UNDEFINED; }   // (uploaded data counts)
 static int is_depth(const vkn_tex *t) { return (t->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) != 0; }
@@ -415,6 +418,7 @@ int vkn_pass_ready(vkn_pass_info *info) {
 int vkn_pass_sample(vkn_tex *t) {
     vkn_pass_init();
     if (!t) return 0;
+    WATCH(t, VKN_PASS_EV_SAMPLE, 0.0f);   // [stage 5 A3]
     if (in_set(&g_cur, t)) { g_st.feedback++; return 1; }
     if (!t->view) return 0;   // not sampled by the device (no SAMPLED usage): no layout for it here; the draw binds nothing of it
     if (!t->pass_nclr && !t->pass_dclr && t->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return 0;
@@ -431,6 +435,7 @@ int vkn_pass_sample(vkn_tex *t) {
 void vkn_pass_storage(vkn_tex *t) {
     vkn_pass_init();
     if (!t) return;
+    WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return; }
     end_open();
@@ -442,6 +447,7 @@ void vkn_pass_storage(vkn_tex *t) {
 void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
     vkn_pass_init();
     if (!t) return;
+    WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     if (!t->pass_nclr && !t->pass_dclr && t->layout == to) return;
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return; }
@@ -503,6 +509,7 @@ void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
     if ((what & 1) && (t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) a |= VK_IMAGE_ASPECT_DEPTH_BIT;
     if ((what & 2) && (t->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) a |= VK_IMAGE_ASPECT_STENCIL_BIT;
     if (!a) return;
+    if (a & VK_IMAGE_ASPECT_DEPTH_BIT) WATCH(t, VKN_PASS_EV_CLEAR, depth);   // [stage 5 A3]
     if (open_here() && g_open_set.d == t) {
         const VkClearAttachment ca = {.aspectMask = a, .clearValue.depthStencil = {depth, stencil}};
         const VkClearRect cr = {g_area, 0, 1};
@@ -535,6 +542,7 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
         return;
     }
     if (dst->nvn_fmt != src->nvn_fmt) { g_st2.copy_skip_fmt++; return; }   // the engine copies nothing between different formats
+    WATCH(dst, VKN_PASS_EV_USE, 0.0f); WATCH(src, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     const int d3 = src->nvn_target == 2;
     if (dst->format != src->format || dst->samples != src->samples || dst == src || d3 != (dst->nvn_target == 2) || dst->aspect != src->aspect) {
         g_st2.copy_drop++;
@@ -589,4 +597,15 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
 
 void vkn_pass_stats_get(vkn_pass_stats *s) { if (s) *s = g_st; }
 void vkn_pass_stats2_get(vkn_pass_stats2 *s) { if (s) *s = g_st2; }
+// ==== [stage 5 A3] the shadow cache (vkn_pass.h) ====
+void vkn_pass_cur_get(uint32_t *n, vkn_tex *color[VKN_PASS_COLORS], uint32_t layer[VKN_PASS_COLORS], uint32_t mip[VKN_PASS_COLORS], vkn_tex **depth) {
+    if (n) *n = g_cur.n;
+    for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) {
+        if (color) color[i] = i < g_cur.n ? g_cur.c[i] : NULL;
+        if (layer) layer[i] = i < g_cur.n ? g_cur.layer[i] : 0;
+        if (mip) mip[i] = i < g_cur.n ? g_cur.mip[i] : 0;
+    }
+    if (depth) *depth = g_cur.d;
+}
+void vkn_pass_watch(vkn_tex *t, vkn_pass_watch_fn fn) { g_watch_t = fn ? t : NULL; g_watch_fn = t ? fn : NULL; }
 #endif

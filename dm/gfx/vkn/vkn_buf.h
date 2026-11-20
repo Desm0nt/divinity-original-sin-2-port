@@ -97,6 +97,24 @@ typedef struct vkn_buf_uinfo { uint64_t carried; uint8_t usage, whole, renamed, 
 int vkn_buf_has_block(int kind, uint64_t handle);
 int vkn_buf_update_ex(int kind, uint64_t handle, uint64_t dst_off, const void *src, uint64_t size, void **cpu, uint64_t *va, vkn_buf_uinfo *out);
 
+// ==== [DOS2] VK-NATIVE stage 5 (draw cost, vkn_draw.c DM_VK_NATIVE_COST bit VB): several lookups under one lock ====
+// vkn_buf_get for h[0], h[1], ... in this order under ONE lock: out[i] as vkn_buf_get(kind, h[i]) would return it (marked used the
+// same way). Stops at the first handle that is 0 / not live / has no block (that out[i] = NULL, the later ones untouched and not
+// marked), as the sequence of single calls the draw path made stops at its first drop (a block without a VkBuffer ends it too, after
+// being returned). Returns the number of entries of out[] written with a block.
+uint32_t vkn_buf_get_n(int kind, const uint64_t *h, uint32_t n, const vkn_block **out);
+// ==== [stage 5 A3] content versions (the shadow cache, vkn_shc.c): what the cache keys a vertex / index buffer's bytes by ====
+// A number that changes with every write of the buffer this module sees - the create (its init, or the zeros) and vkn_buf_update /
+// _ex (in place or renamed), vkn_buf_copy_in - and is unique over every buffer (one serial); 0 = not live / noted only. *none (non-NULL)
+// = 1 when the number does not stand for the bytes (the cache never keeps a draw that reads such a buffer): not live, or the engine's
+// usage byte VKN_BUF_USAGE_DYNAMIC (written every frame through the mapped CPU pointer, which no call here sees). The engine's other CPU
+// writes of buffers (main.raw, 21.11): 0xa487d0 creates a vertex buffer and memcpys another one into it inside the same call, before
+// any draw can name the new handle (the create's number covers it); packets 0x2f / 0x33 (0x9412f0 / 0x9414f0, only caller 0x1406ed0)
+// copy into a buffer made right before (vertex: 0x940280(..., usage 3, 0) = dynamic; index: 0x9403a0) and destroyed after use, so every
+// such copy lands in a buffer with a new number. Lock-free (the recording thread reads it per shadow draw): the engine does not create a
+// handle while it draws from the old one of the same index.
+uint64_t vkn_buf_version(int kind, uint64_t handle, int *none);
+
 #ifdef __cplusplus
 }
 #endif

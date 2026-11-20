@@ -75,6 +75,20 @@ void vkn_pass_stats2_get(vkn_pass_stats2 *s);
 int vkn_pass_dump_active(void);
 vkn_tex *vkn_pass_color(uint32_t i);
 
+// ==== [stage 5 A3] the shadow cache (vkn_shc.c): what the contract lacked ====
+// The current target set as vkn_pass_targets last got it (n slots, their layer / mip, depth): a vkn_fx function that drew into its own
+// targets puts it back with vkn_pass_targets (vkn_fx.h: the set must be the engine's when the function returns without skip).
+void vkn_pass_cur_get(uint32_t *n, vkn_tex *color[VKN_PASS_COLORS], uint32_t layer[VKN_PASS_COLORS], uint32_t mip[VKN_PASS_COLORS], vkn_tex **depth);
+// One watched texture (the shadow atlas): fn runs BEFORE this module uses it in another way than as an attachment of the open pass -
+//   VKN_PASS_EV_CLEAR   vkn_pass_clear_depth of its depth aspect (depth = the value; every depth clear here is of the whole level)
+//   VKN_PASS_EV_SAMPLE  vkn_pass_sample (a draw's or a dispatch's texture binding is about to read it)
+//   VKN_PASS_EV_USE     vkn_pass_layout / vkn_pass_storage / vkn_pass_copy (source or destination)
+// fn may call this module (the watch does not fire again while fn runs) but must not record draws: SAMPLE comes from inside a draw's
+// texture binding. vkn_pass_watch(NULL, NULL) = none. Recording thread.
+enum { VKN_PASS_EV_CLEAR = 1, VKN_PASS_EV_SAMPLE = 2, VKN_PASS_EV_USE = 3 };
+typedef void (*vkn_pass_watch_fn)(vkn_tex *t, int ev, float depth);
+void vkn_pass_watch(vkn_tex *t, vkn_pass_watch_fn fn);
+
 #ifdef __cplusplus
 }
 #endif

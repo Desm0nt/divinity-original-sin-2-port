@@ -26,7 +26,7 @@
 // Build + run (WSL gcc, as vkn_stage2_test.c; <vk> = a directory holding only vulkan/ and vk_video/ of the NDK sysroot include):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
-//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c
+//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c
 //       dm/gfx/nvn/nvn_tex.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -627,6 +627,15 @@ static const vkn_shader *mkshader(uint64_t h, const char *vs, const char *fs, co
 static const void *buf_ptr(uint64_t buf, uint64_t off) { mk_obj *o = mk_obj_of(buf); return o && o->cpu ? (const uint8_t *)o->cpu + off : NULL; }
 static const mk_dw *dw_of(const mk_ev *bs, uint32_t binding) { return bs ? mk_set_dw((VkDescriptorSet)(uintptr_t)bs->a[1], binding, 0) : NULL; }
 static mk_obj *pipe_of(const mk_ev *bp) { mk_obj *o = bp ? mk_obj_of(bp->a[0]) : NULL; return o && o->kind == MK_PIPE ? o : NULL; }
+// [stage 5] the index buffer bound when the indexed draw d ran (the last bind of cb before it: with the index fold a draw may bind
+// nothing) and the CPU pointer of its first index (bound offset + firstIndex * isz)
+static const mk_ev *ib_at(VkCommandBuffer cb, const mk_ev *d) {
+    if (!d) return NULL;
+    for (uint64_t q = d->seq; q-- > mk_ev_base;) { const mk_ev *e = mk_ev_at(q); if (e && e->cb == cb && e->op == MK_E_BIND_IB) return e; }
+    return NULL;
+}
+static const void *idx_of(VkCommandBuffer cb, const mk_ev *d, uint32_t isz) { const mk_ev *b = ib_at(cb, d); return b ? buf_ptr(b->a[0], b->off[0] + (uint64_t)d->u[2] * isz) : NULL; }
+static int vb_bound(uint64_t from, VkCommandBuffer cb) { int n = 0; for (int k = 0; nth(from, cb, MK_E_BIND_VB, k); k++) n += (int)nth(from, cb, MK_E_BIND_VB, k)->u[1]; return n; }   // bindings, not calls
 
 static const uint8_t k_vf3[18] = {0, 0, 0, 0, 0, 3,  0, 3, 0, 0, 8, 4,  1, 2, 0, 0, 3, 2};   // loc 0 float3 / loc 1 (stream 0), loc 4 (stream 1)
 static const uint8_t k_c1[32] = {1, 2, 3, 4};
@@ -697,6 +706,11 @@ static void fx_test(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *ou
         default: break;
     }
 }
+// [stage 5] draw cost: stand-ins for the generations / vertex-index facts other modules are asked to provide (vkn_draw.h)
+static uint32_t g_cost_tex_gen = 1;
+static uint32_t cost_tex_gen(void) { return g_cost_tex_gen; }
+static uint32_t cost_state_gen(void) { return 7; }
+static int cost_vindex(const void *s) { (void)s; return 0; }   // the test's vertex modules read no gl_VertexIndex
 static void test_draw(void) {
     draw_setup();
     if (!g_s1 || !g_t0 || !g_t3 || !g_t5 || !g_ts || !g_a2 || !g_d3 || !g_b2) return;
@@ -709,11 +723,11 @@ static void test_draw(void) {
     uint64_t m = mark();
     CHECK_EQ(vkn_draw_indexed(&in, 6, 12, 2), 0);
     CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
-    CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_VB), 2); CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);
+    CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_VB), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);   // [stage 5] streams 0 + 1: one call (DM_VK_NATIVE_COST VB)
     CHECK_EQ(cnt(m, cb, MK_E_VIEWPORT), 1); CHECK_EQ(cnt(m, cb, MK_E_SCISSOR), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1);
     const mk_ev *bp = nth(m, cb, MK_E_BIND_PIPE, 0), *bs = nth(m, cb, MK_E_BIND_SETS, 0), *dr = nth(m, cb, MK_E_DRAW_IDX, 0), *rp = nth(m, cb, MK_E_BEGIN_RP, 0);
     CHECK(rp->seq < bp->seq && bp->seq < bs->seq && bs->seq < dr->seq && dr->seq == mk_seq - 1);   // the draw last; the set after its pipeline
-    CHECK(dr->u[0] == 12 && dr->u[1] == 2 && dr->u[2] == 6 && dr->u[3] == 0 && dr->u[4] == 0);
+    CHECK(dr->u[0] == 12 && dr->u[1] == 2 && dr->u[2] == 6 + g_ib16.off / 2 && dr->u[3] == 0 && dr->u[4] == 0);   // [stage 5] index fold: + block offset / 2
     mk_obj *po = pipe_of(bp);
     CHECK(po && po->gp.nst == 2 && po->gp.module[0] == g_vs1_mod && po->gp.module[1] == g_fs1_mod && po->gp.layout == g_s1->layout && po->gp.topo == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     if (po) { CHECK_EQ(po->gp.nbind, 2); CHECK(po->gp.bind[0].binding == 0 && po->gp.bind[1].binding == 1); CHECK_EQ(po->gp.ds.front.reference, 5); }
@@ -729,10 +743,10 @@ static void test_draw(void) {
     CHECK(w18 && w18->buf == g_s1->c1[VKN_SRC_VS].buf && w18->off == g_s1->c1[VKN_SRC_VS].off && w18->range == 32);
     CHECK(w16 && w16->view == g_t3->view && w16->smp == vkn_sampler_by_id(13) && w16->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     CHECK(w22 && w22->view == g_t0->view && w22->smp == vkn_sampler_by_id(10));
-    const mk_ev *v0 = nth(m, cb, MK_E_BIND_VB, 0), *v1 = nth(m, cb, MK_E_BIND_VB, 1), *ib = nth(m, cb, MK_E_BIND_IB, 0);
-    CHECK(v0->u[0] == 0 && v0->u[1] == 1 && v0->a[0] == VH(g_vb0.buf) && v0->off[0] == g_vb0.off + 16);
-    CHECK(v1->u[0] == 1 && v1->a[0] == VH(g_vb1.buf) && v1->off[0] == g_vb1.off);   // stream 2 is not read by the format: not bound
-    CHECK(ib->a[0] == VH(g_ib16.buf) && ib->off[0] == g_ib16.off && ib->u[0] == VK_INDEX_TYPE_UINT16);
+    const mk_ev *v0 = nth(m, cb, MK_E_BIND_VB, 0), *ib = nth(m, cb, MK_E_BIND_IB, 0);
+    CHECK(v0->u[0] == 0 && v0->u[1] == 2 && v0->a[0] == VH(g_vb0.buf) && v0->off[0] == g_vb0.off + 16);
+    CHECK(v0->a[1] == VH(g_vb1.buf) && v0->off[1] == g_vb1.off);   // stream 2 is not read by the format: not bound
+    CHECK(ib->a[0] == VH(g_ib16.buf) && ib->off[0] == g_ib16.off % 2 && ib->u[0] == VK_INDEX_TYPE_UINT16);   // [stage 5] folded: bound at off mod 2
     const mk_ev *vp = nth(m, cb, MK_E_VIEWPORT, 0), *sc = nth(m, cb, MK_E_SCISSOR, 0);
     // flipped viewport (NVN upper-left origin: NDC y = +1 -> row 0), as the translator's xbg_nvn_viewport: y = y + h, height = -h
     CHECK(vp->vp.x == 0 && vp->vp.y == 32 && vp->vp.width == 64 && vp->vp.height == -32 && vp->vp.minDepth == 0 && vp->vp.maxDepth == 1);
@@ -780,38 +794,39 @@ static void test_draw(void) {
     in.prim = 4; m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 10, 8), 0);
     {
         const mk_ev *bi = nth(m, cb, MK_E_BIND_IB, 0), *d = nth(m, cb, MK_E_DRAW_IDX, 0);
-        CHECK(bi && d && bi->u[0] == VK_INDEX_TYPE_UINT16 && d->u[0] == 12 && d->u[2] == 0 && d->u[3] == 10);
+        CHECK(bi && d && bi->u[0] == VK_INDEX_TYPE_UINT16 && d->u[0] == 12 && d->u[3] == 10);   // [stage 5] firstIndex: the fold of the transient offset
         CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 0);   // quads draw as triangles: the triangle pipeline
         static const uint16_t want[12] = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
-        const uint16_t *got = bi ? (const uint16_t *)buf_ptr(bi->a[0], bi->off[0]) : NULL; CHECK(got && !memcmp(got, want, sizeof want));
+        const uint16_t *got = (const uint16_t *)idx_of(cb, d, 2); CHECK(got && !memcmp(got, want, sizeof want));
     }
     in.prim = 2; m = mark(); vkn_draw_arrays(&in, 7, 5);
     {
         const mk_ev *bi = nth(m, cb, MK_E_BIND_IB, 0), *d = nth(m, cb, MK_E_DRAW_IDX, 0);
         CHECK(d && d->u[0] == 9 && d->u[3] == 7);
         static const uint16_t want[9] = {0, 1, 2, 0, 2, 3, 0, 3, 4};
-        const uint16_t *got = bi ? (const uint16_t *)buf_ptr(bi->a[0], bi->off[0]) : NULL; CHECK(got && !memcmp(got, want, sizeof want));
+        const uint16_t *got = (const uint16_t *)idx_of(cb, d, 2); CHECK(got && !memcmp(got, want, sizeof want));
     }
     in.prim = 7; m = mark(); vkn_draw_arrays(&in, 0, 4);
     {
         const mk_ev *bi = nth(m, cb, MK_E_BIND_IB, 0), *d = nth(m, cb, MK_E_DRAW_IDX, 0); po = pipe_of(nth(m, cb, MK_E_BIND_PIPE, 0));
         CHECK(po && po->gp.topo == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP); CHECK(d && d->u[0] == 5);
         static const uint16_t want[5] = {0, 1, 2, 3, 0};
-        const uint16_t *got = bi ? (const uint16_t *)buf_ptr(bi->a[0], bi->off[0]) : NULL; CHECK(got && !memcmp(got, want, sizeof want));
+        const uint16_t *got = (const uint16_t *)idx_of(cb, d, 2); CHECK(got && !memcmp(got, want, sizeof want));
     }
     {   // indexed: the engine's indices through the buffer's CPU pointer, from first_index on; u16 in, u16 out; u32 in, u32 out
         uint16_t *i16 = (uint16_t *)vkn_buf_get(VKN_BUF_IB, H(52, 1))->cpu; static const uint16_t q[8] = {10, 11, 12, 13, 20, 21, 22, 23}; memcpy(i16 + 4, q, sizeof q);
         uint32_t *i32 = (uint32_t *)vkn_buf_get(VKN_BUF_IB, H(53, 1))->cpu; static const uint32_t f[4] = {100000, 5, 6, 7}; memcpy(i32 + 2, f, sizeof f);
         in.prim = 4; in.ib = H(52, 1); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 4, 8, 3), 0);
         const mk_ev *bi = nth(m, cb, MK_E_BIND_IB, 0), *d = nth(m, cb, MK_E_DRAW_IDX, 0);
-        CHECK(bi && bi->u[0] == VK_INDEX_TYPE_UINT16 && bi->a[0] != VH(g_ib16.buf)); CHECK(d && d->u[0] == 12 && d->u[1] == 3 && d->u[2] == 0 && d->u[3] == 0);
+        bi = ib_at(cb, d);   // [stage 5] the transient block may be bound already (index fold: (buffer, 0) for all its draws)
+        CHECK(bi && bi->u[0] == VK_INDEX_TYPE_UINT16 && bi->a[0] != VH(g_ib16.buf)); CHECK(d && d->u[0] == 12 && d->u[1] == 3 && d->u[3] == 0);
         static const uint16_t wq[12] = {10, 11, 12, 10, 12, 13, 20, 21, 22, 20, 22, 23};
-        const uint16_t *gq = bi ? (const uint16_t *)buf_ptr(bi->a[0], bi->off[0]) : NULL; CHECK(gq && !memcmp(gq, wq, sizeof wq));
+        const uint16_t *gq = (const uint16_t *)idx_of(cb, d, 2); CHECK(gq && !memcmp(gq, wq, sizeof wq));
         in.prim = 2; in.ib = H(53, 1); m = mark(); vkn_draw_indexed(&in, 2, 4, 1);
-        bi = nth(m, cb, MK_E_BIND_IB, 0); d = nth(m, cb, MK_E_DRAW_IDX, 0);
+        d = nth(m, cb, MK_E_DRAW_IDX, 0); bi = ib_at(cb, d);
         CHECK(bi && bi->u[0] == VK_INDEX_TYPE_UINT32 && bi->off[0] % 4 == 0); CHECK(d && d->u[0] == 6);
         static const uint32_t wf[6] = {100000, 5, 6, 100000, 6, 7};
-        const uint32_t *gf = bi ? (const uint32_t *)buf_ptr(bi->a[0], bi->off[0]) : NULL; CHECK(gf && !memcmp(gf, wf, sizeof wf));
+        const uint32_t *gf = (const uint32_t *)idx_of(cb, d, 4); CHECK(gf && !memcmp(gf, wf, sizeof wf));
         // nothing to draw: a fan of 2
         m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 0, 2), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 0);
         // the engine's next plain indexed draw rebinds its own index buffer
@@ -893,7 +908,7 @@ static void test_draw(void) {
     // ---- a new recording rebinds everything
     cb = fbegin(1); targets(g_a2, NULL, g_d3);
     m = mark(); vkn_draw_indexed(&in, 0, 3, 1);
-    CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_VB), 2); CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);
+    CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK_EQ(vb_bound(m, cb), 2); CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);
     CHECK_EQ(cnt(m, cb, MK_E_VIEWPORT), 1); CHECK_EQ(cnt(m, cb, MK_E_SCISSOR), 1);
     CHECK(nth(m, cb, MK_E_BIND_SETS, 0)->a[1] == VH(set1));   // the set cache outlives the recording
     fsubmit(0);
@@ -953,6 +968,57 @@ static void test_draw(void) {
         CHECK_EQ(f1.skipped, f0.skipped + 1); CHECK_EQ(f1.discards, f0.discards + 1); CHECK_EQ(f1.ds_swaps, f0.ds_swaps + 1); CHECK_EQ(f1.no_fs, f0.no_fs + 1);
         CHECK_EQ(f1.shader_swaps, f0.shader_swaps + 2); CHECK_EQ(f1.bypassed, f0.bypassed + 1); CHECK_EQ(f1.nfn, 1);
         vkn_fx_out oa, ob; memset(&oa, 0, sizeof oa); memset(&ob, 0, sizeof ob); CHECK(vkn_fx_out_same(&oa, NULL)); ob.ubo[3].size = 4; CHECK(!vkn_fx_out_same(&oa, &ob));
+    }
+    // ---- [stage 5] draw cost (DM_VK_NATIVE_COST, all bits on since main): the fast paths give the same state with fewer commands
+    {
+        vkn_draw_cost_stats c0, c1; vkn_draw_cost_stats_get(&c0);
+        vkn_block ib2; CHECK_EQ(vkn_buf_create(VKN_BUF_IB, H(55, 1), 1024, 2, 0, NULL, &ib2), 0);
+        in.ib = H(52, 1); vkn_draw_indexed(&in, 0, 3, 1);
+        // index fold: another u16 index buffer of the same arena buffer needs no bind; firstIndex carries its block offset
+        in.ib = H(55, 1); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 3, 6, 1), 0);
+        if (ib2.buf == g_ib16.buf) { OPS(m, cb, MK_E_DRAW_IDX); } else CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);
+        { const mk_ev *d = nth(m, cb, MK_E_DRAW_IDX, 0), *b = ib_at(cb, d); CHECK(d && b && b->a[0] == VH(ib2.buf) && b->off[0] + (uint64_t)d->u[2] * 2 == ib2.off + 3 * 2); }
+        in.ib = H(52, 1);
+        // the pipeline front cache: back and forth between two keys
+        in.blend = H(41, 1); vkn_draw_indexed(&in, 0, 3, 1); in.blend = H(40, 1); vkn_draw_indexed(&in, 0, 3, 1);
+        vkn_draw_cost_stats_get(&c1); const uint64_t fh = c1.pipe_front_hits;
+        in.blend = H(41, 1); m = mark(); vkn_draw_indexed(&in, 0, 3, 1); OPS(m, cb, MK_E_BIND_PIPE, MK_E_DRAW_IDX); in.blend = H(40, 1); vkn_draw_indexed(&in, 0, 3, 1);
+        vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.pipe_front_hits, fh + 2);
+        CHECK(c1.ib_calls < c1.ib_calls_old); CHECK(c1.set_key_same > c0.set_key_same); CHECK(c1.shader_hits > c0.shader_hits); CHECK(c1.vfmt_hits > c0.vfmt_hits);
+        CHECK(c1.support_hits > c0.support_hits); CHECK(c1.ring_hits > c0.ring_hits); CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse);   // no texture generation: no reuse
+        // with the generations of the other modules (stand-ins): texture bindings reused, state ids cached, the vertex fold
+        vkn_draw_cost_gens(cost_tex_gen, cost_state_gen, cost_vindex);
+        vkn_draw_indexed(&in, 0, 3, 1);
+        vkn_draw_cost_stats_get(&c0);
+        m = mark(); vkn_draw_indexed(&in, 0, 3, 1); OPS(m, cb, MK_E_DRAW_IDX);
+        vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse + 1); CHECK(c1.state_hits >= c0.state_hits + 3);
+        g_ftex[3] = 303; g_fsmp[3] = 13;   // (the same values written again: still reused)
+        vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_cost_stats_get(&c0); CHECK_EQ(c0.set_tex_reuse, c1.set_tex_reuse + 1);
+        g_ftex[0] = -1; m = mark(); vkn_draw_indexed(&in, 0, 3, 1);   // a slot changed: looked up again, the placeholder bound
+        vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.set_tex_lookups, c0.set_tex_lookups + 1);
+        { const mk_dw *w = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 22); CHECK(w && w->view != g_t0->view); }
+        g_ftex[0] = 300; m = mark(); vkn_draw_indexed(&in, 0, 3, 1);
+        { const mk_dw *w = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 22); CHECK(w && w->view == g_t0->view); }
+        g_cost_tex_gen++; vkn_draw_cost_stats_get(&c0); vkn_draw_indexed(&in, 0, 3, 1);   // a mapping may have changed: looked up again
+        vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.set_tex_lookups, c0.set_tex_lookups + 1);
+        // the vertex fold: stream s bound at (raw offset - k * stride), drawn with vertexOffset k - the same fetch address
+        const vkn_vfmt *vf = vkn_vfmt_info(vkn_vfmt_id(H(40, 1)));
+        in.vb_off[0] = 16; m = mark(); vkn_draw_indexed(&in, 0, 3, 1);
+        uint64_t k = ~0ull;
+        {
+            const mk_ev *d = nth(m, cb, MK_E_DRAW_IDX, 0); CHECK(d && vf);
+            uint64_t raw[2] = {g_vb0.off + 16, g_vb1.off}; const uint32_t st[2] = {vf ? vf->stride[0] : 0, vf ? vf->stride[1] : 0};
+            for (int i = 0; i < 2; i++) if (st[i] && raw[i] / st[i] < k) k = raw[i] / st[i];
+            if (d) CHECK_EQ(d->u[3], (uint32_t)k);
+            uint64_t boff[2] = {0, 0}; int seen = 0;   // what the recording has bound for bindings 0 / 1 at the draw
+            for (uint64_t q = mk_ev_base; d && q < d->seq; q++) { const mk_ev *e = mk_ev_at(q); if (e && e->cb == cb && e->op == MK_E_BIND_VB) for (uint32_t i = 0; i < e->u[1]; i++) if (e->u[0] + i < 2) { boff[e->u[0] + i] = e->off[i]; seen |= 1 << (e->u[0] + i); } }
+            CHECK_EQ(seen, 3); for (int i = 0; i < 2; i++) CHECK_EQ(boff[i] + k * st[i], raw[i]);
+        }
+        vkn_draw_cost_stats_get(&c0); CHECK(c0.vb_folded > c1.vb_folded);
+        m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 2, 3), 0);   // arrays: firstVertex = first + k
+        { const mk_ev *d = nth(m, cb, MK_E_DRAW, 0); CHECK(d && d->u[2] == 2 + k); }
+        vkn_draw_cost_gens(NULL, NULL, NULL);
+        vkn_draw_indexed(&in, 0, 3, 1); in.vb_off[0] = 16;
     }
     fsubmit(0);
     frames_n(4);
@@ -1187,7 +1253,7 @@ static void test_ui(void) {
     vkn_draw_in in = g_in; targets(W, NULL, NULL);
     const uint64_t m2 = mark();
     CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
-    CHECK_EQ(cnt(m2, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m2, cb, MK_E_BIND_SETS), 1); CHECK(cnt(m2, cb, MK_E_BIND_VB) >= 2); CHECK_EQ(cnt(m2, cb, MK_E_BIND_IB), 1);
+    CHECK_EQ(cnt(m2, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m2, cb, MK_E_BIND_SETS), 1); CHECK(vb_bound(m2, cb) >= 2); CHECK_EQ(cnt(m2, cb, MK_E_BIND_IB), 1);
     CHECK_EQ(cnt(m2, cb, MK_E_VIEWPORT), 1); CHECK_EQ(cnt(m2, cb, MK_E_SCISSOR), 1);
     vkn_rec_present(W, NULL, 1);
     fsubmit(0);
@@ -1377,6 +1443,7 @@ int main(void) {
     vkn_set_mode(VKN_NATIVE);
     // install order of the host: the modules' listeners first, then the test's own
     vkn_pass_init(); vkn_draw_install(); vkn_tex_update_init();
+    vkn_draw_cost_set(VKN_COST_ALL);   // [stage 5] the draw-cost shortcuts as the host sets them in mode 1 (DM_VK_NATIVE_COST default)
     vkn_rec_on_begin(lis_begin); vkn_rec_on_close(lis_close);
     test_no_device();
     test_frame_order();

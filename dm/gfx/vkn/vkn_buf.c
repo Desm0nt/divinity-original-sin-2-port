@@ -10,10 +10,13 @@
 
 // used / used_frame (stage 4): the block was handed to a draw path (vkn_buf_get / vkn_buf_lookup) in frame used_frame (vkn_frame()):
 // until 3 more frames ended, a recording (the open one, or one the GPU may still run) can read it.
-typedef struct vkn_buf_rec { vkn_buf_info i; uint64_t used_frame; uint8_t used; } vkn_buf_rec;
+typedef struct vkn_buf_rec { vkn_buf_info i; uint64_t used_frame; uint8_t used; uint64_t ver; } vkn_buf_rec;   // ver: [stage 5 A3] content version (end of file)
 static vkn_tab g_tab[VKN_BUF_KINDS]; static int g_tab_ok;
 static vkn_buf_stats g_st;
 static vkn_buf_ustats g_ust;   // stage 4: staged updates (vkn_buf_update)
+// [stage 5 A3] content versions (vkn_buf_version, end of file): one serial over every buffer; a write takes the next number (g_mu held)
+static uint64_t g_ver;
+#define VER_BUMP(r) __atomic_store_n(&(r)->ver, ++g_ver, __ATOMIC_RELEASE)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 // chunk index -> its VkBuffer, as last seen by a create (a chunk with a live block of ours is never dropped, so the entry of every
 // chunk a live pseudo address names is current).
@@ -51,6 +54,7 @@ static int put(int kind, uint64_t handle, uint64_t size, unsigned index_size, un
     memset(r, 0, sizeof *r);
     if (blk) { r->i.blk = *blk; if (blk->chunk < VKN_BUF_CHUNKS) g_chunk_buf[blk->chunk] = blk->buf; }
     r->i.size = size; r->i.index_size = index_size; r->i.usage = (uint8_t)usage; r->i.kind = (uint8_t)kind; r->i.has_init = (uint8_t)!!has_init;
+    VER_BUMP(r);   // [stage 5 A3]
     g_st.created[kind]++; g_st.live[kind]++; g_st.live_bytes[kind] += size;
     if (usage == VKN_BUF_USAGE_DYNAMIC) g_st.bytes_dynamic[kind] += size; else g_st.bytes_static[kind] += size;
     if (has_init) g_st.with_init[kind]++; else g_st.without_init[kind]++;
@@ -121,7 +125,7 @@ int vkn_buf_copy_in(int kind, uint64_t handle, uint64_t dst_off, const void *src
     const vkn_buf_rec *r = g_tab_ok > 0 ? (const vkn_buf_rec *)vkn_tab_get(&g_tab[kind], handle) : NULL;
     if (!r || !r->i.blk.size) rc = -1;
     else if (!src || dst_off > r->i.blk.size || size > r->i.blk.size - dst_off) rc = -2;
-    else { memcpy((uint8_t *)r->i.blk.cpu + dst_off, src, size); rc = 0; }   // under the lock: a concurrent destroy cannot retire it mid-copy
+    else { memcpy((uint8_t *)r->i.blk.cpu + dst_off, src, size); rc = 0; VER_BUMP((vkn_buf_rec *)r); }   // under the lock: a concurrent destroy cannot retire it mid-copy ([stage 5 A3] new version)
     pthread_mutex_unlock(&g_mu);
     return rc;
 }
@@ -220,6 +224,7 @@ int vkn_buf_update_ex(int kind, uint64_t handle, uint64_t dst_off, const void *s
                 rc = 1;
             }
         }
+        if (rc != -2) VER_BUMP(r);   // [stage 5 A3] the bytes changed (in place, renamed, or in place without memory)
     }
     pthread_mutex_unlock(&g_mu);
     return rc;
@@ -233,4 +238,27 @@ int vkn_buf_has_block(int kind, uint64_t handle) {
     return has;
 }
 void vkn_buf_ustats_get(vkn_buf_ustats *s) { pthread_mutex_lock(&g_mu); *s = g_ust; pthread_mutex_unlock(&g_mu); }
+// ---- stage 5 (draw cost): several vkn_buf_get under one lock (vkn_buf.h) ----
+uint32_t vkn_buf_get_n(int kind, const uint64_t *h, uint32_t n, const vkn_block **out) {
+    if (kind < 0 || kind >= VKN_BUF_KINDS || !n) return 0;
+    uint32_t i = 0;
+    pthread_mutex_lock(&g_mu);
+    const uint64_t f = vkn_frame();
+    for (; i < n; i++) {
+        vkn_buf_rec *r = h[i] && g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], h[i]) : NULL;
+        if (!r || !r->i.blk.size) { out[i] = NULL; break; }
+        r->used = 1; r->used_frame = f; out[i] = &r->i.blk;
+        if (!r->i.blk.buf) { i++; break; }   // (the caller drops the draw at this one: nothing after it is looked up)
+    }
+    pthread_mutex_unlock(&g_mu);
+    return i;
+// ==== [stage 5 A3] content versions (vkn_buf.h; the shadow cache, vkn_shc.c) ====
+uint64_t vkn_buf_version(int kind, uint64_t handle, int *none) {
+    if (none) *none = 1;
+    if (kind < 0 || kind >= VKN_BUF_KINDS || __atomic_load_n(&g_tab_ok, __ATOMIC_ACQUIRE) <= 0) return 0;
+    const vkn_buf_rec *r = (const vkn_buf_rec *)vkn_tab_get(&g_tab[kind], handle);   // no lock: see the header
+    if (!r || !r->i.blk.size) return 0;
+    if (none) *none = r->i.usage == VKN_BUF_USAGE_DYNAMIC;
+    return __atomic_load_n(&r->ver, __ATOMIC_ACQUIRE);
+}
 #endif

@@ -85,6 +85,7 @@ typedef struct vkn_tex {
     uint8_t shared; struct vkn_tex *snext; uint64_t st_block, st_off;
     VkImageUsageFlags usage; VkImageCreateFlags cflags; VkComponentMapping swz;
     char sname[32];                            // the engine's target name (logs)
+    uint64_t shc_up;                           // [stage 5 A3] upload number (end of this header)
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index
@@ -195,6 +196,17 @@ int vkn_tex_on_rec_thread(void);
 // The comparison twins (vkn_sampler_cmp_by_id): made, ids whose game sampler compares already (its own twin), refused (no engine
 // sampler under the id / vkCreateSampler failed), alive now.
 void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed, uint32_t *alive);
+// ==== [stage 5 A3] the shadow cache (vkn_shc.c): upload numbers, own depth images ====
+// vkn_tex.shc_up: a number unique over every texture of the process, taken at creation and again whenever this module records data
+// into the image (a creation upload, vkn_tex_update, the level-tail copy of vkn_tex_swap_reduced) - in command order, so a draw recorded
+// after the new number reads the new texels. Writes by the GPU through vkn_pass (attachment, clear, copy destination, storage) do not
+// take a number: they set pass_ever, and the cache treats such a texture as having no version (never kept). Read on the recording thread.
+vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char *name);
+// The backend's own depth target: one VkImage (w x h, 1 level / layer / sample; usage depth attachment, transfer source and
+// destination) with its attachment view, class VKN_TC_DEPTH, no engine handle / cookie / pool id (no lookup finds it); vkn_pass takes it
+// as any target. NULL = failure. vkn_tex_private_free: its owner lets go (dead, the framebuffers of its view forgotten; the object is
+// retired when the last reference - vkn_pass's current set - is dropped).
+void vkn_tex_private_free(vkn_tex *t);
 
 #ifdef __cplusplus
 }
