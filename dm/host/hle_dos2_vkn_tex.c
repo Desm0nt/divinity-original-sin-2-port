@@ -22,6 +22,8 @@
 // builder / Initialize / pool registration / view / getter / WriteTexels entries are answered by the create part's stubs in the
 // game's NVN table (same in-place object layout, no translator side effects); WriteTexels copies nothing, the data reaches the
 // native image here from the engine arguments. The engine's own bookkeeping (pool-id bitmap, A at object +0xe0, records) is unchanged.
+// Stage 4 (both modes, devices without BC and DM_GFX_SIM_GPU=mali / powervr): vkn_tex looks packaged BC1..BC3 2D textures up in the
+// setup ASTC pack (vkn_astc.h; DM_VK_NATIVE_ASTC=0 = always decode); the census adds a "tex BC:" line (native / pack / decoded).
 // Not covered here: 0x914bb0 shared RT storage (every target gets its own memory, VK-NATIVE.md 3.3), texture updates after creation
 // (UI WriteTexels / CopyBufferToTexture, packets 0x2c / 0x2d: stage 3).
 #ifdef DM_GAME_DOS2
@@ -31,6 +33,7 @@
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_tex.h"
+#include "../gfx/vkn/vkn_astc.h"
 #include "hle_dos2_vkn.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
@@ -231,6 +234,24 @@ static void tex_census(void) {
              s.bytes[VKN_TC_DEPTH] / mb, s.bytes[VKN_TC_WINDOW] / mb, (unsigned long long)s.created, (unsigned long long)s.destroyed, (unsigned long long)s.uploads, s.upload_bytes / mb,
              s.upload_ns / 1e6, (unsigned long long)s.deswizzled, (unsigned long long)s.decoded, (unsigned long long)s.widened, (unsigned long long)s.swaps, s.samplers,
              (unsigned long long)s.samplers_made, (unsigned long long)s.failed, (unsigned long long)s.samplers_failed);
+    // stage 4: BC textures by storage (native BC / ASTC from the setup pack / CPU-decoded), why the decoded ones were decoded, the pack
+    const uint64_t bcm = s.bc_made[VKN_BC_NATIVE] + s.bc_made[VKN_BC_PACK] + s.bc_made[VKN_BC_DECODED];
+    if (bcm) {
+        vkn_astc_stats a; vkn_astc_get_stats(&a);
+        static const char *const k_state[4] = {"not opened", "ready", "none", "unreadable"};
+        vkn_logf("tex BC: alive native %u (%.1f MB) / ASTC pack %u (%.1f MB) / CPU-decoded %u (%.1f MB), made %llu / %llu / %llu; decoded because: no pack %llu, "
+                 "BC4-BC7 %llu, not packaged %llu, not 2D one layer %llu, pack has no such shape %llu / bytes %llu, block size %llu; mip tails as ASTC %llu; "
+                 "pack %s (%u entries, %.1f MB): lookups %llu, hits %llu, hashed %.1f MB in %.1f ms, read %llu (%.1f MB in %.1f ms), read errors %llu, "
+                 "zero blocks fixed %llu; pack path %.1f ms",
+                 s.bc_alive[VKN_BC_NATIVE], s.bc_bytes[VKN_BC_NATIVE] / mb, s.bc_alive[VKN_BC_PACK], s.bc_bytes[VKN_BC_PACK] / mb, s.bc_alive[VKN_BC_DECODED],
+                 s.bc_bytes[VKN_BC_DECODED] / mb, (unsigned long long)s.bc_made[VKN_BC_NATIVE], (unsigned long long)s.bc_made[VKN_BC_PACK],
+                 (unsigned long long)s.bc_made[VKN_BC_DECODED], (unsigned long long)s.dec_why[VKN_DW_OFF], (unsigned long long)s.dec_why[VKN_DW_FMT],
+                 (unsigned long long)s.dec_why[VKN_DW_SRC], (unsigned long long)s.dec_why[VKN_DW_SHAPE], (unsigned long long)s.dec_why[VKN_DW_MISS_SHAPE],
+                 (unsigned long long)s.dec_why[VKN_DW_MISS_KEY], (unsigned long long)s.dec_why[VKN_DW_BLOCK], (unsigned long long)s.pack_tail,
+                 a.state >= 0 && a.state < 4 ? k_state[a.state] : "?", a.entries, a.pack_bytes / mb, (unsigned long long)a.lookups, (unsigned long long)a.hits,
+                 a.hash_bytes / mb, a.hash_ns / 1e6, (unsigned long long)a.reads, a.read_bytes / mb, a.read_ns / 1e6, (unsigned long long)a.read_fails,
+                 (unsigned long long)a.zero_fixed, s.pack_ns / 1e6);
+    }
     if (s.failed || s.samplers_failed) vkn_logf(RED "tex: %llu texture / %llu sampler creations failed so far (the first 16 of each are logged)", (unsigned long long)s.failed,
                                                 (unsigned long long)s.samplers_failed);
 }

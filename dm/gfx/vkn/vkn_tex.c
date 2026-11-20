@@ -1,6 +1,7 @@
 // [DOS2] VK-NATIVE stage 2: textures and samplers (vkn_tex.h). No game addresses, no engine record offsets, no NVN objects: the NVN
 // format / target NUMBERS the engine used are plain enum values the host file passes; the Switch block-linear layout of packaged
-// storage comes from the pure helpers nvn/nvn_tex.c + tex/nvn_deswizzle.c, CPU BC decoding from tex/nvn_bcdec.c.
+// storage comes from the pure helpers nvn/nvn_tex.c + tex/nvn_deswizzle.c, CPU BC decoding from tex/nvn_bcdec.c, the ASTC blocks of
+// the setup pack (stage 4, devices without BC) from vkn_astc.c.
 // Tables (one mutex g_mu): handle index -> linked texture (vkn_tab), cookie -> texture (chained hash), texture slot -> texture, engine
 // texture-pool id -> (slot, view) (pages of 4096 u32 over the engine's 0x100000 ids), sampler handle -> (pool id, VkSampler) and
 // sampler-pool id -> VkSampler (0x1000 ids).
@@ -10,6 +11,7 @@
 #ifdef DM_GAME_DOS2
 #include "vkn_tex.h"
 #include "vkn_state.h"   // vkn_fb_forget_view: framebuffers of a dying texture's views
+#include "vkn_astc.h"    // stage 4: the setup ASTC pack
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -224,6 +226,8 @@ static void tex_free(void *ctx) {
     }
     free(t->att_views); free(t);
 }
+// How a BC texture is stored (VKN_BC_*), -1 = not a BC format.
+static int bc_kind(const vkn_tex *t) { return !fmt_is_bc(t->nvn_fmt) ? -1 : t->astc ? VKN_BC_PACK : t->decoded ? VKN_BC_DECODED : VKN_BC_NATIVE; }
 static void unref_locked(vkn_tex *t) { if (t->refs && !--t->refs) vkn_retire(tex_free, t); }
 static void unref(vkn_tex *t) { pthread_mutex_lock(&g_mu); unref_locked(t); pthread_mutex_unlock(&g_mu); }
 // The engine is done with t: out of every table, its engine reference dropped.
@@ -239,6 +243,7 @@ static void kill_locked(vkn_tex *t) {
     if (t->att_views) for (uint32_t i = 0, n = t->mips * t->layers; i < n; i++) vkn_fb_forget_view(t->att_views[i]);
     if (t->slot < TEX_SLOTS && g_slot[t->slot] == t) { g_slot[t->slot] = NULL; g_free_slot[g_nfree++] = t->slot; }
     if (t->cls < VKN_TC_N) { g_st.alive[t->cls]--; g_st.bytes[t->cls] -= t->bytes; }
+    const int k = bc_kind(t); if (k >= 0) { g_st.bc_alive[k]--; g_st.bc_bytes[k] -= t->bytes; }
     g_st.destroyed++;
     unref_locked(t);
 }
@@ -311,6 +316,29 @@ static VkImageView make_view(VkDevice dev, vkn_tex *t, VkImageViewType type, VkI
     return vkCreateImageView(dev, &vi, NULL, &v) == VK_SUCCESS ? v : VK_NULL_HANDLE;
 }
 
+// ---- stage 4: the setup ASTC pack (vkn_astc.h) on a device without BC ----
+// The pack's entry for this creation: 1 = hit (*pe), else 0 and *dw = why the texture is decoded (VKN_DW_*). The key is the one of the
+// translator (xbg_game.cpp astccache::lookup): the storage bytes of the packaged layout (nvn_tex_layout of the builder's description,
+// the bytes the engine's image holds at its storage pointer), the NVN format the engine gave (sRGB twin included), w, h, levels as the
+// engine gave them (before the level clamp of vkn_tex_create, like the builder's). Linear data is never keyed: the tool keys the XTX
+// storage, which the engine hands over only as packaged storage.
+static int pack_try(const vkn_tex_desc *d, const vkn_tex_src *src, uint32_t nvn, vkn_astc_entry *pe, int *dw) {
+    if (nvn < 0x41 || nvn > 0x48) { *dw = VKN_DW_FMT; return 0; }
+    if (!src || src->kind != VKN_SRC_PACKAGED || !src->storage) { *dw = VKN_DW_SRC; return 0; }
+    if (vkn_astc_open() != VKN_ASTC_READY) { *dw = VKN_DW_OFF; return 0; }
+    const uint32_t levels = d->mips ? d->mips : 1;
+    nvn_texdesc nd; nvn_texlayout L; memset(&nd, 0, sizeof nd); memset(&L, 0, sizeof L);
+    nd.target = (int)d->nvn_target; nd.format = (int)nvn; nd.width = d->w; nd.height = d->h; nd.depth = src->nvn_depth ? src->nvn_depth : 1; nd.levels = levels;
+    nd.pkg_block_h = src->pkg_block_h;
+    nvn_tex_layout(&nd, &L);
+    if (!vkn_astc_cacheable(nvn, d->nvn_target, L.layers, d->samples, L.size, d->w, d->h) || L.size > src->storage_bytes) { *dw = VKN_DW_SHAPE; return 0; }
+    const char *why = NULL;
+    if (vkn_astc_lookup(src->storage, L.size, nvn, levels, d->w, d->h, pe, &why)) return 1;
+    *dw = !why ? VKN_DW_OFF : !strcmp(why, "shape") ? VKN_DW_MISS_SHAPE : !strcmp(why, "key") ? VKN_DW_MISS_KEY : !strcmp(why, "block") ? VKN_DW_BLOCK : VKN_DW_OFF;
+    return 0;
+}
+static __thread uint8_t t_force_astc;   // vkn_tex_swap_reduced: make this BC texture an (empty) ASTC image of this block size
+
 static __thread const uint8_t *t_swz;   // vkn_tex_create_swz (UI piece): the view swizzle of this creation, NULL = the format's own
 vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const char **why) {
     const char *dummy; if (!why) why = &dummy;
@@ -331,11 +359,20 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     const int rt = d->cls == VKN_TC_COLOR || d->cls == VKN_TC_DEPTH || d->cls == VKN_TC_WINDOW;
     VkFormatFeatureFlags ff = fmt_feat(fmt);
     const VkFormatFeatureFlags want_s = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-    uint8_t decoded = 0, widened = 0;
-    if (fmt_is_bc(nvn) && ((ff & want_s) != want_s || sim_no_bc())) {   // no native BC sampling (or the Mali / PowerVR model): decoded once here
-        int bpp = 0; uint32_t pf = 0;
-        if (!nvn_bc_unpacked(nvn, &pf, &bpp) || (fmt = bc_decoded(nvn)) == VK_FORMAT_UNDEFINED) { *why = "BC format the CPU decoder does not know"; goto fail0; }
-        p.mode = 1; p.dbpb = (uint32_t)bpp; decoded = 1; ff = fmt_feat(fmt);
+    uint8_t decoded = 0, widened = 0, astc = 0; int dw = VKN_DW_OFF; uint64_t pack_ns = 0;
+    vkn_astc_entry pe; memset(&pe, 0, sizeof pe);
+    if (fmt_is_bc(nvn) && ((ff & want_s) != want_s || sim_no_bc())) {   // no native BC sampling (or the Mali / PowerVR model)
+        // stage 4: the ASTC pack's blocks when it has this texture (read below, after the image), else decoded once here
+        const uint64_t a0 = vkn_now_ns();
+        if (t_force_astc) astc = t_force_astc;
+        else if (pack_try(d, src, nvn, &pe, &dw)) astc = pe.bw;
+        pack_ns = vkn_now_ns() - a0;
+        if (astc) { fmt = vkn_astc_vkformat(astc, astc, vkn_astc_srgb(nvn)); ff = fmt_feat(fmt); }
+        else {
+            int bpp = 0; uint32_t pf = 0;
+            if (!nvn_bc_unpacked(nvn, &pf, &bpp) || (fmt = bc_decoded(nvn)) == VK_FORMAT_UNDEFINED) { *why = "BC format the CPU decoder does not know"; goto fail0; }
+            p.mode = 1; p.dbpb = (uint32_t)bpp; decoded = 1; ff = fmt_feat(fmt);
+        }
     } else if ((ff & want_s) != want_s && !rt) {
         VkFormat to;
         if (widen_of(nvn, &to, &p.cs, &p.one)) { p.mode = 2; p.dbpb = 4 * p.cs; fmt = to; widened = 1; ff = fmt_feat(fmt); }
@@ -371,7 +408,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     if (!t) { *why = "no memory"; goto fail0; }
     t->cookie = d->cookie; t->format = fmt; t->aspect = fmt_aspect(fmt); t->w = w; t->h = h; t->depth = dep; t->mips = mips; t->layers = layers;
     t->samples = (uint32_t)samples; t->efmt = d->efmt; t->nvn_fmt = nvn; t->nvn_target = tg; t->cls = d->cls < VKN_TC_N ? d->cls : VKN_TC_SAMPLED; t->cube = (uint8_t)cube;
-    t->decoded = decoded; t->widened = widened; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
+    t->decoded = decoded; t->widened = widened; t->astc = astc; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
     memcpy(t->layer_ids, d->layer_ids, sizeof t->layer_ids);
     p.t = t;
     if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; *why = "vkCreateImage failed"; goto fail1; }
@@ -400,7 +437,27 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     // data -> one staging block
     up_ctx *u = NULL; uint64_t total = 0; uint32_t nc = 0;
     const int has_data = src && ((src->kind == VKN_SRC_REGIONS && src->nreg) || (src->kind == VKN_SRC_PACKAGED && src->storage));
-    if (has_data && samples == VK_SAMPLE_COUNT_1_BIT) {
+    if (astc && !t_force_astc) {
+        // stage 4: the entry's blocks (every level the pack holds; level 0 first, tight 16-byte blocks: every level offset is a multiple
+        // of 16, the texel block size) read into one staging block, one copy per level. The key includes the level count, so the entry
+        // has exactly the engine's levels; only the level clamp above could leave fewer in the image (then only those are copied).
+        const uint32_t nl = mips < pe.levels ? mips : pe.levels;
+        u = (up_ctx *)calloc(1, sizeof *u + sizeof(VkBufferImageCopy) * nl);
+        if (!u) { *why = "no memory"; goto fail1; }
+        if (vkn_block_alloc(VKN_ARENA_STAGING, pe.data_bytes, 16, &u->blk)) { free(u); u = NULL; *why = "no staging memory"; goto fail1; }
+        u->have_blk = 1; total = pe.data_bytes;
+        const uint64_t r0 = vkn_now_ns();
+        vkn_astc_read(&pe, (uint8_t *)u->blk.cpu);   // (a short read leaves transparent black: counted and logged there)
+        pack_ns += vkn_now_ns() - r0;
+        uint64_t off = 0;
+        for (uint32_t l = 0; l < nl; l++) {
+            VkBufferImageCopy *c = &u->c[nc++];
+            c->bufferOffset = u->blk.off + off; c->bufferRowLength = 0; c->bufferImageHeight = 0;
+            c->imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+            c->imageOffset = (VkOffset3D){0, 0, 0}; c->imageExtent = (VkExtent3D){mipdim(w, l), mipdim(h, l), 1};
+            off += vkn_astc_level_bytes(&pe, l);
+        }
+    } else if (has_data && samples == VK_SAMPLE_COUNT_1_BIT) {
         nvn_texdesc nd = {0}; nvn_texlayout L = {0};
         uint32_t maxc = src->kind == VKN_SRC_REGIONS ? src->nreg : mips * (d3 ? 1 : layers);
         if (src->kind == VKN_SRC_PACKAGED) {
@@ -468,6 +525,9 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     const uint32_t b = cookie_bucket(t->cookie); t->hnext = g_cookie[b]; g_cookie[b] = t;
     if (t->slot != ~0u) ids_set_locked(t);
     g_st.alive[t->cls]++; g_st.bytes[t->cls] += t->bytes; g_st.created++;
+    { const int k = bc_kind(t); if (k >= 0) { g_st.bc_alive[k]++; g_st.bc_bytes[k] += t->bytes; g_st.bc_made[k]++; } }
+    if (decoded) g_st.dec_why[dw]++;
+    g_st.pack_ns += pack_ns;
     if (u) { t->refs++; g_st.uploads += nc ? 1 : 0; g_st.upload_bytes += total; g_st.decoded += decoded; g_st.widened += widened; g_st.upload_ns += vkn_now_ns() - t0; }
     pthread_mutex_unlock(&g_mu);
     if (u) vkn_upload_push(up_run, u, total);
@@ -533,7 +593,38 @@ static void tail_run(VkCommandBuffer cb, void *ctx) {
     pthread_mutex_lock(&g_mu); unref_locked(u->src); unref_locked(u->dst); pthread_mutex_unlock(&g_mu);
     free(u);
 }
+// Stage 4: the engine's smaller texture (0x920460 makes it by 0x91e2a0 with the old texture's NVN format and flags, no data) was made
+// CPU-decoded on a device without BC, while the old one is stored from the ASTC pack: vkCmdCopyImage cannot copy ASTC blocks into
+// RGBA8. The new one is made again as an empty image in the old one's ASTC block size (sRGB-ness of its own format; UNORM / sRGB of
+// one block size are copy-compatible), under the same handle and cookie (vkn_tex_create replaces the decoded one: same pool ids).
+static void remake_astc(uint64_t old_cookie, uint64_t new_cookie) {
+    pthread_mutex_lock(&g_mu);
+    vkn_tex *o = g_init > 0 ? cookie_find_locked(old_cookie) : NULL, *n = g_init > 0 ? cookie_find_locked(new_cookie) : NULL;
+    // (n linked under its temporary handle: the engine made it inside this very call; an unlinked one would re-link a handle index
+    // that may belong to another texture by now)
+    if (!o || !n || !o->astc || !n->decoded || n->astc || !n->linked || !fmt_is_bc(n->nvn_fmt) || n->samples != 1) { pthread_mutex_unlock(&g_mu); return; }
+    vkn_tex_desc d; memset(&d, 0, sizeof d);
+    const uint32_t tg = n->nvn_target;
+    d.efmt = n->efmt; d.nvn_fmt = n->nvn_fmt; d.nvn_target = tg; d.w = n->w; d.h = n->h; d.depth = n->depth; d.mips = n->mips; d.samples = 1; d.cls = n->cls;
+    d.layers = tg == 9 ? n->layers / 6 : (tg == 3 || tg == 4 || tg == 6) ? n->layers : 1;
+    d.pool_id = n->pool_id; memcpy(d.layer_ids, n->layer_ids, sizeof d.layer_ids); d.sampler_id = n->sampler_id; d.cookie = n->cookie;
+    const uint64_t h = n->handle; const uint8_t b = o->astc;
+    pthread_mutex_unlock(&g_mu);
+    const char *why = NULL;
+    t_force_astc = b;
+    vkn_tex *r = vkn_tex_create(h, &d, NULL, &why);
+    t_force_astc = 0;
+    pthread_mutex_lock(&g_mu);
+    if (r) g_st.pack_tail++;
+    pthread_mutex_unlock(&g_mu);
+    if (!r) {
+        static uint32_t told;
+        if (__atomic_fetch_add(&told, 1, __ATOMIC_RELAXED) < 16)
+            vkn_logf(RED "tex: mip reduction %ux%u x %u levels (NVN %#x): ASTC %ux%u image failed (%s): the level tail stays undefined", d.w, d.h, d.mips, d.nvn_fmt, b, b, why ? why : "?");
+    }
+}
 int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cookie) {
+    remake_astc(old_cookie, new_cookie);
     tail_ctx *u = (tail_ctx *)calloc(1, sizeof *u); if (!u) return -1;
     pthread_mutex_lock(&g_mu);
     vkn_tex *o = g_init > 0 ? cookie_find_locked(old_cookie) : NULL, *n = g_init > 0 ? cookie_find_locked(new_cookie) : NULL;
@@ -547,7 +638,7 @@ int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cook
     handle_link_locked(n, handle);
     g_st.swaps++;
     // engine 0x920b00 rule: same format only; one level each -> one copy (smaller depth); else new level i <- old level (n_old - n_new + i)
-    int ok = o->format == n->format && n->mips <= o->mips;
+    int ok = (o->format == n->format || (o->astc && o->astc == n->astc)) && n->mips <= o->mips;   // (ASTC: UNORM / sRGB twins copy as they are)
     if (ok)
         for (uint32_t i = 0; i < n->mips && u->n < 16; i++) {
             const uint32_t sl = o->mips - n->mips + i, nl = o->layers < n->layers ? o->layers : n->layers;
@@ -673,6 +764,7 @@ static void ust_count(uint64_t *c) { pthread_mutex_lock(&g_mu); (*c)++; pthread_
 int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *rows, uint32_t pitch) {
     if (!t || !rows || t->dead || !t->image || t->samples != 1) { ust_count(&g_ust.dropped_dead); return -1; }
     if (level >= t->mips || layer >= (t->nvn_target == 2 ? mipdim(t->depth, level) : t->layers)) { ust_count(&g_ust.dropped_rect); return -1; }
+    if (t->astc) { ust_count(&g_ust.dropped_fmt); return -1; }   // stage 4: stored from the ASTC pack; BC rows cannot go into it (no CPU ASTC encoder here)
     // format facts as at creation (the texture's NVN number; decoded / widened textures convert the same way)
     prep p; memset(&p, 0, sizeof p);
     p.nvn = t->nvn_fmt;

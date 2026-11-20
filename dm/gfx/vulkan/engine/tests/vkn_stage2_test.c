@@ -14,6 +14,10 @@
 //            linear data, a packaged (block-linear) texture built by hand with the Tegra GOB formula, BC on a device without BC (CPU decode),
 //            RGB widening, render / depth target usage, pool-id lookups, destroy, mip-reduction swap, samplers for every filter / wrap /
 //            compare value (MAP-1 §3.2 and CreateSampler 0x921e40);
+//   ASTC     stage 4, the setup pack (vkn_astc.c) on a device without BC: a synthetic D3AC pack written here (hit with every level and the
+//            zero-block fix, the sRGB twin, 6x6 with two levels, key miss with an entry of another byte count, level count in the key /
+//            shape filter without hashing, block size the device lacks, linear / BC4 / cube never looked up, an update refused, the mip
+//            reduction re-made as ASTC + its tail copy, no pack / corrupt entry / bad magic / DM_VK_NATIVE_ASTC=0, a short read);
 //   state    blend factors / ops, depth-stencil funcs / ops, cull / fill (MAP-1 §3.2, 0x922530 / 0x922d10 / 0x923360; expected tables
 //            written here from the doc's NVN numbers, not from the code), vertex formats (MAP-1 §3.1, 0x9181d0; the engine's own
 //            fullscreen-mesh element list of 0x1f58698), the write-mask rule (0x9282c0, MAP-2), the primitive table 0x1f58640, the render
@@ -30,7 +34,7 @@
 // From the repository root (one command line; wrapped here):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage2_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage2_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c
-//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
+//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/vkn/vkn_astc.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
 //       dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage2_test
 // (the game defines of the dos2 build, dm/android/CMakeLists.txt: nvn_tex.c's layout rules depend on DM_GAME_D3; -fsanitize=address,undefined
 // works the same way.)
@@ -42,10 +46,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "vkn_mock_vk.h"
 #include "../../../vkn/vkn.h"
 #include "../../../vkn/vkn_buf.h"
 #include "../../../vkn/vkn_tex.h"
+#include "../../../vkn/vkn_astc.h"
 #include "../../../vkn/vkn_shader.h"
 #include "../../../vkn/vkn_state.h"
 #include "../../../vkn/vkn_mirror.h"
@@ -931,6 +937,265 @@ static void test_tex_packaged(void) {
     flush_logged(); frames(3);
 }
 
+// ---- stage 4: the setup ASTC pack (vkn_astc.c) on a device without BC ----
+// The key function of the dos2 build lives in xbg_game.cpp (zlib); the test gives its own CRC-32 / Adler-32 (checked against the
+// published check values), written here from the definitions.
+static uint32_t t_crc32(const uint8_t *p, uint64_t n) {
+    uint32_t c = 0xffffffffu;
+    for (uint64_t i = 0; i < n; i++) { c ^= p[i]; for (int k = 0; k < 8; k++) c = c & 1 ? (c >> 1) ^ 0xEDB88320u : c >> 1; }
+    return ~c;
+}
+static uint32_t t_adler32(const uint8_t *p, uint64_t n) {
+    uint32_t a = 1, b = 0;
+    for (uint64_t i = 0; i < n; i++) { a = (a + p[i]) % 65521u; b = (b + a) % 65521u; }
+    return b << 16 | a;
+}
+static int g_key_calls;
+int xbg_astc_storage_key(const void *mem, uint64_t size, uint32_t *crc, uint32_t *adler) {
+    g_key_calls++; *crc = t_crc32((const uint8_t *)mem, size); *adler = t_adler32((const uint8_t *)mem, size); return 0;
+}
+typedef struct { vkn_astc_entry e; const uint8_t *data; } tp_ent;
+static int tp_less(const void *a, const void *b) {   // the tool's sort key: crc, adler, bytes, format, width, height, levels
+    const vkn_astc_entry *x = &((const tp_ent *)a)->e, *y = &((const tp_ent *)b)->e;
+    const uint64_t kx[7] = {x->crc, x->adler, x->bytes, x->format, x->width, x->height, x->levels}, ky[7] = {y->crc, y->adler, y->bytes, y->format, y->width, y->height, y->levels};
+    for (int i = 0; i < 7; i++) if (kx[i] != ky[i]) return kx[i] < ky[i] ? -1 : 1;
+    return 0;
+}
+// Writes a D3AC v1 pack: header, the entries' data in their order, the sorted index. data_bytes as given (a wrong one tests the
+// reader); the data written is data_bytes long.
+static void tp_write(const char *path, tp_ent *e, uint32_t n, const char *magic) {
+    FILE *f = fopen(path, "wb"); CHECK(f != NULL); if (!f) return;
+    vkn_astc_hdr h; memset(&h, 0, sizeof h); memcpy(h.magic, magic, 4); h.version = 1; h.entries = n; h.data_off = 64;
+    fwrite(&h, 64, 1, f);
+    uint64_t off = 64;
+    for (uint32_t i = 0; i < n; i++) { e[i].e.data_off = off; fwrite(e[i].data, 1, e[i].e.data_bytes, f); off += e[i].e.data_bytes; }
+    h.data_bytes = off - 64; h.index_off = off;
+    qsort(e, n, sizeof *e, tp_less);
+    for (uint32_t i = 0; i < n; i++) fwrite(&e[i].e, sizeof e[i].e, 1, f);
+    fseek(f, 0, SEEK_SET); fwrite(&h, 64, 1, f); fclose(f);
+}
+static tp_ent tp_of(const uint8_t *stor, uint64_t bytes, uint16_t fmt, uint16_t w, uint16_t h, uint16_t levels, uint8_t b, const uint8_t *data, uint32_t data_bytes) {
+    tp_ent t; memset(&t, 0, sizeof t);
+    t.e.crc = t_crc32(stor, bytes); t.e.adler = t_adler32(stor, bytes); t.e.bytes = (uint32_t)bytes; t.e.format = fmt; t.e.width = w; t.e.height = h; t.e.levels = levels;
+    t.e.bw = t.e.bh = b; t.e.data_bytes = data_bytes; t.e.psnr_x100 = 4500; t.data = data;
+    return t;
+}
+// Packaged storage of a 2D texture: the bytes are a pattern (a hit never decodes them; a miss decodes them as whatever BC they are).
+static uint8_t *tp_storage(uint32_t nvn, uint32_t w, uint32_t h, uint32_t levels, uint32_t target, uint8_t seed, uint64_t *bytes) {
+    nvn_texdesc nd; memset(&nd, 0, sizeof nd); nd.target = (int)target; nd.format = (int)nvn; nd.width = w; nd.height = h; nd.depth = 1; nd.levels = levels; nd.pkg_block_h = 1;
+    nvn_texlayout L; nvn_tex_layout(&nd, &L);
+    uint8_t *s = (uint8_t *)malloc((size_t)L.size);
+    for (uint64_t i = 0; s && i < L.size; i++) s[i] = (uint8_t)(i * 7 + seed);
+    *bytes = L.size; return s;
+}
+static vkn_tex *tp_create(uint64_t handle, uint32_t nvn, uint32_t w, uint32_t h, uint32_t levels, uint32_t target, const uint8_t *stor, uint64_t bytes, uint64_t cookie,
+                          uint32_t pool, const char **why) {
+    vkn_tex_desc d = tdesc(55, target, w, h, levels, 1, VKN_TC_SAMPLED, cookie, pool); d.nvn_fmt = nvn;
+    vkn_tex_src s = {VKN_SRC_PACKAGED, NULL, 0, stor, bytes, 1, 1};
+    return vkn_tex_create(handle, &d, &s, why);
+}
+static void test_tex_astc_pack(void) {
+    static const char *const path = "/tmp/vkn_stage2_astc.pack";
+    // the test's key function = zlib's (check values of CRC-32 and Adler-32)
+    CHECK_EQ(t_crc32((const uint8_t *)"123456789", 9), 0xCBF43926u); CHECK_EQ(t_adler32((const uint8_t *)"Wikipedia", 9), 0x11E60398u);
+    // pure pieces
+    vkn_astc_entry pe; memset(&pe, 0, sizeof pe); pe.width = 20; pe.height = 12; pe.bw = pe.bh = 6; pe.levels = 3;
+    CHECK_EQ(vkn_astc_level_bytes(&pe, 0), 4 * 2 * 16); CHECK_EQ(vkn_astc_level_bytes(&pe, 1), 2 * 1 * 16); CHECK_EQ(vkn_astc_level_bytes(&pe, 4), 16);
+    CHECK_EQ(vkn_astc_vkformat(4, 4, 1), VK_FORMAT_ASTC_4x4_SRGB_BLOCK); CHECK_EQ(vkn_astc_vkformat(5, 5, 0), VK_FORMAT_ASTC_5x5_UNORM_BLOCK);
+    CHECK_EQ(vkn_astc_vkformat(6, 6, 1), VK_FORMAT_ASTC_6x6_SRGB_BLOCK); CHECK_EQ(vkn_astc_vkformat(8, 8, 0), VK_FORMAT_UNDEFINED);
+    CHECK(vkn_astc_srgb(0x48) && vkn_astc_srgb(0x45) && !vkn_astc_srgb(0x44) && !vkn_astc_srgb(0x41));
+    CHECK(vkn_astc_cacheable(0x44, 1, 1, 1, 4096, 64, 64)); CHECK(!vkn_astc_cacheable(0x49, 1, 1, 1, 4096, 64, 64)); CHECK(!vkn_astc_cacheable(0x44, 8, 6, 1, 4096, 64, 64));
+    CHECK(!vkn_astc_cacheable(0x44, 1, 2, 1, 4096, 64, 64)); CHECK(!vkn_astc_cacheable(0x44, 1, 1, 4, 4096, 64, 64)); CHECK(!vkn_astc_cacheable(0x44, 1, 1, 1, 4096, 70000, 64));
+    { uint8_t z[48]; memset(z, 0, sizeof z); z[20] = 1; CHECK_EQ(vkn_astc_sanitize(z, 48), 2); CHECK(z[0] == 0xFC && z[1] == 0xFD && z[7] == 0xFF && z[8] == 0 && z[20] == 1 && z[32] == 0xFC); }
+
+    // storages: A BC3 16x16 x 3 levels, B the same shape with other bytes, C BC1 20x20 (5x5 entry), D BC1 12x12 x 2 levels (6x6 entry)
+    uint64_t na, nb, nc, nd;
+    uint8_t *sa = tp_storage(0x44, 16, 16, 3, 1, 3, &na), *sb = tp_storage(0x44, 16, 16, 3, 1, 9, &nb), *sc = tp_storage(0x42, 20, 20, 1, 1, 5, &nc),
+            *sd = tp_storage(0x42, 12, 12, 2, 1, 1, &nd);
+    CHECK(sa && sb && sc && sd); if (!sa || !sb || !sc || !sd) { free(sa); free(sb); free(sc); free(sd); return; }
+    CHECK_EQ(na, nb);
+    uint8_t da[336], dc[256], dd[80];   // A: 4x4 blocks 256 + 64 + 16; C: 5x5 blocks 4 x 4 x 16; D: 6x6 blocks 2 x 2 x 16 + 16
+    for (unsigned i = 0; i < sizeof da; i++) da[i] = (uint8_t)((i * 13 + 1) | 1);
+    memset(da + 256, 0, 16);   // an all-zero block in level 1: arrives as the void extent of transparent black
+    for (unsigned i = 0; i < sizeof dc; i++) dc[i] = (uint8_t)(i | 0x80);
+    for (unsigned i = 0; i < sizeof dd; i++) dd[i] = (uint8_t)(255 - i);
+    uint8_t ea[336]; memcpy(ea, da, sizeof ea); vkn_astc_sanitize(ea, sizeof ea);
+    tp_ent ents[5] = {tp_of(sa, na, 0x44, 16, 16, 3, 4, da, 336), tp_of(sa, na, 0x48, 16, 16, 3, 4, da, 336), tp_of(sb, nb, 0x44, 16, 16, 3, 4, da, 336),
+                      tp_of(sc, nc, 0x42, 20, 20, 1, 5, dc, 256), tp_of(sd, nd, 0x42, 12, 12, 2, 6, dd, 80)};
+    ents[2].e.bytes = (uint32_t)nb + 16;   // B's CRC / Adler, another byte count: B must miss
+    tp_write(path, ents, 5, "D3AC");
+    // the pure lookup over the written (sorted) index
+    { vkn_astc_entry idx[5]; for (int i = 0; i < 5; i++) idx[i] = ents[i].e;
+      CHECK(vkn_astc_find(idx, 5, t_crc32(sa, na), t_adler32(sa, na), (uint32_t)na, 0x48, 3, 16, 16) >= 0);
+      CHECK_EQ(vkn_astc_find(idx, 5, t_crc32(sa, na), t_adler32(sa, na), (uint32_t)na, 0x48, 2, 16, 16), -1);
+      CHECK_EQ(vkn_astc_find(idx, 5, t_crc32(sb, nb), t_adler32(sb, nb), (uint32_t)nb, 0x44, 3, 16, 16), -1); }
+
+    setenv("DM_ASTC_CACHE_PATH", path, 1); unsetenv("DM_VK_NATIVE_ASTC");
+    mk_bc = 0; mk_astc = 5;   // no BC; ASTC 4x4 and 6x6, no 5x5
+    vkn_astc_reset();
+    vkn_tex_stats s0; vkn_tex_get_stats(&s0);
+    const uint64_t pend0 = vkn_upload_pending_bytes();
+    const char *why = NULL;
+    // hit: ASTC 4x4 UNORM, every level from the pack, the zero block fixed, no CPU decode
+    vkn_tex *A = tp_create(H(300, 1), 0x44, 16, 16, 3, 1, sa, na, 0x3A0, 3000, &why);
+    CHECK(A != NULL);
+    vkn_astc_stats as; vkn_astc_get_stats(&as);
+    CHECK_EQ(as.state, VKN_ASTC_READY); CHECK_EQ(as.entries, 5); CHECK_EQ(as.block_ok[0], 1); CHECK_EQ(as.block_ok[1], 0); CHECK_EQ(as.block_ok[2], 1);
+    if (A) {
+        CHECK_EQ(A->format, VK_FORMAT_ASTC_4x4_UNORM_BLOCK); CHECK_EQ(A->astc, 4); CHECK_EQ(A->decoded, 0); CHECK_EQ(A->mips, 3);
+        mk_obj *im = img_of(A); CHECK(im && im->ici.format == VK_FORMAT_ASTC_4x4_UNORM_BLOCK && im->ici.mipLevels == 3);
+        CHECK_EQ(vkn_upload_pending_bytes(), pend0 + 336);
+        CHECK_EQ(as.hits, 1); CHECK_EQ(as.reads, 1); CHECK_EQ(as.read_bytes, 336); CHECK_EQ(as.zero_fixed, 1); CHECK_EQ(as.read_fails, 0); CHECK_EQ(as.hash_bytes, na);
+        flush_logged();
+        CHECK_EQ(copies_of(A->image), 3);
+        const mk_copy_t *c0 = copy_of(A->image, 0, 0, 0), *c1 = copy_of(A->image, 1, 0, 0), *c2 = copy_of(A->image, 2, 0, 0);
+        CHECK(c0 && c1 && c2);
+        if (c0 && c1 && c2 && c0->src && c1->src && c2->src) {
+            CHECK(!memcmp(c0->src, ea, 256)); CHECK(!memcmp(c1->src, ea + 256, 64)); CHECK(!memcmp(c2->src, ea + 320, 16));
+            CHECK(c1->src[0] == 0xFC && c1->src[1] == 0xFD);   // the fixed block
+            CHECK_EQ(c1->c.bufferOffset - c0->c.bufferOffset, 256); CHECK_EQ(c2->c.bufferOffset - c1->c.bufferOffset, 64); CHECK_EQ(c0->c.bufferOffset % 16, 0);
+            CHECK_EQ(c0->c.imageExtent.width, 16); CHECK_EQ(c1->c.imageExtent.width, 8); CHECK_EQ(c2->c.imageExtent.height, 4);
+            CHECK_EQ(c1->c.imageSubresource.aspectMask, VK_IMAGE_ASPECT_COLOR_BIT);
+        } else CHECK(0);
+        CHECK_EQ(A->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // an update with BC rows cannot go into the ASTC image
+        vkn_tex_update_stats us0, us1; vkn_tex_update_stats_get(&us0);
+        uint8_t row[64]; memset(row, 1, sizeof row);
+        CHECK_EQ(vkn_tex_update(A, 0, 0, 0, 0, 16, 4, row, 64), -1);
+        vkn_tex_update_stats_get(&us1); CHECK_EQ(us1.dropped_fmt, us0.dropped_fmt + 1);
+    }
+    // the sRGB twin entry: ASTC 4x4 sRGB over the same blocks
+    vkn_tex *A2 = tp_create(H(301, 1), 0x48, 16, 16, 3, 1, sa, na, 0x3A1, ~0u, &why);
+    CHECK(A2 != NULL); if (A2) { CHECK_EQ(A2->format, VK_FORMAT_ASTC_4x4_SRGB_BLOCK); CHECK_EQ(A2->astc, 4); }
+    // the same shape, other bytes (the entry with its key has another byte count): key miss -> decoded
+    vkn_tex *B = tp_create(H(302, 1), 0x44, 16, 16, 3, 1, sb, nb, 0x3A2, ~0u, &why);
+    CHECK(B != NULL); if (B) { CHECK_EQ(B->decoded, 1); CHECK_EQ(B->astc, 0); CHECK_EQ(B->format, VK_FORMAT_R8G8B8A8_UNORM); }
+    // A's bytes with 2 levels: the level count is part of the key (and of the layout): shape miss, never hashed
+    const int kc0 = g_key_calls;
+    uint64_t na2; uint8_t *sa2 = tp_storage(0x44, 16, 16, 2, 1, 3, &na2);
+    vkn_tex *A3 = sa2 ? tp_create(H(303, 1), 0x44, 16, 16, 2, 1, sa2, na2, 0x3A3, ~0u, &why) : NULL;
+    CHECK(A3 != NULL); if (A3) CHECK_EQ(A3->decoded, 1);
+    CHECK_EQ(g_key_calls, kc0);
+    free(sa2);
+    // a 5x5 entry on a device without 5x5: decoded
+    vkn_tex *C = tp_create(H(304, 1), 0x42, 20, 20, 1, 1, sc, nc, 0x3A4, ~0u, &why);
+    CHECK(C != NULL); if (C) CHECK_EQ(C->decoded, 1);
+    // a 6x6 entry, two levels: 12x12 = 2 x 2 blocks, 6x6 = one block
+    vkn_tex *D = tp_create(H(305, 1), 0x42, 12, 12, 2, 1, sd, nd, 0x3A5, ~0u, &why);
+    CHECK(D != NULL);
+    if (D) {
+        CHECK_EQ(D->format, VK_FORMAT_ASTC_6x6_UNORM_BLOCK); CHECK_EQ(D->astc, 6);
+        flush_logged();
+        const mk_copy_t *c0 = copy_of(D->image, 0, 0, 0), *c1 = copy_of(D->image, 1, 0, 0);
+        CHECK(c0 && c1 && copies_of(D->image) == 2);
+        if (c0 && c1 && c0->src && c1->src) {
+            CHECK(!memcmp(c0->src, dd, 64)); CHECK(!memcmp(c1->src, dd + 64, 16)); CHECK_EQ(c1->c.bufferOffset - c0->c.bufferOffset, 64);
+            CHECK_EQ(c0->c.imageExtent.width, 12); CHECK_EQ(c1->c.imageExtent.width, 6); CHECK_EQ(c1->c.imageExtent.height, 6);
+        } else CHECK(0);
+    }
+    // not looked up: linear data, BC4, a cube
+    { static uint8_t lin16[16 * 16];   // BC3 16x16: 16 blocks
+      vkn_tex_region r = {0, 0, 0, 16, 16, 1, lin16};
+      vkn_tex_desc d = tdesc(55, 1, 16, 16, 1, 1, VKN_TC_SAMPLED, 0x3A6, ~0u); vkn_tex_src s = {VKN_SRC_REGIONS, &r, 1, NULL, 0, 0, 0};
+      vkn_tex *t = vkn_tex_create(H(306, 1), &d, &s, &why); CHECK(t && t->decoded); }
+    uint64_t n4; uint8_t *s4 = tp_storage(0x49, 16, 16, 1, 1, 2, &n4);
+    vkn_tex *T4 = s4 ? tp_create(H(307, 1), 0x49, 16, 16, 1, 1, s4, n4, 0x3A7, ~0u, &why) : NULL;
+    CHECK(T4 && T4->decoded && T4->format == VK_FORMAT_R8_UNORM);
+    free(s4);
+    { uint8_t *big = (uint8_t *)calloc(1, 1 << 16);
+      vkn_tex *Q = big ? tp_create(H(308, 1), 0x44, 16, 16, 1, 8, big, 1 << 16, 0x3A8, ~0u, &why) : NULL;
+      CHECK(Q && Q->decoded && Q->layers == 6); free(big); }
+    vkn_astc_get_stats(&as);
+    CHECK_EQ(as.hits, 3); CHECK_EQ(as.miss_key, 1); CHECK_EQ(as.miss_shape, 1); CHECK_EQ(as.miss_block, 1); CHECK_EQ(as.lookups, 6);
+    vkn_tex_stats s1; vkn_tex_get_stats(&s1);
+    CHECK_EQ(s1.bc_made[VKN_BC_PACK] - s0.bc_made[VKN_BC_PACK], 3); CHECK_EQ(s1.bc_made[VKN_BC_DECODED] - s0.bc_made[VKN_BC_DECODED], 6);
+    CHECK_EQ(s1.bc_alive[VKN_BC_PACK] - s0.bc_alive[VKN_BC_PACK], 3);
+    CHECK_EQ(s1.bc_bytes[VKN_BC_PACK] - s0.bc_bytes[VKN_BC_PACK], (A ? A->bytes : 0) + (A2 ? A2->bytes : 0) + (D ? D->bytes : 0));
+    CHECK_EQ(s1.dec_why[VKN_DW_MISS_KEY] - s0.dec_why[VKN_DW_MISS_KEY], 1); CHECK_EQ(s1.dec_why[VKN_DW_MISS_SHAPE] - s0.dec_why[VKN_DW_MISS_SHAPE], 1);
+    CHECK_EQ(s1.dec_why[VKN_DW_BLOCK] - s0.dec_why[VKN_DW_BLOCK], 1); CHECK_EQ(s1.dec_why[VKN_DW_SRC] - s0.dec_why[VKN_DW_SRC], 1);
+    CHECK_EQ(s1.dec_why[VKN_DW_FMT] - s0.dec_why[VKN_DW_FMT], 1); CHECK_EQ(s1.dec_why[VKN_DW_SHAPE] - s0.dec_why[VKN_DW_SHAPE], 1);
+
+    // mip reduction (0x920460): the smaller texture comes CPU-decoded (no data, the old one's NVN format) under a temporary handle; the
+    // swap re-makes it as an ASTC 4x4 image and the GPU copies the old levels 1, 2 into it
+    if (A) {
+        vkn_tex_desc dn = tdesc(55, 1, 8, 8, 2, 1, VKN_TC_SAMPLED, 0x3B0, 3001); dn.nvn_fmt = 0x44;
+        vkn_tex *N = vkn_tex_create(H(310, 1), &dn, NULL, &why);
+        CHECK(N && N->decoded);
+        flush_logged(); mk_nicopy = 0;
+        const VkImage nimg = N ? N->image : VK_NULL_HANDLE;
+        CHECK_EQ(vkn_tex_swap_reduced(H(300, 1), 0x3A0, 0x3B0), 0);
+        vkn_tex *R = vkn_tex_get(H(300, 1));
+        CHECK(R != NULL && R != A && R != N); CHECK(vkn_tex_get(H(310, 1)) == NULL);
+        if (R) {
+            CHECK_EQ(R->astc, 4); CHECK_EQ(R->format, VK_FORMAT_ASTC_4x4_UNORM_BLOCK); CHECK_EQ(R->mips, 2); CHECK_EQ(R->w, 8); CHECK_EQ(R->cookie, 0x3B0);
+            CHECK(vkn_tex_by_cookie(0x3B0) == R); CHECK(vkn_tex_view_by_id(3001, NULL) == R->view);
+            flush_logged();
+            CHECK_EQ(mk_nicopy, 1);
+            if (mk_nicopy == 1) {
+                const mk_icopy_t *c = &mk_icopy[0];
+                CHECK(c->src == A->image && c->dst == R->image && c->dst != nimg); CHECK_EQ(c->n, 2);
+                CHECK_EQ(c->c[0].srcSubresource.mipLevel, 1); CHECK_EQ(c->c[0].dstSubresource.mipLevel, 0); CHECK_EQ(c->c[0].extent.width, 8);
+                CHECK_EQ(c->c[1].srcSubresource.mipLevel, 2); CHECK_EQ(c->c[1].dstSubresource.mipLevel, 1); CHECK_EQ(c->c[1].extent.height, 4);
+                mk_obj *si = mk_obj_of((uint64_t)(uintptr_t)c->src), *di = mk_obj_of((uint64_t)(uintptr_t)c->dst);
+                CHECK(si && di && si->ici.format == di->ici.format);
+            }
+        }
+        vkn_tex_get_stats(&s1); CHECK_EQ(s1.pack_tail - s0.pack_tail, 1);
+        vkn_tex_destroy_cookie(0x3B0);
+    }
+    vkn_tex_destroy_cookie(0x3A0); vkn_tex_destroy_cookie(0x3A1); vkn_tex_destroy_cookie(0x3A2); vkn_tex_destroy_cookie(0x3A3); vkn_tex_destroy_cookie(0x3A4);
+    vkn_tex_destroy_cookie(0x3A5); vkn_tex_destroy_cookie(0x3A6); vkn_tex_destroy_cookie(0x3A7); vkn_tex_destroy_cookie(0x3A8);
+    vkn_tex_get_stats(&s1);
+    for (int k = 0; k < VKN_BC_N; k++) { CHECK_EQ(s1.bc_alive[k], s0.bc_alive[k]); CHECK_EQ(s1.bc_bytes[k], s0.bc_bytes[k]); }
+
+    // a device that samples BC: the pack is never asked
+    mk_bc = 1;
+    vkn_astc_get_stats(&as); const uint64_t lk = as.lookups;
+    vkn_tex *E = tp_create(H(320, 1), 0x44, 16, 16, 3, 1, sa, na, 0x3C0, ~0u, &why);
+    CHECK(E && E->format == VK_FORMAT_BC3_UNORM_BLOCK && !E->astc); vkn_astc_get_stats(&as); CHECK_EQ(as.lookups, lk);
+    vkn_tex_destroy_cookie(0x3C0);
+    mk_bc = 0;
+
+    // no pack / an unusable pack / switched off: every BC texture decoded as before (reason "no pack")
+    struct { const char *path, *magic, *sw; int bad_size, want; } cases[] = {
+        {"/tmp/vkn_stage2_no_such.pack", NULL, NULL, 0, VKN_ASTC_NONE}, {path, "D3AC", NULL, 1, VKN_ASTC_BAD}, {path, "XXXX", NULL, 0, VKN_ASTC_BAD},
+        {path, "D3AC", "0", 0, VKN_ASTC_NONE}, {path, "D3AC", NULL, 0, VKN_ASTC_READY}};
+    for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+        if (cases[i].magic) {
+            tp_ent e2[2] = {tp_of(sa, na, 0x44, 16, 16, 3, 4, da, cases[i].bad_size ? 320 : 336), tp_of(sd, nd, 0x42, 12, 12, 2, 6, dd, 80)};
+            tp_write(path, e2, 2, cases[i].magic);
+        }
+        setenv("DM_ASTC_CACHE_PATH", cases[i].path, 1);
+        if (cases[i].sw) setenv("DM_VK_NATIVE_ASTC", cases[i].sw, 1); else unsetenv("DM_VK_NATIVE_ASTC");
+        vkn_astc_reset();
+        vkn_tex_get_stats(&s0);
+        vkn_tex *t = tp_create(H(330 + i, 1), 0x44, 16, 16, 3, 1, sa, na, 0x3D0 + i, ~0u, &why);
+        CHECK(t != NULL);
+        CHECK_EQ(vkn_astc_open(), cases[i].want);
+        vkn_tex_get_stats(&s1);
+        if (t) {
+            if (cases[i].want == VKN_ASTC_READY) { CHECK_EQ(t->astc, 4); }
+            else { CHECK_EQ(t->decoded, 1); CHECK_EQ(s1.dec_why[VKN_DW_OFF] - s0.dec_why[VKN_DW_OFF], 1); }
+        }
+        vkn_tex_destroy_cookie(0x3D0 + i);
+    }
+    // a pack truncated after it was opened: the short read becomes transparent black (counted)
+    { tp_ent e3[1] = {tp_of(sa, na, 0x44, 16, 16, 3, 4, da, 336)}; tp_write(path, e3, 1, "D3AC");
+      setenv("DM_ASTC_CACHE_PATH", path, 1); vkn_astc_reset(); CHECK_EQ(vkn_astc_open(), VKN_ASTC_READY);
+      CHECK_EQ(truncate(path, 64 + 100), 0);
+      vkn_tex *t = tp_create(H(340, 1), 0x44, 16, 16, 3, 1, sa, na, 0x3E0, ~0u, &why);
+      vkn_astc_get_stats(&as); CHECK_EQ(as.read_fails, 1); CHECK(t && t->astc == 4);
+      flush_logged(); const mk_copy_t *c = t ? copy_of(t->image, 1, 0, 0) : NULL;
+      CHECK(c && c->src && c->src[0] == 0xFC && c->src[1] == 0xFD);   // level 1 lies past the 100 bytes read: void extent
+      c = t ? copy_of(t->image, 0, 0, 0) : NULL; CHECK(c && c->src && !memcmp(c->src, da, 100));
+      vkn_tex_destroy_cookie(0x3E0); }
+    unsetenv("DM_ASTC_CACHE_PATH"); unsetenv("DM_VK_NATIVE_ASTC");
+    vkn_astc_reset(); remove(path);
+    mk_bc = 1; mk_astc = 7;
+    free(sa); free(sb); free(sc); free(sd);
+    flush_logged(); frames(3);
+}
+
 static void test_tex_targets(void) {
     // colour target: attachment usage and view, no upload queued
     const uint64_t pend0 = vkn_upload_pending_bytes();
@@ -1156,6 +1421,7 @@ static void test_textures(void) {
     test_tex_linear();
     test_tex_widen_bc();
     test_tex_packaged();
+    test_tex_astc_pack();
     test_tex_targets();
     test_tex_lifetime();
     test_samplers();

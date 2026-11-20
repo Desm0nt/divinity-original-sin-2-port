@@ -187,6 +187,7 @@ static MK_U uint32_t mk_views_of(VkImage img, VkImageView *out, uint32_t n) {
 // ---------------------------------------------------------------- configuration
 static int mk_dev_on = 1;               // dm_vk_handles reports a device
 static int mk_bc = 1;                   // BC formats sampled (optimal tiling)
+static int mk_astc = 7;                 // stage 4: ASTC 4x4 / 5x5 / 6x6 (bits 0 / 1 / 2) sampled with linear filtering (other ASTC: never)
 static int mk_rgb3 = 0;                 // 3-component 8 / 16 / 32-bit formats sampled
 static int mk_d24 = 1;                  // X8_D24 / D24S8 usable as depth attachments
 static int mk_vtx3 = 1;                 // 3-component 8 / 16-bit vertex formats
@@ -196,6 +197,13 @@ static int mk_qlock_depth, mk_qlocks, mk_submits;
 #define MK_BAD_MODULE ((VkShaderModule)(uintptr_t)0xbad0000ull)
 
 static int mk_fmt_bc(VkFormat f) { return f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK; }
+static int mk_fmt_astc(VkFormat f) { return f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; }
+static int mk_astc_bit(VkFormat f) {   // the mk_astc bit of an ASTC format, -1 = a block size the mock never samples
+    if (f == VK_FORMAT_ASTC_4x4_UNORM_BLOCK || f == VK_FORMAT_ASTC_4x4_SRGB_BLOCK) return 0;
+    if (f == VK_FORMAT_ASTC_5x5_UNORM_BLOCK || f == VK_FORMAT_ASTC_5x5_SRGB_BLOCK) return 1;
+    if (f == VK_FORMAT_ASTC_6x6_UNORM_BLOCK || f == VK_FORMAT_ASTC_6x6_SRGB_BLOCK) return 2;
+    return -1;
+}
 static int mk_fmt_rgb3(VkFormat f) {
     return (f >= VK_FORMAT_R8G8B8_UNORM && f <= VK_FORMAT_B8G8R8_SRGB) || (f >= VK_FORMAT_R16G16B16_UNORM && f <= VK_FORMAT_R16G16B16_SFLOAT) ||
            (f >= VK_FORMAT_R32G32B32_UINT && f <= VK_FORMAT_R32G32B32_SFLOAT);
@@ -243,7 +251,7 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice p, VkPhysicalDevicePropertie
 }
 void vkGetPhysicalDeviceFeatures(VkPhysicalDevice p, VkPhysicalDeviceFeatures *f) {
     (void)p; memset(f, 0, sizeof *f);
-    f->samplerAnisotropy = VK_TRUE; f->depthBiasClamp = VK_TRUE; f->fillModeNonSolid = VK_TRUE;
+    f->samplerAnisotropy = VK_TRUE; f->depthBiasClamp = VK_TRUE; f->fillModeNonSolid = VK_TRUE; f->textureCompressionASTC_LDR = VK_TRUE;
 }
 void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice p, VkFormat f, VkFormatProperties *o) {
     if (p != MK_PHYS) mk_err("format properties of %p", (void *)p);
@@ -254,6 +262,7 @@ void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice p, VkFormat f, VkForma
         v = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | xfer;
         if (!mk_d24 && (f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D24_UNORM_S8_UINT)) v = 0;
     } else if (mk_fmt_bc(f)) v = mk_bc ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | xfer : 0;
+    else if (mk_fmt_astc(f)) { const int b = mk_astc_bit(f); v = b >= 0 && (mk_astc >> b & 1) ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | xfer : 0; }
     else if (mk_fmt_rgb3(f)) v = mk_rgb3 ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | xfer : 0;
     else {
         v = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | xfer;
