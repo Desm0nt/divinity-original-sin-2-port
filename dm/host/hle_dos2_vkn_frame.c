@@ -72,6 +72,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_frame.h"
 #include "../gfx/vkn/vkn_pass.h"
+#include "../gfx/vkn/vkn_prof.h"   // [stage 5 A0] measurement
 #include "../gfx/vkn/vkn_state.h"
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/nvn/nvn_pace.h"
@@ -381,7 +382,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (mu_on()) mu_unlock();
     const uint64_t slot10 = vkn_rd64(vkn_rd64(win) + 0x50);   // (the original tail-branches to it)
     const uint64_t rc = ((fn_2)(uintptr_t)slot10)(win, (uint64_t)present);
-    if (present) { g_ft.end = vkn_now_ns() - t0; dm_vkn_tick(); }
+    if (present) { g_ft.end = vkn_now_ns() - t0; vkn_prof_frame_cpu(g_ft.begin, g_ft.render, g_ft.end); dm_vkn_tick(); }   // [stage 5 A0] frame_cpu
     return rc;
 }
 
@@ -409,6 +410,7 @@ static void fh_census(void) {
              (unsigned long long)g_fs.begins, (unsigned long long)g_fs.renders, (unsigned long long)g_fs.ends_presented, (unsigned long long)g_fs.ends_off, (unsigned long long)g_fs.staged,
              (unsigned long long)g_fs.mips, (unsigned long long)g_fs.resizes, g_pace.period / 1e6, (unsigned long long)g_fs.pace_waits, g_fs.pace_ns / 1e6,
              (unsigned long long)g_fs.wintex_unknown, (unsigned long long)g_fs.clear_unknown, (unsigned long long)g_fs.depth_unknown, (unsigned long long)g_fs.no_dev);
+    vkn_prof_census();   // [stage 5 A0] "draw by part", "backend measured"
 }
 
 void dm_vkn_frame_register(void);   // hle_dos2_vkn.c (weak there)
@@ -426,6 +428,10 @@ void dm_vkn_frame_register(void) {
     dm_vkn_site(0x93ccd0, k_end, "Window::EndFrame", (void *)fh_end, &g_o_end, VKN_M_NATIVE);
     dm_vkn_site(0x93cc20, k_resize, "Window::Resize", (void *)fh_resize, &g_o_resize, VKN_M_NATIVE);
     dm_vkn_census(fh_census);
+    {   // [stage 5 A0] DM_VK_NATIVE_PROF (replaces the old path's DM_NR_HEAT / DM_NR_TCOUNT): 0 off, 1 (default) 10 s lines + a GPU sample every 20 s, 2 every 2 s
+        const char *e = getenv("DM_VK_NATIVE_PROF");
+        vkn_prof_init(e && *e ? atoi(e) : 1);
+    }
     if (dm_vkn_read_register) dm_vkn_read_register();
 }
 #endif

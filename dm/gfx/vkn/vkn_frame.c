@@ -14,6 +14,7 @@
 #ifdef DM_GAME_DOS2
 #include "vkn_frame.h"
 #include "vkn_pass.h"
+#include "vkn_prof.h"   // [stage 5 A0] GPU time by pass on a sampled frame (its query regions follow this ring)
 #include <string.h>
 
 // The presenter (android/vulkan_present.cpp). Weak: host tests and other front ends link without them (then nothing is presented).
@@ -108,6 +109,7 @@ static void slot_done(int k) {
         }
     }
     s->ts = 0;
+    vkn_prof_slot_done(k);   // [stage 5 A0] a sampled recording of this buffer: its timestamps are final now
 }
 // Waits until slot k is free. 0 = free; -1 = still in flight after FENCE_WAIT_NS or the device failed (never reuse it then).
 static int slot_wait(int k) {
@@ -171,6 +173,7 @@ int vkn_rec_begin(int presented) {
         vkCmdResetQueryPool(s->cb, g.qp, 2u * (uint32_t)k, 2);
         vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g.qp, 2u * (uint32_t)k);
     }
+    vkn_prof_rec_begin(s->cb, k, presented);   // [stage 5 A0] (before the uploads: they count as "outside passes")
     g.st.uploads += (uint64_t)vkn_upload_run(s->cb);   // queued uploads first: the frame's commands may read what they fill
     for (int i = 0; i < g.nbegin; i++) g.on_begin[i]();
     return 0;
@@ -255,6 +258,7 @@ int vkn_rec_submit(int wait) {
     for (int i = 0; i < g.nclose; i++) g.on_close[i]();
     // A close listener may have moved images to their resting layouts: the presented image must stay TRANSFER_SRC (the presenter's contract).
     if (g.pres.have && g.pres.tex && g.pres.tex->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) vkn_pass_layout(g.pres.tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkn_prof_rec_close(s->cb, k);   // [stage 5 A0] after the close listeners (the last pass ended)
     if (g.qp) { vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g.qp, 2u * (uint32_t)k + 1); s->ts = 1; }
     g.cur = -1;   // from here on recorders see no command buffer
     int rc = 0;

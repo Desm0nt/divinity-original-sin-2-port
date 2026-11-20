@@ -19,6 +19,7 @@
 #include "vkn_pass.h"
 #include "vkn_frame.h"
 #include "vkn_state.h"
+#include "vkn_prof.h"   // [stage 5 A0] GPU time by pass
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,7 @@ static void end_open(void) {
     if (g_open && open_here()) {
         if (vkn_query_pass_closing) vkn_query_pass_closing(g_open_cb);   // [stage 4: queries]
         vkCmdEndRenderPass(g_open_cb);
+        vkn_prof_pass_end(g_open_cb);                                     // [stage 5 A0]
         if (vkn_query_pass_closed) vkn_query_pass_closed(g_open_cb);     // [stage 4: queries]
     }
     g_open = 0; g_open_cb = VK_NULL_HANDLE;
@@ -359,6 +361,7 @@ static int begin_set(const tset *s) {
     if (!fb) { g_st2.fb_fail++; return -1; }
     const VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
                                       .renderArea = {{0, 0}, {W, H}}, .clearValueCount = nv, .pClearValues = cv};
+    vkn_prof_pass_begin(cb, s->c, s->n, s->d, W, H);   // [stage 5 A0] (after every failure point above)
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     g_open = 1; g_open_cb = cb; g_open_serial = vkn_cb_serial(); g_open_set = *s;
     g_area = bi.renderArea;

@@ -257,6 +257,13 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice p, VkPhysicalDevicePropertie
     o->apiVersion = VK_API_VERSION_1_1; o->vendorID = 0x5143; o->driverVersion = 1; strcpy(o->deviceName, "mock GPU");
     o->limits.maxSamplerAnisotropy = 16.0f; o->limits.maxDescriptorSetUniformBuffersDynamic = mk_dyn_limit; o->limits.minUniformBufferOffsetAlignment = 64;
 }
+// [stage 5 A0] vkn_prof.c: 4 queue families (the tests' device uses family 2), each graphics + compute with 64 valid timestamp bits
+static uint32_t mk_ts_bits = 64;
+void vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice p, uint32_t *n, VkQueueFamilyProperties *o) {
+    (void)p; if (!o) { *n = 4; return; }
+    if (*n > 4) *n = 4;
+    for (uint32_t i = 0; i < *n; i++) { memset(&o[i], 0, sizeof o[i]); o[i].queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT; o[i].queueCount = 1; o[i].timestampValidBits = mk_ts_bits; }
+}
 void vkGetPhysicalDeviceFeatures(VkPhysicalDevice p, VkPhysicalDeviceFeatures *f) {
     (void)p; memset(f, 0, sizeof *f);
     f->samplerAnisotropy = VK_TRUE; f->depthBiasClamp = VK_TRUE; f->fillModeNonSolid = VK_TRUE; f->textureCompressionASTC_LDR = VK_TRUE;
