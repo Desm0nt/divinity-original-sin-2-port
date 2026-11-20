@@ -34,7 +34,9 @@
 #define TS_SIDE_COL 92.0f          // dmSide_p (anchor topright, the iPad's places): the panel column's left edge from the screen's right edge
 #define TS_SIDE_BOT 896.0f         // its stack's bottom (options 20..94 in the corner, the helmet 310..415 under the map, six panels from 422 every 80)
 #define TS_PI_W 180.0f             // playerInfo_p (anchor topleft, class 1.1): the portraits' right edge (container_mc.x 25 + portrait + statuses)
-#define TS_PI_BOT 720.0f           // the bottom of a party of four (estimate: 30 + 4 x ~170 x 1.1 ... measured on the phone, not static)
+#define TS_DIALOG_W 1160.0f        // dialog_p (anchor bottom, centred): the iPad's window 1160 x 400 (tools/dos2_ppanel_trade.py; the PC's was 1352 x 398)
+#define TS_DIALOG_H 400.0f
+#define TS_PI_BOT 720.0f          // the bottom of a party of four (estimate: 30 + 4 x ~170 x 1.1 ... measured on the phone, not static)
 // ---- the panels (tools/dos2_ppanel_inv.py partyInventory_p: header INV_LIST_Y own px at its own scale <= TS_HEAD_S, then a bag header
 // 56 + the rest 4 + rows x 56 own px at the cell's scale C / 50)
 #define TS_INV_HEAD 202.0f
@@ -119,7 +121,7 @@ static inline void ts_compute(float mm, float aspect, float hud_given, int cell_
     o->examine = ts_fit_center(ww, 620, 947, sw, b, 1.5f);                         // examine_p 484 x 740 x 1.28 (centred)
     o->tooltip = ts_clampf(ww, 1.0f, 1.3f);                                       // tooltip: <= 400 wide, long ones ~700 high; the engine keeps it in the screen
     const float side_x = fmaxf(TS_MARGIN_X, TS_SIDE_COL * o->side + TS_GAP);      // the right column reaches the bottom: a bottom window keeps clear of it (both sides: centred)
-    o->dialog = ts_clampf(fminf(ww, fminf((sw - 2 * side_x) / 1352.0f, (1080.0f - 2 * TS_MARGIN_Y) / 398.0f)), 1.0f, 1.7f);   // dialog_p 1352 x 398 at the bottom
+    o->dialog = ts_clampf(fminf(ww, fminf((sw - 2 * side_x) / TS_DIALOG_W, (1080.0f - 2 * TS_MARGIN_Y) / TS_DIALOG_H)), 1.0f, 1.7f);   // dialog_p at the bottom
     o->reward = ts_fit_center(ww, 651, 798, sw, b, 1.5f);                          // reward_p
     o->splitter = ts_fit_center(ww, 638, 478, sw, b, 1.6f);                        // itemSplitter_p
     o->log = ts_clampf(fminf(hud, 1.3f), 1.0f, 1.3f);                              // combatLog_p (622 px PC window, centred)

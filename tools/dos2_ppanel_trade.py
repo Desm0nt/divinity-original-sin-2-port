@@ -14,26 +14,36 @@ offerCols / bgDiscrap / cellSpacing; UIContainerInventory 0x12c7c00 reads inv_mc
 rows; the reward class 0x13ea8ac reads root.icon_size) and the slot frames and item icons are drawn by the engine into the `iggy_*`
 placeholders at those numbers. The iPad's _t movies set the SAME variable names to the touch numbers (trade_t: cell 76 + 2 x 3 border =
 82, spacing 4, 4 inventory columns, 2 offer columns). So:
-  trade_p          the grid variables set to trade_t's numbers right after the PC frame script (trade_1.frame1 wrapped): cells 82 (icon
-                   76), pitch 86, 4 x 9 inventories, 2 x 8 offers; the PC window kept, its centre column widened by 32 px for the wider offer
-                   grids (the PC frame drawn as three slices: frame_mc cut to the left part by scrollRect, two grafted copies of the same
-                   frame symbol cut to the centre (x 1.095) and right parts), the right column moved +32; anchored centre / screen / centre
-                   (PC: top), stage 1392 x 1056 (PC 1360 x 1121, iPad 1160 x 1030: the PC side strips - filter tabs, repair / identify - are
-                   kept); the PC Cell symbols scaled 82 / 55; offer wares and clear-offer buttons x1.4, finger hit areas (close 56, offer
-                   wares / repair / identify / balance 64, clear 50). Mouse code is the PC's: tap = itemClick, double tap = itemDoubleClick
-                   (moves the item across, as the iPad's DoubleTap), long press (host right click) = itemRightClick, still finger (host
-                   hover) = tooltip, drag = startDragging / stopDragging between the four grids.
+  trade_p          the iPad's window: 1160 wide (stage 1160 x 1056: the PC frame's own height; iPad 1160 x 1030; PC 1360 x 1121), anchored
+                   centre / screen / centre (PC: top). The grid variables set to trade_t's numbers right after the PC frame script
+                   (trade_1.frame1 wrapped): cells 82 (icon 76), pitch 86, inventories 4 columns (7 full rows + a part of the 8th seen, as the
+                   iPad's 7.5) at x 15 / 804.5 y 290 (iPad 25 / 796, 272), offers 2 x 8 at x 410 / 582 (iPad 407 / 584); the PC Cell symbols
+                   scaled 82 / 55. The PC frame in 11 slices (frame_mc = the centre column x1.06, ten grafted copies of its symbol cut by
+                   scrollRect: the side strips with the filter tabs and repair / identify cut, the panes narrowed to their grids, one portrait
+                   slot and 110 px of the plain name bars cut in the header). The filter tabs (engine addTab) a row above each inventory (the
+                   iPad's filter row): the list holder turned -90, every tab +90, so the PC list lays them out left to right, upright. The
+                   iPad's bottom row: offer junk (x1.9, 91 x 61) under the player's inventory, OK (308 x 52 on the PC's OK plate) in the
+                   centre, repair / identify x1.164 = 64 x 64 under the trader's; close x1.6 in the top right corner (iPad 50); party
+                   portraits x0.8. Finger pads: junk 96 x 72, OK 64 high, repair / identify 72, balance 64, clear 50. Mouse code is the PC's:
+                   first tap = select, a second tap on the same slot = itemClick (moves the item across, as the iPad's DoubleTap), long press
+                   (host right click) = itemRightClick, still finger (host hover) = tooltip, drag = startDragging / stopDragging.
   containerInventory_p   inv_mc scaled 76 / 55 (cells 76 on screen; iPad: cells 76, its art x1.2), centred on the stage (stage 1400 x 1080,
                    setPosition center / screen / center like the iPad's anchor consts; PC: no anchor in mouse mode). Take all / close
                    become 138 x 66 (iPad 118 x 56). Double tap = doubleClickItem (take), drag = the PC's.
   reward_p         reward_mc scaled 76 / 56 (cells 76, window 651 x 798; iPad 620 x 915, cells 76), accept button x1.4 more (296 x 61; iPad
                    291 x 62). Tap = itemClicked (the PC's pick by click).
   itemSplitter_p   splitter_mc scaled 1.32 (iPad 638 x 478 / PC 484 x 350), OK / cancel x1.25 more (252 x 53 each).
-  dialog_p         the PC window (1352 x 398 at the bottom; iPad 1160 x 400) with every answer a full-width tappable row: a transparent
-                   ANSWER_W x (text + 2 x ANSWER_PAD) rect in the answer (tap anywhere on the row = that answer: the PC's ROLL_OVER select +
-                   CLICK executeSelection), one-finger drag on the window = scroll the text (scrollTo on the text list's scrollbar); a tap
-                   that ended a drag runs no answer (executeSelection ignored for DRAG_GUARD ms after a scroll step).
-  waypoints_p      + double tap on a waypoint = travel (the iPad's DoubleTap; PC: tap selects, the travel button travels).
+  dialog_p         the iPad's window: 1160 x 400 at the bottom centre (PC 1352; the stage stays 1920 x 1080, setPosition bottom): the art
+                   in three slices (the strips 1:1, the text part x0.84), the text list 1010 wide (PC 1200; texts re-wrapped at 810, answers
+                   at 785), trade / inventory / stop listening on the left strip (iPad: trade at the top, stop listening at the bottom; finger
+                   pads 76 x 100 / 84 x 100). Every answer (the engine's: updateDialog -> addKeywordAnswer) a full-width tappable row: a
+                   transparent ANSWER_W x (text + 2 x ANSWER_PAD) rect (tap anywhere on the row = that answer: the PC's ROLL_OVER select +
+                   CLICK executeSelection). A one-finger drag on the text or the answers scrolls them (finger_scroll); the release that ends a
+                   scroll picks no answer.
+  waypoints_p      + double tap on a waypoint = travel (the iPad's DoubleTap; PC: tap selects, the travel button travels); a one-finger
+                   drag on the list scrolls it (no waypoint picked).
+  The container, reward, trade and splitter windows have no long text of their own (labels, item grids whose drag is the item drag; the
+  item tooltip is the separate tooltip window); their grids keep the two-finger wheel.
 
   python -I tools/dos2_ppanel_trade.py check  <Switch Game.pak | dir of the PC movies>
   python -I tools/dos2_ppanel_trade.py build  <Switch Game.pak | dir> <out dir>
@@ -51,41 +61,89 @@ import dos2_swf_graft as gr
 GUI = 'Public/Game/GUI/'
 
 # ---------------------------------------------------------------- numbers (stage px of each movie = design px on a 1080 high screen at UI scale 1)
-# trade (PC trade.swf: stage 1360 x 1121, anchored top; frame_mc 0..1360 x 0..1056; columns: left 0..512, centre 512..848, right 848..1360)
+# trade (PC trade.swf: stage 1360 x 1121, anchored top; frame_mc 0..1360 x 0..1056: header y 0..233 (its bottom line 231..232), below it the
+# body: x 0..10 border, 10..74 the filter-tab strip, 74..470 player pane, 470..512 pillar, 512..848 centre (offers), 848..890 pillar,
+# 890..1285 trader pane, 1285..1349 the repair / identify strip, 1349..1360 border). iPad trade_t: window 1160 x 1030, inventories 343 x 647
+# at x 25 / 796 (y 272), offers 170 x 600 at x 407 / 584, a bottom row (y 928..998) with junk 206 x 62 under the player's inventory, OK
+# 206 x 62 in the centre, repair / identify 64 x 64 under the trader's; close 50 in the top right corner.
 TR_CELL, TR_BORDER, TR_SPACING, TR_DISCRAP = 82, 3, 4, Fraction(-7, 2)     # trade_t: CELL_SIZE 76 + 2 x CELL_BORDER 3, CELL_BORDER_SPACING 4, -3.5
 TR_PITCH = TR_CELL + TR_SPACING                                             # 86
-TR_INV_COLS, TR_INV_ROWS, TR_OFF_COLS, TR_OFF_ROWS = 4, 9, 2, 8              # trade_t 4 / 8 / 2 / 7; PC 6 / 13 / 2 / 12 (rows fill the PC's 770 / 700 high panes)
-TR_INV_W, TR_OFF_W = TR_INV_COLS * TR_PITCH, TR_OFF_COLS * TR_PITCH          # 344 (PC 6 x 57 = 342: the same pane) / 172 (PC 114)
-TR_INV_H, TR_OFF_H = 770, TR_OFF_ROWS * TR_PITCH + 1                         # PC setLength(770) / 8 rows
-TR_CUT = (512, 848)                                                          # PC frame x of the centre column
-TR_DW = 32                                                                   # the centre column 336 -> 368 px (two offer grids 2 x 172 + 2 + borders)
-TR_CS = Fraction(TR_CUT[1] - TR_CUT[0] + TR_DW, TR_CUT[1] - TR_CUT[0])      # 368 / 336
+TR_INV_COLS, TR_INV_ROWS, TR_OFF_COLS, TR_OFF_ROWS = 4, 8, 2, 8              # trade_t 4 / 8 / 2 / 7; PC 6 / 13 / 2 / 12
+TR_INV_W, TR_OFF_W = TR_INV_COLS * TR_PITCH, TR_OFF_COLS * TR_PITCH          # 344 / 172 (the last column's spacing included: 340 / 168 drawn)
+TR_INV_H, TR_OFF_H = 640, TR_OFF_ROWS * TR_PITCH + 1                         # inventories: 7 rows + a part of the 8th seen (iPad 7.5), offers 8 rows
+TR_INV_SB, TR_OFF_SB = 646, 689                                              # scroll bar lengths (PC setLength 770 / 700 in init)
 TR_FRAME_H = 1056
-TR_W, TR_H = 1360 + TR_DW, TR_FRAME_H                                        # stage / setMcSize
-TR_OFF_X = (523, 697)                                                        # playerExchange_mc / traderExchange_mc (PC 522 / 682 + list offset 20)
-# scroll bar x = SB holder x + SB_SPACING + grid width (LS_Classes.scrollGrid.setFrame): kept where the PC had them (inventory bars in the
-# pillars, offer bars on the centre column's borders)
-TR_SB = {'playerInventoryList': 471 - 78 - TR_INV_W, 'traderInventoryList': 874 + TR_DW - (891 + TR_DW) - TR_INV_W,
-         'playerExchangeList': 506 - TR_OFF_X[0] - TR_OFF_W, 'traderExchangeList': 870 - TR_OFF_X[1] - TR_OFF_W}
+TR_HDR = 233                                                                 # the PC frame's header band ends here
+TR_W, TR_H = 1160, TR_FRAME_H                                                # stage / setMcSize (iPad 1160 x 1030; the PC frame's own height kept)
+# the PC frame in slices (x0, x1, y0, y1 of the frame -> new x, scaleX); the first is frame_mc itself, the others are grafted copies of its
+# symbol. Header: one portrait slot + 18 px (168..278) and 110 px of the plain name bars (960..1070) cut; body: both side strips cut, the panes
+# narrowed to their grids (350 / 349), the centre column widened to 356 (two offer grids of 168 drawn + 4)
+TR_K_C, TR_K_L, TR_K_R = Fraction(356, 336), Fraction(350, 396), Fraction(349, 395)
+TR_SLICES = [(512, 848, 0, TR_FRAME_H, 402, TR_K_C),
+             (0, 168, 0, TR_HDR, 0, 1), (278, 512, 0, TR_HDR, 168, 1), (848, 960, 0, TR_HDR, 758, 1), (1070, 1360, 0, TR_HDR, 870, 1),
+             (0, 10, TR_HDR, TR_FRAME_H, 0, 1), (74, 470, TR_HDR, TR_FRAME_H, 10, TR_K_L), (470, 512, TR_HDR, TR_FRAME_H, 360, 1),
+             (848, 890, TR_HDR, TR_FRAME_H, 758, 1), (890, 1285, TR_HDR, TR_FRAME_H, 800, TR_K_R), (1349, 1360, TR_HDR, TR_FRAME_H, 1149, 1)]
+TR_COPIES = ['dmFrame%d' % k for k in range(1, len(TR_SLICES))]
+
+
+def tr_map(x, body):
+    """new x of PC frame x in the header (body False) or the body band; a cut-out x goes to the end of the slice before it"""
+    best = None
+    for x0, x1, y0, y1, nx, k in TR_SLICES:
+        if (y0 == 0 and y1 == TR_FRAME_H) or (y1 != TR_HDR) == body:
+            if x0 <= x < x1: return nx + (x - x0) * float(k)
+            if x >= x1 and (best is None or x1 > best[0]): best = (x1, nx + (x1 - x0) * float(k))
+    return best[1] if best else 0.0
+
+
+def _cx(x0, x1, w=None, body=False):
+    """new left x of an element drawn x0..x1 (PC), kept at size w (default its own), centred where the PC centre maps to"""
+    w = (x1 - x0) if w is None else w
+    return Fraction(tr_map((x0 + x1) / 2.0, body) - w / 2.0).limit_denominator(10)
+
+
+# the four grids: the iggy_* holders and the scroll bar holders at the cell origin - 3.5 (SIDE / TOP_SPACING = -bgDiscrap), the lists at 0, 0
+TR_GRID = {'playerInventory_mc': (Fraction(23, 2), Fraction(573, 2)), 'traderInventory_mc': (801, Fraction(573, 2)),
+           'playerExchange_mc': (Fraction(813, 2), 241), 'traderExchange_mc': (Fraction(1157, 2), 241)}   # cells at x 15 / 804.5 (y 290), 410 / 582 (y 244.5)
 TR_LISTS = ['playerInventoryList', 'playerExchangeList', 'traderExchangeList', 'traderInventoryList']
-TR_RIGHT = ['traderImg_mc', 'traderInventory_mc', 'traderInventorySB_mc', 'traderTabs_mc', 'traderGold_mc', 'vendorCombo_mc', 'vendorSortLabel_txt',
-            'mcRepContainer', 'repair_mc', 'identify_mc', 'balloon_mc', 'traderTooltip_mc', 'closeX_mc']
-TR_RIGHT_NAMES = ['title_txt', 'label_txt']                                  # inside namesHolder_mc (the trader's name / title)
-
-
-def _centre_shift(x0, x1):
-    """px a centre-column element moves when the column is stretched by TR_CS from TR_CUT[0]"""
-    c = (x0 + x1) / 2.0
-    return int(round(TR_CUT[0] + (c - TR_CUT[0]) * float(TR_CS) - c))
-
-
-TR_SHIFT = {'balance_mc': _centre_shift(652, 709), 'ok_mc': _centre_shift(526, 834), 'playerExchangeGold_mc': _centre_shift(559, 643),
-            'traderExchangeGold_mc': _centre_shift(718, 802)}
-TR_PILLAR = (4, _centre_shift(652, 709), 9)   # child index, x shift, timeline depth of the unnamed shape behind balance_mc (652..709 x 16..185)
-# (name, PC box x0, y0, x1, y1 at its PC place, scale): enlarged about its centre (plus the column shift)
-TR_GROW = [('offerJunk_mc', (657, 126, 705, 158), Fraction(7, 5)), ('clearSupplyBtn_mc', (587, 158, 612, 183), Fraction(7, 5)),
-           ('clearDemandBtn_mc', (747, 158, 772, 183), Fraction(7, 5))]
-TR_PAD = [('closeX_mc', 56), ('offerJunk_mc', 64), ('clearSupplyBtn_mc', 50), ('clearDemandBtn_mc', 50), ('repair_mc', 64), ('identify_mc', 64),
+TR_HOLDER = {'playerInventoryList': 'playerInventory_mc', 'playerExchangeList': 'playerExchange_mc', 'traderExchangeList': 'traderExchange_mc',
+             'traderInventoryList': 'traderInventory_mc'}
+# scroll bars (15 px) where the PC had them relative to the pillars / centre column: player inventory 1 px into the left pillar, player offers
+# 36 px into it, trader offers 9 px inside the centre's right edge, trader inventory 26 px into the right pillar
+TR_BAR = {'playerInventoryList': 361, 'playerExchangeList': 396, 'traderExchangeList': 748, 'traderInventoryList': 784}
+TR_SB = {n: TR_BAR[n] - TR_GRID[TR_HOLDER[n]][0] - (TR_INV_W if 'Inventory' in n else TR_OFF_W) for n in TR_LISTS}   # SB_SPACING
+TR_SBMC = {'playerInventorySB_mc': 'playerInventory_mc', 'traderInventorySB_mc': 'traderInventory_mc', 'playerExchangeSB_mc': 'playerExchange_mc',
+           'traderExchangeSB_mc': 'traderExchange_mc'}
+# the filter tabs (Tab 41 x 41; PC: a vertical list in each side strip): a row above each inventory (the iPad's filter row, y 219..268): the
+# tab holder turned -90 and every tab +90, so the list's own vertical layout lays them out left to right, upright
+TR_TABS = {'playerTabs_mc': (15, 240), 'traderTabs_mc': (Fraction(1609, 2), 240)}
+TR_TAB_SP = 2                                                                # PC 12: 8 tabs in 342 px
+_BAL_X = _cx(652, 709)                                                       # 552
+# every other element: path -> its new x, y (sizes kept unless TR_SCALE)
+TR_POS = {
+    # header, left: 4 party portraits x0.8 (80 x 100 at a pitch of 79 -> 253 px) over the three portrait slots left, the sort row and the gold row moved with the cut
+    ('characterList_mc',): (82, 71), ('playerSortLabel_txt',): (26, 179), ('playerCombo_mc',): (133, 176), ('playerGold_mc',): (274, 202),
+    # centre column (header and body)
+    ('balance_mc',): (_BAL_X, 41), ('playerExchangeGold_mc',): (_cx(559, 643), 204), ('traderExchangeGold_mc',): (_cx(718, 802), 204),
+    ('clearSupplyBtn_mc',): (_cx(587, 612, 35), 153), ('clearDemandBtn_mc',): (_cx(747, 772, 35), 153),
+    ('ok_mc',): (410, 923),                                                  # its drawing (local 16..324 x 23..75) centred at 580: 426..734 x 946..998
+    # header, right (the ring with the trader's portrait 980..1152): name / title / reputation / sort row left of it
+    ('mcRepContainer',): (844, 132), ('vendorSortLabel_txt',): (762, 179), ('vendorCombo_mc',): (843, 176), ('traderGold_mc',): (999, 202),
+    ('balloon_mc',): (945, 20), ('traderImg_mc',): (1023, 60), ('traderTooltip_mc',): (801, 60),
+    ('closeX_mc',): (1086, 0),                                               # x1.6: the X 1105..1142 x 19..56, hit 74 in the corner (iPad 50 at 1105..1155 x 5..55)
+    # the bottom row (y 935..999): junk under the player's inventory, repair / identify under the trader's (iPad 904 / 972 under 796..1139)
+    ('offerJunk_mc',): (Fraction(697, 5), Fraction(4678, 5)), ('repair_mc',): (908, 935), ('identify_mc',): (976, 935),
+}
+TR_X = {('namesHolder_mc', 'playerName_txt'): 85, ('namesHolder_mc', 'title_txt'): 762, ('namesHolder_mc', 'label_txt'): 802}
+TR_WIDTH = {('namesHolder_mc', 'playerName_txt'): 186, ('namesHolder_mc', 'title_txt'): 210, ('namesHolder_mc', 'label_txt'): 122,
+            ('vendorSortLabel_txt',): 76}
+TR_SCALE = {('characterList_mc',): Fraction(4, 5), ('closeX_mc',): Fraction(8, 5), ('offerJunk_mc',): Fraction(19, 10), ('repair_mc',): Fraction(64, 55),
+            ('identify_mc',): Fraction(64, 55), ('clearSupplyBtn_mc',): Fraction(7, 5), ('clearDemandBtn_mc',): Fraction(7, 5)}
+TR_SCALEX = {('traderTooltip_mc',): Fraction(379, 40)}                      # the trader's hover zone 891..1304 -> 801..1104 (PC scaleX 12.915)
+TR_PILLAR = (4, int(round(_BAL_X - 652)), 9)  # child index, x shift, timeline depth of the unnamed shape behind balance_mc (652..709 x 16..185)
+# finger pads (object px x its scale = on-screen px): junk 96 x 72, OK the bar x 64 high, repair / identify 72, balance 64, clear 50 (close: its
+# own 46 px hit area x1.6)
+TR_PAD = [('offerJunk_mc', (96, 72)), ('ok_mc', (308, 64)), ('clearSupplyBtn_mc', 50), ('clearDemandBtn_mc', 50), ('repair_mc', 72), ('identify_mc', 72),
           ('balance_mc', 64)]
 TR_CELL_PC = 55                                                              # the PC Cell symbol (cellWidth 55)
 
@@ -109,12 +167,37 @@ IS_BTN = (150.0, 214.9, (61 + 421) / 2.0, (203 + 256) / 2.0)                 # b
 IS_BTN_K = Fraction(5, 4)
 IS_BTN_XY = (IS_BTN[2] - (IS_BTN[2] - IS_BTN[0]) * float(IS_BTN_K), IS_BTN[3] - (IS_BTN[3] - IS_BTN[1]) * float(IS_BTN_K))
 
-# dialog
-ANSWER_W, ANSWER_X, ANSWER_PAD = 900, -10, 12                                # the row rect in the answer's px (questionWidth 850 + margins)
-DRAG_START, DRAG_GUARD = 14, 250                                             # px before a press becomes a scroll; ms an answer is ignored after one
+# dialog (PC dialog.swf: stage 1920 x 1080, setPosition bottom / screen / bottom; dialog_mc's window art = an unnamed shape (child #2,
+# depth 4) drawn 274..1646 x 678..1126, the window seen 284..1636 x 680..1080 = 1352 x 400: left strip 284..360 (buttons, chain), the
+# text 360..1562, right strip 1562..1636 (the scroll bar slot 1575..1603, a red pillar). iPad dialog_t: window 1160 x 400 at the bottom,
+# text holder at 85.7 (x0.933, frame 1070), trade / stop listening 50 x 100 on the left strip (y 30 / 277), no inventory button.
+DL_ART = 2                                                                   # child index of the art shape in dialog_mc's frame 1
+DL_SHIFT = 96                                                                # (1352 - 1160) / 2: the strips move in by this
+DL_K = Fraction(1010, 1202)                                                  # the text part 360..1562 -> 456..1466
+DL_SLICES = [(274, 360, 274 + DL_SHIFT, 1), (360, 1562, 360 + DL_SHIFT, DL_K), (1562, 1646, 1562 - DL_SHIFT, 1)]   # x0, x1 -> new x, scaleX
+DL_Y0, DL_H = 670, 460                                                       # the slices' rows (the art 678..1126)
+DL_COPIES = ['dmDlgL', 'dmDlgR']                                             # the art shape itself is the middle slice
+DL_HIT = (303 + DL_SHIFT, Fraction(1617 - 303 - 2 * DL_SHIFT, 1314))         # hit_mc (the window's mouse area 303..1617) -> 399..1521
+DL_TEXT_X = 469                                                              # textHolder_mc (PC 375; 360 + 15 x DL_K + 96)
+DL_TEXT_W = 1010                                                             # the text list's frame (PC 1200): its right edge stays at the scroll slot
+DL_TC_W = 810                                                                # TextComp.text_txt width (PC 1000 in the 1200 frame)
+DL_KW_W, DL_Q_W = 785, 660                                                   # KeywordTextWidth (PC 975), questionWidth (850)
+# the left strip, top to bottom (iPad: trade at the top, stop listening at the bottom): trade 56 x 76, the inventory button 56 x 76 (PC: at the
+# bottom; the iPad has none), stop listening 69 x 69 (PC: top right in the text)
+DL_POS = {('trade_mc',): (401, 698), ('invBtn_mc',): (401, 852), ('stoplisten_mc',): (Fraction(789, 2), 1005), ('hit_mc',): (DL_HIT[0], 682),
+          ('textHolder_mc',): (DL_TEXT_X, 706)}
+DL_PAD = [('trade_mc', (76, 100)), ('invBtn_mc', (76, 100)), ('stoplisten_mc', (84, 100))]
+# every answer (AnswerKeyword: number + text from x 0, 30 px a line) a full-width row: a transparent rect from x ANSWER_X, ANSWER_W wide,
+# ANSWER_PAD above and below its text (the rows stack: the PC puts the next answer at this one's y + height - 2)
+ANSWER_W, ANSWER_X, ANSWER_PAD = 836, -6, 12                                 # the answers sit at x 150 of the text list: to 980 (the bar is at 992)
+# one-finger scroll (dialog text + answers, waypoint list): list px of travel before a press becomes a scroll; ms a tap / answer is ignored
+# after the release that ended a scroll (the release is a CLICK on what is under the finger too)
+DRAG_START, DRAG_GUARD = 14, 300
+DL_SCROLL_X = (0, DL_TEXT_W - 24)                                            # textHolder px a scroll may start in (not on the buttons, not on the bar)
 
 # waypoints
 DTAP_MS = 450
+WP_SCROLL_X = (0, 556)                                                       # listCont px (the 560 frame; its scroll bar at 560)
 
 SRC = {'trade_p.swf': 'trade.swf', 'containerInventory_p.swf': 'containerInventory.swf', 'dialog_p.swf': 'dialog.swf', 'reward_p.swf': 'reward.swf',
        'waypoints_p.swf': 'waypoints.swf', 'itemSplitter_p.swf': 'itemSplitter.swf'}
@@ -146,7 +229,7 @@ class Cls:
     def S(s, t): return s.mv.S(t)
     def add(s, name, nparams, lines, like=None):
         abc = s.mv.abc
-        m = abc.add_method('dm_' + name, [0] * nparams, 0, asm(lines), 64, 64, s.scope, s.scope + 1)
+        m = abc.add_method('dm_' + name, [0] * nparams, 0, asm(lines), 255, 255, s.scope, s.scope + 1)   # verify() sets the real counts
         b = abc.methods[m].body; st, sc, loc = abc.verify(b); b.max_stack = st; b.local_count = loc; abc.verify(b)
         if like is not None:
             abc.methods[m].ret = like.ret
@@ -217,24 +300,28 @@ class B:
                 if op[2]: s.addp(o, 'x', op[2])
                 if op[3]: s.addp(o, 'y', op[3])
             elif op[0] == 'scale': s.setp(o, 'scaleX', num(op[2])); s.setp(o, 'scaleY', num(op[2]))
+            elif op[0] == 'scalex': s.setp(o, 'scaleX', num(op[2]))
+            elif op[0] == 'rot': s.setp(o, 'rotation', num(op[2]))
             elif op[0] == 'width': s.setp(o, 'width', num(op[2]))
             elif op[0] == 'pad': s.pad(o, op[2])
             else: raise ValueError(op)
             s.close(k)
     def pad(s, o, size):
-        """a transparent size x size (object px) square centred on what the object draws: a finger-sized hit area"""
+        """a transparent w x h (object px; one number = a square) rect centred on what the object draws: a finger-sized hit area"""
+        w, h = size if isinstance(size, tuple) else (size, size)
         b, g = s.loc(), s.loc(); k = s.lab()
         s.emit(('getlocal', o), ('getlocal', o), ('callproperty', s.P('getBounds'), 1), ('coerce_a',), ('setlocal', b),
                ('getlocal', o), ('getproperty', s.P('graphics')), ('coerce_a',), ('setlocal', g), ('getlocal', g), ('iffalse', k),
                ('getlocal', g), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', s.P('beginFill'), 2), ('getlocal', g))
-        for pos, sz in (('x', 'width'), ('y', 'height')):
+        for pos, sz, v in (('x', 'width', w), ('y', 'height', h)):
             s.emit(('getlocal', b), ('getproperty', s.P(pos)), ('getlocal', b), ('getproperty', s.P(sz)), ('pushbyte', 2), ('divide',), ('add',),
-                   *num(Fraction(size) / 2), ('subtract',))
-        s.emit(*num(size), *num(size), ('callpropvoid', s.P('drawRect'), 4), ('getlocal', g), ('callpropvoid', s.P('endFill'), 0), ('L', k))
+                   *num(Fraction(v) / 2), ('subtract',))
+        s.emit(*num(w), *num(h), ('callpropvoid', s.P('drawRect'), 4), ('getlocal', g), ('callpropvoid', s.P('endFill'), 0), ('L', k))
 
 
 def ops_pad(pads, scale_of=lambda n: 1):
-    return [('pad', (n,), Fraction(size) / scale_of(n)) for n, size in pads]
+    def per(size, k): return tuple(Fraction(v) / k for v in size) if isinstance(size, tuple) else Fraction(size) / k
+    return [('pad', (n,), per(size, scale_of(n))) for n, size in pads]
 
 
 def rect_bytes(w, h):
@@ -249,47 +336,47 @@ def set_stage(swf, w, h): swf.head = rect_bytes(w, h) + swf.head[-4:]
 # ---------------------------------------------------------------- trade
 def trade_ops():
     """the layout ops of trade_1 (paths from trade_mc); also used by the render"""
-    ops = [('x', (n,), TR_OFF_X[k]) for k, n in enumerate(('playerExchange_mc', 'traderExchange_mc'))]
-    ops += [('x', (n,), TR_OFF_X[k]) for k, n in enumerate(('playerExchangeSB_mc', 'traderExchangeSB_mc'))]
-    ops += [('move', (n,), TR_DW, 0) for n in TR_RIGHT] + [('move', ('namesHolder_mc', n), TR_DW, 0) for n in TR_RIGHT_NAMES]
-    ops += [('move', (n,), d, 0) for n, d in TR_SHIFT.items()]
-    for n, (x0, y0, x1, y1), k in TR_GROW:
-        cx = (x0 + x1) / 2.0 + _centre_shift(x0, x1); cy = (y0 + y1) / 2.0
-        ops += [('scale', (n,), k), ('pos', (n,), Fraction(cx - (x1 - x0) * float(k) / 2.0).limit_denominator(10), Fraction(cy - (y1 - y0) * float(k) / 2.0).limit_denominator(10))]
+    ops = [('pos', (n,), x, y) for n, (x, y) in TR_GRID.items()] + [('pos', (n,), *TR_GRID[g]) for n, g in TR_SBMC.items()]
+    ops += [('pos', (n,), x, y) for n, (x, y) in TR_TABS.items()] + [('rot', (n,), -90) for n in TR_TABS]
+    ops += [('scale', p, k) for p, k in TR_SCALE.items()] + [('scalex', p, k) for p, k in TR_SCALEX.items()]
+    ops += [('pos', p, x, y) for p, (x, y) in TR_POS.items()] + [('x', p, x) for p, x in TR_X.items()]
+    ops += [('width', p, w) for p, w in TR_WIDTH.items()]
     # the engine's draw placeholders (iggy_*: a red bg_mc) as wide as the new grids (their height follows the rows: updateRows)
     for holder, w in (('playerInventory_mc', TR_INV_W), ('playerExchange_mc', TR_OFF_W), ('traderExchange_mc', TR_OFF_W), ('traderInventory_mc', TR_INV_W)):
         ops.append(('width', (holder, 'iggy_' + holder[:-3], 'bg_mc'), w - 1))
-    grow = {n: k for n, _, k in TR_GROW}
-    ops += ops_pad(TR_PAD, lambda n: grow.get(n, 1))
+    ops += ops_pad(TR_PAD, lambda n: TR_SCALE.get((n,), 1))
     return ops
 
 
 def trade(data):
     """trade.swf -> trade_p.swf"""
     swf = Swf(data)
-    # the frame in three slices: two plain sprites holding the PC frame symbol, placed on the root; trade_1 moves them under its frame_mc
+    # the frame in slices: plain sprites holding the PC frame symbol, placed on the root; trade_1 moves them under its frame_mc
     g = gr.Graft(swf); recs = gr.frame_state(swf.tags[gr.Movie(swf).defs[gr.Movie(swf).resolve('trade_fla.trade_1')]][1], 1)
     fid = [r['char'] for r in recs.values() if r['name'] == b'frame_mc\0'][0]
-    for nm in ('dmFrameC', 'dmFrameR'): g.place(g.sprite([(fid, 1, (0, 0), None)]), 0, 0, nm)
+    for nm in TR_COPIES: g.place(g.sprite([(fid, 1, (0, 0), None)]), 0, 0, nm)
     g.finish(); set_stage(swf, TR_W, TR_H)
     mv = Movie(swf.write(compress=False)); t = Cls(mv, 'trade_fla.trade_1'); root = Cls(mv, 'trade_fla.MainTimeline')
     Rect = mv.abc.pub('Rectangle', 'flash.geom')
     def rect(b, x, y, w, h): return [('findpropstrict', Rect)] + num(x) + num(y) + num(w) + num(h) + [('constructprop', Rect, 4)]
-    # dmSlices(): the frame cut into left (frame_mc itself) / centre (stretched) / right (moved) parts; idempotent
+    # dmSlices(): frame_mc = the centre column, the copies = the other slices (right under frame_mc). Nothing is cut until frame_mc and every
+    # copy are found (frame1: the root's copies may not exist yet; onEventInit again), so the PC frame stays whole if one is missing; idempotent
     b = B(t, 0)
-    o, k = b.obj(('frame_mc',)); b.setp(o, 'scrollRect', rect(b, 0, 0, TR_CUT[0], TR_FRAME_H)); b.close(k)
-    for nm, x0, x1, at, sx in (('dmFrameC', TR_CUT[0], TR_CUT[1], TR_CUT[0], TR_CS), ('dmFrameR', TR_CUT[1], 1360, TR_CUT[1] + TR_DW, 1)):
-        o = b.loc(); k = b.lab(); par = b.loc()
-        # right under frame_mc (above the unnamed depth-1 shape that frame_mc hides in the PC movie)
-        b.emit(('getlocal0',), ('getproperty', b.P('parent')), ('coerce_a',), ('setlocal', par), ('getlocal', par), ('iffalse', k),
-               ('getlocal', par), ('pushstring', b.S(nm)), ('callproperty', b.P('getChildByName'), 1), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', k),
-               ('getlocal0',), ('getproperty', b.P('frame_mc')), ('iffalse', k),
-               ('getlocal0',), ('getlocal', o), ('getlocal0',), ('getlocal0',), ('getproperty', b.P('frame_mc')), ('callproperty', b.P('getChildIndex'), 1),
-               ('callpropvoid', b.P('addChildAt'), 2))
-        b.setp(o, 'scrollRect', rect(b, x0, 0, x1 - x0, TR_FRAME_H)); b.setp(o, 'x', num(at)); b.setp(o, 'scaleX', num(sx))
-        b.setp(o, 'mouseEnabled', [('pushfalse',)]); b.close(k)
+    fr, par, end = b.loc(), b.loc(), b.lab()
+    b.emit(('getlocal0',), ('getproperty', b.P('frame_mc')), ('coerce_a',), ('setlocal', fr), ('getlocal', fr), ('iffalse', end),
+           ('getlocal0',), ('getproperty', b.P('parent')), ('coerce_a',), ('setlocal', par), ('getlocal', par), ('iffalse', end))
+    cps = []
+    for nm in TR_COPIES:
+        o = b.loc(); cps.append(o)
+        b.emit(('getlocal', par), ('pushstring', b.S(nm)), ('callproperty', b.P('getChildByName'), 1), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', end))
+    for o, (x0, x1, y0, y1, nx, k) in zip([fr] + cps, TR_SLICES):
+        if o != fr:
+            b.emit(('getlocal0',), ('getlocal', o), ('getlocal0',), ('getlocal', fr), ('callproperty', b.P('getChildIndex'), 1), ('callpropvoid', b.P('addChildAt'), 2))
+            b.setp(o, 'mouseEnabled', [('pushfalse',)])
+        b.setp(o, 'scrollRect', rect(b, x0, y0, x1 - x0, y1 - y0)); b.setp(o, 'x', num(nx)); b.setp(o, 'y', num(y0)); b.setp(o, 'scaleX', num(k))
+    b.emit(('L', end))
     t.method('dmSlices', 0, b.code())
-    # frame1: the original (lists made at the PC numbers), then the iPad's grid numbers, frames, scroll bars, the layout
+    # frame1: the original (lists made at the PC numbers), then the iPad's grid numbers, frames, scroll bars, tab rows, the layout
     def f1(b):
         b.orig()
         for prop, v in (('cellBorder', TR_BORDER), ('cellHeight', TR_CELL), ('cellWidth', TR_CELL), ('cellSpacing', TR_SPACING), ('bgDiscrap', TR_DISCRAP),
@@ -300,10 +387,12 @@ def trade(data):
             o, k = b.obj((n,)); b.setp(o, 'SB_SPACING', num(TR_SB[n]))
             inv = 'Inventory' in n
             b.callv(o, 'setFrame', num(TR_INV_W if inv else TR_OFF_W), num(TR_INV_H if inv else TR_OFF_H))
-            if not inv: b.setp(o, 'x', num(0))
+            b.setp(o, 'x', num(0)); b.setp(o, 'y', num(0))
             b.close(k)
+        for n in ('playerTabList', 'traderTabList'):   # PC: 12 apart, the trader's mirrored (scaleX -1) to grow left from the right strip
+            o, k = b.obj((n,)); b.setp(o, 'EL_SPACING', num(TR_TAB_SP)); b.setp(o, 'scaleX', num(1)); b.close(k)
         b.apply(trade_ops())
-        # the unnamed balance pillar shape (depth 9 = child index TR_PILLAR[0] while the timeline's children are all there is) moves with the centre column
+        # the unnamed balance pillar shape (depth 9 = child index TR_PILLAR[0] while the timeline's children are all there is) moves with balance_mc
         o = b.loc(); k = b.lab(); Shape = mv.abc.pub('Shape', 'flash.display')
         b.emit(('getlocal0',), ('getproperty', b.P('numChildren')), *num(TR_PILLAR[0] + 1), ('lessthan',), ('iftrue', k),
                ('getlocal0',), *num(TR_PILLAR[0]), ('callproperty', b.P('getChildAt'), 1), ('coerce_a',), ('setlocal', o),
@@ -311,6 +400,18 @@ def trade(data):
         b.setp(o, 'x', num(TR_PILLAR[1])); b.emit(('L', k))
         b.emit(('getlocal0',), ('callpropvoid', b.P('dmSlices'), 0))
     t.wrap('frame1', 'dmF1Orig', f1)
+    # addTab / addTraderTab (engine): the original, then the new tab (the list's last element) turned +90 (its holder is turned -90)
+    def tab(lst):
+        def body(b):
+            b.orig()
+            o, k = b.obj((lst,)); e = b.loc(); k2 = b.lab()
+            b.emit(('getlocal', o), ('getproperty', b.P('length')), ('pushbyte', 1), ('lessthan',), ('iftrue', k2),
+                   ('getlocal', o), ('getlocal', o), ('getproperty', b.P('length')), ('pushbyte', 1), ('subtract',), ('callproperty', b.P('getAt'), 1),
+                   ('coerce_a',), ('setlocal', e), ('getlocal', e), ('iffalse', k2))
+            b.setp(e, 'rotation', num(90)); b.emit(('L', k2)); b.close(k)
+        return body
+    t.wrap('addTab', 'dmTabOrig', tab('playerTabList'))
+    t.wrap('addTraderTab', 'dmTTabOrig', tab('traderTabList'))
     # extendGrid(list, rows): the original, then every Cell of the four grids drawn at the cell size (the PC Cell symbol is 55 px)
     def ext(b):
         b.orig()
@@ -323,8 +424,13 @@ def trade(data):
             b.emit(('L', nxt), ('getlocal', i), ('increment',), ('setlocal', i), ('jump', top), ('L', end))
             b.close(k)
     t.wrap('extendGrid', 'dmExtOrig', ext)
-    # init(): the original (it tells the engine setMcSize(frame_mc) = the left slice now), then the whole window
-    t.wrap('init', 'dmInitOrig', lambda b: (b.orig(), b.ei('setMcSize', num(TR_W), num(TR_H))))
+    # init(): the original (it tells the engine setMcSize(frame_mc) and sets the PC scroll bar lengths 770 / 700), then the whole window and
+    # the new lengths
+    def ini(b):
+        b.orig(); b.ei('setMcSize', num(TR_W), num(TR_H))
+        for n in TR_LISTS:
+            o, k = b.obj((n, 'm_scrollbar_mc')); b.callv(o, 'setLength', num(TR_INV_SB if 'Inventory' in n else TR_OFF_SB)); b.close(k)
+    t.wrap('init', 'dmInitOrig', ini)
     # onContainerUp(e): the PC sends itemClick (= the engine moves the item across; the iPad's DoubleTap sends the same itemClick) on every
     # press + release on one slot. As the iPad: a first tap only selects (downList = -1 skips the PC's itemClick; stopDragging / slotUp stay),
     # a second tap on the same slot within DTAP_MS runs the PC code as it is (itemClick). The PC's own itemDoubleClick is not in main.raw.
@@ -409,12 +515,113 @@ def reward(data): return scaled(data, 'reward_fla.MainTimeline', RW_STAGE, rewar
 def splitter(data): return scaled(data, 'itemSplitter_fla.MainTimeline', IS_STAGE, splitter_ops())
 
 
+# ---------------------------------------------------------------- one-finger scroll of a scrollList (dialog text + answers, waypoint list)
+def finger_scroll(c, lst, area, xr):
+    """methods dmScDown(e) / dmScMove(e) / dmScUp(e) on class c: a press inside this.<area> (its own x in xr) that travels more than
+    DRAG_START px vertically scrolls this.<lst> with the finger (scrollTo on its scroll bar, no animation; the bar clamps); while it scrolls the
+    list's rows get no mouse (mouseChildren off: no hover selection, the release clicks nothing); dmScMoved / dmScUpT let a wrapper drop a
+    click that still comes within DRAG_GUARD ms of the release. A press that never moves is the PC's own click."""
+    mv = c.mv; gt = mv.abc.pub('getTimer', 'flash.utils')
+    b = B(c, 1); st, a, l, mx = b.loc(), b.loc(), b.loc(), b.loc(); k = b.lab()
+    b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k),
+           *b.path(area), ('coerce_a',), ('setlocal', a), ('getlocal', a), ('iffalse', k),
+           *b.path(lst), ('coerce_a',), ('setlocal', l), ('getlocal', l), ('iffalse', k),
+           ('getlocal', l), ('pushtrue',), ('setproperty', b.P('mouseChildren')),          # a release that never came: the rows get the mouse back
+           ('getlocal', a), ('getproperty', b.P('mouseX')), ('setlocal', mx),
+           ('getlocal', mx), *num(xr[0]), ('lessthan',), ('iftrue', k), ('getlocal', mx), *num(xr[1]), ('greaterthan',), ('iftrue', k))
+    b.set_this('dmScY', b.path(('mouseY',))); b.set_this('dmScS', b.path(('m_scrollbar_mc', 'scrolledY'), l))
+    b.set_this('dmScOn', [('pushfalse',)]); b.set_this('dmScMoved', [('pushfalse',)])
+    for ev, h in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
+        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('addEventListener'), 2))
+    b.emit(('L', k)); c.method('dmScDown', 1, b.code())
+    b = B(c, 1); l, dy, sb = b.loc(), b.loc(), b.loc(); k, go = b.lab(), b.lab()
+    b.emit(*b.path(lst), ('coerce_a',), ('setlocal', l), ('getlocal', l), ('iffalse', k),
+           ('getlocal0',), ('getproperty', b.P('mouseY')), ('getlocal0',), ('getproperty', b.P('dmScY')), ('subtract',), ('setlocal', dy),
+           ('getlocal0',), ('getproperty', b.P('dmScOn')), ('iftrue', go),
+           ('getlocal', dy), *num(DRAG_START), ('greaterthan',), ('getlocal', dy), *num(-DRAG_START), ('lessthan',), ('bitor',), ('iffalse', k))
+    b.set_this('dmScOn', [('pushtrue',)]); b.set_this('dmScMoved', [('pushtrue',)])
+    b.emit(('getlocal', l), ('pushfalse',), ('setproperty', b.P('mouseChildren')), ('L', go),
+           ('getlocal', l), ('getproperty', b.P('m_scrollbar_mc')), ('coerce_a',), ('setlocal', sb), ('getlocal', sb), ('iffalse', k),
+           ('getlocal', sb), ('getlocal0',), ('getproperty', b.P('dmScS')), ('getlocal', dy), ('subtract',), ('pushfalse',), ('pushfalse',),
+           ('callpropvoid', b.P('scrollTo'), 3), ('L', k))
+    c.method('dmScMove', 1, b.code())
+    b = B(c, 1); st, l = b.loc(), b.loc(); k, k2 = b.lab(), b.lab()
+    b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k))
+    for ev, h in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
+        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('removeEventListener'), 2))
+    b.emit(('L', k), ('getlocal0',), ('getproperty', b.P('dmScOn')), ('iffalse', k2))
+    b.set_this('dmScUpT', [('findpropstrict', gt), ('callproperty', gt, 0)])
+    b.emit(*b.path(lst), ('coerce_a',), ('setlocal', l), ('getlocal', l), ('iffalse', k2), ('getlocal', l), ('pushtrue',), ('setproperty', b.P('mouseChildren')),
+           ('L', k2))
+    b.set_this('dmScOn', [('pushfalse',)])
+    c.method('dmScUp', 1, b.code())
+
+
+def scroll_guard(b, owner, skip):
+    """lines of b: jump to label `skip` when the scroll owner (this.<owner path>, () = this) ended a scroll within DRAG_GUARD ms"""
+    gt = b.c.mv.abc.pub('getTimer', 'flash.utils'); o = b.loc(); go = b.lab()
+    b.emit(*b.path(owner), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', go),
+           ('getlocal', o), ('getproperty', b.P('dmScMoved')), ('iffalse', go),
+           ('findpropstrict', gt), ('callproperty', gt, 0), ('getlocal', o), ('getproperty', b.P('dmScUpT')), ('subtract',), *num(DRAG_GUARD),
+           ('lessthan',), ('iftrue', skip), ('L', go))
+
+
 # ---------------------------------------------------------------- dialog
+def dialog_ops():
+    """the layout ops of Dialog_1 (paths from dialog_mc); also used by the render"""
+    ops = [('pos', p, x, y) for p, (x, y) in DL_POS.items()] + [('scalex', ('hit_mc',), DL_HIT[1])]
+    return ops + ops_pad(DL_PAD)
+
+
 def dialog(data):
-    mv = Movie(data); d = Cls(mv, 'dialog_fla.Dialog_1'); root = Cls(mv, 'dialog_fla.MainTimeline')
-    getTimer = mv.abc.pub('getTimer', 'flash.utils')
-    def now(): return [('findpropstrict', getTimer), ('callproperty', getTimer, 0)]
-    # addAnswers(text): the original, then the answer it added (the last child of the answer container) gets a full-width row rect
+    """dialog.swf -> dialog_p.swf"""
+    swf = Swf(data)
+    # the window art in three slices: the art shape itself (the text part, narrowed) and two plain sprites holding it (the strips), placed on the
+    # root; onEventInit moves them into dialog_mc right under the art
+    mvd = gr.Movie(swf); kids = _children(swf, mvd, mvd.resolve('dialog_fla.Dialog_1'))
+    art = kids[DL_ART][1]['char']
+    g = gr.Graft(swf)
+    for nm in DL_COPIES: g.place(g.sprite([(art, 1, (0, 0), None)]), 0, 0, nm)
+    g.finish()
+    mv = Movie(swf.write(compress=False)); d = Cls(mv, 'dialog_fla.Dialog_1'); root = Cls(mv, 'dialog_fla.MainTimeline')
+    Rect, Shape = mv.abc.pub('Rectangle', 'flash.geom'), mv.abc.pub('Shape', 'flash.display')
+    def rect(x, y, w, h): return [('findpropstrict', Rect)] + num(x) + num(y) + num(w) + num(h) + [('constructprop', Rect, 4)]
+    # dmSlices(): the art (child DL_ART: a Shape over 1000 px wide; kept in dmArt) = the middle slice, the two copies = the strips; idempotent
+    b = B(d, 0); art_l, par, k = b.loc(), b.loc(), b.lab(); found = b.lab()
+    b.emit(('getlocal0',), ('getproperty', b.P('dmArt')), ('coerce_a',), ('setlocal', art_l), ('getlocal', art_l), ('iftrue', found),
+           ('getlocal0',), ('getproperty', b.P('numChildren')), *num(DL_ART + 1), ('lessthan',), ('iftrue', k),
+           ('getlocal0',), *num(DL_ART), ('callproperty', b.P('getChildAt'), 1), ('coerce_a',), ('setlocal', art_l),
+           ('getlocal', art_l), ('getlex', Shape), ('istypelate',), ('iffalse', k),
+           ('getlocal', art_l), ('getproperty', b.P('width')), *num(1000), ('ifngt', k))
+    b.set_this('dmArt', [('getlocal', art_l)])
+    b.emit(('L', found), ('getlocal0',), ('getproperty', b.P('parent')), ('coerce_a',), ('setlocal', par), ('getlocal', par), ('iffalse', k))
+    cp = []
+    for nm in DL_COPIES:
+        o = b.loc(); cp.append(o)
+        b.emit(('getlocal', par), ('pushstring', b.S(nm)), ('callproperty', b.P('getChildByName'), 1), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', k))
+    for o, (x0, x1, nx, kx) in zip([cp[0], art_l, cp[1]], DL_SLICES):
+        if o != art_l:
+            b.emit(('getlocal0',), ('getlocal', o), ('getlocal0',), ('getlocal', art_l), ('callproperty', b.P('getChildIndex'), 1), ('callpropvoid', b.P('addChildAt'), 2))
+            b.setp(o, 'mouseEnabled', [('pushfalse',)])
+        b.setp(o, 'scrollRect', rect(x0, DL_Y0, x1 - x0, DL_H)); b.setp(o, 'x', num(nx)); b.setp(o, 'y', num(DL_Y0)); b.setp(o, 'scaleX', num(kx))
+    b.emit(('L', k)); d.method('dmSlices', 0, b.code())
+    # frame1: the original (the text list made at the PC numbers), then the iPad's places, the narrower text list and answer / text widths
+    def f1(b):
+        b.orig(); b.apply(dialog_ops())
+        o, k = b.obj(('textContainer',)); b.callv(o, 'setFrameWidth', num(DL_TEXT_W)); b.close(k)
+        b.set_this('KeywordTextWidth', num(DL_KW_W)); b.set_this('questionWidth', num(DL_Q_W))
+    d.wrap('frame1', 'dmF1Orig', f1)
+    # addText_Internal(...): the original, then a new text block (lastText: every new TextComp is it) re-wrapped at the narrower width
+    def txt(b):
+        b.orig()
+        o, k = b.obj(('lastText',)); t, k2 = b.obj(('text_txt',), o)
+        b.emit(('getlocal', t), ('getproperty', b.P('width')), *num(DL_TC_W), ('ifeq', k2))
+        b.setp(t, 'width', num(DL_TC_W))
+        b.emit(('getlocal0',), ('getlocal', o), ('getlocal0',), ('getproperty', b.P('minHeight')), ('callpropvoid', b.P('setTextHolderHeight'), 2))
+        b.close(k2); b.close(k)
+    d.wrap('addText_Internal', 'dmTextOrig', txt)
+    # addKeywordAnswer (the engine's answers: MainTimeline.updateDialog -> addKWAnswerArray) / addAnswers (PC, not called by the engine): the
+    # original, then the answer it added (the last child of the answer container) gets a full-width row rect
     def add(b):
         b.orig()
         o, k = b.obj(('playerOptionsHolder', 'container_mc')); a = b.loc(); k2 = b.lab()
@@ -429,50 +636,24 @@ def dialog(data):
                ('getlocal', bb), ('getproperty', b.P('height')), *num(2 * ANSWER_PAD), ('add',), ('callpropvoid', b.P('drawRect'), 4),
                ('getlocal', g), ('callpropvoid', b.P('endFill'), 0), ('L', k2))
         b.close(k)
+    d.wrap('addKeywordAnswer', 'dmKwOrig', add)
     d.wrap('addAnswers', 'dmAddOrig', add)
-    # executeSelection(id): ignored for DRAG_GUARD ms after a scroll step (the release that ends a drag is a CLICK on an answer too)
+    # executeSelection(id): dropped right after a scroll (the release that ends it is a CLICK on an answer)
     def ex(b):
-        k = b.lab()
-        b.emit(*now(), ('getlocal0',), ('getproperty', b.P('dmDragT')), ('subtract',), *num(DRAG_GUARD), ('lessthan',), ('iftrue', k))
-        b.orig(); b.emit(('L', k))
+        k = b.lab(); scroll_guard(b, (), k); b.orig(); b.emit(('L', k))
     d.wrap('executeSelection', 'dmExOrig', ex)
-    # one-finger scroll: dmDown(e) on the window, dmMove(e) / dmUp(e) on the stage
-    b = B(d, 1); st = b.loc(); k = b.lab()
-    b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k))
-    b.set_this('dmY0', [('getlocal', st), ('getproperty', b.P('mouseY'))]); b.set_this('dmMoved', [('pushfalse',)])
-    b.set_this('dmS0', b.path(('textContainer', 'm_scrollbar_mc', 'scrolledY')))
-    for ev, h in (('mouseMove', 'dmMove'), ('mouseUp', 'dmUp')):
-        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('addEventListener'), 2))
-    b.emit(('L', k)); d.method('dmDown', 1, b.code())
-    b = B(d, 1); st, dy = b.loc(), b.loc(); k, go = b.lab(), b.lab()
-    b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k),
-           ('getlocal', st), ('getproperty', b.P('mouseY')), ('getlocal0',), ('getproperty', b.P('dmY0')), ('subtract',), ('setlocal', dy),
-           ('getlocal0',), ('getproperty', b.P('dmMoved')), ('iftrue', go),
-           ('getlocal', dy), *num(DRAG_START), ('greaterthan',), ('getlocal', dy), *num(-DRAG_START), ('lessthan',), ('bitor',),
-           ('iffalse', k))
-    b.set_this('dmMoved', [('pushtrue',)])
-    b.emit(('L', go))
-    o, k2 = b.obj(('textContainer', 'm_scrollbar_mc'))
-    b.callv(o, 'scrollTo', [('getlocal0',), ('getproperty', b.P('dmS0')), ('getlocal', dy), ('subtract',)], [('pushfalse',)], [('pushfalse',)])
-    b.close(k2)
-    b.set_this('dmDragT', now())
-    b.emit(('L', k)); d.method('dmMove', 1, b.code())
-    b = B(d, 1); st = b.loc(); k = b.lab()
-    b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k))
-    for ev, h in (('mouseMove', 'dmMove'), ('mouseUp', 'dmUp')):
-        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('removeEventListener'), 2))
-    b.emit(('L', k)); d.method('dmUp', 1, b.code())
-    # onEventInit(): the original, then the press listener on the dialog window (once)
+    finger_scroll(d, ('textContainer',), ('textHolder_mc',), DL_SCROLL_X)
+    # onEventInit(): the original, then the art slices (the copies on the root exist now) and the press listener on the dialog window
     def ev(b):
         b.orig()
-        o, k = b.obj(('dialog_mc',))
-        b.emit(('getlocal', o), ('pushstring', b.S('mouseDown')), ('getlocal', o), ('getproperty', b.P('dmDown')), ('callpropvoid', b.P('addEventListener'), 2))
-        b.setp(o, 'dmDragT', num(-10000)); b.close(k)
+        o, k = b.obj(('dialog_mc',)); b.callv(o, 'dmSlices')
+        b.emit(('getlocal', o), ('pushstring', b.S('mouseDown')), ('getlocal', o), ('getproperty', b.P('dmScDown')), ('callpropvoid', b.P('addEventListener'), 2))
+        b.close(k)
     root.wrap('onEventInit', 'dmEvInitOrig', ev)
     return mv.done()
 
 
-# ---------------------------------------------------------------- waypoints: the shared PANEL_CLOSE movie + double tap = travel
+# ---------------------------------------------------------------- waypoints: the shared PANEL_CLOSE movie + double tap = travel + finger scroll
 def waypoints(data):
     mv = Movie(data); lst = Cls(mv, 'waypoints_fla.WaypointsList_1'); wp = Cls(mv, 'Waypoint')
     getTimer = mv.abc.pub('getTimer', 'flash.utils')
@@ -483,9 +664,20 @@ def waypoints(data):
     b.set_this('dmTapId', num(-1)); b.emit(('getlocal0',), ('callpropvoid', b.P('useWP'), 0), ('returnvoid',), ('L', k))
     b.set_this('dmTapId', [('getlocal1',)]); b.set_this('dmTapT', [('getlocal', t)])
     lst.method('dmTap', 1, b.code())
+    finger_scroll(lst, ('listCont',), ('listCont',), WP_SCROLL_X)
+    # frame1: the original (listCont made), then the press listener on the list
+    def f1(b):
+        b.orig()
+        o, k = b.obj(('listCont',))
+        b.emit(('getlocal', o), ('pushstring', b.S('mouseDown')), ('getlocal0',), ('getproperty', b.P('dmScDown')), ('callpropvoid', b.P('addEventListener'), 2))
+        b.close(k)
+    lst.wrap('frame1', 'dmF1Orig', f1)
+    # Waypoint.onUp: nothing right after a scroll; else the original (select) + dmTap(id)
     def up(b):
+        skip = b.lab(); scroll_guard(b, ('base',), skip)
         b.orig()
         o, k = b.obj(('base',)); b.callv(o, 'dmTap', b.path(('id',))); b.close(k)
+        b.emit(('L', skip))
     wp.wrap('onUp', 'dmUpOrig', up)
     return mv.done()
 
@@ -563,33 +755,65 @@ def check(src, main_raw=None):
         def dis(cls, m): return '\n'.join(Bc.dis(Bc.methods[own[cls + '::' + m]].body)) if cls + '::' + m in own else ''
         if o == 'trade_p.swf':
             t = dis('trade_fla.trade_1', 'frame1')
-            say('dmF1Orig' in t and all(("'%s'" % n) in t or n in t for n in ('cellWidth', 'invCols', 'offerCols', 'setFrame', 'SB_SPACING', 'dmSlices')),
-                'trade_1.frame1 = PC frame1 + grid numbers (cell %d, pitch %d, %d x %d / %d x %d) + frames + scroll bars + layout' % (TR_CELL, TR_PITCH, TR_INV_COLS, TR_INV_ROWS, TR_OFF_COLS, TR_OFF_ROWS))
-            say(TR_INV_W <= 392 - 2 * 24 + 1 and 3.5 + TR_INV_W - TR_SPACING <= TR_INV_W and TR_INV_ROWS * TR_PITCH <= TR_INV_H + TR_PITCH // 2,
-                'inventory grid %d px wide in the PC pane of 392 (PC 6 x 57 = 342), %d rows of %d in %d' % (TR_INV_W, TR_INV_ROWS, TR_PITCH, TR_INV_H))
-            say(TR_OFF_X[0] >= TR_CUT[0] + 10 and TR_OFF_X[1] == TR_OFF_X[0] + TR_OFF_W + 2 and TR_OFF_X[1] + TR_OFF_W <= TR_CUT[1] + TR_DW - 10,
-                'offer grids at x %d / %d (2 x %d) inside the widened centre column %d..%d' % (TR_OFF_X[0], TR_OFF_X[1], TR_OFF_W, TR_CUT[0], TR_CUT[1] + TR_DW))
-            say(TR_OFF_ROWS * TR_PITCH + 1 <= 700, 'offer panes %d px of the PC 700' % (TR_OFF_ROWS * TR_PITCH + 1))
+            say('dmF1Orig' in t and all(("'%s'" % n) in t or n in t for n in ('cellWidth', 'invCols', 'offerCols', 'setFrame', 'SB_SPACING', 'dmSlices', 'EL_SPACING', 'rotation')),
+                'trade_1.frame1 = PC frame1 + grid numbers (cell %d, pitch %d, %d x %d / %d x %d) + frames + scroll bars + tab rows + layout' % (TR_CELL, TR_PITCH, TR_INV_COLS, TR_INV_ROWS, TR_OFF_COLS, TR_OFF_ROWS))
+            # the frame slices tile 0..TR_W in the header and in the body (no gap, no overlap)
+            def tiles(body):
+                sp = sorted((nx, nx + (x1 - x0) * float(k)) for x0, x1, y0, y1, nx, k in TR_SLICES if (y0 == 0 and y1 == TR_FRAME_H) or (y1 != TR_HDR) == body)
+                return all(abs(a[1] - b_[0]) < 0.01 for a, b_ in zip(sp, sp[1:])) and sp[0][0] == 0 and abs(sp[-1][1] - TR_W) < 0.01
+            say(tiles(False) and tiles(True), 'frame: %d slices tile 0..%d in the header (y 0..%d) and the body: side strips cut, panes x%.3f / x%.3f, centre x%.3f'
+                % (len(TR_SLICES), TR_W, TR_HDR, float(TR_K_L), float(TR_K_R), float(TR_K_C)))
+            # grids inside their panes, the inventories end above the bottom row, the offers above the OK plate
+            cells = {n: (float(x) + 3.5, float(y) + 3.5) for n, (x, y) in TR_GRID.items()}
+            pane = {'playerInventory_mc': (10, 360), 'traderInventory_mc': (800, 1149), 'playerExchange_mc': (402, 758), 'traderExchange_mc': (402, 758)}
+            okg = all(pane[n][0] <= cx and cx + (TR_INV_W if 'Inventory' in n else TR_OFF_W) - TR_SPACING <= pane[n][1] for n, (cx, cy) in cells.items())
+            inv_end = float(TR_GRID['playerInventory_mc'][1]) + TR_INV_H; off_end = float(TR_GRID['playerExchange_mc'][1]) + TR_OFF_H
+            say(okg and inv_end <= 935 and off_end <= 935 and cells['traderExchange_mc'][0] - cells['playerExchange_mc'][0] == TR_OFF_W,
+                'grids: inventories at x %.1f / %.1f (%d drawn; iPad 25 / 796, 343), offers at %.1f / %.1f (%d; iPad 407 / 584, 170), all in their panes; '
+                'inventories to y %.0f (%d full rows of %d, iPad 7.5), offers to %.0f, the button row from 935'
+                % (cells['playerInventory_mc'][0], cells['traderInventory_mc'][0], TR_INV_W - TR_SPACING, cells['playerExchange_mc'][0], cells['traderExchange_mc'][0],
+                   TR_OFF_W - TR_SPACING, inv_end, int((TR_INV_H - 3.5) // TR_PITCH), TR_PITCH, off_end))
+            say(360 <= TR_BAR['playerInventoryList'] and TR_BAR['playerExchangeList'] + 15 <= 412 and 745 <= TR_BAR['traderExchangeList'] <= 758 - 9
+                and 758 <= TR_BAR['traderInventoryList'] and TR_BAR['traderInventoryList'] + 15 <= 800,
+                'scroll bars in the pillars / the centre edge as on the PC: x %s' % ' / '.join('%d' % TR_BAR[n] for n in TR_LISTS))
+            tabs_end = float(TR_TABS['playerTabs_mc'][0]) + 44 + TR_TAB_SP + 6 * (41 + TR_TAB_SP) + 41   # the first tab 44 high (heightOverride)
+            say(tabs_end <= 360 + 0.5 and float(TR_TABS['traderTabs_mc'][0]) + tabs_end - 15 <= 1149 + 0.5 and TR_TABS['playerTabs_mc'][1] + 41 <= cells['playerInventory_mc'][1],
+                'filter tabs: a row of up to 8 above each inventory (y %d..%d; iPad filter row 219..268), the player\'s to x %.0f' % (TR_TABS['playerTabs_mc'][1], TR_TABS['playerTabs_mc'][1] + 41, tabs_end))
+            t = dis('trade_fla.trade_1', 'addTab') + dis('trade_fla.trade_1', 'addTraderTab')
+            say(t.count('rotation') == 2 and 'dmTabOrig' in t and 'dmTTabOrig' in t, 'addTab / addTraderTab: original + the new tab turned +90 (holders -90: upright, left to right)')
             mvd = gr.Movie(Swf(data)); kids = _children(Swf(data), mvd, mvd.resolve('trade_fla.trade_1'))
             pil = kids[TR_PILLAR[0]][1] if len(kids) > TR_PILLAR[0] else None
             say(pil is not None and kids[TR_PILLAR[0]][0] is None and pil['depth'] == TR_PILLAR[2] and Swf(data).tags[mvd.defs[pil['char']]][0] in gr.T_SHAPES
-                and kids[1][0] == 'frame_mc' and kids[0][0] is None, 'trade_1 children: #0 = the unnamed shape under frame_mc (#1), #%d = the unnamed balance pillar shape (depth %d) -> x +%d' % (TR_PILLAR[0], TR_PILLAR[2], TR_PILLAR[1]))
+                and kids[1][0] == 'frame_mc' and kids[0][0] is None, 'trade_1 children: #0 = the unnamed shape under frame_mc (#1), #%d = the unnamed balance pillar shape (depth %d) -> x %+d' % (TR_PILLAR[0], TR_PILLAR[2], TR_PILLAR[1]))
             say('getChildIndex' in dis('trade_fla.trade_1', 'dmSlices') and 'istypelate' in dis('trade_fla.trade_1', 'frame1'), 'slices go right under frame_mc; the pillar is moved only if child #%d is a Shape at x 0' % TR_PILLAR[0])
-            t = dis('trade_fla.trade_1', 'dmSlices'); say(t.count('scrollRect') == 3 and 'addChildAt' in t, 'frame slices: left 0..%d, centre %d..%d x%.3f, right +%d' % (TR_CUT[0], TR_CUT[0], TR_CUT[1], float(TR_CS), TR_DW))
+            t = dis('trade_fla.trade_1', 'dmSlices'); say(t.count('scrollRect') == len(TR_SLICES) and t.count('addChildAt') == len(TR_COPIES), 'dmSlices: frame_mc + %d copies cut by scrollRect' % len(TR_COPIES))
             say('getAt' in dis('trade_fla.trade_1', 'extendGrid') and 'dmExtOrig' in dis('trade_fla.trade_1', 'extendGrid'), 'extendGrid: original + Cell symbols scaled %d / %d' % (TR_CELL, TR_CELL_PC))
             t = dis('trade_fla.trade_1', 'onContainerUp'); say('dmUpOrig' in t and 'downList' in t and 'getTimer' in t, 'onContainerUp: a first tap selects (no itemClick), a second tap on that slot within %d ms = the PC itemClick (moves across)' % DTAP_MS)
-            say("'setMcSize'" in dis('trade_fla.trade_1', 'init'), 'init: original + setMcSize(%d, %d)' % (TR_W, TR_H))
+            t = dis('trade_fla.trade_1', 'init')
+            say("'setMcSize'" in t and t.count('setLength') == 4, 'init: original + setMcSize(%d, %d) + scroll bar lengths %d / %d' % (TR_W, TR_H, TR_INV_SB, TR_OFF_SB))
             t = dis('trade_fla.MainTimeline', 'onEventInit'); say("'center'" in t and 'dmEvInitOrig' in t, 'onEventInit: original + setAnchor center / screen / center')
             names = {gr.place_parse(c, tt)['name'] for c, tt, _ in b.tags if c in (26, 70)}
-            say(all((n.encode() + b'\0') in names for n in ('dmFrameC', 'dmFrameR')), 'two frame slices grafted onto the root (the PC frame symbol)')
+            say(all((n.encode() + b'\0') in names for n in TR_COPIES), '%d frame copies grafted onto the root (the PC frame symbol)' % len(TR_COPIES))
             say(b.head[:-4] == rect_bytes(TR_W, TR_H), 'stage %d x %d (PC 1360 x 1121, iPad 1160 x 1030)' % (TR_W, TR_H))
-            # every path the layout touches exists in the PC movie
+            # every path the layout touches exists in the PC movie; every moved element inside the window
             with tempfile.TemporaryDirectory() as td:
                 f = os.path.join(td, 'trade.swf'); open(f, 'wb').write(data)
-                have = {e['npath'] for e in lay.walk(lay.Mov.load(f), 4)}
+                ent = {e['npath']: e for e in lay.walk(lay.Mov.load(f), 4)}
             paths = {'trade_mc.' + '.'.join(op[1]) for op in trade_ops()}
-            miss = sorted(p for p in paths if p not in have)
+            miss = sorted(p for p in paths if p not in ent)
             say(not miss, 'all %d instance paths of the layout are in trade.swf%s' % (len(paths), (': missing ' + ' '.join(miss)) if miss else ''))
+            out_of = []
+            for p, (x, y) in TR_POS.items():
+                e = ent.get('trade_mc.' + '.'.join(p))
+                if not e or not e['local'] or p == ('traderTooltip_mc',): continue
+                k = float(TR_SCALE.get(p, e['sx'])); l = e['local']
+                bx = (float(x) + l[0] * k, float(y) + l[1] * k, float(x) + l[2] * k, float(y) + l[3] * k)
+                if bx[0] < -0.5 or bx[1] < -0.5 or bx[2] > TR_W + 0.5 or bx[3] > TR_H + 0.5: out_of.append('%s %s' % ('.'.join(p), [round(v) for v in bx]))
+            say(not out_of, 'every placed element inside the %d x %d window%s' % (TR_W, TR_H, (': ' + '; '.join(out_of)) if out_of else ''))
+            jb = ent['trade_mc.offerJunk_mc']['local']; rb = ent['trade_mc.repair_mc']['local']; ob = ent['trade_mc.ok_mc']['local']
+            say(True, 'bottom row: junk %.0f x %.0f (iPad 206 x 62; the PC icon x%.1f), OK %.0f x %.0f (iPad 206 x 62), repair / identify %.0f (iPad 64), close x%.1f (iPad 50)'
+                % ((jb[2] - jb[0]) * float(TR_SCALE[('offerJunk_mc',)]), (jb[3] - jb[1]) * float(TR_SCALE[('offerJunk_mc',)]), float(TR_SCALE[('offerJunk_mc',)]),
+                   ob[2] - ob[0], ob[3] - ob[1], (rb[2] - rb[0]) * float(TR_SCALE[("repair_mc",)]), float(TR_SCALE[("closeX_mc",)])))
         elif o in ('containerInventory_p.swf', 'reward_p.swf', 'itemSplitter_p.swf'):
             cls, ops, stage, what = {'containerInventory_p.swf': ('containerInventory_fla.MainTimeline', container_ops(), CI_STAGE, 'inv_mc x%.3f at %d,%d' % (float(CI_K), CI_X, CI_Y)),
                                      'reward_p.swf': ('reward_fla.MainTimeline', reward_ops(), RW_STAGE, 'reward_mc x%.3f, accept x%.1f' % (float(RW_K), float(RW_ACC_K))),
@@ -619,13 +843,47 @@ def check(src, main_raw=None):
                 else:
                     say(IS_BTN_XY[0] + (61 - 150) * float(IS_BTN_K) >= 0 and IS_BTN_XY[0] + (421 - 150) * float(IS_BTN_K) <= 484, 'OK / cancel %.0f x %.0f each (iPad confirm 291 x 62), group inside the window' % (153 * k * float(IS_BTN_K), 32 * k * float(IS_BTN_K)))
         elif o == 'dialog_p.swf':
-            t = dis('dialog_fla.Dialog_1', 'addAnswers'); say('dmAddOrig' in t and 'drawRect' in t and 'getChildAt' in t, 'addAnswers: original + a %d px wide row (+%d above / below) on the new answer' % (ANSWER_W, ANSWER_PAD))
-            t = dis('dialog_fla.Dialog_1', 'executeSelection'); say('dmExOrig' in t and 'getTimer' in t, 'executeSelection ignored %d ms after a scroll step' % DRAG_GUARD)
-            t = dis('dialog_fla.Dialog_1', 'dmMove'); say('scrollTo' in t and 'dmDragT' in t, 'one-finger scroll: past %d px the text list follows the finger (scrollTo)' % DRAG_START)
-            say("'mouseDown'" in dis('dialog_fla.MainTimeline', 'onEventInit'), 'onEventInit: original + the press listener on dialog_mc')
+            mvd = gr.Movie(Swf(data)); kids = _children(Swf(data), mvd, mvd.resolve('dialog_fla.Dialog_1'))
+            art = kids[DL_ART][1] if len(kids) > DL_ART else None
+            with tempfile.TemporaryDirectory() as td:
+                f = os.path.join(td, 'dialog.swf'); open(f, 'wb').write(data)
+                walk = lay.walk(lay.Mov.load(f), 3)
+            ent = {e['npath'] for e in walk}
+            ae = [e for e in walk if art is not None and e['path'] == 'dialog_mc.[d%d]' % art['depth']]
+            say(art is not None and kids[DL_ART][0] is None and Swf(data).tags[mvd.defs[art['char']]][0] in gr.T_SHAPES and len(ae) == 1
+                and ae[0]['x'] == 0 and ae[0]['y'] == 0 and ae[0]['local'][2] - ae[0]['local'][0] > 1000,
+                'Dialog_1 child #%d = the unnamed window art shape at 0, 0 (%s)' % (DL_ART, ae[0]['local'] if ae else None))
+            sl = [(nx, nx + (x1 - x0) * float(k)) for x0, x1, nx, k in DL_SLICES]
+            say(all(abs(a[1] - b_[0]) < 0.01 for a, b_ in zip(sl, sl[1:])) and abs((sl[0][0] + 10 + sl[-1][1] - 10) / 2 - 960) < 0.5 and abs((sl[-1][1] - 10) - (sl[0][0] + 10) - 1160) < 0.5,
+                'art: 3 slices (strips 1:1, text part x%.3f) = a window %.0f..%.0f (1160 wide, centred on the 1920 stage, bottom 1080; iPad 1160 x 400; PC 1352)'
+                % (float(DL_K), sl[0][0] + 10, sl[-1][1] - 10))
+            t = dis('dialog_fla.Dialog_1', 'dmSlices')
+            say(t.count('scrollRect') == 3 and t.count('addChildAt') == 2 and 'istypelate' in t and 'dmArt' in t, 'dmSlices: the art (a Shape > 1000 px at #%d) cut to the text part, two grafted copies = the strips' % DL_ART)
+            names = {gr.place_parse(c, tt)['name'] for c, tt, _ in b.tags if c in (26, 70)}
+            say(all((n.encode() + b'\0') in names for n in DL_COPIES), 'two art copies grafted onto the root')
+            t = dis('dialog_fla.Dialog_1', 'frame1')
+            say('dmF1Orig' in t and 'setFrameWidth' in t and 'KeywordTextWidth' in t and all(("'%s'" % p[0]) in t or p[0] in t for p in DL_POS),
+                'frame1: original + trade / inventory / stop listening on the left strip (y 698 / 852 / 1005), text list at x %d, %d wide (PC 375, 1200), answers wrap at %d (PC 975)'
+                % (DL_TEXT_X, DL_TEXT_W, DL_KW_W))
+            say(DL_TEXT_X + DL_TEXT_W == 1575 - DL_SHIFT and DL_TEXT_X >= 456 and float(DL_HIT[0]) + 1314 * float(DL_HIT[1]) <= 1540,
+                'text frame ends at the scroll slot (%d, PC 1575); hit_mc %s..%.0f inside the window' % (DL_TEXT_X + DL_TEXT_W, DL_HIT[0], float(DL_HIT[0]) + 1314 * float(DL_HIT[1])))
+            t = dis('dialog_fla.Dialog_1', 'addText_Internal'); say('dmTextOrig' in t and 'setTextHolderHeight' in t, 'addText_Internal: original + the new text re-wrapped at %d (PC 1000)' % DL_TC_W)
+            for m in ('addKeywordAnswer', 'addAnswers'):
+                t = dis('dialog_fla.Dialog_1', m); say(('dmKwOrig' in t or 'dmAddOrig' in t) and 'drawRect' in t and 'getChildAt' in t,
+                                                       '%s: original + a %d px wide row (+%d above / below) on the new answer' % (m, ANSWER_W, ANSWER_PAD))
+            say(ANSWER_X + ANSWER_W <= DL_TEXT_W - 18 - 150 + 4, 'answer rows end at %d of the text list (its scroll bar at %d)' % (150 + ANSWER_X + ANSWER_W, DL_TEXT_W - 18))
+            t = dis('dialog_fla.Dialog_1', 'executeSelection'); say('dmExOrig' in t and 'dmScUpT' in t, 'executeSelection dropped %d ms after a scroll' % DRAG_GUARD)
+            t = dis('dialog_fla.Dialog_1', 'dmScMove'); say('scrollTo' in t and 'mouseChildren' in t, 'one-finger scroll: past %d px the text list follows the finger (scrollTo), its rows get no mouse' % DRAG_START)
+            t = dis('dialog_fla.MainTimeline', 'onEventInit'); say("'mouseDown'" in t and 'dmSlices' in t, 'onEventInit: original + art slices + the press listener on dialog_mc')
+            miss = sorted(p for p in ('dialog_mc.' + '.'.join(op[1]) for op in dialog_ops()) if p not in ent)
+            say(not miss, 'all instance paths of the dialog layout are in dialog.swf%s' % ((': missing ' + ' '.join(miss)) if miss else ''))
+            # the engine adds answers through updateDialog -> addKeywordAnswer (addKWAnswerArray), not addAnswers
+            if main is not None: say(b'addKWAnswerArray' in main and b'updateDialog' in main, 'main.raw fills addKWAnswerArray and calls updateDialog (the answers come through addKeywordAnswer)')
         elif o == 'waypoints_p.swf':
-            say('dmUpOrig' in dis('Waypoint', 'onUp') and 'dmTap' in dis('Waypoint', 'onUp'), 'Waypoint.onUp: original (select) + dmTap(id)')
+            t = dis('Waypoint', 'onUp'); say('dmUpOrig' in t and 'dmTap' in t and 'dmScUpT' in t, 'Waypoint.onUp: nothing right after a scroll, else original (select) + dmTap(id)')
             say('useWP' in dis('waypoints_fla.WaypointsList_1', 'dmTap'), 'dmTap: the same waypoint twice within %d ms = useWP (travel)' % DTAP_MS)
+            t = dis('waypoints_fla.WaypointsList_1', 'frame1'); say('dmF1Orig' in t and 'dmScDown' in t, 'WaypointsList_1.frame1: original + one-finger scroll of listCont')
+            say('scrollTo' in dis('waypoints_fla.WaypointsList_1', 'dmScMove'), 'one-finger scroll: past %d px the list follows the finger' % DRAG_START)
             say('drawRect' in dis('waypoints_fla.MainTimeline', 'onEventInit'), 'the shared PANEL_CLOSE hit area is in (onEventInit)')
     # the host table: one row per UI type
     c = Path(__file__).resolve().parent.parent / 'dm' / 'host' / 'hle_dos2_touchui.c'
@@ -663,9 +921,10 @@ def _apply(m, ops, path):
         if op[0] == 'pos': m[4], m[5] = float(op[2]), float(op[3])
         elif op[0] == 'x': m[4] = float(op[2])
         elif op[0] == 'move': m[4] += float(op[2]); m[5] += float(op[3])
-        elif op[0] == 'scale':
+        elif op[0] in ('scale', 'scalex'):
             k = float(op[2]); sx = (m[0] ** 2 + m[1] ** 2) ** 0.5 or 1; sy = (m[2] ** 2 + m[3] ** 2) ** 0.5 or 1
-            m[0], m[1], m[2], m[3] = m[0] / sx * k, m[1] / sx * k, m[2] / sy * k, m[3] / sy * k
+            ky = k if op[0] == 'scale' else sy
+            m[0], m[1], m[2], m[3] = m[0] / sx * k, m[1] / sx * k, m[2] / sy * ky, m[3] / sy * ky
     return m
 
 
@@ -678,6 +937,10 @@ def scene(swf, cid, M, canvas, ops, path=(), skip=(), expand=(), ctx=None):
         p = path + (name or '#%d' % rec['depth'],)   # an unnamed child is '#<depth>'
         if p in skip: continue
         m = _apply(_mat(rec), ops, p)
+        wd = [op[2] for op in ops if op[0] == 'width' and tuple(op[1]) == p]   # a text field made narrower: drawn as its box x the ratio
+        if wd and not (name and p in expand):
+            bx = gr.bounds(swf, rec['char'])
+            if bx and bx[2] > bx[0]: k = float(wd[-1]) / ((bx[2] - bx[0]) * ((m[0] ** 2 + m[1] ** 2) ** 0.5 or 1)); m[0] *= k; m[1] *= k
         MM = _mul(M, m)
         if name and p in expand: scene(swf, rec['char'], MM, canvas, ops, p, skip, expand, ctx)
         else: rn.draw(ctx, rec['char'], MM, canvas, rn._cx(rec), 1, 1)
@@ -709,23 +972,28 @@ def render_one(name, data, ipad_dir, out_dir, stage_only=False):
         out = np.empty_like(canvas); out[...] = (0.16, 0.17, 0.16, 1.0); rn._over(out, canvas); return out
     ctx = rn.Ctx(swf)
     if name == 'trade':
-        W, H = TR_W, TR_H; cv = blank(W, H)
+        W, H = TR_W, TR_H
         mv = ctx.mv; tcid = mv.resolve('trade_fla.trade_1'); fr = [r for n, r in _children(swf, mv, tcid) if n == 'frame_mc'][0]
         full = blank(1360, TR_FRAME_H); rn.draw(ctx, fr['char'], (1, 0, 0, 1, 0, 0), full, None, 1, 1)
         im = Image.fromarray((np.clip(full, 0, 1) * 255).astype(np.uint8), 'RGBA')
-        parts = [(0, TR_CUT[0], 0, 1.0), (TR_CUT[0], TR_CUT[1], TR_CUT[0], float(TR_CS)), (TR_CUT[1], 1360, TR_CUT[1] + TR_DW, 1.0)]
         canvas_im = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-        for x0, x1, at, sx in parts:
-            piece = im.crop((x0, 0, x1, TR_FRAME_H)).resize((int(round((x1 - x0) * sx)), TR_FRAME_H), Image.LANCZOS); canvas_im.alpha_composite(piece, (at, 0))
+        for x0, x1, y0, y1, nx, k in TR_SLICES:   # the frame slices (scrollRect + x + scaleX of dmSlices)
+            piece = im.crop((x0, y0, x1, y1)).resize((int(round((x1 - x0) * float(k))), y1 - y0), Image.LANCZOS); canvas_im.alpha_composite(piece, (int(round(nx)), y0))
         cv = np.asarray(canvas_im).astype(np.float32) / 255.0; cv = np.ascontiguousarray(cv)
         cv[..., :3] *= cv[..., 3:4]
-        ops = trade_ops(); ops = [('pos', ('playerExchange_mc',), TR_OFF_X[0], 234), ('pos', ('traderExchange_mc',), TR_OFF_X[1], 234)] + ops
-        # the grids first (the engine draws them inside the placeholders), then the movie's own elements over them
-        for cname, cols, rows, lx, ly, x in (('playerInventory_mc', TR_INV_COLS, TR_INV_ROWS, 25, 15, 78), ('playerExchange_mc', TR_OFF_COLS, TR_OFF_ROWS, 0, 7, TR_OFF_X[0]),
-                                             ('traderExchange_mc', TR_OFF_COLS, TR_OFF_ROWS, 0, 7, TR_OFF_X[1]), ('traderInventory_mc', TR_INV_COLS, TR_INV_ROWS, 25, 15, 891 + TR_DW)):
-            vis = TR_INV_H if cols == TR_INV_COLS else TR_OFF_H
-            _cells(cv, (1, 0, 0, 1, 0, 0), x + lx + 3.5, 234 + ly + 3.5, cols, min(rows, int(vis // TR_PITCH)), TR_CELL, TR_PITCH)
-        skip = {('frame_mc',), ('#1',), ('playerInventory_mc',), ('playerExchange_mc',), ('traderExchange_mc',), ('traderInventory_mc',), ('tweenItem_mc',)}
+        ops = trade_ops()
+        # the grids first (the engine draws them inside the placeholders; the inventories show 7 full rows), then the movie's own elements
+        for cname, (x, y) in TR_GRID.items():
+            inv = 'Inventory' in cname
+            _cells(cv, (1, 0, 0, 1, 0, 0), float(x) + 3.5, float(y) + 3.5, TR_INV_COLS if inv else TR_OFF_COLS, 7 if inv else TR_OFF_ROWS, TR_CELL, TR_PITCH)
+        # the filter tabs the engine adds (addTab): 8 Tab symbols in each row (the holder -90, every tab +90 = upright, left to right)
+        tab = mv.resolve('Tab')
+        for hx, hy in TR_TABS.values():
+            x = float(hx)
+            for i in range(8):
+                rn.draw(ctx, tab, (1, 0, 0, 1, x, float(hy)), cv, None, 1, 1); x += (44 if i == 0 else 41) + TR_TAB_SP
+        skip = {('frame_mc',), ('#1',), ('playerInventory_mc',), ('playerExchange_mc',), ('traderExchange_mc',), ('traderInventory_mc',), ('tweenItem_mc',),
+                ('traderTooltip_mc',)}
         ops = ops + [('move', ('#%d' % TR_PILLAR[2],), TR_PILLAR[1], 0)]
         scene(swf, tcid, (1, 0, 0, 1, 0, 0), cv, ops, (), skip, {('namesHolder_mc',)}, ctx)
         mine = cv
@@ -746,15 +1014,33 @@ def render_one(name, data, ipad_dir, out_dir, stage_only=False):
             scene(swf, rec['char'], M, cv, ops, (top,), set(), set(), ctx)
         mine = cv
     elif name == 'dialog':
-        W, H = 1920, 1080; cv = blank(W, H)
-        rn_img, org = rn.render(swf, 'root', 1.0); mine = np.asarray(rn_img).astype(np.float32) / 255.0; mine = np.ascontiguousarray(mine); mine[..., :3] *= mine[..., 3:4]
-        # three sample answer rows (the rect each answer gets) where the answers end up at run time: the answer holder is moved into the text
-        # list (addAnswerHolder: textHolder_mc 375,706, answers at x 90 in it); the y is only an example (the list grows from the bottom)
-        for k in range(3):
-            y = 900 + k * (26 + 2 * ANSWER_PAD); x = 375 + 90 + ANSWER_X
-            mine[y - ANSWER_PAD:y + 26 + ANSWER_PAD, x:x + ANSWER_W] *= 0.6
-            mine[y - ANSWER_PAD:y + 26 + ANSWER_PAD, x:x + ANSWER_W, 0] += 0.15
-            mine[y - ANSWER_PAD, x:x + ANSWER_W] = (0.8, 0.7, 0.4, 1)
+        # the window (the stage's 380..1540 x 680..1080, where the iPad's 1160 x 400 stage is): the art in its three slices, the left strip's
+        # buttons and hit_mc where frame1 puts them, then a sample of the run-time content (made by code: a text block, three answer rows)
+        mv = ctx.mv; dcid = mv.resolve('dialog_fla.Dialog_1'); kids = _children(swf, mv, dcid); art = kids[DL_ART][1]
+        full = blank(1920, 1200); rn.draw(ctx, art['char'], (1, 0, 0, 1, 0, 0), full, None, 1, 1)
+        im = Image.fromarray((np.clip(full, 0, 1) * 255).astype(np.uint8), 'RGBA')
+        canvas_im = Image.new('RGBA', (1920, 1080), (0, 0, 0, 0))
+        for x0, x1, nx, k in DL_SLICES:
+            piece = im.crop((x0, DL_Y0, x1, DL_Y0 + DL_H)).resize((int(round((x1 - x0) * float(k))), DL_H), Image.LANCZOS); canvas_im.alpha_composite(piece, (int(round(nx)), DL_Y0))
+        cv = np.ascontiguousarray(np.asarray(canvas_im).astype(np.float32) / 255.0); cv[..., :3] *= cv[..., 3:4]
+        skip = {('#1',), ('hit_mc',), ('#%d' % art['depth'],), ('playerOptionsHolder',), ('textHolder_mc',)}
+        scene(swf, dcid, (1, 0, 0, 1, 0, 0), cv, dialog_ops(), (), skip, set(), ctx)
+        tx, ty = DL_TEXT_X, 706 + 10
+        tc = blank(1920, 1080); rn.draw(ctx, mv.resolve('TextComp'), (1, 0, 0, 1, tx, ty), tc, None, 1, 1)   # a text block: the speaker's portrait ...
+        tc[:, tx + 98:] = 0; rn._over(cv, tc)
+        cv[ty:ty + 62, tx + 102:tx + 102 + DL_TC_W] = cv[ty:ty + 62, tx + 102:tx + 102 + DL_TC_W] * 0.4 + np.array([0.18, 0.17, 0.2, 0.6], np.float32)   # ... its text at DL_TC_W
+        kw = mv.resolve('AnswerKeyword')
+        for i in range(3):   # the answer rows: AnswerKeyword at x 150 of the text list, the transparent row rect (outlined here)
+            ay = ty + 100 + i * (30 + 2 * ANSWER_PAD - 2) + ANSWER_PAD; ax = tx + 150
+            x0, x1, y0, y1 = ax + ANSWER_X, ax + ANSWER_X + ANSWER_W, ay - ANSWER_PAD, ay + 30 + ANSWER_PAD
+            cv[y0:y1, x0:x1] = cv[y0:y1, x0:x1] * 0.7 + np.array([0.12, 0.05, 0.02, 0.3], np.float32)
+            cv[y0, x0:x1] = cv[y1 - 1, x0:x1] = (0.8, 0.7, 0.4, 1); cv[y0:y1, x0] = cv[y0:y1, x1 - 1] = (0.8, 0.7, 0.4, 1)
+            rn.draw(ctx, kw, (1, 0, 0, 1, ax, ay), cv, None, 1, 1)
+        # the text list's frame (the scroll area: a drag anywhere in it scrolls) and its scroll bar place
+        x0, x1, y0, y1 = tx, tx + DL_TEXT_W, 706, 1060
+        cv[y0, x0:x1] = cv[y1, x0:x1] = (0.4, 0.8, 0.9, 1); cv[y0:y1, x0] = cv[y0:y1, x1] = (0.4, 0.8, 0.9, 1)
+        cv[y0 + 20:y1 - 20, x1 - 18:x1 - 3] = (0.35, 0.25, 0.2, 1)
+        mine = np.ascontiguousarray(cv[680:1080, 380:1540])
     else:   # waypoints: the PC layout, the 50 px close area marked
         rn_img, org = rn.render(swf, 'root', 1.0); mine = np.asarray(rn_img).astype(np.float32) / 255.0; mine = np.ascontiguousarray(mine); mine[..., :3] *= mine[..., 3:4]
         cx, cy = (1270 + 1293) / 2.0, (125 + 148) / 2.0

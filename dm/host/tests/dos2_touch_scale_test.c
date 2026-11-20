@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
         assert(sw / 2 + TS_HB_HALF * s.hud <= sw - TS_SIDE_COL * s.side - TS_GAP + 0.01f);                 // the hot bar row left of the column
         if (sw / 2 - TS_HB_HALF * s.hud < TS_PI_W * s.pi + TS_GAP) assert(TS_PI_BOT * s.pi <= ts_hb_top(s.hud, TS_HB_TOP_L) - TS_GAP + 0.01f);
         assert(s.cell >= TS_CELL0 && s.cell <= s.cell_cap && ts_inv_rows(s.cell, (float)s.bottom, sw) >= TS_INV_ROWS);
-        assert(s.examine >= 1 && s.reward >= 1 && s.splitter >= 1 && s.dialog >= 1 && 1352 * s.dialog <= sw - 2 * fmaxf(TS_MARGIN_X, TS_SIDE_COL * s.side + TS_GAP) + 0.5f);
+        assert(s.examine >= 1 && s.reward >= 1 && s.splitter >= 1 && s.dialog >= 1 && TS_DIALOG_W * s.dialog <= sw - 2 * fmaxf(TS_MARGIN_X, TS_SIDE_COL * s.side + TS_GAP) + 0.5f);
         assert(s.hb_mm <= TS_TARGET_MM + 0.01f || s.hud == 1);   // never grown past the target
     }
     // the hot bar row of tools/dos2_pchud_touch.py: 16:9 holds x ~1.2 (the column at x ~1.2 beside it)
