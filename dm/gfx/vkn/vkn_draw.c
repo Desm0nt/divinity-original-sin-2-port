@@ -20,6 +20,7 @@
 // Single-threaded: the recording thread (vkn_draw_forget_all from elsewhere is only a request).
 #ifdef DM_GAME_DOS2
 #include "vkn_draw.h"
+#include "vkn_fx.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,21 @@ void vkn_draw_ubo(int stage, uint32_t slot, uint32_t ring_off, uint32_t size) {
     g_ubo[stage][slot].off = ring_off; g_ubo[stage][slot].size = size; g_ubo[stage][slot].valid = 1;
     g_st2.ubo_announce++;
 }
+int vkn_draw_ubo_get(int stage, uint32_t slot, uint32_t *ring_off, uint32_t *size) {   // [stage 5] vkn_fx.h: a piece's deferred replay
+    if (stage < 0 || stage >= VKN_STAGE_SLOTS || slot >= VKN_UBO_SLOTS || !g_ubo[stage][slot].valid) return -1;
+    if (ring_off) *ring_off = g_ubo[stage][slot].off;
+    if (size) *size = g_ubo[stage][slot].size;
+    return 0;
+}
+// ---- [stage 5] draw effects (vkn_fx.h). g_fx: the chain's output for the draw being prepared (NULL = none: the engine's own
+// draw); g_call: what the entry point was asked to draw (the chain's context). The chain is weak: a build without vkn_fx.c
+// (old host tests) draws everything as the engine asked. ----
+int vkn_fx_active(void) __attribute__((weak));
+void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) __attribute__((weak));
+VkSampler vkn_sampler_cmp_by_id(uint32_t sampler_id) __attribute__((weak));
+static const vkn_fx_out *g_fx; static vkn_fx_out g_fx_out;
+static struct { uint8_t indexed; uint32_t first, count, instances; } g_call;
+static uint64_t g_fx_drop;   // draws dropped for an fx binding without a source (red)
 
 // ---- what this recording has bound (forgotten at every recording begin and by vkn_draw_raw_begin) ----
 static struct {
@@ -329,6 +345,11 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                     if (sid >= 0 || !use_ph) { g_st.unknown_smp++; if (sid >= 0) DRAW_RED(R_SMP, "shader %#llx stage %d slot %u: sampler-pool id %d is not known (default sampler)", (unsigned long long)s->handle, st, slot, sid); }
                     samplers_make(); sm = g_smp_linear;
                 }
+                // [stage 5] depth comparison (vkn_fx.h): the binding's flag (a named Dref bundle) or the chain's mask picks the slot
+                // sampler's comparison twin; never for a placeholder (no depth image behind it).
+                if (sid >= 0 && !use_ph && vkn_sampler_cmp_by_id && ((b->flags & VKN_BF_CMP) || (g_fx && slot < 32 && (g_fx->cmp_mask[st] >> slot & 1)))) {
+                    const VkSampler c = vkn_sampler_cmp_by_id((uint32_t)sid); if (c) sm = c;
+                }
                 if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) { if (!sm) { g_st2.dropped_bind++; return -1; } el->img.sampler = sm; }
                 else if (b->type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) { g_st2.dropped_bind++; DRAW_RED(R_BIND, "shader %#llx binding %u: texture with descriptor type %d", (unsigned long long)s->handle, b->binding, (int)b->type); return -1; }
                 el->img.imageView = v; el->img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -343,7 +364,17 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                 }
                 vkn_pass_storage(t);
                 el->img.imageView = t->view; el->img.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            } else if (b->kind != VKN_BK_UNIFORM && b->kind != VKN_BK_SUPPORT && b->kind != VKN_BK_C1) {
+            } else if (b->kind == VKN_BK_FX_TEX) {   // [stage 5] a texture the chain gave (vkn_fx_out.tex[slot])
+                const vkn_fx_tex *ft = g_fx && (uint32_t)b->slot + k < VKN_FX_TEX ? &g_fx->tex[b->slot + k] : NULL;
+                if (!ft || !ft->view || b->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || (ft->tex && vkn_pass_sample(ft->tex) == 1)) {
+                    g_st2.dropped_bind++; g_fx_drop++;
+                    DRAW_RED(R_BIND, "shader %#llx (%s) binding %u: effect texture %u has no view, or is a target of this pass (draw dropped)", (unsigned long long)s->handle, s->key[0], b->binding, b->slot + k);
+                    return -1;
+                }
+                VkSampler sm = ft->sampler; if (!sm) { samplers_make(); sm = g_smp_linear; }
+                if (!sm) { g_st2.dropped_bind++; return -1; }
+                el->img.sampler = sm; el->img.imageView = ft->view; el->img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            } else if (b->kind != VKN_BK_UNIFORM && b->kind != VKN_BK_SUPPORT && b->kind != VKN_BK_C1 && b->kind != VKN_BK_FX_UBO) {
                 g_st2.dropped_bind++;
                 DRAW_RED(R_BIND, "shader %#llx binding %u: kind %u (storage / driver table / other) has no source in the draw path", (unsigned long long)s->handle, b->binding, b->kind);
                 return -1;
@@ -368,7 +399,7 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
         const int dynamic = b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         for (uint32_t k = 0; k < b->count; k++, e++) {
             elem *el = &g_el[e];
-            if (b->kind == VKN_BK_UNIFORM || b->kind == VKN_BK_SUPPORT || b->kind == VKN_BK_C1) {
+            if (b->kind == VKN_BK_UNIFORM || b->kind == VKN_BK_SUPPORT || b->kind == VKN_BK_C1 || b->kind == VKN_BK_FX_UBO) {
                 if (b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && !dynamic) { g_st2.dropped_bind++; DRAW_RED(R_BIND, "shader %#llx binding %u: uniform source with descriptor type %d", (unsigned long long)s->handle, b->binding, (int)b->type); return -1; }
                 VkBuffer buf = VK_NULL_HANDLE; uint64_t off = 0, size = 0, doff = 0;   // doff: the dynamic offset (dynamic descriptors only)
                 const int st = src_of_stage(b->stage);
@@ -377,6 +408,13 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
                     if (st >= 0 && slot < VKN_UBO_SLOTS && g_ubo[st][slot].valid && ring) {
                         buf = ring; size = g_ubo[st][slot].size;
                         if (dynamic) { off = ring_base; doff = g_ubo[st][slot].off; } else off = ring_base + g_ubo[st][slot].off;
+                    }
+                } else if (b->kind == VKN_BK_FX_UBO) {   // [stage 5] a block the chain gave: the ring (buf NULL) or its own buffer
+                    const vkn_fx_ubo *fu = g_fx && (uint32_t)b->slot + k < VKN_FX_UBO ? &g_fx->ubo[b->slot + k] : NULL;
+                    if (fu && fu->size && (fu->buf || ring)) {
+                        size = fu->size;
+                        if (fu->buf) { buf = fu->buf; if (dynamic) doff = fu->off; else off = fu->off; }
+                        else { buf = ring; if (dynamic) { off = ring_base; doff = fu->off; } else off = ring_base + fu->off; }
                     }
                 } else if (b->kind == VKN_BK_SUPPORT) {
                     vkn_block sb;
@@ -420,7 +458,7 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
         const vkn_bind *b = &s->bind[i];
         VkWriteDescriptorSet *w = &wr[nwr++]; memset(w, 0, sizeof *w);
         w->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w->dstSet = set; w->dstBinding = b->binding; w->descriptorCount = b->count; w->descriptorType = b->type;
-        if (b->kind == VKN_BK_UNIFORM || b->kind == VKN_BK_SUPPORT || b->kind == VKN_BK_C1) w->pBufferInfo = &g_el[e].buf;
+        if (b->kind == VKN_BK_UNIFORM || b->kind == VKN_BK_SUPPORT || b->kind == VKN_BK_C1 || b->kind == VKN_BK_FX_UBO) w->pBufferInfo = &g_el[e].buf;
         else w->pImageInfo = &g_el[e].img;
         e += b->count;
     }
@@ -492,7 +530,8 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "draw without an open recording (dropped)"); return -1; }
     const vkn_shader *s = shader_for(in, 0); if (!s) return -1;
     // state ids (handle 0 = the default: blend off / depth-stencil off / default raster / no vertex input)
-    const uint16_t bid = in->blend ? vkn_blend_id(in->blend) : 0, did = in->ds ? vkn_ds_id(in->ds) : 0, rid = in->raster ? vkn_raster_id(in->raster) : 0;
+    const uint16_t bid = in->blend ? vkn_blend_id(in->blend) : 0, rid = in->raster ? vkn_raster_id(in->raster) : 0;
+    uint16_t did = in->ds ? vkn_ds_id(in->ds) : 0;
     const uint16_t vid = in->vfmt ? vkn_vfmt_id(in->vfmt) : 0;
     if ((in->blend && !bid) || (in->ds && !did) || (in->raster && !rid) || (in->vfmt && !vid)) {
         g_st.dropped_state++;
@@ -507,11 +546,29 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         DRAW_RED(R_VIEWPORT, "viewport %g %g %g %g (x y w h): no area, draw dropped", in->viewport[0], in->viewport[1], in->viewport[2], in->viewport[3]);
         return -1;
     }
+    // [stage 5] THE call point of the draw effects (vkn_fx.h): after the engine's shader and state ids are known, before anything
+    // of the draw is touched (buffers, textures, pass, pipeline). A skipped draw leaves no trace in the recording.
+    g_fx = NULL; uint8_t fxbits = 0;
+    if (vkn_fx_active && vkn_fx_run && vkn_fx_active()) {
+        vkn_fx_ctx fc; memset(&fc, 0, sizeof fc);
+        fc.shader = s; for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) fc.color[i] = vkn_pass_color(i);
+        fc.depth = vkn_pass_depth(); fc.blend = bid; fc.ds = did; fc.raster = rid; fc.vfmt = vid; fc.prim = prim;
+        fc.indexed = g_call.indexed; fc.first = g_call.first; fc.count = g_call.count; fc.instances = g_call.instances; fc.frame = vkn_frame();
+        vkn_fx_run(in, &fc, &g_fx_out);
+        if (g_fx_out.skip) return 1;
+        g_fx = &g_fx_out;
+        if (g_fx_out.shader) s = g_fx_out.shader;
+        if (g_fx_out.ds) did = g_fx_out.ds;
+        if (g_fx_out.discard) fxbits |= VKN_PIPE_FX_DISCARD;
+        if (g_fx_out.no_fs && (s->stages & (1u << VKN_SRC_FS))) fxbits |= VKN_PIPE_FX_NO_FS;
+    }
+    const int fxs = vkn_fx_shader_is(s);   // a piece's shader: its own modules, no variants
     const vkn_vfmt *vf = vid ? vkn_vfmt_info(vid) : NULL;
     uint16_t vs_inputs = 0;
     for (uint32_t i = 0; i < s->ninputs && i < 16; i++) if (s->inputs[i] < VKN_VFMT_LOCS) vs_inputs |= (uint16_t)(1u << s->inputs[i]);
-    const uint64_t code = retype_code(s, vf);
-    const int vsv = variant_vs(code), fsv = (s->stages & (1u << VKN_SRC_FS)) ? variant_fs(in->alpha_ref) : 0;
+    const uint64_t code = fxs ? 0 : retype_code(s, vf);
+    const int has_fs = (s->stages & (1u << VKN_SRC_FS)) && !(fxbits & VKN_PIPE_FX_NO_FS);
+    const int vsv = variant_vs(code), fsv = has_fs && !fxs ? variant_fs(in->alpha_ref) : 0;
     if (vsv < 0 || fsv < 0) { g_st2.dropped_variant++; DRAW_RED(R_VARIANT, "more than %d module variants (retype %#llx, alpha reference %g): draw dropped", VARIANTS - 1, (unsigned long long)code, in->alpha_ref); return -1; }
     // vertex / index buffers (resolved before the pass: a drop must not open one)
     VkBuffer vbuf[VKN_VFMT_NULL_BINDING + 1]; VkDeviceSize voff[VKN_VFMT_NULL_BINDING + 1]; uint8_t vuse = 0;
@@ -535,18 +592,18 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     // pipeline
     vkn_pipe_desc pd; memset(&pd, 0, sizeof pd);
     pd.shader = s->id; pd.vs_variant = (uint8_t)vsv; pd.fs_variant = (uint8_t)fsv; pd.blend = bid; pd.ds = did; pd.raster = rid; pd.vfmt = vid;
-    pd.prim = prim; pd.stencil_ref = in->stencil_ref; pd.pass = pi->compat;
+    pd.prim = prim; pd.stencil_ref = in->stencil_ref; pd.pass = pi->compat; pd.fx = fxbits;
     for (int i = 0; i < 8; i++) pd.write_mask[i] = (uint8_t)(pi->write_mask[i] & 0xf);
     const vkn_pipe_key key = vkn_pipe_key_pack(&pd);
     if (!g_b.gpipe_ok || memcmp(&key, &g_b.gkey, sizeof key)) {
         VkPipeline p = vkn_pipe_get(&key, NULL);
         if (!p) {
             vkn_pipe_src src; memset(&src, 0, sizeof src);
-            src.vs = vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);
-            src.fs = (s->stages & (1u << VKN_SRC_FS)) ? vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0) : VK_NULL_HANDLE;
+            src.vs = fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);
+            src.fs = !has_fs ? VK_NULL_HANDLE : fxs ? s->module[VKN_SRC_FS] : vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0);
             src.layout = s->layout; src.pass = pi->pass; src.vs_inputs = vs_inputs;
-            src.shader = s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable
-            if (src.vs && (src.fs || !(s->stages & (1u << VKN_SRC_FS)))) p = vkn_pipe_get(&key, &src);
+            src.shader = fxs || fxbits ? NULL : s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable (an effect's variant is not listed)
+            if (src.vs && (src.fs || !has_fs)) p = vkn_pipe_get(&key, &src);
         }
         if (!p) {
             g_st.dropped_pipe++;
@@ -686,6 +743,7 @@ static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, 
     }
     const int out32 = ix ? isz == 4 : n > 0xffffu;   // arrays: relative indices 0..n-1, the first vertex goes to vertexOffset
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
+    g_call.indexed = (uint8_t)ix; g_call.first = first_vertex; g_call.count = n; g_call.instances = instances ? instances : 1;
     const int r = prepare(in, q, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     VkBuffer buf; VkDeviceSize off;
@@ -735,6 +793,7 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
         return draw_rewritten(in, (const uint8_t *)ib.blk.cpu + (uint64_t)first_index * isz, isz, 0, count, instances);
     }
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
+    g_call.indexed = 1; g_call.first = first_index; g_call.count = count; g_call.instances = instances ? instances : 1;
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     const VkIndexType it = vkn_buf_index_type(ib.index_size);
@@ -755,6 +814,7 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     Q_ENTER();   // [stage 4: queries]
     if (rw_kind(in->prim) >= 0) return draw_rewritten(in, NULL, 0, first, count, 1);
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
+    g_call.indexed = 0; g_call.first = first; g_call.count = count; g_call.instances = 1;
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     Q_PRE(cb);   // [stage 4: queries]
@@ -765,6 +825,7 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
 }
 
 int vkn_draw_dispatch(const vkn_draw_in *in, const vkn_img_bind *img, uint32_t nimg, uint32_t x, uint32_t y, uint32_t z) {
+    g_fx = NULL;   // [stage 5] dispatches do not pass the effect chain
     if (!in) return 1;
     VkCommandBuffer cb = cb_ready();
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "dispatch without an open recording (dropped)"); return 1; }

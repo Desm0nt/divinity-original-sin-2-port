@@ -260,6 +260,7 @@ int dm_vkn_exec_scissor(uint64_t r, int32_t out[4]) __attribute__((weak));
 static uint64_t g_last_blend, g_last_ds, g_last_raster; static uint8_t g_last_sref;
 static int32_t g_prev_vp[4], g_prev_sc[4]; static int g_prev_ok, g_sc_from_vp = 1;
 int dm_vkn_cmd_override(uint64_t r, float vp[4], int32_t sc[4]) __attribute__((weak));   // hle_dos2_vkn_cmd.c
+void vkn_fx_census(void) __attribute__((weak));        // vkn_fx.c (stage 5)
 void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c
 void dm_vkn_draw_fill(vkn_draw_in *in) {
     if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // textures the engine wrote through their mapped storage since the last draw
@@ -403,5 +404,6 @@ void dm_vkn_draw_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2: no site of this part goes in (VKN_M_NATIVE), nothing else either
     vkn_draw_install();
     dm_vkn_census(draw_census);
+    if (vkn_fx_census) dm_vkn_census(vkn_fx_census);   // [stage 5] the draw effects (vkn_fx.h)
 }
 #endif

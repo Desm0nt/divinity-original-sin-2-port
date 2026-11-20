@@ -548,7 +548,7 @@ enum { COMPILE_NS = 2000000 };                // a build under 2 ms came from th
 
 // w0: shader (24) | vs variant (8) << 24 | fs variant (8) << 32 | vertex format (16) << 40 | primitive (8) << 56
 // w1: blend (16) | depth-stencil (16) << 16 | raster (16) << 32 | pass compatibility (16) << 48
-// w2: write masks (4 bits a slot, slot 0 lowest) | stencil reference (8) << 32
+// w2: write masks (4 bits a slot, slot 0 lowest) | stencil reference (8) << 32 | fx bits (2) << 40 (stage 5, vkn_fx.h)
 vkn_pipe_key vkn_pipe_key_pack(const vkn_pipe_desc *d) {
     vkn_pipe_key k;
     const compat_e *c = compat_get(d->pass);
@@ -559,7 +559,7 @@ vkn_pipe_key vkn_pipe_key_pack(const vkn_pipe_desc *d) {
     for (uint32_t i = 0; i < 8; i++) if (!c || (i < c->k.ncolor && c->k.color[i])) masks |= (uint64_t)(d->write_mask[i] & 0xf) << (4 * i);
     k.w[0] = (uint64_t)(d->shader & 0xffffff) | (uint64_t)d->vs_variant << 24 | (uint64_t)d->fs_variant << 32 | (uint64_t)d->vfmt << 40 | (uint64_t)d->prim << 56;
     k.w[1] = (uint64_t)d->blend | (uint64_t)d->ds << 16 | (uint64_t)d->raster << 32 | (uint64_t)d->pass << 48;
-    k.w[2] = masks | (uint64_t)ref << 32;
+    k.w[2] = masks | (uint64_t)ref << 32 | (uint64_t)(d->fx & VKN_PIPE_FX_MASK) << 40;
     return k;
 }
 void vkn_pipe_key_unpack(const vkn_pipe_key *k, vkn_pipe_desc *d) {
@@ -568,7 +568,7 @@ void vkn_pipe_key_unpack(const vkn_pipe_key *k, vkn_pipe_desc *d) {
     d->vfmt = (uint16_t)(k->w[0] >> 40); d->prim = (uint8_t)(k->w[0] >> 56);
     d->blend = (uint16_t)k->w[1]; d->ds = (uint16_t)(k->w[1] >> 16); d->raster = (uint16_t)(k->w[1] >> 32); d->pass = (uint16_t)(k->w[1] >> 48);
     for (uint32_t i = 0; i < 8; i++) d->write_mask[i] = (uint8_t)((k->w[2] >> (4 * i)) & 0xf);
-    d->stencil_ref = (uint8_t)(k->w[2] >> 32);
+    d->stencil_ref = (uint8_t)(k->w[2] >> 32); d->fx = (uint8_t)(k->w[2] >> 40) & VKN_PIPE_FX_MASK;
 }
 VkPipelineCache vkn_pipe_cache_get(void) { return __atomic_load_n(&g_pcache, __ATOMIC_ACQUIRE); }
 static pthread_mutex_t g_pcache_mu = PTHREAD_MUTEX_INITIALIZER;   // serialises the one creation of the cache
@@ -625,7 +625,7 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     if (!dv || !c || !src->vs || !src->layout) return VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo st[2]; memset(st, 0, sizeof st); uint32_t nst = 0;
     st[nst].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; st[nst].stage = VK_SHADER_STAGE_VERTEX_BIT; st[nst].module = src->vs; st[nst].pName = "main"; nst++;
-    if (src->fs) { st[nst].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; st[nst].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[nst].module = src->fs; st[nst].pName = "main"; nst++; }
+    if (src->fs && !(k->fx & VKN_PIPE_FX_NO_FS)) { st[nst].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; st[nst].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[nst].module = src->fs; st[nst].pName = "main"; nst++; }
     // Vertex input: the format's attributes, plus the null stream for every location the vertex module reads and the format lacks.
     VkVertexInputAttributeDescription at[VKN_VFMT_LOCS]; VkVertexInputBindingDescription bd[VKN_VFMT_STREAMS + 1]; uint32_t nat = 0, nbd = 0;
     const vkn_vfmt *vf = vkn_vfmt_info(k->vfmt);
@@ -653,6 +653,7 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     const VkPipelineRasterizationStateCreateInfo *r0 = vkn_raster_info(k->raster);
     if (r0) rs = *r0;
     pthread_mutex_unlock(&g_st_mu);
+    if (k->fx & VKN_PIPE_FX_DISCARD) rs.rasterizerDiscardEnable = VK_TRUE;   // [stage 5] nothing reaches the targets (vkn_fx.h)
     if (rs.polygonMode != VK_POLYGON_MODE_FILL && !dv->feat.fillModeNonSolid) {
         static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
         rs.polygonMode = VK_POLYGON_MODE_FILL;

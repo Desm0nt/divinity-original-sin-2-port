@@ -138,7 +138,11 @@ typedef struct vkn_pipe_desc {
     uint8_t stencil_ref;               // block +0x10 of 0x92c3c0 (forced 0 when the depth-stencil state has no stencil test)
     uint16_t pass;                     // render pass COMPATIBILITY id
     uint8_t write_mask[8];             // VkColorComponentFlags per colour slot (vkn_write_mask_*; 0 for a slot not bound)
+    uint8_t fx;                        // [stage 5, vkn_fx.h] VKN_PIPE_FX_*: variants a draw effect asked for (0 = the engine's own draw)
 } vkn_pipe_desc;
+// fx bits. DISCARD: rasterizerDiscardEnable. NO_FS: built without the fragment stage (the caller passes vkn_pipe_src.fs = NULL).
+// A swapped depth-stencil state is simply another `ds` id; a swapped shader another `shader` id (vkn_fx.h VKN_FX_SHADER_ID0).
+enum { VKN_PIPE_FX_DISCARD = 1, VKN_PIPE_FX_NO_FS = 2, VKN_PIPE_FX_MASK = 3 };
 vkn_pipe_key vkn_pipe_key_pack(const vkn_pipe_desc *d);
 void vkn_pipe_key_unpack(const vkn_pipe_key *k, vkn_pipe_desc *d);
 // What a miss needs from the caller (the shader piece's objects; this piece does not include its header).

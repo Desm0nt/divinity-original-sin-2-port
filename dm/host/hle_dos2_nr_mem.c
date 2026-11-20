@@ -28,6 +28,10 @@
 
 void xbg_nr_mem_usage(uint64_t *u) __attribute__((weak));            // xbg_nr_mem.inc
 void xbg_nr_mem_trim(int tier, uint64_t *freed) __attribute__((weak));
+int vkn_shlib_on(void) __attribute__((weak));                         // vkn_shlib.cpp: 1 = DM_VK_NATIVE=1 without the translator
+// The translator's caches (staging, ASTC queue, warm-up SPIR-V, static copies) do not exist when it is not initialised:
+// their figures are zero and there is nothing of its to trim. The native backend retires its own memory by frame (vkn_core.c).
+static int nm_xbg(void) { return !(vkn_shlib_on && vkn_shlib_on()); }
 uint64_t dm_nr_tex_mem_held(void);                                     // hle_dos2_nr.c (NR-05 table; 0 without NR-05)
 uint64_t dm_nr_tex_mem_trim(void);
 
@@ -101,7 +105,7 @@ void dm_nr_mem_trim_request(int level) {   // the UI thread: only noted, the tri
 // ---- usage, trims, the line ----
 static void nm_usage(uint64_t u[NRM_U_N]) {
     memset(u, 0, sizeof(uint64_t) * NRM_U_N);
-    if (xbg_nr_mem_usage) xbg_nr_mem_usage(u);
+    if (nm_xbg() && xbg_nr_mem_usage) xbg_nr_mem_usage(u);
     u[NRM_U_TEXBLOB] = dm_nr_tex_mem_held();
 }
 static void nm_trim(int tier, const char *why) {
@@ -119,7 +123,7 @@ static void nm_trim(int tier, const char *why) {
     memset(f, 0, sizeof f);
     const uint64_t t0 = nm_now();
     f[NRM_U_TEXBLOB] = dm_nr_tex_mem_trim();
-    if (xbg_nr_mem_trim) xbg_nr_mem_trim(tier, f);
+    if (nm_xbg() && xbg_nr_mem_trim) xbg_nr_mem_trim(tier, f);
     f[NRM_U_TS_IMG] = u[NRM_U_TS_IMG];   // the table's trim released them all: the worker destroys them (its next idle)
     const uint64_t freed = nrm_usage_bytes(f) - f[NRM_U_RING];
     g_nm.trims[tier]++; g_nm.freed += freed; g_nm.last_freed = freed; g_nm.last_tier = tier;

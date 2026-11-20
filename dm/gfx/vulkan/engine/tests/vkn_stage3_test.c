@@ -26,7 +26,7 @@
 // Build + run (WSL gcc, as vkn_stage2_test.c; <vk> = a directory holding only vulkan/ and vk_video/ of the NDK sysroot include):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
-//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c
+//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c
 //       dm/gfx/nvn/nvn_tex.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -46,6 +46,7 @@
 #include "../../../vkn/vkn_frame.h"
 #include "../../../vkn/vkn_pass.h"
 #include "../../../vkn/vkn_draw.h"
+#include "../../../vkn/vkn_fx.h"
 #include "../../../vkn/vkn_ui.h"
 #include "../../../vkn/vkn_query.h"
 
@@ -683,6 +684,19 @@ static void draw_setup(void) {
     g_in.viewport[2] = 64; g_in.viewport[3] = 32; g_in.scissor[2] = 64; g_in.scissor[3] = 32;
 }
 
+// [stage 5] a draw effect of the test (vkn_fx.h): g_fxm picks what it asks for; the last context is kept.
+static int g_fxm; static vkn_fx_ctx g_fxc; static const vkn_shader *g_fxsh; static uint16_t g_fxds; static uint32_t g_fxcalls;
+static void fx_test(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
+    (void)in; (void)user; g_fxc = *ctx; g_fxcalls++;
+    switch (g_fxm) {
+        case 1: out->skip = 1; break;
+        case 2: out->discard = 1; break;
+        case 3: out->ds = g_fxds; break;
+        case 4: out->no_fs = 1; break;
+        case 5: out->shader = g_fxsh; out->tex[2].view = g_t0 ? g_t0->view : VK_NULL_HANDLE; out->tex[2].tex = g_t0; out->ubo[1].off = 512; out->ubo[1].size = 64; break;
+        default: break;
+    }
+}
 static void test_draw(void) {
     draw_setup();
     if (!g_s1 || !g_t0 || !g_t3 || !g_t5 || !g_ts || !g_a2 || !g_d3 || !g_b2) return;
@@ -896,6 +910,50 @@ static void test_draw(void) {
     // a flush in the middle of a recording (a request from another thread): its pools are still read by this recording
     vkn_draw_forget_all();
     m = mark(); vkn_draw_indexed(&in, 0, 3, 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1);
+    // ---- [stage 5] draw effects (vkn_fx.h): the chain, skip, discard, depth-state swap, no fragment stage, a piece's shader, bypass
+    {
+        vkn_fx_stats f0, f1; vkn_fx_stats_get(&f0);
+        CHECK_EQ(vkn_fx_register("test", fx_test, NULL, 100), 0); CHECK_EQ(vkn_fx_register("test", fx_test, NULL, 100), -1);
+        g_fxm = 0; vkn_draw_indexed(&in, 0, 3, 1);
+        m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); OPS(m, cb, MK_E_DRAW_IDX);   // a function that asks nothing changes nothing
+        CHECK(g_fxc.shader && g_fxc.shader->handle == in.shader); CHECK(g_fxc.color[0] == g_a2); CHECK(g_fxc.depth == g_d3);
+        CHECK_EQ(g_fxc.indexed, 1); CHECK_EQ(g_fxc.count, 3); CHECK_EQ(g_fxc.instances, 1); CHECK_EQ(g_fxc.prim, in.prim);
+        g_fxm = 1; m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 0); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 0);
+        g_fxm = 2; m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1);
+        const uint64_t p_disc = nth(m, cb, MK_E_BIND_PIPE, 0) ? nth(m, cb, MK_E_BIND_PIPE, 0)->a[0] : 0;
+        g_fxm = 0; m = mark(); vkn_draw_indexed(&in, 0, 3, 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1);
+        const uint64_t p_base = nth(m, cb, MK_E_BIND_PIPE, 0) ? nth(m, cb, MK_E_BIND_PIPE, 0)->a[0] : 0;
+        CHECK(p_disc && p_base && p_disc != p_base);
+        g_fxds = vkn_fx_ds(1, 0, 2, 0, 0, 0, 0, 0); CHECK(g_fxds != 0); CHECK_EQ(vkn_fx_ds(1, 0, 2, 0, 0, 0, 0, 0), g_fxds);
+        g_fxm = 3; m = mark(); vkn_draw_indexed(&in, 0, 3, 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1);
+        CHECK(nth(m, cb, MK_E_BIND_PIPE, 0) && nth(m, cb, MK_E_BIND_PIPE, 0)->a[0] != p_base && nth(m, cb, MK_E_BIND_PIPE, 0)->a[0] != p_disc);
+        g_fxm = 4; m = mark(); vkn_draw_indexed(&in, 0, 3, 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1);
+        {   // a shader of a piece: an effect block (dynamic), the engine's fragment texture slot 3, an effect texture
+            static const uint32_t spv[5] = {0x07230203u, 0x00010000u, 0, 1, 0};
+            VkShaderModuleCreateInfo mi; memset(&mi, 0, sizeof mi); mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO; mi.codeSize = sizeof spv; mi.pCode = spv;
+            VkShaderModule mv = VK_NULL_HANDLE, mf = VK_NULL_HANDLE;
+            vkCreateShaderModule(vkn_device()->dev, &mi, NULL, &mv); vkCreateShaderModule(vkn_device()->dev, &mi, NULL, &mf);
+            vkn_bind tb[3]; memset(tb, 0, sizeof tb);
+            tb[0].binding = 0; tb[0].kind = VKN_BK_FX_UBO; tb[0].slot = 1; tb[0].count = 1; tb[0].bundle_stage = 4; tb[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            tb[1].binding = 1; tb[1].kind = VKN_BK_TEXTURE; tb[1].stage = VKN_STAGE_FS; tb[1].slot = 3; tb[1].count = 1; tb[1].bundle_stage = 4; tb[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            tb[2].binding = 2; tb[2].kind = VKN_BK_FX_TEX; tb[2].slot = 2; tb[2].count = 1; tb[2].bundle_stage = 4; tb[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            vkn_fx_shader_src ss; memset(&ss, 0, sizeof ss); ss.name = "fxtest"; ss.vs = mv; ss.fs = mf; ss.bind = tb; ss.nbind = 3;
+            g_fxsh = vkn_fx_shader_create(&ss); CHECK(g_fxsh != NULL);
+            if (g_fxsh) {
+                CHECK(vkn_fx_shader_is(g_fxsh)); CHECK_EQ(g_fxsh->ndyn, 1); CHECK_EQ(g_fxsh->bind[0].dyn, 0); CHECK_EQ(g_fxsh->bind[1].dyn, VKN_NO_DYN);
+                g_fxm = 5; m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+                CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1);
+                m = mark(); vkn_draw_indexed(&in, 0, 3, 1); OPS(m, cb, MK_E_DRAW_IDX);   // the same again: nothing rebound
+            }
+            tb[2].slot = VKN_FX_TEX; CHECK(vkn_fx_shader_create(&ss) == NULL);   // an effect slot out of range is refused
+        }
+        g_fxm = 1; vkn_fx_bypass(1); m = mark(); vkn_draw_indexed(&in, 0, 3, 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1); vkn_fx_bypass(0);   // a piece's own draw
+        g_fxm = 0; vkn_draw_indexed(&in, 0, 3, 1);
+        vkn_fx_stats_get(&f1);
+        CHECK_EQ(f1.skipped, f0.skipped + 1); CHECK_EQ(f1.discards, f0.discards + 1); CHECK_EQ(f1.ds_swaps, f0.ds_swaps + 1); CHECK_EQ(f1.no_fs, f0.no_fs + 1);
+        CHECK_EQ(f1.shader_swaps, f0.shader_swaps + 2); CHECK_EQ(f1.bypassed, f0.bypassed + 1); CHECK_EQ(f1.nfn, 1);
+        vkn_fx_out oa, ob; memset(&oa, 0, sizeof oa); memset(&ob, 0, sizeof ob); CHECK(vkn_fx_out_same(&oa, NULL)); ob.ubo[3].size = 4; CHECK(!vkn_fx_out_same(&oa, &ob));
+    }
     fsubmit(0);
     frames_n(4);
     CHECK(mk_destroyed[MK_DPOOL] > dp0);
