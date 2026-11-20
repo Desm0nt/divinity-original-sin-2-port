@@ -114,6 +114,24 @@ typedef struct vkn_tex_stats {
 } vkn_tex_stats;
 void vkn_tex_get_stats(vkn_tex_stats *s);
 
+
+// ==== added by the UI piece (stage 3, vkn_tex.c): texture updates after creation, view swizzles ====
+// Writes a rectangle of one (level, layer) of t: rows of block rows `pitch` bytes apart (block formats: x, y, w, h in texels, the rows
+// are block rows), copied into a staging block during the call. On the recording thread with a recording open (vkn_frame.h) the copy
+// is recorded at once into vkn_cb() in order with the draws around it (vkn_pass_layout ends a pass that is open and runs remembered
+// clears first; the texture ends in SHADER_READ_ONLY_OPTIMAL); on any other thread, or with no recording open, it is queued like a
+// creation upload (vkn_upload_push: the start of the next recording). The rectangle is clipped to the level. CPU-decoded BC and
+// widened textures take the same conversion as at creation (BC: block-aligned rectangles only). 0 = recorded / queued; -1 = dropped
+// (dead or unknown texture, empty rectangle, out of range, no memory: counted in vkn_tex_update_stats).
+int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *rows, uint32_t pitch);
+// Install time (mode 1): registers the begin listener that tells vkn_tex_update which thread records. Without it every update is queued.
+void vkn_tex_update_init(void);
+typedef struct vkn_tex_update_stats { uint64_t recorded, queued, bytes, dropped_dead, dropped_rect, dropped_fmt, dropped_mem; } vkn_tex_update_stats;
+void vkn_tex_update_stats_get(vkn_tex_update_stats *s);
+// vkn_tex_create with an explicit view swizzle (NVN TextureSwizzle numbers per output component r, g, b, a: 0 zero, 1 one, 2 R, 3 G,
+// 4 B, 5 A; what nvnTextureBuilderSetSwizzle got) instead of the format's own. Applies to the sampled views (whole and per layer).
+vkn_tex *vkn_tex_create_swz(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const uint8_t swz[4], const char **why);
+
 #ifdef __cplusplus
 }
 #endif

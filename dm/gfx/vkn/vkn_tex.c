@@ -297,6 +297,7 @@ static VkImageView make_view(VkDevice dev, vkn_tex *t, VkImageViewType type, VkI
     return vkCreateImageView(dev, &vi, NULL, &v) == VK_SUCCESS ? v : VK_NULL_HANDLE;
 }
 
+static __thread const uint8_t *t_swz;   // vkn_tex_create_swz (UI piece): the view swizzle of this creation, NULL = the format's own
 vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const char **why) {
     const char *dummy; if (!why) why = &dummy;
     *why = "no device";
@@ -363,7 +364,13 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { *why = "no device memory"; goto fail1; }
 
     // views
-    const VkComponentMapping sw = fmt_swizzle(nvn, x && !decoded);
+    VkComponentMapping sw = fmt_swizzle(nvn, x && !decoded);
+    if (t_swz) {   // vkn_tex_create_swz: the caller's NVN swizzle (0 zero, 1 one, 2 R, 3 G, 4 B, 5 A)
+        static const VkComponentSwizzle k[6] = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
+                                                VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+        VkComponentSwizzle *c[4] = {&sw.r, &sw.g, &sw.b, &sw.a};
+        for (int i = 0; i < 4; i++) if (t_swz[i] < 6) *c[i] = k[t_swz[i]];
+    }
     const VkImageAspectFlags sasp = t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect;   // a depth-stencil texture samples depth
     const VkImageViewType vt = d3 ? VK_IMAGE_VIEW_TYPE_3D : tg == 0 ? VK_IMAGE_VIEW_TYPE_1D : tg == 3 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : (tg == 4 || tg == 6) ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : tg == 8 && (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? VK_IMAGE_VIEW_TYPE_CUBE
@@ -628,5 +635,116 @@ void vkn_tex_get_stats(vkn_tex_stats *s) {
     s->pending = 0;
     if (g_init > 0) for (uint32_t i = 0; i < g_slot_hi; i++) if (g_slot[i] && !g_slot[i]->linked) s->pending++;
     pthread_mutex_unlock(&g_mu);
+}
+
+// ==== UI piece (stage 3): updates after creation (vkn_tex.h), the swizzle variant of creation ====
+// The recording thread: set by a begin listener of vkn_frame (weak: this file also links without the frame and pass modules, as in
+// the stage-2 host test; then every update is queued).
+extern void vkn_rec_on_begin(void (*fn)(void)) __attribute__((weak));
+extern VkCommandBuffer vkn_cb(void) __attribute__((weak));
+extern void vkn_pass_layout(vkn_tex *t, VkImageLayout to) __attribute__((weak));
+static pthread_t g_rec_thread; static int g_rec_known;
+static vkn_tex_update_stats g_ust;
+static void rec_begin_seen(void) { g_rec_thread = pthread_self(); __atomic_store_n(&g_rec_known, 1, __ATOMIC_RELEASE); }
+void vkn_tex_update_init(void) {
+    static int done;
+    if (done || !vkn_rec_on_begin) return;
+    done = 1;
+    vkn_rec_on_begin(rec_begin_seen);
+}
+void vkn_tex_update_stats_get(vkn_tex_update_stats *s) {
+    if (!s) return;
+    pthread_mutex_lock(&g_mu); *s = g_ust; pthread_mutex_unlock(&g_mu);
+}
+static void ust_count(uint64_t *c) { pthread_mutex_lock(&g_mu); (*c)++; pthread_mutex_unlock(&g_mu); }
+
+int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *rows, uint32_t pitch) {
+    if (!t || !rows || t->dead || !t->image || t->samples != 1) { ust_count(&g_ust.dropped_dead); return -1; }
+    if (level >= t->mips || layer >= (t->nvn_target == 2 ? mipdim(t->depth, level) : t->layers)) { ust_count(&g_ust.dropped_rect); return -1; }
+    // format facts as at creation (the texture's NVN number; decoded / widened textures convert the same way)
+    prep p; memset(&p, 0, sizeof p);
+    p.nvn = t->nvn_fmt;
+    p.bpb = nvn_fmt_bpb((int)p.nvn, &p.bw, &p.bh);
+    if (!p.bpb || p.bw <= 0 || p.bh <= 0) { ust_count(&g_ust.dropped_fmt); return -1; }
+    if (t->decoded) {
+        int bpp = 0; uint32_t pf = 0;
+        if (!nvn_bc_unpacked(p.nvn, &pf, &bpp)) { ust_count(&g_ust.dropped_fmt); return -1; }
+        p.mode = 1; p.dbpb = (uint32_t)bpp;
+    } else if (t->widened) {
+        VkFormat to;
+        if (!widen_of(p.nvn, &to, &p.cs, &p.one)) { ust_count(&g_ust.dropped_fmt); return -1; }
+        p.mode = 2; p.dbpb = 4 * p.cs;
+    }
+    p.align = lcm16(p.mode ? p.dbpb : (uint32_t)p.bpb);
+    // clip to the level (block formats: whole blocks; a clipped origin moves the source pointer)
+    const int64_t lw = mipdim(t->w, level), lh = mipdim(t->h, level);
+    const uint8_t *src = (const uint8_t *)rows;
+    if (x < 0) {
+        if ((int64_t)w <= -(int64_t)x || (-x) % p.bw) { ust_count(&g_ust.dropped_rect); return -1; }
+        src += (uint64_t)((-x) / p.bw) * (uint64_t)p.bpb; w -= (uint32_t)-x; x = 0;
+    }
+    if (y < 0) {
+        if ((int64_t)h <= -(int64_t)y || (-y) % p.bh) { ust_count(&g_ust.dropped_rect); return -1; }
+        src += (uint64_t)((-y) / p.bh) * pitch; h -= (uint32_t)-y; y = 0;
+    }
+    if (x >= lw || y >= lh || !w || !h) { ust_count(&g_ust.dropped_rect); return -1; }
+    if (x + (int64_t)w > lw) w = (uint32_t)(lw - x);
+    if (y + (int64_t)h > lh) h = (uint32_t)(lh - y);
+    if ((p.bw > 1 || p.bh > 1) && ((x % p.bw) || (y % p.bh) || ((w % (uint32_t)p.bw) && x + (int64_t)w != lw) || ((h % (uint32_t)p.bh) && y + (int64_t)h != lh))) {
+        ust_count(&g_ust.dropped_rect); return -1;
+    }
+    const uint64_t srow = (uint64_t)((w + p.bw - 1) / p.bw) * (uint64_t)p.bpb, nrows = (h + p.bh - 1) / p.bh;
+    if (pitch < srow) { ust_count(&g_ust.dropped_rect); return -1; }
+    const uint64_t bytes = dst_bytes(&p, w, h, 1);
+    // staging: the rows tight (converted when the texture is decoded / widened)
+    up_ctx *u = (up_ctx *)calloc(1, sizeof *u + sizeof(VkBufferImageCopy));
+    if (!u) { ust_count(&g_ust.dropped_mem); return -1; }
+    const int al_pow2 = !(p.align & (p.align - 1));
+    if (vkn_block_alloc(VKN_ARENA_STAGING, bytes + (al_pow2 ? 0 : p.align), al_pow2 ? (uint32_t)p.align : 16, &u->blk)) { free(u); ust_count(&g_ust.dropped_mem); return -1; }
+    u->have_blk = 1;
+    const uint64_t skew = (p.align - u->blk.off % p.align) % p.align;
+    uint8_t *stage = (uint8_t *)u->blk.cpu + skew;
+    if (p.mode == 0) {
+        for (uint64_t r = 0; r < nrows; r++) memcpy(stage + r * srow, src + r * pitch, (size_t)srow);
+    } else {
+        uint8_t *tight = (uint8_t *)malloc((size_t)(srow * nrows));
+        if (!tight) { vkn_block_free(&u->blk); free(u); ust_count(&g_ust.dropped_mem); return -1; }
+        for (uint64_t r = 0; r < nrows; r++) memcpy(tight + r * srow, src + r * pitch, (size_t)srow);
+        const int cr = convert(&p, tight, w, h, 1, stage);
+        free(tight);
+        if (cr) { vkn_block_free(&u->blk); free(u); ust_count(&g_ust.dropped_fmt); return -1; }
+    }
+    VkBufferImageCopy *c = &u->c[0];
+    c->bufferOffset = u->blk.off + skew; c->bufferRowLength = 0; c->bufferImageHeight = 0;
+    const int d3 = t->nvn_target == 2;
+    c->imageSubresource = (VkImageSubresourceLayers){t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect, level, d3 ? 0 : layer, 1};
+    c->imageOffset = (VkOffset3D){x, y, d3 ? (int32_t)layer : 0};
+    c->imageExtent = (VkExtent3D){w, h, 1};
+    u->n = 1; u->t = t;
+    // a reference for the copy (up_run drops it)
+    pthread_mutex_lock(&g_mu);
+    const int alive = !t->dead && t->refs != 0;
+    if (alive) t->refs++;
+    pthread_mutex_unlock(&g_mu);
+    if (!alive) { vkn_block_free(&u->blk); free(u); ust_count(&g_ust.dropped_dead); return -1; }
+    const int here = vkn_cb && vkn_pass_layout && __atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && pthread_equal(pthread_self(), g_rec_thread) &&
+                     vkn_cb() != VK_NULL_HANDLE;
+    if (here) {
+        // in order with the draws of this recording: an open pass ends, remembered clears of t run, then the copy
+        vkn_pass_layout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        up_run(vkn_cb(), u);   // -> copy -> SHADER_READ_ONLY_OPTIMAL; staging retired, reference dropped
+    } else vkn_upload_push(up_run, u, bytes);
+    pthread_mutex_lock(&g_mu);
+    if (here) g_ust.recorded++; else g_ust.queued++;
+    g_ust.bytes += bytes;
+    pthread_mutex_unlock(&g_mu);
+    return 0;
+}
+
+vkn_tex *vkn_tex_create_swz(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const uint8_t swz[4], const char **why) {
+    t_swz = swz;
+    vkn_tex *t = vkn_tex_create(handle, d, src, why);
+    t_swz = NULL;
+    return t;
 }
 #endif
