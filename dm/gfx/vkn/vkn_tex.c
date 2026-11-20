@@ -18,6 +18,7 @@
 #include "vkn_state.h"   // vkn_fb_forget_view: framebuffers of a dying texture's views
 #include "vkn_astc.h"    // stage 4: the setup ASTC pack
 #include "vkn_bcgpu.h"   // stage 4: GPU BC decode (-> ASTC 4x4) at upload
+#include "vkn_fx.h"      // [stage 5 A1] vkn_sampler_cmp_by_id (the comparison twin of a sampler)
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -931,12 +932,25 @@ void vkn_tex_unref(vkn_tex *t) { if (t) unref(t); }
 
 // ---- samplers ----
 static void sampler_free(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroySampler(d->dev, (VkSampler)(uintptr_t)ctx, NULL); }
-int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso, uint32_t compare) {
-    const vkn_dev *d = vkn_device(); if (!d) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
-    pthread_mutex_lock(&g_mu); const int ti = tables_init_locked(); pthread_mutex_unlock(&g_mu);
-    if (ti) return -1;
+// [stage 5 A1] the creation arguments of every sampler-pool id (the comparison twin is made from them) and the twins themselves
+// (vkn_sampler_cmp_by_id). Under g_mu. g_samp_gen[id] + 1 at every create / destroy of the id: a twin made from older arguments is
+// not installed.
+typedef struct samp_args { uint32_t filter, wrap_u, wrap_v, wrap_w, max_aniso, compare; uint8_t known; } samp_args;
+static samp_args g_samp_args[SAMP_IDS]; static uint32_t g_samp_gen[SAMP_IDS];
+static VkSampler g_samp_cmp[SAMP_IDS]; static uint8_t g_samp_cmp_own[SAMP_IDS];   // own 0: the engine sampler itself (it compares already)
+static uint64_t g_cmp_made, g_cmp_game, g_cmp_failed; static uint32_t g_cmp_alive, g_cmp_reds;
+static void cmp_drop_locked(uint32_t id) {   // the twin of id leaves with its engine sampler (under g_mu)
+    if (id >= SAMP_IDS) return;
+    g_samp_gen[id]++;
+    if (g_samp_cmp[id] && g_samp_cmp_own[id]) { vkn_retire(sampler_free, (void *)(uintptr_t)g_samp_cmp[id]); g_cmp_alive--; }
+    g_samp_cmp[id] = VK_NULL_HANDLE; g_samp_cmp_own[id] = 0;
+}
+// The engine's sampler arguments as a VkSamplerCreateInfo. twin 1: the comparison twin of the old path's Dref host (xbg_game.cpp
+// dref_sampler, DM_NR_SH_PCF=3): compare LESS (NVN compare func 2 - 1; ref < texel = lit, the Switch shader's manual test), linear
+// min / mag (hardware 2x2 PCF per tap), the mip mode, wraps, anisotropy and LOD range of the game's sampler kept.
+static VkSamplerCreateInfo samp_info(const vkn_dev *d, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso, uint32_t compare, int twin) {
     // engine 0x921e40: filter 1..5 -> min linear (mip nearest for 1, 2, 4; mip linear for 3, 5), mag linear; 0 / other -> nearest, mip nearest
-    const int lin = filter >= 1 && filter <= 5, mipl = filter == 3 || filter == 5;
+    const int lin = twin || (filter >= 1 && filter <= 5), mipl = filter == 3 || filter == 5;
     // wrap: 0 repeat, 1 clamp to edge, 2 mirrored repeat, 3 clamp to border (border colour 0); anything else repeat
     static const VkSamplerAddressMode k_wrap[4] = {VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
                                                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER};
@@ -948,18 +962,28 @@ int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint3
         .anisotropyEnable = an > 1.0f && d->feat.samplerAnisotropy ? VK_TRUE : VK_FALSE, .maxAnisotropy = an > 1.0f ? an : 1.0f,
         // compare: engine n (1..7) = VkCompareOp n (less, equal, less-or-equal, greater, not-equal, greater-or-equal, always); 0 = off;
         // above 7 the engine enables the compare with "never"
-        .compareEnable = compare ? VK_TRUE : VK_FALSE, .compareOp = compare <= 7 ? (VkCompareOp)compare : VK_COMPARE_OP_NEVER,
+        .compareEnable = twin || compare ? VK_TRUE : VK_FALSE, .compareOp = twin ? VK_COMPARE_OP_LESS : compare <= 7 ? (VkCompareOp)compare : VK_COMPARE_OP_NEVER,
         .minLod = 0.0f, .maxLod = VK_LOD_CLAMP_NONE, .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, .unnormalizedCoordinates = VK_FALSE};
+    return si;
+}
+int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso, uint32_t compare) {
+    const vkn_dev *d = vkn_device(); if (!d) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    pthread_mutex_lock(&g_mu); const int ti = tables_init_locked(); pthread_mutex_unlock(&g_mu);
+    if (ti) return -1;
+    const VkSamplerCreateInfo si = samp_info(d, filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 0);
     VkSampler s = VK_NULL_HANDLE;
     if (vkCreateSampler(d->dev, &si, NULL, &s) != VK_SUCCESS) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
     pthread_mutex_lock(&g_mu);
     int alive = 0; samp_rec *r = (samp_rec *)vkn_tab_put(&g_samp, handle, &alive);
     if (r && alive && r->s) {   // a record of this index we never saw destroyed
-        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) g_samp_by_id[r->id] = VK_NULL_HANDLE;
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); }
         vkn_retire(sampler_free, (void *)(uintptr_t)r->s); g_st.samplers--;
     }
     if (r) { r->s = s; r->id = pool_id; g_st.samplers++; g_st.samplers_made++; }
-    if (r && pool_id < SAMP_IDS) g_samp_by_id[pool_id] = s;
+    if (r && pool_id < SAMP_IDS) {
+        g_samp_by_id[pool_id] = s; cmp_drop_locked(pool_id);
+        g_samp_args[pool_id] = (samp_args){filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 1};
+    }
     pthread_mutex_unlock(&g_mu);
     if (!r) { vkDestroySampler(d->dev, s, NULL); __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
     return 0;
@@ -968,7 +992,7 @@ int vkn_sampler_destroy(uint64_t handle) {
     pthread_mutex_lock(&g_mu);
     samp_rec *r = g_init > 0 ? (samp_rec *)vkn_tab_get(&g_samp, handle) : NULL; int known = 0;
     if (r && r->s) {
-        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) g_samp_by_id[r->id] = VK_NULL_HANDLE;
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); g_samp_args[r->id].known = 0; }
         vkn_retire(sampler_free, (void *)(uintptr_t)r->s); r->s = VK_NULL_HANDLE; g_st.samplers--; known = 1;
     }
     if (r) vkn_tab_kill(&g_samp, handle);
@@ -979,6 +1003,48 @@ VkSampler vkn_sampler_by_id(uint32_t id) {
     if (id >= SAMP_IDS) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_mu); const VkSampler s = g_samp_by_id[id]; pthread_mutex_unlock(&g_mu);
     return s;
+}
+// [stage 5 A1] vkn_fx.h: the comparison twin of the engine sampler of this pool id, made on first use (on the recording thread: one
+// vkCreateSampler per sampler id that a Dref binding ever reads, a handful), cached per id, retired with the engine sampler (destroy or
+// replacement of the id). A game sampler that compares already is its own twin (the old path left it as it was).
+VkSampler vkn_sampler_cmp_by_id(uint32_t id) {
+    const vkn_dev *d = vkn_device();
+    if (id >= SAMP_IDS || !d) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_mu);
+    VkSampler c = g_samp_cmp[id]; const VkSampler base = g_samp_by_id[id]; const samp_args a = g_samp_args[id]; const uint32_t gen = g_samp_gen[id];
+    if (!c && base && a.known && a.compare) { c = g_samp_cmp[id] = base; g_samp_cmp_own[id] = 0; g_cmp_game++; }
+    const int none = !c && (!base || !a.known);
+    const int red = none && g_cmp_reds < 16 ? (int)++g_cmp_reds : 0;
+    if (none) g_cmp_failed++;
+    pthread_mutex_unlock(&g_mu);
+    if (c || none) {
+        if (red) vkn_logf(RED "tex: comparison twin of sampler-pool id %u: no engine sampler there (sampled without the comparison)", id);
+        return c;
+    }
+    const VkSamplerCreateInfo si = samp_info(d, a.filter, a.wrap_u, a.wrap_v, a.wrap_w, a.max_aniso, 0, 1);
+    VkSampler t = VK_NULL_HANDLE;
+    const VkResult vr = vkCreateSampler(d->dev, &si, NULL, &t);
+    pthread_mutex_lock(&g_mu);
+    int installed = 0, n = 0;
+    if (vr == VK_SUCCESS && g_samp_gen[id] == gen && !g_samp_cmp[id]) { g_samp_cmp[id] = t; g_samp_cmp_own[id] = 1; g_cmp_alive++; n = (int)++g_cmp_made; installed = 1; }
+    else if (vr != VK_SUCCESS) g_cmp_failed++;
+    c = g_samp_cmp[id];
+    const int red2 = vr != VK_SUCCESS && g_cmp_reds < 16 ? (int)++g_cmp_reds : 0;
+    pthread_mutex_unlock(&g_mu);
+    if (!installed && vr == VK_SUCCESS) vkDestroySampler(d->dev, t, NULL);   // the id changed meanwhile (or another caller won): never used
+    if (red2) vkn_logf(RED "tex: comparison twin of sampler-pool id %u: vkCreateSampler %d (sampled without the comparison)", id, (int)vr);
+    if (n && n <= 8)
+        vkn_logf("tex: comparison twin of sampler-pool id %u: game filter %u wrap %u/%u/%u anisotropy %u compare %u -> compare LESS, linear min / mag, mip %s (%d made)",
+                 id, a.filter, a.wrap_u, a.wrap_v, a.wrap_w, a.max_aniso, a.compare, si.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? "linear" : "nearest", n);
+    return c;
+}
+void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed, uint32_t *alive) {
+    pthread_mutex_lock(&g_mu);
+    if (made) *made = g_cmp_made;
+    if (game_cmp) *game_cmp = g_cmp_game;
+    if (failed) *failed = g_cmp_failed;
+    if (alive) *alive = g_cmp_alive;
+    pthread_mutex_unlock(&g_mu);
 }
 
 void vkn_tex_get_stats(vkn_tex_stats *s) {
@@ -1013,6 +1079,9 @@ void vkn_tex_update_init(void) {
     if (done || !vkn_rec_on_begin) return;
     done = 1;
     vkn_rec_on_begin(rec_begin_seen);
+}
+int vkn_tex_on_rec_thread(void) {   // [stage 5 A1] vkn_tex.h
+    return __atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && pthread_equal(pthread_self(), g_rec_thread);
 }
 void vkn_tex_update_stats_get(vkn_tex_update_stats *s) {
     if (!s) return;

@@ -188,6 +188,14 @@ typedef struct vkn_tex_share {
 } vkn_tex_share;
 vkn_tex *vkn_tex_create_shared(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const vkn_tex_share *sh, const char **why);
 
+// ==== [stage 5 A1] named shaders + Dref (vkn_shlib_named.h); vkn_sampler_cmp_by_id itself is declared in vkn_fx.h ====
+// 1 = the calling thread is the recording thread (the begin listener of vkn_tex_update_init saw it begin a recording): its current
+// target set (vkn_pass.h) is the pass a pipeline is being built for. 0 = another thread or not known yet.
+int vkn_tex_on_rec_thread(void);
+// The comparison twins (vkn_sampler_cmp_by_id): made, ids whose game sampler compares already (its own twin), refused (no engine
+// sampler under the id / vkCreateSampler failed), alive now.
+void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed, uint32_t *alive);
+
 #ifdef __cplusplus
 }
 #endif

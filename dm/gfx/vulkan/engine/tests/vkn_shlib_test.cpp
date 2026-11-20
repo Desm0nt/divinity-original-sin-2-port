@@ -14,11 +14,18 @@
 // -> float).
 // One device model per process (the translator initialises once): argv[1] = adreno | mali | powervr | adreno-simmali | adreno-native | adreno-files,
 // argv[2] = the shader directory, argv[3] (optional) = the bundle limit (0 = all). Exit 0 = no difference.
+// [stage 5 A1] "With replacement" column: a model name may carry "+nr<q>" (q = 0..3: the shadow class; "+nrv": verify; "+nr3nl": the
+// shadow atlas formats D16 / X8_D24 without linear filtering, so Dref falls back to mobile on both sides): the translator runs with DM_NR_SH=1 /
+// DM_NR_SH_PCF=q, the library with DM_VK_NATIVE_SH=1 / DM_VK_NATIVE_SH_PCF=q (vkn_shlib_named.cpp), both reading <shader dir>/native-nr.xgspack;
+// every compare above then covers the named bundles too (the module words with the replacement = the translator's with DM_NR_SH=1), and
+// the summary counts the NR-04 keys replaced, those with a Dref binding, and the "#nrt" translated twin of each replaced key (loaded, a
+// fragment module whose binding list equals the named one's, words other than the named module's). Without "+nr" both sides run with
+// the replacement off (DM_NR_SH=0 / DM_VK_NATIVE_SH=0: the stage-4 column).
 // Build + run (WSL; tests/vkn_shlib_test.sh does exactly this, and copies the pack into the Linux file system first):
 //   g++ -std=c++17 -O1 -w -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -DVK_USE_PLATFORM_ANDROID_KHR
 //       -DDM_ASTC_LAZY=1 -I<shim: android/hardware_buffer.h, zlib.h> -I<NDK vulkan headers> -Idm/gfx/vulkan -Idm/gfx/nvn/include -Idm/host -Idm
-//       dm/gfx/vulkan/engine/*.cpp dm/gfx/vulkan/engine/*.c (not xbg_spvopt.cpp / xbg_astc_lazy.cpp) dm/gfx/vkn/vkn_shlib.cpp
-//       dm/gfx/nr/nr_ubodyn.c dm/gfx/vulkan/engine/tests/vkn_shlib_test.cpp -no-pie -Wl,--unresolved-symbols=ignore-all -lpthread -ldl -l:libz.so.1
+//       dm/gfx/vulkan/engine/*.cpp dm/gfx/vulkan/engine/*.c (not xbg_spvopt.cpp / xbg_astc_lazy.cpp) dm/gfx/vkn/vkn_shlib.cpp dm/gfx/vkn/vkn_shlib_named.cpp
+//       dm/gfx/nr/nr_ubodyn.c dm/gfx/nr/nr_sh.c dm/gfx/vulkan/engine/tests/vkn_shlib_test.cpp -no-pie -Wl,--unresolved-symbols=ignore-all -lpthread -ldl -l:libz.so.1
 #include <vulkan/vulkan.h>
 #include <execinfo.h>
 #include <dirent.h>
@@ -39,6 +46,8 @@
 #include <vector>
 #include "../xbg_game.h"
 #include "../../../vkn/vkn_shlib.h"
+#include "../../../vkn/vkn_shlib_named.h"
+#include "../../../nr/nr_sh.h"
 
 // ---------------------------------------------------------------- device models
 struct Model {
@@ -47,6 +56,8 @@ struct Model {
     std::vector<std::pair<const char *, const char *>> env;   // set with overwrite (the model's own switches)
 };
 static Model g_m;
+static bool g_d16_nolinear;   // "+nr3nl": D16_UNORM and X8_D24 without SAMPLED_IMAGE_FILTER_LINEAR: both Dref checks refuse it.
+// (D16 alone would differ by design: the translator then stores NVN DEPTH16 as X8_D24 and keeps Dref; vkn_tex.c has no such widening.)
 static VkPhysicalDeviceFeatures all_features(bool gs, bool gather, bool rwf) {
     VkPhysicalDeviceFeatures f; VkBool32 *b = reinterpret_cast<VkBool32 *>(&f); for (size_t i = 0; i < sizeof f / sizeof(VkBool32); i++) b[i] = VK_TRUE;
     f.geometryShader = gs; f.shaderImageGatherExtended = gather; f.shaderStorageImageReadWithoutFormat = rwf; f.shaderStorageImageWriteWithoutFormat = rwf;
@@ -136,10 +147,18 @@ MK VkResult vkEnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *,
     for (uint32_t i = 0; i < k; i++) { memset(&e[i], 0, sizeof e[i]); snprintf(e[i].extensionName, sizeof e[i].extensionName, "%s", names[first + i]); e[i].specVersion = 1; }
     *n = k; return k < have ? VK_INCOMPLETE : VK_SUCCESS;
 }
-MK void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice, VkFormat, VkFormatProperties *p) {   // everything everywhere (only reports read it)
+MK void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice, VkFormat f, VkFormatProperties *p) {   // everything everywhere (only reports and the Dref checks read it)
     p->linearTilingFeatures = p->optimalTilingFeatures = p->bufferFeatures = 0x7fffffff;
+    if (g_d16_nolinear && (f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32)) p->optimalTilingFeatures &= ~VkFormatFeatureFlags(VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
 }
-MK void vkGetPhysicalDeviceFormatProperties2(VkPhysicalDevice d, VkFormat f, VkFormatProperties2 *p) { vkGetPhysicalDeviceFormatProperties(d, f, &p->formatProperties); }
+MK void vkGetPhysicalDeviceFormatProperties2(VkPhysicalDevice d, VkFormat f, VkFormatProperties2 *p) {
+    vkGetPhysicalDeviceFormatProperties(d, f, &p->formatProperties);
+    for (VkBaseOutStructure *s = reinterpret_cast<VkBaseOutStructure *>(p->pNext); s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3) {   // VK_KHR_format_feature_flags2: everything, as above
+            auto *p3 = reinterpret_cast<VkFormatProperties3 *>(s); p3->linearTilingFeatures = p3->optimalTilingFeatures = p3->bufferFeatures = ~VkFormatFeatureFlags2(0);
+            if (g_d16_nolinear && (f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32)) p3->optimalTilingFeatures &= ~VkFormatFeatureFlags2(VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+        }
+}
 MK VkResult vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties *p) {
     p->maxExtent = {16384, 16384, 2048}; p->maxMipLevels = 15; p->maxArrayLayers = 2048; p->sampleCounts = 0x5; p->maxResourceSize = 1ull << 32; return VK_SUCCESS;
 }
@@ -198,6 +217,7 @@ static std::vector<std::string> keys_of(const std::string &dir, size_t *in_pack)
 struct Count { uint64_t compared = 0, same = 0, differ = 0; };
 static Count c_base, c_alpha, c_retype;
 static uint64_t g_unusable, g_missing, g_alpha_refused, g_retype_refused, g_vs, g_fs, g_cs;
+static uint64_t g_nr_keys, g_nr_replaced, g_nr_same, g_nr_dref, g_nr_alt, g_nr_alt_bad;   // [stage 5 A1] the "with replacement" column
 static int g_diff_lines;
 static void diff(const char *what, const std::string &key, const char *fmt, ...) {
     if (g_diff_lines++ >= 40) return;
@@ -230,7 +250,17 @@ static bool same_module(VkShaderModule o, VkShaderModule ob, VkShaderModule n, V
 static void tally(Count &c, bool ok) { c.compared++; (ok ? c.same : c.differ)++; }
 
 int main(int argc, char **argv) {
-    if (argc < 3 || !pick_model(argv[1])) { fprintf(stderr, "usage: %s adreno|mali|powervr|adreno-simmali|adreno-native|adreno-files <shader dir> [limit]\n", argv[0]); return 2; }
+    // [stage 5 A1] "<model>+nr<q>" / "+nrv" / "+nr3nl": the named-bundle replacement on both sides (head comment)
+    std::string mname = argc > 1 ? argv[1] : "", nr; const size_t plus = mname.find('+');
+    if (plus != std::string::npos) { nr = mname.substr(plus + 1); mname.resize(plus); }
+    const bool nr_on = !nr.empty();
+    if (nr_on && !(nr == "nr0" || nr == "nr1" || nr == "nr2" || nr == "nr3" || nr == "nrv" || nr == "nr3nl")) { fprintf(stderr, "unknown option +%s\n", nr.c_str()); return 2; }
+    if (argc < 3 || !pick_model(mname.c_str())) { fprintf(stderr, "usage: %s adreno|mali|powervr|adreno-simmali|adreno-native|adreno-files[+nr0..3|+nrv|+nr3nl] <shader dir> [limit]\n", argv[0]); return 2; }
+    if (nr_on) {
+        const char *q = nr == "nrv" ? "3" : nr == "nr3nl" ? "3" : nr.c_str() + 2, *m = nr == "nrv" ? "2" : "1";
+        g_m.env.push_back({"DM_NR_SH", m}); g_m.env.push_back({"DM_NR_SH_PCF", q}); g_m.env.push_back({"DM_VK_NATIVE_SH", m}); g_m.env.push_back({"DM_VK_NATIVE_SH_PCF", q});
+        g_d16_nolinear = nr == "nr3nl";
+    }
     signal(SIGSEGV, on_crash); signal(SIGBUS, on_crash); signal(SIGILL, on_crash);
     const std::string dir = argv[2]; const size_t limit = argc > 3 ? size_t(atol(argv[3])) : 0;
     // the phone's environment in mode 1: the app's defaults (jni_android.c, setenv without overwrite), the switches dm_dos2_vkn_pre forces
@@ -239,7 +269,8 @@ int main(int argc, char **argv) {
                                          {"DM_GFX_NAN_MINMAX", "1"}, {"DM_GFX_D3PERF", "1"}, {"DM_GFX_PRESENT_THREAD", "1"}, {"DM_VK_NATIVE", "1"}};
     for (auto &e : app) setenv(e[0], e[1], 0);
     static const char *const off[] = {"DM_NR_SH", "DM_NR_ONCHIP", "DM_NR_ONCHIP_FOG", "DM_NR_MAT", "DM_NR_MAT_VS", "DM_NR_SH_SURF", "DM_NR_XLQ", "DM_NR_LIGHTFUSE",
-                                      "DM_NR_LIGHTFUSE_FOG", "DM_NR_SH_PCF", "DM_HACK_FSR", "DM_NR_HEAT", "DM_NR_SEED", "DM_NB", "DM_NR", "DM_NB_POST"};
+                                      "DM_NR_LIGHTFUSE_FOG", "DM_NR_SH_PCF", "DM_HACK_FSR", "DM_NR_HEAT", "DM_NR_SEED", "DM_NB", "DM_NR", "DM_NB_POST",
+                                      "DM_VK_NATIVE_SH", "DM_HACK_SHPCF", "DM_HACK_LIGHTS", "DM_HACK_TIER"};   // [stage 5 A1] the library's replacement: off unless "+nr"
     for (const char *k : off) setenv(k, "0", 1);
     for (auto &e : g_m.env) setenv(e.first, e.second, 1);
     const std::string logp = std::string("/tmp/vkn_shlib_test_") + g_m.name + (argc > 1 ? std::string("_") + argv[1] : std::string()) + ".log";
@@ -298,6 +329,23 @@ int main(int argc, char **argv) {
             (so->stage == 0 ? g_vs : so->stage == 4 ? g_fs : g_cs)++;
         }
         tally(c_base, ok);
+        if (nr_on && ro == 0 && nr_sh_find_key(key.c_str()) >= 0 && key.size() == 16) {   // [stage 5 A1] an NR-04 key
+            g_nr_keys++; uint64_t dref = 0;
+            if (vkn_shlib_named_entry(key.c_str(), &dref) >= 0) {
+                g_nr_replaced++; if (ok) g_nr_same++; if (dref) g_nr_dref++;
+                xbg_vkn_stage *sa = new xbg_vkn_stage;
+                const int ra = vkn_shlib_named_alt(key.c_str(), sa);
+                const std::vector<uint32_t> *wa = ra == 0 && sa->module ? words(sa->module) : nullptr, *wn = sn->module ? words(sn->module) : nullptr;
+                bool good = wa && wn && sa->stage == 4 && sa->binding_count == sn->binding_count;
+                for (uint32_t b = 0; good && b < sa->binding_count; b++) good = sa->bindings[b].binding == sn->bindings[b].binding && sa->bindings[b].type == sn->bindings[b].type;
+                if (good && nr != "nrv" && *wa == *wn) good = false;   // mode 1: the twin is the translated module, not the named one
+                if (good && nr == "nrv" && *wa != *wn) good = false;   // mode 2: both are the translated module
+                (good ? g_nr_alt : g_nr_alt_bad)++;
+                if (!good) diff("nr-alt", key, "translated twin rc %d stage %u bindings %u/%u words %zu/%zu", ra, sa->stage, sa->binding_count, sn->binding_count, wa ? wa->size() : 0, wn ? wn->size() : 0);
+                if (sa->module) forget(sa->module);
+                delete sa;
+            }
+        }
         if (!ok || ro != 0) continue;
         if (so->stage == 4) for (auto &a : alphas) {
             const VkShaderModule mo = xbg_vkn_alpha_module(so->shader, a.func, a.ref), mn = vkn_shlib_alpha_module(sn->shader, a.func, a.ref);
@@ -326,15 +374,19 @@ int main(int argc, char **argv) {
     vkn_shlib_stats st; vkn_shlib_stats_get(&st);
     printf("model %s: bundles compared %llu identical %llu different %llu (vertex %llu fragment %llu compute %llu, unusable %llu, missing %llu); "
            "alpha variants compared %llu identical %llu different %llu (both refused %llu); retype variants compared %llu identical %llu different %llu (both refused %llu); "
-           "library: %llu from the pack, %llu from files, %llu native; modules created %llu; words digest %016llx; %.1f s\n",
+           "library: %llu from the pack, %llu from files, %llu native; modules created %llu; words digest %016llx; %.1f s\n"
+           "with replacement (%s): NR-04 keys %llu, replaced by name %llu (identical to the translator %llu), with a Dref binding %llu; translated twins ok %llu, bad %llu\n",
            argv[1], (unsigned long long)c_base.compared, (unsigned long long)c_base.same, (unsigned long long)c_base.differ, (unsigned long long)g_vs, (unsigned long long)g_fs,
            (unsigned long long)g_cs, (unsigned long long)g_unusable, (unsigned long long)g_missing, (unsigned long long)c_alpha.compared, (unsigned long long)c_alpha.same,
            (unsigned long long)c_alpha.differ, (unsigned long long)g_alpha_refused, (unsigned long long)c_retype.compared, (unsigned long long)c_retype.same,
            (unsigned long long)c_retype.differ, (unsigned long long)g_retype_refused, (unsigned long long)st.from_pack, (unsigned long long)st.from_file,
-           (unsigned long long)st.native_used, (unsigned long long)g_mod_creates, (unsigned long long)g_digest, s);
+           (unsigned long long)st.native_used, (unsigned long long)g_mod_creates, (unsigned long long)g_digest, s,
+           nr_on ? nr.c_str() : "off", (unsigned long long)g_nr_keys, (unsigned long long)g_nr_replaced, (unsigned long long)g_nr_same, (unsigned long long)g_nr_dref,
+           (unsigned long long)g_nr_alt, (unsigned long long)g_nr_alt_bad);
+    if (nr_on) vkn_shlib_named_census();
     if (g_log) fclose(g_log);
     if (!ovr.empty()) remove(ovr.c_str());
-    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared;
+    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit);
     printf("%s\n", pass ? "PASS" : "FAIL");
     fflush(stdout); _exit(pass ? 0 : 1);   // no static destructors: the translator's state is not shut down
 }

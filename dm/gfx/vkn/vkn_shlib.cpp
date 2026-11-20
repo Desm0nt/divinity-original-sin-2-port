@@ -9,6 +9,7 @@
 // the rewrites, deep on the stack) for shaders and variants.
 #ifdef DM_GAME_DOS2
 #include "vkn_shlib.h"
+#include "vkn_shlib_named.h"   // [stage 5 A1] engine shaders by name (DM_VK_NATIVE_SH): the hook at the head of read_bundle
 #include "vkn.h"
 #include <dirent.h>
 #include <fcntl.h>
@@ -191,6 +192,7 @@ void apply(const std::string &key, std::vector<uint8_t> &bytes) {
 }
 // One bundle: pack first (mode 1), else its own file; then the native swap. false = neither has it; a bad length leaves out empty.
 bool read_bundle(const std::string &key, std::vector<uint8_t> &out, bool &from_pack) {
+    { const int nr = vkn_shlib_named_read(key, out, from_pack, read_bundle, g.dir, g.c.physical, g.ffl2, int(g.policy)); if (nr >= 0) return nr != 0; }   // [stage 5 A1] DM_VK_NATIVE_SH (vkn_shlib_named.h): NR-04 keys read here (the named bundle in place of the translated one)
     xp::open_once(); from_pack = false; bool have = false;
     if (xp::mode == 1 && xp::get(key, out)) { from_pack = true; have = true; }
     else {

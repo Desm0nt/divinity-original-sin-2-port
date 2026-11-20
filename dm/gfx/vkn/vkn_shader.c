@@ -19,6 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../vulkan/engine/xbg_game.h"   // xbg_vkn_stage, xbg_shader_binding, XBG_SOURCE_* (the door to the packs)
+#include "vkn_fx.h"            // [stage 5 A1] VKN_BF_CMP, VKN_FX_SHADER_ID0
+#include "vkn_shlib_named.h"   // [stage 5 A1] engine shaders by name (DM_VK_NATIVE_SH) + Dref
 
 // The translator and the key (weak: host tests link without them; then nothing is created).
 extern int xbg_shader_program_key(const void *control, const void *code, char out_hex17[17]) __attribute__((weak));
@@ -47,11 +49,25 @@ static const sh_loader *loader(void) {
     return &l;
 }
 extern void xbg_support_defaults(void *bytes1392, float width, float height) __attribute__((weak));   // xbg_vulkan.cpp (stateless)
+// [stage 5 A1] named shaders (vkn_shlib_named.cpp) and the pass a pipeline is built for (vkn_tex.c / vkn_pass.c). Weak: the host tests
+// link this file without them (then no shader is named).
+extern int vkn_shlib_named_entry(const char *fs_key, uint64_t *dref_mask) __attribute__((weak));
+extern int vkn_shlib_named_pass(int entry, int ncolor, const uint32_t *fmt, uint32_t depth_fmt, uint32_t samples, uint32_t w, uint32_t h) __attribute__((weak));
+extern int vkn_shlib_named_alt(const char *fs_key, xbg_vkn_stage *out) __attribute__((weak));
+extern void vkn_shlib_named_flagged(uint32_t bindings) __attribute__((weak));
+extern void vkn_shlib_named_alt_result(int ok) __attribute__((weak));
+extern void vkn_shlib_named_census(void) __attribute__((weak));
+extern int vkn_tex_on_rec_thread(void) __attribute__((weak));
+extern vkn_tex *vkn_pass_color(uint32_t i) __attribute__((weak));
+extern vkn_tex *vkn_pass_depth(void) __attribute__((weak));
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 enum { SH_TAB = 1 << 16, LAYOUT_CAP = 4096, SUPPORT_CAP = 32, SUPPORT_BYTES = 1392, MISS_REDS = 16, BLOCK_REDS = 8 };
 
-typedef struct sh_rec { vkn_shader pub; uint8_t own_layout; } sh_rec;
+// nr_entry: [stage 5 A1] NR-04 table entry + 1 of a fragment stage the library replaced by name (0 = none); nr_alt: the translated
+// module for a pass outside the verified one (vkn_shlib_named_alt, made on first need; state 0 not tried, 1 made, -1 refused), under g_mu.
+typedef struct sh_rec { vkn_shader pub; uint8_t own_layout; uint8_t nr_entry; int8_t nr_alt_state; VkShaderModule nr_alt; } sh_rec;
+static uint32_t g_cmp_reds; static uint64_t g_bit30;   // [stage 5 A1] red lines of the Dref flag; bundle flags that carried bit 30
 typedef struct sh_layout { uint64_t hash; uint32_t nb; VkDescriptorSetLayoutBinding *b; VkDescriptorSetLayout set; VkPipelineLayout pl; } sh_layout;
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -236,6 +252,7 @@ static void create_job(void *arg) {
     if (!st || !r || !tb || !lb) { free(st); free(r); free(tb); free(lb); return; }
     vkn_shader *s = &r->pub; s->handle = j->handle;
     uint32_t nb = 0; uint64_t n_stages = 0, n_bundle = 0, n_miss = 0, n_unus = 0, n_mism = 0, n_noblock = 0;
+    uint32_t n_cmp = 0, n_bit30 = 0; uint64_t dref = 0; int named = -1;   // [stage 5 A1]
     for (int k = 0; k < VKN_SRCS; k++) {
         if (!(j->has >> k & 1)) continue;
         s->stages |= (uint8_t)(1u << k); n_stages++;
@@ -261,6 +278,9 @@ static void create_job(void *arg) {
         }
         s->xs[k] = st[k].shader; s->module[k] = st[k].module;
         if (!st[k].module) { s->unusable |= (uint8_t)(1u << k); n_unus++; }
+        // [stage 5 A1] a fragment bundle the library replaced by name (NR-04): its entry (the pass check at pipeline creation) and the
+        // bindings its module samples with a depth comparison (Dref: they get VKN_BF_CMP below)
+        if (k == VKN_SRC_FS && vkn_shlib_named_entry) named = vkn_shlib_named_entry(s->key[k], &dref);
         if (k == VKN_SRC_VS) {
             s->ninputs = (uint8_t)st[k].input_count;
             for (uint32_t i = 0; i < st[k].input_count; i++) { s->inputs[i] = (uint8_t)st[k].inputs[i]; s->input_classes[i] = (uint8_t)st[k].input_classes[i]; }
@@ -270,7 +290,9 @@ static void create_job(void *arg) {
             vkn_bind *t = &tb[nb];
             t->binding = (uint16_t)b->binding; t->kind = kind_of(b->source); t->stage = (uint8_t)src_engine_stage(k); t->bundle_stage = (uint8_t)st[k].stage;
             t->slot = t->kind == VKN_BK_SUPPORT || t->kind == VKN_BK_C1 ? 0 : (uint8_t)b->slot; t->count = (uint8_t)(b->count ? b->count : 1);
-            t->type = (VkDescriptorType)b->type; t->bytes = b->bytes; t->flags = b->flags; t->dyn = VKN_NO_DYN;
+            t->type = (VkDescriptorType)b->type; t->bytes = b->bytes; t->flags = b->flags & ~VKN_BF_CMP; t->dyn = VKN_NO_DYN;
+            if (b->flags & VKN_BF_CMP) n_bit30++;   // [stage 5 A1] bit 30 is ours (vkn_fx.h): no bundle flag may carry it
+            if (k == VKN_SRC_FS && dref && t->kind == VKN_BK_TEXTURE && b->binding < 64 && (dref >> b->binding & 1)) { t->flags |= VKN_BF_CMP; n_cmp++; }
             if (t->kind == VKN_BK_UNIFORM && b->slot < 8 && (j->mask[k] >> 31) && !(j->mask[k] >> b->slot & 1)) {
                 n_noblock++;
                 pthread_mutex_lock(&g_mu); const int red = g_block_reds < BLOCK_REDS ? ++g_block_reds : 0; pthread_mutex_unlock(&g_mu);
@@ -280,6 +302,17 @@ static void create_job(void *arg) {
             nb++;
         }
     }
+    if (dref && !n_cmp) {   // [stage 5 A1] a Dref module whose depth bindings are not texture bindings of the table
+        pthread_mutex_lock(&g_mu); const int red = g_cmp_reds < 16 ? (int)++g_cmp_reds : 0; pthread_mutex_unlock(&g_mu);
+        if (red) vkn_logf(RED "shaders: engine shader %#llx (%s): its named module samples bindings %#llx with a depth comparison, none is a texture binding of the table: no comparison sampler",
+                          (unsigned long long)j->handle, s->key[VKN_SRC_FS], (unsigned long long)dref);
+    }
+    if (n_cmp && vkn_shlib_named_flagged) vkn_shlib_named_flagged(n_cmp);
+    if (n_bit30) {
+        pthread_mutex_lock(&g_mu); g_bit30 += n_bit30; const int red = g_cmp_reds < 16 ? (int)++g_cmp_reds : 0; pthread_mutex_unlock(&g_mu);
+        if (red) vkn_logf(RED "shaders: engine shader %#llx: %u bundle binding(s) carry flag bit 30 (VKN_BF_CMP): cleared", (unsigned long long)j->handle, n_bit30);
+    }
+    r->nr_entry = (uint8_t)(named >= 0 && named < 255 ? named + 1 : 0);
     qsort(tb, nb, sizeof *tb, cmp_bind);
     uint32_t w = 0;   // a binding number twice (two stages cannot collide: x 6 + stage): keep the first
     for (uint32_t i = 0; i < nb; i++) if (!w || tb[i].binding != tb[w - 1].binding) tb[w++] = tb[i];
@@ -402,6 +435,61 @@ static void var_run(void *arg) {
     if (v->kind == 1) v->out = l->alpha ? l->alpha(v->xs, v->func, v->ref) : VK_NULL_HANDLE;
     else v->out = l->retype ? l->retype(v->xs, v->code) : VK_NULL_HANDLE;
 }
+// [stage 5 A1] the translated module of a named fragment stage (vkn_shlib_named_alt, the library's "<key>#nrt"). Refused when it is not
+// a usable fragment module or reads more of a uniform block than the named module's binding table binds (the table is the named one's:
+// the heads are equal byte for byte, the uniform-extent trim follows each module's own reads).
+typedef struct alt_job { const vkn_shader *s; VkShaderModule out; const char *why; } alt_job;
+static void alt_run(void *arg) {
+    alt_job *a = (alt_job *)arg; a->out = VK_NULL_HANDLE; a->why = "no library";
+    xbg_vkn_stage *st = (xbg_vkn_stage *)calloc(1, sizeof *st);
+    if (!st || !vkn_shlib_named_alt) { free(st); return; }
+    const int rc = vkn_shlib_named_alt(a->s->key[VKN_SRC_FS], st);
+    a->why = rc ? "no bundle" : st->stage != 4 ? "not a fragment bundle" : !st->module ? "unusable on this device" : NULL;
+    for (uint32_t i = 0; !a->why && i < st->binding_count; i++) {
+        const xbg_shader_binding *b = &st->bindings[i];
+        if (b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
+        const vkn_bind *t = NULL;
+        for (uint32_t k = 0; k < a->s->nbind; k++) if (a->s->bind[k].binding == b->binding) { t = &a->s->bind[k]; break; }
+        const uint32_t need = b->bytes ? b->bytes : 65536, have = t ? (t->bytes ? t->bytes : 65536) : 0;
+        if (need > have) a->why = "it reads more of a uniform block than the named module's table binds";
+    }
+    if (!a->why) a->out = st->module;
+    free(st);
+}
+// [stage 5 A1] The fragment module of a named shader for the pipeline being built: on the recording thread the current target set is
+// that pipeline's pass (vkn_draw.c builds after vkn_pass_ready; the pipeline key holds the pass's compatibility class, so this runs once
+// per shader and pass); off it (the warm-up worker) the pass is not known: the named module, counted. Outside the verified pass the
+// translated module (vkn_shlib_named_pass decides; a Dref module stays).
+static VkShaderModule named_fs(sh_rec *r) {
+    const vkn_shader *s = &r->pub;
+    if (!vkn_shlib_named_pass) return s->module[VKN_SRC_FS];
+    uint32_t fmt[VKN_PASS_COLORS], depth = 0, samples = 1, w = 0, h = 0; int n = -1;
+    if (vkn_tex_on_rec_thread && vkn_pass_color && vkn_tex_on_rec_thread()) {
+        n = 0;
+        for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) {
+            const vkn_tex *t = vkn_pass_color(i); if (!t) continue;
+            if (!n) { samples = t->samples ? t->samples : 1; w = t->w; h = t->h; }
+            fmt[n++] = t->nvn_fmt;
+        }
+        const vkn_tex *dt = vkn_pass_depth ? vkn_pass_depth() : NULL;
+        if (dt) { depth = dt->nvn_fmt; if (!n) { samples = dt->samples ? dt->samples : 1; w = dt->w; h = dt->h; } }
+    }
+    if (!vkn_shlib_named_pass(r->nr_entry - 1, n, fmt, depth, samples, w, h)) return s->module[VKN_SRC_FS];
+    pthread_mutex_lock(&g_mu); int state = r->nr_alt_state; pthread_mutex_unlock(&g_mu);
+    if (!state) {
+        alt_job a = {s, VK_NULL_HANDLE, NULL};
+        run_big(alt_run, &a);
+        pthread_mutex_lock(&g_mu);
+        const int first = !r->nr_alt_state;
+        if (first) { r->nr_alt = a.out; r->nr_alt_state = a.out ? 1 : -1; }
+        state = r->nr_alt_state;
+        pthread_mutex_unlock(&g_mu);
+        if (first && vkn_shlib_named_alt_result) vkn_shlib_named_alt_result(a.out != VK_NULL_HANDLE);
+        if (first && !a.out) vkn_logf(RED "shaders: engine shader %#llx (%s): no translated module for a pass outside the verified one (%s): the named module is used there",
+                                      (unsigned long long)s->handle, s->key[VKN_SRC_FS], a.why ? a.why : "?");
+    }
+    return state > 0 ? r->nr_alt : s->module[VKN_SRC_FS];
+}
 VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype) {
     if (!s) return VK_NULL_HANDLE;
     const int k = stage == VKN_STAGE_VS ? VKN_SRC_VS : stage == VKN_STAGE_FS ? VKN_SRC_FS : stage == VKN_STAGE_CS ? VKN_SRC_CS : -1;
@@ -409,6 +497,8 @@ VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_
     var_job v = {s->xs[k], 0, alpha_func, alpha_ref, retype, s->module[k]};
     if (k == VKN_SRC_FS && alpha_func && alpha_func != 8) v.kind = 1;
     else if (k == VKN_SRC_VS && retype) v.kind = 2;
+    // [stage 5 A1] a named fragment module: the pass check (an alpha-tested draw keeps the named bundle's "#at" variant, as before)
+    if (!v.kind && k == VKN_SRC_FS && s->id < (uint32_t)VKN_FX_SHADER_ID0 && ((const sh_rec *)s)->nr_entry) return named_fs((sh_rec *)s);
     if (!v.kind) return s->module[k];
     run_big(var_run, &v);
     return v.out ? v.out : s->module[k];
@@ -456,6 +546,7 @@ void vkn_shader_census(void) {
                       (unsigned long long)s.bind_kind[VKN_BK_STORAGE], (unsigned long long)s.bind_kind[VKN_BK_DRIVER0], (unsigned long long)s.bind_kind[VKN_BK_DRIVER2],
                       (unsigned long long)(s.bind_kind[VKN_BK_OTHER] + s.bind_kind[0]));
     if (s.stage_mismatch || s.ubo_no_block) vkn_logf(RED "shaders: %llu stages whose bundle is of another stage, %llu uniform bindings without an engine block", (unsigned long long)s.stage_mismatch, (unsigned long long)s.ubo_no_block);
+    if (vkn_shlib_named_census) vkn_shlib_named_census();   // [stage 5 A1] engine shaders by name + Dref (one line)
 }
 // ==== [DOS2] VK-NATIVE stage 4 (pipeline warm-up, vkn_warm.c): lookups the replay of the pipeline list needs ====
 uint32_t vkn_shader_each(int (*fn)(const vkn_shader *s, void *ctx), void *ctx) {

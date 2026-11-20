@@ -50,6 +50,8 @@ typedef struct vkn_bind {
     VkDescriptorType type;      // as in the set layout (uniform buffers: UNIFORM_BUFFER_DYNAMIC unless the dynamic limit forbids)
     uint32_t bytes;             // uniform buffers: the bytes the SPIR-V may read (0 = up to 64 KiB); the range is min(block size, this)
     uint32_t flags;             // xbg_shader_binding flags (images: bit31 shape present, dim bits 8..10, array 12, MS 13, depth 14, scalar 16..17)
+                                // [stage 5 A1] bit 30 = VKN_BF_CMP (vkn_fx.h): a texture binding the named Dref module samples with a
+                                // depth comparison (vkn_shlib_named.h); the draw path binds the slot sampler's comparison twin
 } vkn_bind;
 
 // Dynamic-offset policy of a shader (the translator's dyn_mode_for, by maxDescriptorSetUniformBuffersDynamic):

@@ -2,15 +2,18 @@
 # [DOS2] VK-NATIVE shader library comparison test (vkn_shlib_test.cpp): build under WSL and run it for every device model.
 # Run from Git Bash:  MSYS_NO_PATHCONV=1 wsl bash <checkout>/dm/gfx/vulkan/engine/tests/vkn_shlib_test.sh [limit] [models...]
 # Env: WT = the worktree (WSL path form), SHADERS = the shader directory (default <dos2-port>/work/shaders-vk), NATIVE = a native.xgspack
-# (default <dos2-port>/work/shaders-native/native.xgspack). The tree is copied into the Linux file system first: gcc's #pragma once is not
+# (default <dos2-port>/work/shaders-native/native.xgspack), NR = a native-nr.xgspack for the "+nr" models (stage 5 A1; default
+# <dos2-port>/work/native-lightfuse/native-nr.xgspack, the newest full one: x / m / d of all 16 NR-04 entries). The tree is copied into the Linux file system first: gcc's #pragma once is not
 # reliable on /mnt drives, and the 270 MB pack reads much faster there.
 set -u
 WT=${WT:?set WT to the checkout (WSL path)}
 PORT=$(dirname "$WT")
 SHADERS=${SHADERS:-$PORT/work/shaders-vk}
 NATIVE=${NATIVE:-$PORT/work/shaders-native/native.xgspack}
+NR=${NR:-$PORT/work/native-lightfuse/native-nr.xgspack}
 LIMIT=${1:-0}; shift || true
-MODELS=${*:-adreno mali powervr adreno-simmali adreno-native adreno-files}
+# "+nr<q>" (q 0..3), "+nrv", "+nr3nl": the named-bundle replacement on both sides (vkn_shlib_test.cpp head comment)
+MODELS=${*:-adreno mali powervr adreno-simmali adreno-native adreno-files adreno+nr3 mali+nr3 powervr+nr3 adreno+nr1 adreno+nr2 adreno+nrv adreno+nr3nl adreno-native+nr3}
 NDK=${NDK:?set NDK to <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include}
 B=$HOME/vkn-shlib-test; mkdir -p $B/inc/android $B/obj $B/shaders $B/src/dm
 [ -d $B/inc/vulkan ] || cp -r $NDK/vulkan $NDK/vk_video $B/inc/
@@ -36,10 +39,11 @@ EOF
 rsync -a --delete --exclude ios "$WT/dm/" $B/src/dm/
 rsync -a "$SHADERS/" $B/shaders/
 [ -f "$NATIVE" ] && cp -u "$NATIVE" $B/shaders/native.xgspack
+[ -f "$NR" ] && cp -u "$NR" $B/shaders/native-nr.xgspack
 cd $B/src
 D="-D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -DVK_USE_PLATFORM_ANDROID_KHR -DDM_ASTC_LAZY=1 -O1 -w -I$B/inc -Idm/gfx/vulkan -Idm/gfx/nvn/include -Idm/host -Idm"
 OBJS=""
-for f in dm/gfx/vulkan/engine/*.cpp dm/gfx/vulkan/engine/*.c dm/gfx/vkn/vkn_shlib.cpp dm/gfx/nr/nr_ubodyn.c dm/gfx/vulkan/engine/tests/vkn_shlib_test.cpp; do
+for f in dm/gfx/vulkan/engine/*.cpp dm/gfx/vulkan/engine/*.c dm/gfx/vkn/vkn_shlib.cpp dm/gfx/vkn/vkn_shlib_named.cpp dm/gfx/nr/nr_ubodyn.c dm/gfx/nr/nr_sh.c dm/gfx/vulkan/engine/tests/vkn_shlib_test.cpp; do
   b=$(basename $f); case $b in xbg_spvopt.cpp|xbg_astc_lazy.cpp) continue;; esac
   o=$B/obj/$b.o; OBJS="$OBJS $o"
   [ $o -nt $f ] && continue
@@ -49,7 +53,7 @@ g++ -no-pie -o $B/vkn_shlib_test $OBJS -Wl,--unresolved-symbols=ignore-all -lpth
 rc=0
 for m in $MODELS; do
   $B/vkn_shlib_test $m $B/shaders $LIMIT > $B/out_$m.txt 2>&1; r=$?
-  grep -v "^DIFF" $B/out_$m.txt | tail -3
+  grep -v "^DIFF" $B/out_$m.txt | tail -4
   [ $r -ne 0 ] && { rc=1; grep "^DIFF\|FATAL\|signal\|symbol" $B/out_$m.txt | head -20; }
 done
 echo "vkn_shlib_test rc $rc"
