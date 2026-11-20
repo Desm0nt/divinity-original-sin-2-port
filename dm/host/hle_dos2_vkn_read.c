@@ -33,27 +33,10 @@
 //   that HLE NVN answers from its texture object - DEPENDENCY on the creation piece (stage 4, in parallel): those four queries must
 //   keep answering the engine's values for objects whose creation it replaces.
 //
-// 2. VIDEO FRAMES (DM_VK_NATIVE_VIDEO, default 1 in mode 1; 0 = videos stay black as in stage 3).
-//   The movie player (Bink; class vtable 0x29c3580, object p) opens a movie in 0xd1b8a0 -> 0xd1bbe0, which makes up to four plane
-//   textures with 0xd1bc80 = 0x92ccb0(0, engine format 1 R8 -> NVN 0x01, w, h, ..., flags 4, usage 6): p+0xb8 Y (frame size), p+0xc0
-//   and p+0xc8 chroma (the half size), p+0xd0 alpha (frame size, only for movies with alpha). Slot 12 0xd1ada0(p) draws a frame: when
-//   byte p+0x110 is set (a new decoded frame), frame i = u32 [[p+0xa8]+0x14] (< count of the frame array p+0xe0, bits 24..47 of
-//   p+0xe8; 0x40-byte entries = 4 planes {u64 src, u32 src pitch, u32 rows}, plane k at +0x10k), for each plane texture k (handles
-//   p+0xb8 + 8k, record in r = [p+0x98]): record byte +0x17 = 1, dst = [object+0xe0] (the CPU mapping of the linear storage),
-//   stride = nvnTextureGetStride(object) (slot 217), `rows` rows of `src pitch` bytes copied `stride` apart (one memcpy when equal),
-//   +0x17 = 0; p+0x110 = 0. Then (p+0x109 == 0, p+0xb0, p+0x48, p+0x108 set) the draw: clear, viewport, state, planes 0xb8 / 0xc8 /
-//   0xc0 bound through 0x924610, flushes, DrawArrays(3) - all through hooks of other parts / the command part's slots in mode 1.
-//   The plane data never reaches the backend's images (that copy is a CPU write into NVN memory). Here: a hook on 0xd1ada0 that, when
-//   p+0x110 is set, does the same plane walk BEFORE calling the original and gives each plane's SOURCE rows to vkn_tex_update (level
-//   0, layer 0, x 0, y 0, w = min(texture width, src pitch / texel bytes), h = rows, pitch = src pitch): on the recording thread with a
-//   recording open it is recorded at once, so it lands before the frame's draw (same frame, as on the Switch). The texel bytes the
-//   engine's copy puts in the texture are exactly those source rows (the row's first `stride` bytes; width <= stride), so the result
-//   does not depend on GetStride. The original still runs its copies into [object+0xe0] - DEPENDENCY on the creation piece: as long
-//   as 0xd1ada0 runs, object+0xe0 must stay a writable CPU mapping of >= stride * rows bytes and GetStride a stride >= the width (HLE
-//   NVN's storage today); replacing those creation-time NVN entries must keep both (or this hook must replace the copy loop).
-//   How often: once per decoded movie frame (p+0x110 set), up to four R8 planes.
-// Not covered (open, other parts' or later): 0xff5500 and 0x14284c0 have the same "copy rows into [object+0xe0]" shape in their
-//   immediate-list branch (list +0x30 == 0; the other branch writes packet 0x2c / 0x2d, which the UI part forwards to vkn_tex_update).
+// 2. VIDEO FRAMES: the movie player 0xd1ada0 copies its decoded planes into the plane textures' mapped storage ([object+0xe0],
+//   stride from nvnTextureGetStride) before its own draw. Stage 4 (copies): that is the storage mirror's job (hle_dos2_vkn_glue.c,
+//   which hooks 0xd1ada0 for the planes' row counts and mirrors each plane's rows once, before the movie's draw). This file's own
+//   plane upload (a second copy of the same rows from the decoder's buffers) and DM_VK_NATIVE_VIDEO are gone.
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <stdio.h>
@@ -82,9 +65,6 @@ enum {
     TEX_TAB = 0x000, TEX_REC = 0x28, REC_OBJ = 0x00, REC_EFMT = 0x10,
     FN_FMT_INFO = 0x91eea0,                              // 0x91eea0(out[4], engine format): {name, components, bytes, compressed}
     NVN_RGBA8 = 0x25, NVN_RGB8 = 0x19,                   // the only formats 0xbe74c0 / 0xbe79a0 accept (else 0x80f560 + trap)
-    // the movie player object (0xd1ada0)
-    V_R = 0x98, V_BINK = 0xa8, V_PLANES = 0xb8, V_FRAMES = 0xe0, V_FRAMES_META = 0xe8, V_NEW = 0x110,
-    BINK_FRAME = 0x14, FRAME_BYTES = 0x40, PLANE_BYTES = 0x10, PLANES = 4,
 };
 typedef void (*fmt_info_fn)(uint64_t out[4], int efmt);
 static void *eng(uint32_t off) { return dm_vkn_base() + off; }
@@ -95,16 +75,15 @@ static const char *const k_fname[F_N] = {"SaveTextureToFile", "EncodeTexture", "
 enum { N_OFF, N_SLOT, N_TEX, N_FMT, N_BPP, N_ENCFMT, N_BUSY, N_THREAD, N_N };   // "no data" reasons of the pre-checks
 static const char *const k_nname[N_N] = {"switched off", "slot 222 not repointed", "texture unknown to the backend", "format not readable",
                                          "NVN texel size != engine bpp", "format the engine's encoder traps on", "presented recording open", "not the recording thread"};
-enum { RL_NODATA, RL_SLOT, RL_VIDEO, RL_N };
+enum { RL_NODATA, RL_SLOT, RL_N };
 static struct {
     uint64_t calls[F_N], served[F_N], nodata[N_N];
     uint64_t regions[F_N], bytes[F_N], wait_ns[F_N], slot_fail[F_N], slot_unknown, slot_view;
-    uint64_t v_frames, v_planes, v_bytes, v_unknown, v_fmt, v_fail, v_noframe;
     uint32_t red[RL_N];
 } g_rs;
 static int red_ok(int k) { return g_rs.red[k]++ < 16; }
 
-static int g_read_on, g_video_on;
+static int g_read_on;
 static void *g_slot_stub;      // the host-stack stub of rd_slot (made at registration; NULL = read-back off)
 static int g_fn = F_OTHER;     // which reader is running (the recording thread only; set around the original)
 
@@ -197,47 +176,6 @@ VKN_HOOK rh_file(VKN_A) { return rb_pre(F_FILE, VKN_F); }   // 0x9291c0
 VKN_HOOK rh_enc(VKN_A) { return rb_pre(F_ENC, VKN_F); }     // 0x9296d0
 VKN_HOOK rh_raw(VKN_A) { return rb_pre(F_RAW, VKN_F); }     // 0x929880
 
-// ---- video: 0xd1ada0(p) ----
-static vkn_fn g_o_video;
-static void video_planes(uint64_t p) {
-    const uint64_t bink = vkn_rd64(p + V_BINK), r = vkn_rd64(p + V_R);
-    if (!bink || !r) { g_rs.v_noframe++; return; }
-    const uint32_t i = vkn_rd32(bink + BINK_FRAME), n = (uint32_t)(vkn_rd64(p + V_FRAMES_META) >> 24 & 0xffffff);
-    if (i >= n) { g_rs.v_noframe++; return; }   // (the original copies nothing either)
-    const uint64_t fr = vkn_rd64(p + V_FRAMES) + (uint64_t)i * FRAME_BYTES;
-    g_rs.v_frames++;
-    for (int k = 0; k < PLANES; k++) {
-        const uint64_t h = vkn_rd64(p + V_PLANES + 8u * (unsigned)k);
-        if (!h) continue;
-        const uint64_t rec = vkn_rec(r, TEX_TAB, TEX_REC, h), obj = rec ? vkn_rd64(rec + REC_OBJ) : 0;
-        const uint64_t src = vkn_rd64(fr + PLANE_BYTES * (unsigned)k); const uint32_t pitch = vkn_rd32(fr + PLANE_BYTES * (unsigned)k + 8), rows = vkn_rd32(fr + PLANE_BYTES * (unsigned)k + 12);
-        vkn_tex *t = obj ? vkn_tex_by_cookie(obj) : NULL;
-        if (!t) {
-            g_rs.v_unknown++;
-            if (red_ok(RL_VIDEO)) vkn_logf(RB_RED "video: plane %d texture %#llx (object %#llx) unknown to the backend: plane not updated", k, (unsigned long long)h, (unsigned long long)obj);
-            continue;
-        }
-        const uint32_t nb = vkn_read_texel_bytes(t);
-        if (!nb || !src || !pitch || !rows) {
-            g_rs.v_fmt++;
-            if (red_ok(RL_VIDEO)) vkn_logf(RB_RED "video: plane %d texture %#llx (NVN %#x, %ux%u): source %#llx pitch %u rows %u: not updated", k, (unsigned long long)h, t->nvn_fmt, t->w, t->h,
-                                            (unsigned long long)src, pitch, rows);
-            continue;
-        }
-        const uint32_t w = pitch / nb < t->w ? pitch / nb : t->w, hh = rows < t->h ? rows : t->h;
-        if (!w || vkn_tex_update(t, 0, 0, 0, 0, w, hh, (const void *)(uintptr_t)src, pitch)) {
-            g_rs.v_fail++;
-            if (red_ok(RL_VIDEO)) vkn_logf(RB_RED "video: plane %d texture %#llx (NVN %#x, %ux%u): update %ux%u pitch %u dropped", k, (unsigned long long)h, t->nvn_fmt, t->w, t->h, w, hh, pitch);
-            continue;
-        }
-        g_rs.v_planes++; g_rs.v_bytes += (uint64_t)w * hh * nb;
-    }
-}
-VKN_HOOK vh_draw(VKN_A) {
-    if (a0 && vkn_rd8(a0 + V_NEW)) video_planes(a0);   // before the original: its draw comes after the update in the recording
-    return g_o_video(VKN_F);
-}
-
 // ---- census ----
 static void rd_census(void) {
     vkn_read_stats s; vkn_read_stats_get(&s);
@@ -257,9 +195,6 @@ static void rd_census(void) {
              (unsigned long long)s.reads, s.bytes / 1024.0, s.wait_ns / 1e6, (unsigned long long)s.own_rec, (unsigned long long)s.engine_rec, (unsigned long long)s.undefined_zero,
              (unsigned long long)s.e_tex, (unsigned long long)s.e_fmt, (unsigned long long)s.e_rect, (unsigned long long)s.e_busy, (unsigned long long)s.e_thread,
              (unsigned long long)s.e_cb, (unsigned long long)s.e_mem, (unsigned long long)s.e_submit, m ? nd : " none");
-    vkn_logf("video: %s; frames %llu (no frame %llu), plane updates %llu, %.1f KB; dropped: unknown texture %llu, format / source %llu, update failed %llu",
-             g_video_on ? "on" : "off (DM_VK_NATIVE_VIDEO=0)", (unsigned long long)g_rs.v_frames, (unsigned long long)g_rs.v_noframe, (unsigned long long)g_rs.v_planes,
-             g_rs.v_bytes / 1024.0, (unsigned long long)g_rs.v_unknown, (unsigned long long)g_rs.v_fmt, (unsigned long long)g_rs.v_fail);
 }
 
 // ---- registration (install time; idempotent: called from the frame part's register until hle_dos2_vkn.c calls it itself) ----
@@ -269,12 +204,10 @@ void dm_vkn_read_register(void) {
     if (done || vkn_mode() != VKN_NATIVE) return;   // mode 2: the old path reads and plays (nothing here)
     done = 1;
     g_read_on = sw_on("DM_VK_NATIVE_READ");
-    g_video_on = sw_on("DM_VK_NATIVE_VIDEO");
     // First 4 instructions of each site (python <scratchpad>/vk/re/pro.py; none PC-relative, checked with capstone).
     static const uint32_t k_rb_file[4] = {0xd10303ff /* sub sp,sp,#0xc0 */, 0xa9066ffc, 0xa90767fa, 0xa9085ff8};
     static const uint32_t k_rb_enc[4] = {0xd102c3ff /* sub sp,sp,#0xb0 */, 0xa90667fa, 0xa9075ff8, 0xa90857f6};
     static const uint32_t k_rb_raw[4] = {0xd10143ff /* sub sp,sp,#0x50 */, 0xa90257f6, 0xa9034ff4, 0xa9047bfd};
-    static const uint32_t k_video[4] = {0xd10283ff /* sub sp,sp,#0xa0 */, 0xa9046ffc, 0xa90567fa, 0xa9065ff8};
     // (off: the hooks stay in and return "no data" - the stage-3 behaviour, so the engine never reaches HLE NVN's ReadTexels)
     dm_vkn_site(0x9291c0, k_rb_file, "SaveTextureToFile", (void *)rh_file, &g_o_file, VKN_M_NATIVE);
     dm_vkn_site(0x9296d0, k_rb_enc, "EncodeTexture", (void *)rh_enc, &g_o_enc, VKN_M_NATIVE);
@@ -283,8 +216,7 @@ void dm_vkn_read_register(void) {
         vkn_read_init();
         if (!(g_slot_stub = dm_vkn_stack_stub((void *)rd_slot))) vkn_logf(RB_RED "read: no host-stack stub for the ReadTexels slot: read-back returns no data");
     }
-    dm_vkn_site(0xd1ada0, k_video, "MoviePlayer::Draw", (void *)vh_draw, &g_o_video, g_video_on ? VKN_M_NATIVE : 0);   // (modes 0: not installed)
-    vkn_logf("read: DM_VK_NATIVE_READ=%d (texture read-back through the ReadTexels slot), DM_VK_NATIVE_VIDEO=%d (movie planes to the native textures)", g_read_on, g_video_on);
+    vkn_logf("read: DM_VK_NATIVE_READ=%d (texture read-back through the ReadTexels slot; movie planes: the storage mirror)", g_read_on);
     dm_vkn_census(rd_census);
 }
 #endif

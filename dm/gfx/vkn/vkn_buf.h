@@ -82,8 +82,20 @@ void vkn_buf_count_copy(unsigned kind, uint64_t bytes, int ok);   // the hooks c
 // rename (the caller writes them into the engine record, +0x10 / +8). 0 = in place, 1 = renamed, -1 = not ours / no block, -2 = out
 // of range (nothing copied), -3 = no memory for a new block (copied in place: the old hazard, counted).
 int vkn_buf_update(int kind, uint64_t handle, uint64_t dst_off, const void *src, uint64_t size, void **cpu, uint64_t *va);
-typedef struct vkn_buf_ustats { uint64_t inplace, renamed, rename_fail, bytes, rest_bytes; } vkn_buf_ustats;
+// Stage 4 (copies) counters: rest_bytes = carried over by renames; whole = updates that cover the buffer's engine size (a rename
+// then carries nothing), partial = the others; by the engine's usage byte (VKN_BUF_USAGE_DYNAMIC or not): renames and carried bytes.
+typedef struct vkn_buf_ustats {
+    uint64_t inplace, renamed, rename_fail, bytes, rest_bytes;
+    uint64_t whole, partial, renamed_dyn, rest_dyn, renamed_static, rest_static;
+} vkn_buf_ustats;
 void vkn_buf_ustats_get(vkn_buf_ustats *s);
+// ==== [DOS2] VK-NATIVE stage 4 (copies): vkn_buf_update with what it did ====
+// The same as vkn_buf_update; *out (non-NULL) gets the details of this call. A rename carries over only bytes inside the buffer's
+// engine size (bytes past it, the block's rounding, are never part of the engine's buffer).
+typedef struct vkn_buf_uinfo { uint64_t carried; uint8_t usage, whole, renamed, pad; } vkn_buf_uinfo;
+// Whether the handle is live here with a block, WITHOUT marking it used (vkn_buf_get / vkn_buf_lookup mark it: a draw binds it).
+int vkn_buf_has_block(int kind, uint64_t handle);
+int vkn_buf_update_ex(int kind, uint64_t handle, uint64_t dst_off, const void *src, uint64_t size, void **cpu, uint64_t *va, vkn_buf_uinfo *out);
 
 #ifdef __cplusplus
 }

@@ -5,6 +5,10 @@
 //            (order, run, flush under the queue lock), handle tables (put / get / kill / generation replace);
 //   buffers  create with / without init data, destroy (the block comes back only after the retire delay), replace, pseudo addresses,
 //            copy-in, the constant ring rule of FlushShaderConstants 0x925740 (MAP-2 §2.1: align 256, wrap when head + size >= 0x1380000);
+//            stage 4 (copies): staged updates in place / renamed (carry-over only inside the engine size, none for a whole-buffer
+//            update, dynamic vs static counters), has_block without marking the buffer used;
+//   mirror   vkn_mirror band hashes: full first diff, unchanged, single / adjacent / separate bands, the run limit, stride padding,
+//            a short last band, generation / geometry change, forget, eviction of the least recently used region;
 //   textures the engine format table (every format 0..62 against nr_formats of dm/gfx/nr/nr_reg.c, which tools/dos2_nr_check.py checks
 //            against main.raw, and an NVN -> Vulkan table written here from the NVN enum), sRGB pairs, 2D / cube / array textures with
 //            linear data, a packaged (block-linear) texture built by hand with the Tegra GOB formula, BC on a device without BC (CPU decode),
@@ -26,7 +30,7 @@
 // From the repository root (one command line; wrapped here):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage2_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage2_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c
-//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
+//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
 //       dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage2_test
 // (the game defines of the dos2 build, dm/android/CMakeLists.txt: nvn_tex.c's layout rules depend on DM_GAME_D3; -fsanitize=address,undefined
 // works the same way.)
@@ -44,6 +48,7 @@
 #include "../../../vkn/vkn_tex.h"
 #include "../../../vkn/vkn_shader.h"
 #include "../../../vkn/vkn_state.h"
+#include "../../../vkn/vkn_mirror.h"
 #include "../../../nvn/nvn_tex.h"
 #include "../../../tex/nvn_deswizzle.h"
 #include "../../../nr/nr_reg.h"
@@ -317,6 +322,110 @@ static void test_ring(void) {
     vkn_buf_stats_get(&st); CHECK_EQ(st.ring_fail, 2); CHECK_EQ(st.ring_allocs, 10); CHECK_EQ(st.ring_wraps, 3);
 }
 
+// ================================================================================================================ stage 4: copies
+// vkn_buf_update_ex: in place while no recording of the last 3 frames read the block; renamed (old bytes carried, only inside the
+// engine size) once a draw path got it; whole-buffer updates carry nothing; has_block does not mark the buffer used.
+static void test_buf_update(void) {
+    const uint64_t s0 = used_of(VKN_ARENA_STAGING), u0 = used_of(VKN_ARENA_STATIC);
+    uint8_t init[1000], pat[1000];
+    for (int i = 0; i < 1000; i++) { init[i] = (uint8_t)i; pat[i] = (uint8_t)(0xa0 ^ i); }
+    vkn_block b; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(20, 1), 1000, 0, VKN_BUF_USAGE_DYNAMIC, init, &b), 0);
+    CHECK(b.size >= 1000);
+    vkn_buf_ustats u0s; vkn_buf_ustats_get(&u0s);
+    void *cpu = NULL; uint64_t va = 0; vkn_buf_uinfo in;
+    // never handed to a draw: in place
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 100, pat, 50, &cpu, &va, &in), 0);
+    CHECK(cpu == NULL); CHECK_EQ(in.renamed, 0); CHECK_EQ(in.whole, 0); CHECK_EQ(in.usage, VKN_BUF_USAGE_DYNAMIC);
+    CHECK(!memcmp((uint8_t *)b.cpu + 100, pat, 50)); CHECK(!memcmp(b.cpu, init, 100)); CHECK(!memcmp((uint8_t *)b.cpu + 150, init + 150, 850));
+    CHECK_EQ(vkn_buf_has_block(VKN_BUF_VB, H(20, 1)), 1); CHECK_EQ(vkn_buf_has_block(VKN_BUF_VB, H(20, 2)), 0); CHECK_EQ(vkn_buf_has_block(VKN_BUF_IB, H(20, 1)), 0);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 0, pat, 4, &cpu, &va, &in), 0);   // has_block did not mark it used: still in place
+    memcpy(b.cpu, init, 4);
+    // a draw path got it this frame: renamed, everything outside the update carried over
+    CHECK(vkn_buf_get(VKN_BUF_VB, H(20, 1)) != NULL);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 200, pat, 100, &cpu, &va, &in), 1);
+    CHECK(cpu != NULL && cpu != b.cpu); CHECK_EQ(in.renamed, 1); CHECK_EQ(in.carried, 900); CHECK_EQ(in.whole, 0);
+    const vkn_block *nb = vkn_buf_get(VKN_BUF_VB, H(20, 1));
+    CHECK(nb && nb->cpu == cpu && va == vkn_buf_va(nb));
+    CHECK(!memcmp(cpu, init, 100)); CHECK(!memcmp((uint8_t *)cpu + 100, pat, 50)); CHECK(!memcmp((uint8_t *)cpu + 150, init + 150, 50));
+    CHECK(!memcmp((uint8_t *)cpu + 200, pat, 100)); CHECK(!memcmp((uint8_t *)cpu + 300, init + 300, 700));
+    CHECK(!memcmp((uint8_t *)b.cpu + 200, init + 200, 100));   // the old block (draws recorded before) kept its bytes
+    // used again (the vkn_buf_get above): a whole-buffer update renames without carrying (the block's rounding is not the engine's)
+    void *cpu2 = NULL;
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 0, pat, 1000, &cpu2, &va, &in), 1);
+    CHECK(cpu2 != NULL && cpu2 != cpu); CHECK_EQ(in.carried, 0); CHECK_EQ(in.whole, 1); CHECK(!memcmp(cpu2, pat, 1000));
+    vkn_buf_ustats us; vkn_buf_ustats_get(&us);
+    CHECK_EQ(us.inplace - u0s.inplace, 2); CHECK_EQ(us.renamed - u0s.renamed, 2); CHECK_EQ(us.renamed_dyn - u0s.renamed_dyn, 2);
+    CHECK_EQ(us.rest_dyn - u0s.rest_dyn, 900); CHECK_EQ(us.rest_bytes - u0s.rest_bytes, 900); CHECK_EQ(us.whole - u0s.whole, 1); CHECK_EQ(us.partial - u0s.partial, 3);
+    CHECK_EQ(us.bytes - u0s.bytes, 50 + 4 + 100 + 1000);
+    // 3 frames after the last use: in place again
+    frames(3);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 10, pat, 10, &cpu, &va, &in), 0); CHECK(!memcmp((uint8_t *)cpu2 + 10, pat, 10));
+    // errors
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 995, pat, 100, NULL, NULL, &in), -2);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(20, 1), 0, NULL, 4, NULL, NULL, &in), -2);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(99, 1), 0, pat, 4, NULL, NULL, &in), -1);
+    CHECK_EQ(vkn_buf_update_ex(5, H(20, 1), 0, pat, 4, NULL, NULL, &in), -1);
+    CHECK_EQ(vkn_buf_update(VKN_BUF_VB, H(20, 1), 0, pat, 4, NULL, NULL), 0);   // the old entry is the same function
+    // a static IB: renames counted as static; a size-0 buffer (block of 16) carries nothing past the update
+    vkn_block bi; CHECK_EQ(vkn_buf_create(VKN_BUF_IB, H(21, 1), 64, 2, 0, init, &bi), 0);
+    CHECK(vkn_buf_get(VKN_BUF_IB, H(21, 1)) != NULL);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_IB, H(21, 1), 32, pat, 32, NULL, NULL, &in), 1); CHECK_EQ(in.carried, 32); CHECK_EQ(in.usage, 0);
+    vkn_block bz; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(22, 1), 0, 0, VKN_BUF_USAGE_DYNAMIC, NULL, &bz), 0);
+    CHECK(vkn_buf_get(VKN_BUF_VB, H(22, 1)) != NULL);
+    CHECK_EQ(vkn_buf_update_ex(VKN_BUF_VB, H(22, 1), 0, pat, 8, NULL, NULL, &in), 1); CHECK_EQ(in.carried, 0); CHECK_EQ(in.whole, 1);
+    vkn_buf_ustats_get(&us); CHECK_EQ(us.renamed_static - u0s.renamed_static, 1); CHECK_EQ(us.rest_static - u0s.rest_static, 32);
+    // destroys: every version comes back after the retire delay
+    vkn_buf_destroy(VKN_BUF_VB, H(20, 1)); vkn_buf_destroy(VKN_BUF_IB, H(21, 1)); vkn_buf_destroy(VKN_BUF_VB, H(22, 1));
+    frames(3);
+    CHECK_EQ(used_of(VKN_ARENA_STAGING), s0); CHECK_EQ(used_of(VKN_ARENA_STATIC), u0);
+}
+
+// vkn_mirror: changed 16-row bands of a CPU-written region, runs, limits, forgetting, eviction.
+static void test_mirror(void) {
+    enum { RB = 100, ST = 128, ROWS = 96 };
+    static uint8_t m[ST * ROWS];
+    for (int i = 0; i < ST * ROWS; i++) m[i] = (uint8_t)(i * 7);
+    // the hash: deterministic, sensitive to every byte and to the length, seeds differ
+    CHECK(vkn_mirror_hash(m, 37, 0) == vkn_mirror_hash(m, 37, 0)); CHECK(vkn_mirror_hash(m, 37, 0) != vkn_mirror_hash(m, 36, 0));
+    CHECK(vkn_mirror_hash(m, 37, 0) != vkn_mirror_hash(m, 37, 1));
+    { uint8_t z[64]; memset(z, 0, sizeof z); const uint64_t h0 = vkn_mirror_hash(z, 64, 0); z[63] = 1; CHECK(vkn_mirror_hash(z, 64, 0) != h0); z[63] = 0; z[0] = 0x80; CHECK(vkn_mirror_hash(z, 64, 0) != h0); }
+    vkn_mirror_stats a; vkn_mirror_stats_get(&a);
+    vkn_mirror_run r[VKN_MIRROR_RUNS]; int full = 0;
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(full, 1); CHECK_EQ(r[0].y, 0); CHECK_EQ(r[0].rows, ROWS);
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 0); CHECK_EQ(full, 0);   // nothing changed
+    m[20 * ST + 99] ^= 1;   // row 20, last byte of the row: band 1
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(r[0].y, 16); CHECK_EQ(r[0].rows, 16);
+    m[20 * ST + 100] ^= 1;  // the stride padding is not part of the region
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 0);
+    m[0] ^= 1; m[95 * ST] ^= 1;   // bands 0 and 5
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 2);
+    CHECK_EQ(r[0].y, 0); CHECK_EQ(r[0].rows, 16); CHECK_EQ(r[1].y, 80); CHECK_EQ(r[1].rows, 16);
+    m[17 * ST] ^= 1; m[40 * ST + 5] ^= 1;   // bands 1 and 2: adjacent, one run
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(r[0].y, 16); CHECK_EQ(r[0].rows, 32);
+    m[1] ^= 1; m[33 * ST] ^= 1; m[70 * ST] ^= 1;   // bands 0, 2, 4 with room for 2 runs: the last run grows over band 3
+    CHECK_EQ(vkn_mirror_diff(1, 7, m, ST, RB, ROWS, r, 2, &full), 2);
+    CHECK_EQ(r[0].y, 0); CHECK_EQ(r[0].rows, 16); CHECK_EQ(r[1].y, 32); CHECK_EQ(r[1].rows, 48);
+    // another generation / geometry / a forget: full again
+    CHECK_EQ(vkn_mirror_diff(1, 8, m, ST, RB, ROWS, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(full, 1);
+    CHECK_EQ(vkn_mirror_diff(1, 8, m, ST, RB, ROWS - 8, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(full, 1); CHECK_EQ(r[0].rows, ROWS - 8);
+    m[87 * ST] ^= 1;   // the short last band (rows 80..87)
+    CHECK_EQ(vkn_mirror_diff(1, 8, m, ST, RB, ROWS - 8, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(r[0].y, 80); CHECK_EQ(r[0].rows, 8);
+    vkn_mirror_forget(1);
+    CHECK_EQ(vkn_mirror_diff(1, 8, m, ST, RB, ROWS - 8, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(full, 1);
+    // bad arguments
+    CHECK_EQ(vkn_mirror_diff(2, 0, NULL, ST, RB, ROWS, r, 4, &full), -1); CHECK_EQ(vkn_mirror_diff(2, 0, m, 64, RB, ROWS, r, 4, &full), -1);
+    CHECK_EQ(vkn_mirror_diff(2, 0, m, ST, RB, 0, r, 4, &full), -1); CHECK_EQ(vkn_mirror_diff(2, 0, m, ST, RB, ROWS, r, 0, &full), -1);
+    // more keys than the table: the least recently used one is evicted (key 1 was used last before the loop, so it goes first)
+    for (uint64_t k = 100; k < 100 + VKN_MIRROR_KEYS; k++) CHECK_EQ(vkn_mirror_diff(k, 0, m, ST, RB, 16, r, 4, &full), 1);
+    CHECK_EQ(vkn_mirror_diff(1, 8, m, ST, RB, ROWS - 8, r, VKN_MIRROR_RUNS, &full), 1); CHECK_EQ(full, 1);
+    CHECK_EQ(vkn_mirror_diff(100 + VKN_MIRROR_KEYS - 1, 0, m, ST, RB, 16, r, 4, &full), 0);   // a recent one is still known
+    vkn_mirror_stats b2; vkn_mirror_stats_get(&b2);
+    CHECK_EQ(b2.merged - a.merged, 1); CHECK(b2.evicted - a.evicted >= 2); CHECK_EQ(b2.forgot - a.forgot, 1);
+    vkn_mirror_forget_all();
+    CHECK_EQ(vkn_mirror_diff(100 + VKN_MIRROR_KEYS - 1, 0, m, ST, RB, 16, r, 4, &full), 1); CHECK_EQ(full, 1);
+    vkn_mirror_forget_all();
+}
+
 // ================================================================================================================ main
 static void test_textures(void);
 static void test_state(void);
@@ -333,6 +442,8 @@ int main(void) {
     test_tab();
     test_buffers();
     test_ring();
+    test_buf_update();
+    test_mirror();
     test_textures();
     test_state();
     test_shaders();

@@ -35,10 +35,12 @@
 #include "hle.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_buf.h"
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define VB_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
 
@@ -174,10 +176,26 @@ VKN_HOOK vb_h_dib(VKN_A) {   // 0x91d890 DestroyIndexBuffer(r, handle)
 // r+0x300 table), and every writer of a pending node stores kind 0 (packet 0x2e and the nine inline lockers) or 1 (0x921c60). In mode 1
 // a kind-2 (or unknown) descriptor is dropped and counted, never handed to NVN.
 static uint64_t g_kind2, g_kind_bad;
+// Stage 4 (copies): who called 0x9218c0 (the stub's guest return address; xr of main.raw: these are all its call sites).
+enum { CB_BEGIN, CB_P30, CB_UNLOCK, CB_INLINE, CB_OTHER, CB_N };
+static const char *const k_cb_name[CB_N] = {"BeginRender 0x93d9f0", "packet 0x30", "0x921dc0 (packet 0x32 / 0x9414e0 / 0x941490)", "inline lockers", "other"};
+static uint64_t g_cb_n[CB_N], g_cb_bytes[CB_N];
+static unsigned copy_caller(void) {
+    static const uint32_t k_inline[9] = {0xaac364, 0xc697ec, 0xc7eac4, 0xc9e230, 0xd55944, 0x10e2ea8, 0x12b0930, 0x12dc2d0, 0x140736c};
+    const uint64_t c = dm_vkn_caller(), b = (uint64_t)(uintptr_t)dm_vkn_base();
+    if (!c || c < b) return CB_OTHER;
+    const uint64_t lr = c - b;
+    if (lr == 0x93db28) return CB_BEGIN;
+    if (lr == 0x93fc70) return CB_P30;
+    if (lr == 0x921e1c) return CB_UNLOCK;
+    for (int i = 0; i < 9; i++) if (lr == k_inline[i]) return CB_INLINE;
+    return CB_OTHER;
+}
 VKN_HOOK vb_h_copy(VKN_A) {
     const uint64_t d = a1;
     const unsigned kind = d ? vkn_rd8(d + SC_KIND) : 3;
     const uint64_t size = d ? (uint64_t)(int64_t)(int32_t)vkn_rd32(d + SC_SIZE) : 0;
+    { const unsigned cb = copy_caller(); __atomic_add_fetch(&g_cb_n[cb], 1, __ATOMIC_RELAXED); __atomic_add_fetch(&g_cb_bytes[cb], size, __ATOMIC_RELAXED); }
     if (vkn_mode() == VKN_NATIVE && kind <= 1) {
         const uint64_t h = vkn_rd64(d + SC_HANDLE);
         const int k = kind == 0 ? VKN_BUF_VB : VKN_BUF_IB;
@@ -203,6 +221,97 @@ VKN_HOOK vb_h_copy(VKN_A) {
     return g_o_copy(VKN_F);   // mode 2, or a buffer that is not ours
 }
 
+// ---- stage 4 (copies): packets 0x2e / 0x31 written straight into the buffer ----
+// Packet 0x2e (VB) / 0x31 (IB), +8 handle, +0x10 u32 offset in the buffer, +0x14 u32 size, data from (pkt + 0x2f) & ~15; length
+// size + 0x2f. Written by the lockers of a RECORDING list (0x2e: the nine inline lockers above in their list branch; 0x31: the IB
+// locker): lock = the packet, the caller fills its data, unlock = packet 0x30 / 0x32 right after it in the same list (c69520 /
+// 1406ed0 decompiled: nothing is put into the list between the two; the fill writes into the packet memory).
+// The engine's handler (0x93e5f0 case 0x2e; case 0x31 -> 0x921c60): VB record +0x38 / IB record +0x18 = [dev+0x51f0] (last use);
+// a slice of its staged ring [r+0x1870] at the cursor r+0x1890 (wrap to 0 when cursor + size > 0xefffff); a 0x40-byte node in the
+// pending map r+0x18a0 (buckets r+0x189c, count r+0x1898) keyed by the handle - an existing node of the same handle is OVERWRITTEN
+// (its update lost); the packet data copied into the slice. The unlock (0x30 in 0x93e5f0, 0x32 -> 0x921dc0) finds the node and, when
+// r+0x18c0 is set (BeginRender 0x93d9f0 .. EndFrame 0x93ccd0), applies it through 0x9218c0 (ours: vkn_buf_update) and frees the node
+// (0x921bf0); else BeginRender applies and frees every node at the start of the next frame. So the bytes went packet -> ring
+// (engine) -> block (ours): two CPU copies.
+// Here (mode 1): when r+0x18c0 is set, the handle is live and ours and no node of that handle is pending, the packet's bytes go
+// straight into the block (vkn_buf_update_ex: in place, or a fresh block when a recording of the last 3 frames may read the old one),
+// the record's last-use word is written as the engine writes it, and no node is made: the unlock finds none and does nothing (the
+// pending map does not grow). The visibility is the engine's: the unlock follows the lock with no draw between them, so "applied at
+// the lock" = "applied at the unlock". Otherwise (outside a frame: the engine defers to BeginRender; a pending node: the engine's
+// overwrite rule; a record that is not ours) the engine's handler runs as before. The ring cursor r+0x1890 is only an allocator (its
+// readers: the 0x2e handler, 0x921c60 and the nine inline lockers; also written by the renderer's constructor at 0x913254), nothing
+// reads the ring outside 0x9218c0: skipping the slice is harmless.
+// Packets 0x2c / 0x2d go to the storage mirror (hle_dos2_vkn_glue.c): the 0x2c packet for its region, 0x2d as "write finished".
+enum { R_FRAME_REC = 0x18c0, R_PEND_BUCKETS = 0x189c, R_PEND = 0x18a0, L_RENDERER = 0x38, VB_LASTUSE = 0x38, IB_LASTUSE = 0x18 };
+enum { PE_OUTSIDE, PE_PENDING, PE_NOTOURS, PE_STALE, PE_N };
+static const char *const k_pe_name[PE_N] = {"outside a frame", "node pending", "not ours", "stale handle"};
+static struct {
+    uint64_t direct[2], direct_bytes[2], zero, renamed, carried, whole, range, nomem;
+    uint64_t engine[PE_N], engine_bytes;
+    uint64_t unlock_node, unlock_none;
+} g_pk;
+void dm_vkn_glue_pkt(unsigned op, uint64_t pkt) __attribute__((weak));   // hle_dos2_vkn_glue.c
+void dm_vkn_glue_register(void) __attribute__((weak));
+static int pend_has(uint64_t r, uint64_t h, int *bad) {   // the engine's lookup (0x93e5f0 case 0x30, 0x921dc0)
+    const uint32_t nb = vkn_rd32(r + R_PEND_BUCKETS); const uint64_t tab = vkn_rd64(r + R_PEND);
+    *bad = !nb || !tab;
+    if (*bad) return 0;
+    for (uint64_t n = vkn_rd64(tab + 8ull * (h % nb)); n; n = vkn_rd64(n)) if (vkn_rd64(n + 8) == h) return 1;
+    return 0;
+}
+typedef struct { int kind; uint64_t h, dst; const void *src; uint64_t size; void *cpu; uint64_t va; vkn_buf_uinfo info; } pk_job;
+static uint64_t pk_on_stack(void *p) {
+    pk_job *j = p;
+    return (uint64_t)(int64_t)vkn_buf_update_ex(j->kind, j->h, j->dst, j->src, j->size, &j->cpu, &j->va, &j->info);
+}
+static int pk_update(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
+    const int ib = op == 0x31;
+    const uint64_t h = vkn_rd64(pkt + 8), r = list ? vkn_rd64(list + L_RENDERER) : 0;
+    const uint32_t dst = vkn_rd32(pkt + 0x10), size = vkn_rd32(pkt + 0x14);
+    if (!r) return 0;
+    if (!vkn_rd8(r + R_FRAME_REC)) { g_pk.engine[PE_OUTSIDE]++; g_pk.engine_bytes += size; return 0; }
+    const uint64_t rec = (h & 0x3fffff00000000ull) ? vkn_rec(r, ib ? R_IB : R_VB, ib ? IB_REC : VB_REC, h) : 0;
+    if (!rec) { g_pk.engine[PE_STALE]++; return 0; }   // the engine's handler does nothing either
+    int bad = 0;
+    if (pend_has(r, h, &bad) || bad) { g_pk.engine[PE_PENDING]++; g_pk.engine_bytes += size; return 0; }
+    const uint64_t frame = vkn_rd64(vkn_rd64(r + R_DEV) + DEV_FRAME);
+    if (!size) {   // (0x1406ed0 locks 0 bytes: the engine makes a 0-byte node that the unlock copies and frees)
+        if (!vkn_buf_has_block(ib ? VKN_BUF_IB : VKN_BUF_VB, h)) { g_pk.engine[PE_NOTOURS]++; return 0; }
+        wr64(rec + (ib ? IB_LASTUSE : VB_LASTUSE), frame);
+        g_pk.zero++; *len = 0x2f; return 1;
+    }
+    pk_job j; memset(&j, 0, sizeof j);
+    j.kind = ib ? VKN_BUF_IB : VKN_BUF_VB; j.h = h; j.dst = dst; j.src = (const void *)(uintptr_t)((pkt + 0x2f) & ~15ull); j.size = size;
+    const int rc = (int)(int64_t)dm_vkn_on_stack(pk_on_stack, &j);
+    if (rc == -1) { g_pk.engine[PE_NOTOURS]++; g_pk.engine_bytes += size; return 0; }   // (a record we did not create: the old path)
+    wr64(rec + (ib ? IB_LASTUSE : VB_LASTUSE), frame);
+    *len = (uint64_t)size + 0x2f;
+    if (rc == -2) {
+        g_pk.range++;
+        if (g_pk.range <= 16) vkn_logf(VB_RED "packet %#x into %s %#llx: offset %u + %u bytes outside the buffer: dropped", op, ib ? "IB" : "VB", (unsigned long long)h, dst, size);
+        return 1;
+    }
+    if (rc == 1) { wr64(rec + (ib ? IB_CPU : VB_CPU), (uint64_t)(uintptr_t)j.cpu); wr64(rec + (ib ? IB_VA : VB_VA), j.va); g_pk.renamed++; g_pk.carried += j.info.carried; }
+    if (rc == -3) { g_pk.nomem++; if (g_pk.nomem <= 16) vkn_logf(VB_RED "packet %#x into %s %#llx: no memory for a new version, copied in place (draws of this frame may see it)", op, ib ? "IB" : "VB", (unsigned long long)h); }
+    g_pk.direct[ib]++; g_pk.direct_bytes[ib] += size; g_pk.whole += j.info.whole;
+    return 1;
+}
+static int vb_model(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
+    if (!pkt) return 0;
+    switch (op) {
+    case 0x2e: case 0x31: return pk_update(list, op, pkt, len);
+    case 0x30: case 0x32: {   // the unlock: only counted (after a direct update there is no node: the engine's handler finds none)
+        const uint64_t r = list ? vkn_rd64(list + L_RENDERER) : 0; int bad = 0;
+        if (r && pend_has(r, vkn_rd64(pkt + 8), &bad)) g_pk.unlock_node++; else g_pk.unlock_none++;
+        return 0;
+    }
+    case 0x2c: case 0x2d: if (dm_vkn_glue_pkt) dm_vkn_glue_pkt(op, pkt); return 0;
+    default: return 0;
+    }
+}
+int dn_install_rc_model2(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len));   // hle_dos2_native.c
+static int g_model_in;
+
 // ---- census ----
 static void vb_census(void) {
     vkn_buf_stats s; vkn_buf_stats_get(&s);
@@ -224,9 +333,22 @@ static void vb_census(void) {
              (unsigned long long)__atomic_load_n(&g_bad_handle, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_not_ours, __ATOMIC_RELAXED));
     if (vkn_mode() == VKN_NATIVE) {
         vkn_buf_ustats u; vkn_buf_ustats_get(&u);
-        vkn_logf("buffers staged updates: %llu in place, %llu renamed (old block busy; %.2f MB carried over), %llu without memory (in place), %.2f MB updated; kind 2 dropped %llu, bad kind %llu",
-                 (unsigned long long)u.inplace, (unsigned long long)u.renamed, u.rest_bytes / M, (unsigned long long)u.rename_fail, u.bytes / M,
+        vkn_logf("buffers staged updates: %llu in place, %llu renamed (old block busy; %.2f MB carried over: dynamic %llu / %.2f MB, static %llu / %.2f MB), %llu without memory (in place), "
+                 "%.2f MB updated (%llu whole buffer, %llu partial); kind 2 dropped %llu, bad kind %llu",
+                 (unsigned long long)u.inplace, (unsigned long long)u.renamed, u.rest_bytes / M, (unsigned long long)u.renamed_dyn, u.rest_dyn / M,
+                 (unsigned long long)u.renamed_static, u.rest_static / M, (unsigned long long)u.rename_fail, u.bytes / M, (unsigned long long)u.whole, (unsigned long long)u.partial,
                  (unsigned long long)__atomic_load_n(&g_kind2, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_kind_bad, __ATOMIC_RELAXED));
+        char cb[400]; int k = 0; cb[0] = 0;
+        for (int i = 0; i < CB_N; i++)
+            if (g_cb_n[i] && k < (int)sizeof cb - 80) k += snprintf(cb + k, sizeof cb - (size_t)k, " %s %llu / %.2f MB;", k_cb_name[i], (unsigned long long)g_cb_n[i], g_cb_bytes[i] / M);
+        char pe[200]; int m = 0; pe[0] = 0;
+        for (int i = 0; i < PE_N; i++)
+            if (g_pk.engine[i] && m < (int)sizeof pe - 48) m += snprintf(pe + m, sizeof pe - (size_t)m, " %s %llu,", k_pe_name[i], (unsigned long long)g_pk.engine[i]);
+        vkn_logf("buffers update paths: packet straight into the block %s: VB %llu / %.2f MB, IB %llu / %.2f MB (copied once; %llu whole buffer, %llu renamed carrying %.2f MB, %llu zero-size, "
+                 "%llu out of range, %llu without memory); packet through the engine's ring (copied twice) %.2f MB:%s; unlocks with a node %llu, without %llu; CopyStagedBufferData by caller:%s",
+                 g_model_in ? "on" : "OFF", (unsigned long long)g_pk.direct[0], g_pk.direct_bytes[0] / M, (unsigned long long)g_pk.direct[1], g_pk.direct_bytes[1] / M,
+                 (unsigned long long)g_pk.whole, (unsigned long long)g_pk.renamed, g_pk.carried / M, (unsigned long long)g_pk.zero, (unsigned long long)g_pk.range, (unsigned long long)g_pk.nomem,
+                 g_pk.engine_bytes / M, m ? pe : " none", (unsigned long long)g_pk.unlock_node, (unsigned long long)g_pk.unlock_none, k ? cb : " none");
     }
 }
 
@@ -247,5 +369,18 @@ void dm_vkn_buf_register(void) {
     dm_vkn_site(0x91d890, k_dib, "DestroyIndexBuffer", (void *)vb_h_dib, &g_o_dib, VKN_M_BOTH);
     dm_vkn_site(0x9218c0, k_copy, "CopyStagedBufferData", (void *)vb_h_copy, &g_o_copy, VKN_M_BOTH);
     dm_vkn_census(vb_census);
+    if (vkn_mode() == VKN_NATIVE) {
+        // Stage 4 (copies): the storage mirror's writer hooks, and the executor's second model slot (packets 0x2c / 0x2d for the
+        // mirror; 0x2e / 0x31 written straight into the buffer, 0x30 / 0x32 counted). DM_VK_NATIVE_VBPKT=0: the engine's handlers.
+        if (dm_vkn_glue_register) dm_vkn_glue_register();
+        const char *e = getenv("DM_VK_NATIVE_VBPKT");
+        const int pk = !(e && *e == '0');
+        const uint64_t ops = 1ull << 0x2c | 1ull << 0x2d | (pk ? 1ull << 0x2e | 1ull << 0x30 | 1ull << 0x31 | 1ull << 0x32 : 0);
+        const int in = !dn_install_rc_model2(ops, vb_model);
+        g_model_in = in && pk;
+        if (!in) vkn_logf(VB_RED "buffers: no second model slot of the executor (hook missing or slot taken): packets 0x2e / 0x31 keep the engine's two copies, 0x2c / 0x2d no mirror events");
+        else vkn_logf("buffers: packets 0x2e / 0x31 %s; packets 0x2c / 0x2d to the storage mirror", pk ? "written straight into the native buffer" : "through the engine's ring (DM_VK_NATIVE_VBPKT=0)");
+    }
+
 }
 #endif

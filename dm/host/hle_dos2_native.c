@@ -132,6 +132,10 @@ static int (*g_rc_take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len)
 static uint64_t g_rc_take_ops;
 static uint64_t g_rc_model_ops;   // [DOS2] NR-NATIVE step D half c (DM_NRN_PKT): the opcodes nr_pkt.h models; model() = 1 - executed, *len its length
 static int (*g_rc_model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
+// [DOS2] VK-NATIVE stage 4 (copies): a second model slot (hle_dos2_vkn_buf.c: packets 0x2c / 0x2d / 0x2e / 0x30 / 0x31), asked after
+// the first one (its opcodes may overlap the first slot's: asked only when the first returned 0), before the native handler.
+static uint64_t g_rc_model2_ops;
+static int (*g_rc_model2)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
 // [DOS2] NR-NATIVE step D (DM_NRN_LIST, hle_dos2_nrn_d.inc): the packet of opcode DN_OP_NOTE that the wrappers of the engine's
 // draw-yourself functions put into a list is ours - the engine's switch and the handlers never see it. NULL: no such packet exists.
 enum { DN_OP_NOTE = 0x40 };
@@ -142,6 +146,7 @@ static uint64_t dn_rc_hook(uint64_t list, uint64_t op, uint64_t pkt, uint64_t a3
     for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
     uint64_t len;
     if (__builtin_expect(g_rc_model_ops != 0, 0) && c < 64 && (g_rc_model_ops >> c & 1) && g_rc_model(list, c, pkt, &len)) { } else   // [DOS2] NR-NATIVE step D half c: a modelled opcode (never one the native handler takes)
+    if (__builtin_expect(g_rc_model2_ops != 0, 0) && c < 64 && (g_rc_model2_ops >> c & 1) && g_rc_model2(list, c, pkt, &len)) { } else   // [DOS2] VK-NATIVE stage 4: the second model slot
     if (!(__builtin_expect(g_rc_take_ops != 0, 0) && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, op, pkt, a3, a4, a5);
     for (int i = 0; i < n; i++) if (g_rc_h[i]->post) g_rc_h[i]->post(list, c, pkt, len);
     return len;
@@ -154,6 +159,7 @@ uint64_t dn_rc_inner(uint64_t list, unsigned op, uint64_t pkt) {
     for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
     uint64_t len;
     if (g_rc_model_ops != 0 && c < 64 && (g_rc_model_ops >> c & 1) && g_rc_model(list, c, pkt, &len)) { } else
+    if (g_rc_model2_ops != 0 && c < 64 && (g_rc_model2_ops >> c & 1) && g_rc_model2(list, c, pkt, &len)) { } else
     if (!(g_rc_take_ops != 0 && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, c, pkt, 0, 0, 0);
     for (int i = 0; i < n; i++) if (g_rc_h[i]->post) g_rc_h[i]->post(list, c, pkt, len);
     return len;
@@ -279,6 +285,20 @@ int dn_install_rc_model(uint64_t mask, int (*model)(uint64_t list, unsigned op, 
     g_rc_model = model; g_rc_model_ops = mask;
     return 0;
 }
+// [DOS2] VK-NATIVE stage 4: the second model slot (installs the ExecuteRenderCommand hook if nobody did, as the native handler's
+// installer does). Its opcodes must not be the native handler's (checked here when that one is in; it checks nothing itself, so the
+// caller keeps them apart: the VK-NATIVE exec part's opcodes are fixed). Install time only. 0 = in.
+int dn_install_rc_model2(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len));
+int dn_install_rc_model2(uint64_t mask, int (*model)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len)) {
+    static const dn_rc_handler none = {NULL, NULL};
+    if (g_rc_model2 || (mask & g_rc_take_ops)) return -1;
+    if (!g_rc_orig && dn_install_rc(&none)) return -1;
+    g_rc_model2 = model; g_rc_model2_ops = mask;
+    return 0;
+}
+// The first model slot's opcodes (0 = none): a part that would duplicate what that model does asks it.
+uint64_t dn_rc_model_ops(void);
+uint64_t dn_rc_model_ops(void) { return g_rc_model ? g_rc_model_ops : 0; }
 int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt));
 int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt)) {
     if (!g_rc_orig || g_rc_note) return -1;
