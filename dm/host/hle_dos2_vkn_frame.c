@@ -40,10 +40,8 @@
 //                                       its result returned; b0 1: dm_vkn_tick().
 //   Window::Resize 0x93cc20(win, w, h, flag)  0x93d200(win, w, h, flag & 1, w, h) and 0x912f70([win+0x50], w, h, f32 [win+0x44]) as the
 //                                       original (engine code: sizes, listener targets); nvnWindowSetCrop(0, 0, w, h) -> the present crop.
-//   ReadTexels users 0x9291c0 (save to a file) / 0x9296d0 (encode into a buffer) / 0x929880 (raw texels into {ptr, size, w, h}):
-//                                       return 0 = "no data", what they return for a stale handle (the only caller 0xa66bc0 ignores the
-//                                       result; 0x9296d0's buffer was zeroed by the caller, 0x929880 writes nothing): counted, red lines.
-//                                       Read-back is stage 4.
+//   ReadTexels users 0x9291c0 / 0x9296d0 / 0x929880: moved to the read-back part (hle_dos2_vkn_read.c, dm_vkn_read_register, called at
+//                                       the end of this file's register until hle_dos2_vkn.c calls it itself; it is idempotent).
 // Pacing (the HLE NVN path: hle_nvn.c nvnQueuePresentTexture computes the slot, nvnWindowAcquireTexture sleeps): present period =
 // interval (1 in the display interval mode, the default with a known refresh; else the game's 2) * 1e9 / rate; rate = DM_DOS2_FPS's
 // nvn_pace_target_hz(refresh, target) (0 = uncapped: no host pacing), else the old rule (power-saving 30, DM_PRESENT_MAX_HZ cap, 60
@@ -122,10 +120,10 @@ typedef uint64_t (*fn_6)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint6
 typedef void (*fn_targets)(uint64_t pool, uint32_t w, uint32_t h, float scale);   // 0x912f70: s0 = the window's scale
 
 // ---- counters (census) and red lines ----
-enum { RL_DEV, RL_WINTEX, RL_CLEAR, RL_DEPTH, RL_RB, RL_PACE, RL_N };
+enum { RL_DEV, RL_WINTEX, RL_CLEAR, RL_DEPTH, RL_PACE, RL_N };
 static struct {
     uint64_t begins, renders, ends_presented, ends_off, resizes, pace_waits, pace_ns, wintex_unknown, clear_unknown, depth_unknown, no_dev;
-    uint64_t staged, mips, rb[3];
+    uint64_t staged, mips;
     uint32_t red[RL_N];
 } g_fs;
 static int red_ok(int k) { return g_fs.red[k]++ < 16; }
@@ -219,7 +217,7 @@ void dm_vkn_frame_times(double ms[3]);
 void dm_vkn_frame_times(double ms[3]) { ms[0] = g_ft.begin / 1e6; ms[1] = g_ft.render / 1e6; ms[2] = g_ft.end / 1e6; }
 
 // ---- hooks ----
-static vkn_fn g_o_begin, g_o_render, g_o_end, g_o_resize, g_o_rb_file, g_o_rb_enc, g_o_rb_raw;   // (originals: never called in mode 1)
+static vkn_fn g_o_begin, g_o_render, g_o_end, g_o_resize;   // (originals: never called in mode 1)
 
 VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
     VKN_UNUSED;
@@ -394,16 +392,6 @@ VKN_HOOK fh_resize(VKN_A) {   // 0x93cc20 Window::Resize(win, w, h, flag) = wind
     return rc & 1;
 }
 
-// The read-back users (stage 4): "no data".
-static uint64_t rb_none(int k, const char *name, uint64_t r, uint64_t h) {
-    g_fs.rb[k]++;
-    if (red_ok(RL_RB)) vkn_logf(FH_RED "frame: %s(r %#llx, texture %#llx): read-back is not native yet (stage 4): no data returned", name, (unsigned long long)r, (unsigned long long)h);
-    return 0;
-}
-VKN_HOOK fh_rb_file(VKN_A) { VKN_UNUSED; return rb_none(0, "0x9291c0 save texture", a0, a1); }
-VKN_HOOK fh_rb_enc(VKN_A) { VKN_UNUSED; return rb_none(1, "0x9296d0 encode texture", a0, a1); }
-VKN_HOOK fh_rb_raw(VKN_A) { VKN_UNUSED; return rb_none(2, "0x929880 read texels", a0, a1); }
-
 // ---- census ----
 static void fh_census(void) {
     vkn_frame_stats s; vkn_frame_stats_get(&s);
@@ -412,14 +400,14 @@ static void fh_census(void) {
              (unsigned long long)s.frames, (unsigned long long)s.offframe, (unsigned long long)s.submits, (unsigned long long)x.submit_fail, (unsigned long long)s.waits, s.wait_ns / 1e6,
              (unsigned long long)x.fence_timeouts, (unsigned long long)s.uploads, (unsigned long long)x.presents, (unsigned long long)s.present_fail, (unsigned long long)s.begin_fail,
              (unsigned long long)x.left_open, (unsigned long long)x.present_waits, x.present_wait_ns / 1e6);
-    vkn_logf("frame engine: BeginFrame %llu, BeginRender %llu, EndFrame %llu presented / %llu off, staged copies %llu, mip reductions %llu, resizes %llu; pacing %.3f ms period, %llu sleeps / %.1f ms; dropped: window texture %llu, colour clear %llu, depth clear %llu, no device %llu; read-backs (no data) file %llu, encode %llu, texels %llu",
+    vkn_logf("frame engine: BeginFrame %llu, BeginRender %llu, EndFrame %llu presented / %llu off, staged copies %llu, mip reductions %llu, resizes %llu; pacing %.3f ms period, %llu sleeps / %.1f ms; dropped: window texture %llu, colour clear %llu, depth clear %llu, no device %llu",
              (unsigned long long)g_fs.begins, (unsigned long long)g_fs.renders, (unsigned long long)g_fs.ends_presented, (unsigned long long)g_fs.ends_off, (unsigned long long)g_fs.staged,
              (unsigned long long)g_fs.mips, (unsigned long long)g_fs.resizes, g_pace.period / 1e6, (unsigned long long)g_fs.pace_waits, g_fs.pace_ns / 1e6,
-             (unsigned long long)g_fs.wintex_unknown, (unsigned long long)g_fs.clear_unknown, (unsigned long long)g_fs.depth_unknown, (unsigned long long)g_fs.no_dev,
-             (unsigned long long)g_fs.rb[0], (unsigned long long)g_fs.rb[1], (unsigned long long)g_fs.rb[2]);
+             (unsigned long long)g_fs.wintex_unknown, (unsigned long long)g_fs.clear_unknown, (unsigned long long)g_fs.depth_unknown, (unsigned long long)g_fs.no_dev);
 }
 
 void dm_vkn_frame_register(void);   // hle_dos2_vkn.c (weak there)
+void dm_vkn_read_register(void) __attribute__((weak));   // hle_dos2_vkn_read.c: the read-back sites moved there (idempotent)
 void dm_vkn_frame_register(void) {
     // Mode 2 has nothing of this part (all sites VKN_M_NATIVE): no census either, so mode 2's 10 s lines stay those of stage 2.
     // (hle_dos2_vkn.c decides its own EndFrame hook by this function's presence, not by what it registers.)
@@ -428,16 +416,11 @@ void dm_vkn_frame_register(void) {
     static const uint32_t k_render[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9045ff8, 0xa90557f6, 0xa9064ff4};
     static const uint32_t k_end[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};
     static const uint32_t k_resize[4] = {0xa9bd57f6 /* stp x22,x21,[sp,#-0x30]! */, 0xa9014ff4, 0xa9027bfd, 0x910083fd};
-    static const uint32_t k_rb_file[4] = {0xd10303ff /* sub sp,sp,#0xc0 */, 0xa9066ffc, 0xa90767fa, 0xa9085ff8};
-    static const uint32_t k_rb_enc[4] = {0xd102c3ff /* sub sp,sp,#0xb0 */, 0xa90667fa, 0xa9075ff8, 0xa90857f6};
-    static const uint32_t k_rb_raw[4] = {0xd10143ff /* sub sp,sp,#0x50 */, 0xa90257f6, 0xa9034ff4, 0xa9047bfd};
     dm_vkn_site(0x9215f0, k_begin, "BeginFrame", (void *)fh_begin, &g_o_begin, VKN_M_NATIVE);
     dm_vkn_site(0x93d9f0, k_render, "Window::BeginRender", (void *)fh_render, &g_o_render, VKN_M_NATIVE);
     dm_vkn_site(0x93ccd0, k_end, "Window::EndFrame", (void *)fh_end, &g_o_end, VKN_M_NATIVE);
     dm_vkn_site(0x93cc20, k_resize, "Window::Resize", (void *)fh_resize, &g_o_resize, VKN_M_NATIVE);
-    dm_vkn_site(0x9291c0, k_rb_file, "SaveTextureToFile", (void *)fh_rb_file, &g_o_rb_file, VKN_M_NATIVE);
-    dm_vkn_site(0x9296d0, k_rb_enc, "EncodeTexture", (void *)fh_rb_enc, &g_o_rb_enc, VKN_M_NATIVE);
-    dm_vkn_site(0x929880, k_rb_raw, "ReadTextureTexels", (void *)fh_rb_raw, &g_o_rb_raw, VKN_M_NATIVE);
     dm_vkn_census(fh_census);
+    if (dm_vkn_read_register) dm_vkn_read_register();
 }
 #endif
