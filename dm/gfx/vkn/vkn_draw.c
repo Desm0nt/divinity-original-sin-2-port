@@ -558,8 +558,12 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         vkCmdBindVertexBuffers(cb, b, 1, &vbuf[b], &voff[b]);
         g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; g_st.vb_binds++;
     }
-    // viewport (no flip: NVN's origin is upper left and its depth 0..1, as Vulkan's) and scissor clamped to the pass
-    const VkViewport vp = {in->viewport[0], in->viewport[1], in->viewport[2], in->viewport[3], 0.0f, 1.0f};
+    // Viewport. NVN with the UPPER_LEFT window origin (the engine sets it) maps NDC y = +1 to row 0; Vulkan maps NDC y = -1 to row 0.
+    // The packs' SPIR-V is the game's own clip space (no flip inside), so the viewport is flipped (negative height, Vulkan 1.1), exactly
+    // as the translator's xbg_nvn_viewport does: rows and the winding seen in framebuffer space (front face CW) then equal NVN's.
+    // (First phone run V3_a: without the flip every back-face-culled draw vanished - a black frame with 0 dropped draws.) Depth 0..1.
+    // Scissor is in framebuffer rows already (upper-left origin in both APIs), clamped to the pass.
+    const VkViewport vp = {in->viewport[0], in->viewport[1] + in->viewport[3], in->viewport[2], -in->viewport[3], 0.0f, 1.0f};
     if (!g_b.vp_ok || memcmp(&vp, &g_b.vp, sizeof vp)) { vkCmdSetViewport(cb, 0, 1, &vp); g_b.vp = vp; g_b.vp_ok = 1; g_st.viewport_sets++; }
     int64_t x0 = in->scissor[0], y0 = in->scissor[1], x1 = x0 + in->scissor[2], y1 = y0 + in->scissor[3];
     if (x0 < 0) x0 = 0;

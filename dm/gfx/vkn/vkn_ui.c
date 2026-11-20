@@ -413,6 +413,9 @@ int vkn_ui_draw(const vkn_ui_draw_in *in) {
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s->layout, 0, 1, &set, ndyn, ndyn ? dyn : NULL);
     VkViewport vp = g_vp_set ? g_vp : (VkViewport){0.0f, 0.0f, (float)pi.width, (float)pi.height, 0.0f, 1.0f};
     if (!(vp.width > 0.0f) || !(vp.height > 0.0f)) vp = (VkViewport){0.0f, 0.0f, (float)pi.width, (float)pi.height, 0.0f, 1.0f};
+    // flipped like vkn_draw.c's viewport: NVN's upper-left origin maps NDC y = +1 to row 0, Vulkan NDC y = -1 (the translator's
+    // xbg_nvn_viewport does the same for these very shaders)
+    vp.y += vp.height; vp.height = -vp.height;
     VkRect2D sc = g_sc_set ? g_sc : (VkRect2D){{0, 0}, {pi.width, pi.height}};
     if ((uint32_t)sc.offset.x >= pi.width || (uint32_t)sc.offset.y >= pi.height) { vkn_draw_raw_begin(); g_st.drop_empty++; return 0; }   // nothing inside the target
     if (sc.offset.x + sc.extent.width > pi.width) sc.extent.width = pi.width - (uint32_t)sc.offset.x;

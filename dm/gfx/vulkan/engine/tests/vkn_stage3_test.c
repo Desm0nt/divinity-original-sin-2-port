@@ -710,7 +710,8 @@ static void test_draw(void) {
     CHECK(v1->u[0] == 1 && v1->a[0] == VH(g_vb1.buf) && v1->off[0] == g_vb1.off);   // stream 2 is not read by the format: not bound
     CHECK(ib->a[0] == VH(g_ib16.buf) && ib->off[0] == g_ib16.off && ib->u[0] == VK_INDEX_TYPE_UINT16);
     const mk_ev *vp = nth(m, cb, MK_E_VIEWPORT, 0), *sc = nth(m, cb, MK_E_SCISSOR, 0);
-    CHECK(vp->vp.x == 0 && vp->vp.width == 64 && vp->vp.height == 32 && vp->vp.minDepth == 0 && vp->vp.maxDepth == 1);
+    // flipped viewport (NVN upper-left origin: NDC y = +1 -> row 0), as the translator's xbg_nvn_viewport: y = y + h, height = -h
+    CHECK(vp->vp.x == 0 && vp->vp.y == 32 && vp->vp.width == 64 && vp->vp.height == -32 && vp->vp.minDepth == 0 && vp->vp.maxDepth == 1);
     CHECK(sc->rect.offset.x == 0 && sc->rect.extent.width == 64 && sc->rect.extent.height == 32);
     const VkDescriptorSet set1 = (VkDescriptorSet)(uintptr_t)bs->a[1];
     // ---- an identical draw rebinds nothing; one change rebinds only that

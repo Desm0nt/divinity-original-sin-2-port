@@ -132,6 +132,13 @@ static VkFormatFeatureFlags fmt_feat(VkFormat f) {
     if (d->props.apiVersion < VK_API_VERSION_1_1 && (v & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) v |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
     return v;
 }
+// DM_GFX_SIM_GPU=mali / powervr (the port's capability model of a GPU without BC, xbg_vendor_policy.h): the real device here samples
+// BC, so the model must force the decision a real Mali gets from its format properties.
+static int sim_no_bc(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_GFX_SIM_GPU"); v = e && (!strcmp(e, "mali") || !strcmp(e, "powervr")); }
+    return v;
+}
 static VkComponentMapping fmt_swizzle(uint32_t nvn, int x) {
     VkComponentMapping m = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     if (x) m.a = VK_COMPONENT_SWIZZLE_ONE;
@@ -325,7 +332,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     VkFormatFeatureFlags ff = fmt_feat(fmt);
     const VkFormatFeatureFlags want_s = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     uint8_t decoded = 0, widened = 0;
-    if (fmt_is_bc(nvn) && (ff & want_s) != want_s) {   // no native BC sampling: decoded once here
+    if (fmt_is_bc(nvn) && ((ff & want_s) != want_s || sim_no_bc())) {   // no native BC sampling (or the Mali / PowerVR model): decoded once here
         int bpp = 0; uint32_t pf = 0;
         if (!nvn_bc_unpacked(nvn, &pf, &bpp) || (fmt = bc_decoded(nvn)) == VK_FORMAT_UNDEFINED) { *why = "BC format the CPU decoder does not know"; goto fail0; }
         p.mode = 1; p.dbpb = (uint32_t)bpp; decoded = 1; ff = fmt_feat(fmt);
