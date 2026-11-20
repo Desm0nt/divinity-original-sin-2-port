@@ -1,0 +1,435 @@
+// [DOS2] VK-NATIVE shaders (vkn_shader.h): engine shader handle -> stage modules of our packs + descriptor-set layout + pipeline layout +
+// binding table. No game addresses (dm/host/hle_dos2_vkn_shader.c passes the control / code pointers of each stage).
+// The modules and their variants come from the translator (xbg_vkn_shader / xbg_vkn_alpha_module / xbg_vkn_retype_module, xbg_game.h):
+// the same bundle bytes, the same load-time SPIR-V rewrites, the same "#at" / "#vi" variants the old path draws with. They are owned by
+// the translator (its shader map lives until xbg_game_shutdown), so this module never destroys a VkShaderModule.
+// Set layouts are shared by content (a cache that only grows: distinct binding lists are a few hundred); a shader whose list does not
+// fit the cache owns its layouts. Everything a record owns (binding table, c1 blocks, own layouts, its id) goes through vkn_retire.
+// Threads: one mutex (g_mu) for the table, the id list, the layout cache and the counters. Every translator call runs on a private
+// worker thread with an 8 MB stack: CreateShader runs on engine threads whose guest stacks are small, and a bundle load (SPIR-V rewrites)
+// is not. Creations are queued (the engine thread computes the keys, copies the control sections and returns: it never waits for the
+// translator's mutex, which its own thread holds for a whole submission); vkn_shader_get waits for a creation still queued, a destroy
+// cancels one; the module variants are waited for.
+#ifdef DM_GAME_DOS2
+#include "vkn_shader.h"
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../vulkan/engine/xbg_game.h"   // xbg_vkn_stage, xbg_shader_binding, XBG_SOURCE_* (the door to the packs)
+
+// The translator and the key (weak: host tests link without them; then nothing is created).
+extern int xbg_shader_program_key(const void *control, const void *code, char out_hex17[17]) __attribute__((weak));
+extern int xbg_vkn_shader(const char *key, const void *control, const void *code, xbg_vkn_stage *out) __attribute__((weak));
+extern VkShaderModule xbg_vkn_alpha_module(void *shader, uint32_t func, float ref) __attribute__((weak));
+extern VkShaderModule xbg_vkn_retype_module(void *shader, uint64_t code) __attribute__((weak));
+extern void xbg_support_defaults(void *bytes1392, float width, float height) __attribute__((weak));   // xbg_vulkan.cpp (stateless)
+
+#define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
+enum { SH_TAB = 1 << 16, LAYOUT_CAP = 4096, SUPPORT_CAP = 32, SUPPORT_BYTES = 1392, MISS_REDS = 16, BLOCK_REDS = 8 };
+
+typedef struct sh_rec { vkn_shader pub; uint8_t own_layout; } sh_rec;
+typedef struct sh_layout { uint64_t hash; uint32_t nb; VkDescriptorSetLayoutBinding *b; VkDescriptorSetLayout set; VkPipelineLayout pl; } sh_layout;
+
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static vkn_tab g_tab; static int g_tab_ok;          // index -> sh_rec *
+static uint32_t *g_free_id, g_nfree, g_capfree, g_next_id = 1;
+static sh_layout g_lay[LAYOUT_CAP]; static uint32_t g_nlay;
+static struct { float w, h; vkn_block b; } g_sup[SUPPORT_CAP]; static uint32_t g_nsup;
+static vkn_shader_stats g_st;
+static void (*g_dead)(uint32_t, uint64_t);
+static int g_miss_reds, g_block_reds, g_odd_reds;
+
+// ---- the worker: a private thread with an 8 MB stack running jobs in order (creations queued, variants waited for) ----
+typedef struct wjob { void (*fn)(void *); void (*drop)(void *); void *arg; uint64_t handle, seq; int async; struct wjob *next; } wjob;
+static pthread_mutex_t g_q_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_q_go = PTHREAD_COND_INITIALIZER, g_q_done = PTHREAD_COND_INITIALIZER;
+static wjob *g_q_head, *g_q_tail; static uint64_t g_q_seq, g_q_fin, g_q_run_seq, g_q_run_handle; static uint32_t g_q_len; static int g_w_state;   // 0 not started, 1 up, -1 failed
+static void *worker_main(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&g_q_mu);
+    for (;;) {
+        while (!g_q_head) pthread_cond_wait(&g_q_go, &g_q_mu);
+        wjob *j = g_q_head; g_q_head = j->next; if (!g_q_head) g_q_tail = NULL; g_q_len--;
+        const uint64_t seq = j->seq; const int async = j->async;
+        g_q_run_seq = seq; g_q_run_handle = async ? j->handle : 0;
+        pthread_mutex_unlock(&g_q_mu);
+        if (j->fn) j->fn(j->arg);
+        if (async) free(j);   // a waited-for job lives on its caller's stack: not touched after g_q_fin says it is done
+        pthread_mutex_lock(&g_q_mu);
+        g_q_run_seq = g_q_run_handle = 0; g_q_fin = seq; pthread_cond_broadcast(&g_q_done);
+    }
+    return NULL;
+}
+static int worker_up(void) {   // under g_q_mu
+    if (!g_w_state) {
+        pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        g_w_state = pthread_create(&t, &a, worker_main, NULL) ? -1 : 1; pthread_attr_destroy(&a);
+        if (g_w_state < 0) vkn_logf(RED "shaders: no worker thread: bundles load on the caller's own stack, synchronously");
+    }
+    return g_w_state > 0;
+}
+static void q_push(wjob *j) {   // under g_q_mu
+    j->seq = ++g_q_seq; j->next = NULL;
+    if (g_q_tail) g_q_tail->next = j; else g_q_head = j;
+    g_q_tail = j; g_q_len++;
+    pthread_cond_signal(&g_q_go);
+}
+static void run_big(void (*fn)(void *), void *arg) {   // fn(arg) on the worker, waited for (fn NULL: wait for everything queued)
+    wjob j = {fn, NULL, arg, 0, 0, 0, NULL};
+    pthread_mutex_lock(&g_q_mu);
+    if (!worker_up()) { pthread_mutex_unlock(&g_q_mu); if (fn) fn(arg); return; }
+    q_push(&j);
+    while (g_q_fin < j.seq) pthread_cond_wait(&g_q_done, &g_q_mu);
+    pthread_mutex_unlock(&g_q_mu);
+}
+static int run_async(void (*fn)(void *), void (*drop)(void *), void *arg, uint64_t handle) {   // 0 = queued (fn or drop owns arg from now on)
+    wjob *j = (wjob *)malloc(sizeof *j); if (!j) return -1;
+    *j = (wjob){fn, drop, arg, handle, 0, 1, NULL};
+    pthread_mutex_lock(&g_q_mu);
+    if (!worker_up()) { pthread_mutex_unlock(&g_q_mu); free(j); return -1; }
+    q_push(j);
+    pthread_mutex_unlock(&g_q_mu);
+    return 0;
+}
+// The queued creations of this handle: cancelled (cancel = 1: the engine destroyed it) or waited for; a running one is waited for.
+static void q_settle(uint64_t handle, int cancel) {
+    wjob *gone = NULL; uint64_t wait = 0;
+    pthread_mutex_lock(&g_q_mu);
+    for (wjob *prev = NULL, *j = g_q_head; j;) {
+        wjob *nx = j->next;
+        if (j->async && j->handle == handle) {
+            if (cancel) { if (prev) prev->next = nx; else g_q_head = nx; if (g_q_tail == j) g_q_tail = prev; g_q_len--; j->next = gone; gone = j; j = nx; continue; }
+            wait = j->seq;
+        }
+        prev = j; j = nx;
+    }
+    if (g_q_run_handle == handle && g_q_run_seq > wait) wait = g_q_run_seq;
+    while (g_q_fin < wait) pthread_cond_wait(&g_q_done, &g_q_mu);
+    pthread_mutex_unlock(&g_q_mu);
+    while (gone) { wjob *nx = gone->next; if (gone->drop) gone->drop(gone->arg); free(gone); gone = nx; }
+}
+
+// ---- small helpers ----
+static int tab_ready(void) {   // under g_mu
+    if (!g_tab_ok) g_tab_ok = vkn_tab_init(&g_tab, SH_TAB, sizeof(sh_rec *)) ? -1 : 1;
+    return g_tab_ok > 0;
+}
+static uint32_t id_take(void) { return g_nfree ? g_free_id[--g_nfree] : g_next_id++; }   // under g_mu
+static void id_give(uint32_t id) {   // under g_mu
+    if (g_nfree == g_capfree) {
+        const uint32_t cap = g_capfree ? g_capfree * 2 : 1024; uint32_t *n = (uint32_t *)realloc(g_free_id, cap * sizeof *n);
+        if (!n) return;   // the id is simply never reused
+        g_free_id = n; g_capfree = cap;
+    }
+    g_free_id[g_nfree++] = id;
+}
+static int src_engine_stage(int k) { return k == VKN_SRC_VS ? VKN_STAGE_VS : k == VKN_SRC_FS ? VKN_STAGE_FS : VKN_STAGE_CS; }
+static uint32_t bundle_stage_bit(uint32_t st) {
+    static const uint32_t bits[6] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                     VK_SHADER_STAGE_GEOMETRY_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_COMPUTE_BIT};
+    return st < 6 ? bits[st] : VK_SHADER_STAGE_ALL;
+}
+static uint8_t kind_of(uint32_t source) {
+    switch (source) {
+    case XBG_SOURCE_UNIFORM: return VKN_BK_UNIFORM;
+    case XBG_SOURCE_SUPPORT: return VKN_BK_SUPPORT;
+    case XBG_SOURCE_C1: return VKN_BK_C1;
+    case XBG_SOURCE_TEXTURE: return VKN_BK_TEXTURE;
+    case XBG_SOURCE_IMAGE: return VKN_BK_IMAGE;
+    case XBG_SOURCE_STORAGE: return VKN_BK_STORAGE;
+    case XBG_SOURCE_DRIVER0: return VKN_BK_DRIVER0;
+    case XBG_SOURCE_DRIVER2: return VKN_BK_DRIVER2;
+    default: return VKN_BK_OTHER;
+    }
+}
+
+// The set layout + pipeline layout of a binding list: shared by content; *own = 1 when the cache is full (the caller owns them).
+static int layouts_get(const VkDescriptorSetLayoutBinding *b, uint32_t nb, VkDescriptorSetLayout *set, VkPipelineLayout *pl, uint8_t *own) {
+    const vkn_dev *d = vkn_device(); if (!d) return -1;
+    const uint64_t h = vkn_fnv(b, sizeof *b * nb) ^ nb;
+    *own = 0;
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t i = 0; i < g_nlay; i++)
+        if (g_lay[i].hash == h && g_lay[i].nb == nb && !memcmp(g_lay[i].b, b, sizeof *b * nb)) { *set = g_lay[i].set; *pl = g_lay[i].pl; pthread_mutex_unlock(&g_mu); return 0; }
+    pthread_mutex_unlock(&g_mu);
+    const VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = nb ? b : NULL};
+    VkDescriptorSetLayout s = VK_NULL_HANDLE; VkPipelineLayout p = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(d->dev, &li, NULL, &s) != VK_SUCCESS) return -1;
+    const VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &s};
+    if (vkCreatePipelineLayout(d->dev, &pi, NULL, &p) != VK_SUCCESS) { vkDestroyDescriptorSetLayout(d->dev, s, NULL); return -1; }
+    VkDescriptorSetLayoutBinding *copy = nb ? (VkDescriptorSetLayoutBinding *)malloc(sizeof *b * nb) : NULL;
+    if (copy) memcpy(copy, b, sizeof *b * nb);
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t i = 0; i < g_nlay; i++)   // another thread made the same one meanwhile: take it, drop ours
+        if (g_lay[i].hash == h && g_lay[i].nb == nb && !memcmp(g_lay[i].b, b, sizeof *b * nb)) {
+            *set = g_lay[i].set; *pl = g_lay[i].pl; pthread_mutex_unlock(&g_mu);
+            vkDestroyPipelineLayout(d->dev, p, NULL); vkDestroyDescriptorSetLayout(d->dev, s, NULL); free(copy); return 0;
+        }
+    if (g_nlay < LAYOUT_CAP && (copy || !nb)) { g_lay[g_nlay++] = (sh_layout){h, nb, copy, s, p}; g_st.layouts++; copy = NULL; }
+    else { *own = 1; g_st.layouts_own++; }
+    pthread_mutex_unlock(&g_mu);
+    free(copy);
+    *set = s; *pl = p;
+    return 0;
+}
+
+// ---- retirement of a record (vkn_retire: 3 frames after it left the table) ----
+static void rec_free(void *ctx) {
+    sh_rec *r = (sh_rec *)ctx; vkn_shader *s = &r->pub;
+    const vkn_dev *d = vkn_device();
+    for (int k = 0; k < VKN_SRCS; k++) if (s->c1[k].size) vkn_block_free(&s->c1[k]);
+    if (r->own_layout && d) { vkDestroyPipelineLayout(d->dev, s->layout, NULL); vkDestroyDescriptorSetLayout(d->dev, s->set_layout, NULL); }
+    pthread_mutex_lock(&g_mu);
+    if (r->own_layout && g_st.layouts_own) g_st.layouts_own--;
+    g_st.table_bytes -= sizeof(vkn_bind) * s->nbind;
+    for (int k = 0; k < VKN_SRCS; k++) g_st.c1_bytes -= s->c1[k].size;
+    id_give(s->id);
+    pthread_mutex_unlock(&g_mu);
+    free((void *)s->bind); free(r);
+}
+static void rec_retire(sh_rec *r) {   // outside g_mu
+    if (g_dead) g_dead(r->pub.id, r->pub.handle);
+    vkn_retire(rec_free, r);
+}
+
+// ---- creation (on the worker) ----
+enum { CTL_COPY = 0xe48, NAME_COPY = 96 };
+// A queued creation: the keys (computed on the engine's thread), the control sections (copies: the engine frees its own), the code
+// pointers (only for the missing-stage dump; a destroy cancels the job first, so the code is still there when it runs).
+typedef struct sh_job {
+    uint64_t handle, t_key; int rc; uint8_t has, keyed;   // t_key: ns the engine's thread spent on the keys and copies
+    char key[VKN_SRCS][17]; uint8_t ctl[VKN_SRCS][CTL_COPY]; const void *code[VKN_SRCS]; char name[VKN_SRCS][NAME_COPY]; uint32_t mask[VKN_SRCS];
+} sh_job;
+static int cmp_bind(const void *a, const void *b) { const vkn_bind *x = (const vkn_bind *)a, *y = (const vkn_bind *)b; return (int)x->binding - (int)y->binding; }
+static void create_job(void *arg) {
+    sh_job *j = (sh_job *)arg; j->rc = -1;
+    const vkn_dev *d = vkn_device();
+    if (!d || !xbg_vkn_shader) return;
+    xbg_vkn_stage *st = (xbg_vkn_stage *)calloc(VKN_SRCS, sizeof *st);
+    sh_rec *r = (sh_rec *)calloc(1, sizeof *r);
+    vkn_bind *tb = (vkn_bind *)calloc(VKN_SRCS * 256, sizeof *tb);
+    VkDescriptorSetLayoutBinding *lb = (VkDescriptorSetLayoutBinding *)calloc(VKN_SRCS * 256, sizeof *lb);
+    if (!st || !r || !tb || !lb) { free(st); free(r); free(tb); free(lb); return; }
+    vkn_shader *s = &r->pub; s->handle = j->handle;
+    uint32_t nb = 0; uint64_t n_stages = 0, n_bundle = 0, n_miss = 0, n_unus = 0, n_mism = 0, n_noblock = 0;
+    for (int k = 0; k < VKN_SRCS; k++) {
+        if (!(j->has >> k & 1)) continue;
+        s->stages |= (uint8_t)(1u << k); n_stages++;
+        if (!(j->keyed >> k & 1)) { s->missing |= (uint8_t)(1u << k); n_miss++; continue; }
+        memcpy(s->key[k], j->key[k], 17);
+        const int lr = xbg_vkn_shader(s->key[k], j->ctl[k], j->code[k], &st[k]);
+        if (lr < 0) { free(st); free(r); free(tb); free(lb); return; }   // the translator is not up: nothing to build from
+        if (lr > 0) {
+            s->missing |= (uint8_t)(1u << k); n_miss++;
+            pthread_mutex_lock(&g_mu); const int red = g_miss_reds < MISS_REDS ? ++g_miss_reds : 0; pthread_mutex_unlock(&g_mu);
+            if (red) vkn_logf(RED "shaders: no bundle for the %s stage of engine shader %#llx: key %s, file '%s' (its draws must be skipped; %d of the first %d)",
+                              k == VKN_SRC_VS ? "vertex" : k == VKN_SRC_FS ? "fragment" : "compute", (unsigned long long)j->handle, s->key[k],
+                              j->name[k][0] ? j->name[k] : "?", red, MISS_REDS);
+            continue;
+        }
+        n_bundle++;
+        const uint32_t want = k == VKN_SRC_VS ? 0 : k == VKN_SRC_FS ? 4 : 5;
+        if (st[k].stage != want) {
+            n_mism++;
+            pthread_mutex_lock(&g_mu); const int red = g_odd_reds < 8 ? ++g_odd_reds : 0; pthread_mutex_unlock(&g_mu);
+            if (red) vkn_logf(RED "shaders: engine shader %#llx: the %s program's bundle %s is of stage %u", (unsigned long long)j->handle,
+                              k == VKN_SRC_VS ? "vertex" : k == VKN_SRC_FS ? "fragment" : "compute", s->key[k], st[k].stage);
+        }
+        s->xs[k] = st[k].shader; s->module[k] = st[k].module;
+        if (!st[k].module) { s->unusable |= (uint8_t)(1u << k); n_unus++; }
+        if (k == VKN_SRC_VS) {
+            s->ninputs = (uint8_t)st[k].input_count;
+            for (uint32_t i = 0; i < st[k].input_count; i++) { s->inputs[i] = (uint8_t)st[k].inputs[i]; s->input_classes[i] = (uint8_t)st[k].input_classes[i]; }
+        }
+        for (uint32_t i = 0; i < st[k].binding_count; i++) {
+            const xbg_shader_binding *b = &st[k].bindings[i];
+            vkn_bind *t = &tb[nb];
+            t->binding = (uint16_t)b->binding; t->kind = kind_of(b->source); t->stage = (uint8_t)src_engine_stage(k); t->bundle_stage = (uint8_t)st[k].stage;
+            t->slot = t->kind == VKN_BK_SUPPORT || t->kind == VKN_BK_C1 ? 0 : (uint8_t)b->slot; t->count = (uint8_t)(b->count ? b->count : 1);
+            t->type = (VkDescriptorType)b->type; t->bytes = b->bytes; t->flags = b->flags; t->dyn = VKN_NO_DYN;
+            if (t->kind == VKN_BK_UNIFORM && b->slot < 8 && (j->mask[k] >> 31) && !(j->mask[k] >> b->slot & 1)) {
+                n_noblock++;
+                pthread_mutex_lock(&g_mu); const int red = g_block_reds < BLOCK_REDS ? ++g_block_reds : 0; pthread_mutex_unlock(&g_mu);
+                if (red) vkn_logf(RED "shaders: engine shader %#llx (%s) binding %u reads uniform slot %u of stage %d: the engine record has no block with that binding index (mask %#x)",
+                                  (unsigned long long)j->handle, s->key[k], b->binding, b->slot, t->stage, j->mask[k] & 0x7fffffffu);
+            }
+            nb++;
+        }
+    }
+    qsort(tb, nb, sizeof *tb, cmp_bind);
+    uint32_t w = 0;   // a binding number twice (two stages cannot collide: x 6 + stage): keep the first
+    for (uint32_t i = 0; i < nb; i++) if (!w || tb[i].binding != tb[w - 1].binding) tb[w++] = tb[i];
+    nb = w;
+    // the dynamic-offset policy (the translator's dyn_mode_for) and the dynamic indices in binding order
+    uint32_t all = 0, vary = 0;
+    for (uint32_t i = 0; i < nb; i++) if (tb[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) { all += tb[i].count; if (tb[i].kind == VKN_BK_UNIFORM || tb[i].kind == VKN_BK_DRIVER0 || tb[i].kind == VKN_BK_DRIVER2) vary += tb[i].count; }
+    const uint32_t lim = d->props.limits.maxDescriptorSetUniformBuffersDynamic;
+    s->dyn_policy = (uint8_t)(all && all <= lim ? 1 : vary && vary <= lim ? 2 : 0);
+    uint32_t dyn = 0;
+    for (uint32_t i = 0; i < nb; i++) {
+        vkn_bind *t = &tb[i];
+        if (t->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && (s->dyn_policy == 1 || (s->dyn_policy == 2 && (t->kind == VKN_BK_UNIFORM || t->kind == VKN_BK_DRIVER0 || t->kind == VKN_BK_DRIVER2)))) {
+            t->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; t->dyn = (uint8_t)dyn; dyn += t->count;
+        }
+        lb[i] = (VkDescriptorSetLayoutBinding){.binding = t->binding, .descriptorType = t->type, .descriptorCount = t->count, .stageFlags = bundle_stage_bit(t->bundle_stage)};
+    }
+    s->ndyn = (uint16_t)dyn;
+    if (layouts_get(lb, nb, &s->set_layout, &s->layout, &r->own_layout)) {
+        vkn_logf(RED "shaders: engine shader %#llx: vkCreateDescriptorSetLayout / vkCreatePipelineLayout failed (%u bindings, %u dynamic)", (unsigned long long)j->handle, nb, dyn);
+        free(st); free(r); free(tb); free(lb); return;
+    }
+    // c1: the shader's own constants, once, as the translator binds them (uniform_range: >= 16 bytes, a multiple of 16)
+    uint64_t c1_bytes = 0;
+    for (int k = 0; k < VKN_SRCS; k++) {
+        int has = 0;
+        for (uint32_t i = 0; i < nb; i++) has |= tb[i].kind == VKN_BK_C1 && tb[i].stage == src_engine_stage(k);
+        if (!has) continue;
+        const uint64_t n = st[k].c1_bytes > 16 ? (st[k].c1_bytes + 15ull) & ~15ull : 16;
+        uint32_t al = (uint32_t)d->props.limits.minUniformBufferOffsetAlignment; if (al < 16) al = 16;
+        if (vkn_block_alloc(VKN_ARENA_STATIC, n, al, &s->c1[k])) { memset(&s->c1[k], 0, sizeof s->c1[k]); vkn_logf(RED "shaders: engine shader %#llx: no arena block for its c1 constants", (unsigned long long)j->handle); continue; }
+        memset(s->c1[k].cpu, 0, (size_t)s->c1[k].size);
+        if (st[k].c1 && st[k].c1_bytes) memcpy(s->c1[k].cpu, st[k].c1, st[k].c1_bytes);
+        c1_bytes += s->c1[k].size;
+    }
+    vkn_bind *tab = (vkn_bind *)malloc(sizeof *tab * (nb ? nb : 1));
+    if (tab) memcpy(tab, tb, sizeof *tab * nb);
+    s->bind = tab; s->nbind = tab ? (uint16_t)nb : 0;
+    free(st); free(tb); free(lb);
+    // into the table (an older record under the same index: retired)
+    sh_rec *old = NULL;
+    pthread_mutex_lock(&g_mu);
+    s->id = id_take();
+    sh_rec **slot = tab_ready() ? (sh_rec **)vkn_tab_put(&g_tab, j->handle, NULL) : NULL;
+    if (slot) { old = *slot; *slot = r; }
+    g_st.stages += n_stages; g_st.stages_bundle += n_bundle; g_st.stages_missing += n_miss; g_st.stages_unusable += n_unus; g_st.stage_mismatch += n_mism; g_st.ubo_no_block += n_noblock;
+    if (slot) {
+        g_st.created++; g_st.alive++; g_st.dyn_policy[s->dyn_policy]++; g_st.table_bytes += sizeof(vkn_bind) * s->nbind; g_st.c1_bytes += c1_bytes;
+        for (uint32_t i = 0; i < s->nbind; i++) g_st.bind_kind[s->bind[i].kind <= VKN_BK_OTHER ? s->bind[i].kind : 0]++;
+        if (old) { g_st.replaced++; g_st.alive--; g_st.dyn_policy[old->pub.dyn_policy]--; }
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (!slot) {   // handle index beyond the table (or no table): not kept; rc -1 counts it
+        pthread_mutex_lock(&g_mu); g_st.table_bytes += sizeof(vkn_bind) * s->nbind; g_st.c1_bytes += c1_bytes; pthread_mutex_unlock(&g_mu);   // rec_free takes them off
+        vkn_retire(rec_free, r); return;
+    }
+    if (old) rec_retire(old);
+    j->rc = 0;
+}
+
+static void create_run(void *arg) {   // the job, then its time and outcome
+    sh_job *j = (sh_job *)arg; const uint64_t t0 = vkn_now_ns();
+    create_job(j);
+    pthread_mutex_lock(&g_mu); g_st.ns += vkn_now_ns() - t0 + j->t_key; if (j->rc) g_st.failed++; pthread_mutex_unlock(&g_mu);
+    free(j);
+}
+static void create_drop(void *arg) {   // cancelled before it ran (the engine destroyed the shader)
+    pthread_mutex_lock(&g_mu); g_st.cancelled++; pthread_mutex_unlock(&g_mu);
+    free(arg);
+}
+int vkn_shader_create(uint64_t handle, const vkn_stage_src src[VKN_SRCS]) {
+    if (!handle || !src || !vkn_device() || !xbg_vkn_shader || !xbg_shader_program_key) return -1;
+    sh_job *j = (sh_job *)calloc(1, sizeof *j); if (!j) return -1;
+    const uint64_t t0 = vkn_now_ns(); j->handle = handle;
+    for (int k = 0; k < VKN_SRCS; k++) {
+        if (!src[k].control) continue;
+        j->has |= (uint8_t)(1u << k);
+        if (!xbg_shader_program_key(src[k].control, src[k].code, j->key[k])) j->keyed |= (uint8_t)(1u << k);
+        memcpy(j->ctl[k], src[k].control, CTL_COPY); j->code[k] = src[k].code; j->mask[k] = src[k].engine_ubo_mask;
+        if (src[k].name) { strncpy(j->name[k], src[k].name, NAME_COPY - 1); j->name[k][NAME_COPY - 1] = 0; }
+    }
+    j->t_key = vkn_now_ns() - t0;
+    if (run_async(create_run, create_drop, j, handle)) create_run(j);   // no worker: here, now
+    return 0;
+}
+
+static const vkn_shader *tab_find(uint64_t handle) {
+    const vkn_shader *s = NULL;
+    pthread_mutex_lock(&g_mu);
+    if (g_tab_ok > 0) { sh_rec **p = (sh_rec **)vkn_tab_get(&g_tab, handle); if (p && *p) s = &(*p)->pub; }
+    pthread_mutex_unlock(&g_mu);
+    return s;
+}
+const vkn_shader *vkn_shader_get(uint64_t handle) {
+    const vkn_shader *s = tab_find(handle);
+    if (!s && handle) { q_settle(handle, 0); s = tab_find(handle); }   // still queued: wait for its creation
+    return s;
+}
+void vkn_shader_sync(void) { run_big(NULL, NULL); }
+
+void vkn_shader_destroy(uint64_t handle) {
+    q_settle(handle, 1);   // a creation still queued is dropped, a running one finished first
+    sh_rec *r = NULL;
+    pthread_mutex_lock(&g_mu);
+    if (g_tab_ok > 0) {
+        sh_rec **p = (sh_rec **)vkn_tab_get(&g_tab, handle);
+        if (p && *p) { r = *p; *p = NULL; vkn_tab_kill(&g_tab, handle); g_st.destroyed++; g_st.alive--; g_st.dyn_policy[r->pub.dyn_policy]--; }
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (r) rec_retire(r);
+}
+
+void vkn_shader_set_dead_fn(void (*fn)(uint32_t id, uint64_t handle)) { g_dead = fn; }
+
+// ---- module variants (translator calls, on the big-stack thread) ----
+typedef struct var_job { void *xs; int kind; uint32_t func; float ref; uint64_t code; VkShaderModule out; } var_job;
+static void var_run(void *arg) {
+    var_job *v = (var_job *)arg;
+    if (v->kind == 1) v->out = xbg_vkn_alpha_module ? xbg_vkn_alpha_module(v->xs, v->func, v->ref) : VK_NULL_HANDLE;
+    else v->out = xbg_vkn_retype_module ? xbg_vkn_retype_module(v->xs, v->code) : VK_NULL_HANDLE;
+}
+VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype) {
+    if (!s) return VK_NULL_HANDLE;
+    const int k = stage == VKN_STAGE_VS ? VKN_SRC_VS : stage == VKN_STAGE_FS ? VKN_SRC_FS : stage == VKN_STAGE_CS ? VKN_SRC_CS : -1;
+    if (k < 0 || !s->module[k] || !s->xs[k]) return VK_NULL_HANDLE;
+    var_job v = {s->xs[k], 0, alpha_func, alpha_ref, retype, s->module[k]};
+    if (k == VKN_SRC_FS && alpha_func && alpha_func != 8) v.kind = 1;
+    else if (k == VKN_SRC_VS && retype) v.kind = 2;
+    if (!v.kind) return s->module[k];
+    run_big(var_run, &v);
+    return v.out ? v.out : s->module[k];
+}
+
+// ---- the SUPPORT block per viewport size ----
+int vkn_shader_support(float width, float height, vkn_block *out) {
+    const vkn_dev *d = vkn_device();
+    if (!out || !d || !xbg_support_defaults || !(width > 0) || !(height > 0)) return -1;
+    int rc = -1;
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t i = 0; i < g_nsup; i++) if (g_sup[i].w == width && g_sup[i].h == height) { *out = g_sup[i].b; rc = 0; break; }
+    if (rc && g_nsup < SUPPORT_CAP) {
+        uint32_t al = (uint32_t)d->props.limits.minUniformBufferOffsetAlignment; if (al < 16) al = 16;
+        vkn_block b;
+        if (!vkn_block_alloc(VKN_ARENA_STATIC, SUPPORT_BYTES, al, &b)) {
+            xbg_support_defaults(b.cpu, width, height);
+            g_sup[g_nsup].w = width; g_sup[g_nsup].h = height; g_sup[g_nsup].b = b; g_nsup++;
+            *out = b; rc = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return rc;
+}
+
+void vkn_shader_stats_get(vkn_shader_stats *out) {
+    if (!out) return;
+    pthread_mutex_lock(&g_q_mu); const uint32_t q = g_q_len; pthread_mutex_unlock(&g_q_mu);
+    pthread_mutex_lock(&g_mu); *out = g_st; pthread_mutex_unlock(&g_mu);
+    out->queued = q;
+}
+void vkn_shader_census(void) {
+    vkn_shader_stats s; vkn_shader_stats_get(&s);
+    vkn_logf("shaders: %llu alive (created %llu, replaced %llu, destroyed %llu, failed %llu, queued %llu, cancelled %llu); stages %llu: with a bundle %llu, without %llu, unusable %llu; "
+             "layouts %llu shared + %llu own; binding tables %.1f KB, c1 %.1f KB; dynamic all / engine blocks / none: %llu / %llu / %llu; "
+             "bindings uniform %llu, support %llu, c1 %llu, texture %llu, image %llu; %.1f ms creating",
+             (unsigned long long)s.alive, (unsigned long long)s.created, (unsigned long long)s.replaced, (unsigned long long)s.destroyed, (unsigned long long)s.failed, (unsigned long long)s.queued, (unsigned long long)s.cancelled,
+             (unsigned long long)s.stages, (unsigned long long)s.stages_bundle, (unsigned long long)s.stages_missing, (unsigned long long)s.stages_unusable,
+             (unsigned long long)s.layouts, (unsigned long long)s.layouts_own, s.table_bytes / 1024.0, s.c1_bytes / 1024.0,
+             (unsigned long long)s.dyn_policy[1], (unsigned long long)s.dyn_policy[2], (unsigned long long)s.dyn_policy[0],
+             (unsigned long long)s.bind_kind[VKN_BK_UNIFORM], (unsigned long long)s.bind_kind[VKN_BK_SUPPORT], (unsigned long long)s.bind_kind[VKN_BK_C1],
+             (unsigned long long)s.bind_kind[VKN_BK_TEXTURE], (unsigned long long)s.bind_kind[VKN_BK_IMAGE], s.ns / 1e6);
+    const uint64_t odd = s.bind_kind[VKN_BK_STORAGE] + s.bind_kind[VKN_BK_DRIVER0] + s.bind_kind[VKN_BK_DRIVER2] + s.bind_kind[VKN_BK_OTHER] + s.bind_kind[0];
+    if (odd) vkn_logf(RED "shaders: bindings of kinds no DOS2 bundle was seen with: storage %llu, driver0 %llu, driver2 %llu, other %llu (the draw path has no source for them yet)",
+                      (unsigned long long)s.bind_kind[VKN_BK_STORAGE], (unsigned long long)s.bind_kind[VKN_BK_DRIVER0], (unsigned long long)s.bind_kind[VKN_BK_DRIVER2],
+                      (unsigned long long)(s.bind_kind[VKN_BK_OTHER] + s.bind_kind[0]));
+    if (s.stage_mismatch || s.ubo_no_block) vkn_logf(RED "shaders: %llu stages whose bundle is of another stage, %llu uniform bindings without an engine block", (unsigned long long)s.stage_mismatch, (unsigned long long)s.ubo_no_block);
+}
+#endif

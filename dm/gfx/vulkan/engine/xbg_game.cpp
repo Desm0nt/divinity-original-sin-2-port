@@ -10418,5 +10418,24 @@ extern "C" void xbg_present_texture(const win_t *window,const tex_t *texture){
 
 extern "C" void xbg_legacy_register_texture(int id,const tex_t *t,const view_t *v){std::lock_guard<std::recursive_mutex> l(mutex);need(id>=0&&t,"Invalid legacy texture registration");if(register_texture_record(legacy_textures[id],*t,v)){++memo_bump[0];note_reg(id);}}
 extern "C" void xbg_legacy_register_sampler(int id,const samp_par *s){std::lock_guard<std::recursive_mutex> l(mutex);need(id>=0&&s,"Invalid legacy sampler registration");legacy_samplers[id]=*s;++memo_epoch;++memo_bump[1];}
+// [DOS2] VK-NATIVE export (xbg_game.h xbg_vkn_*; caller dm/gfx/vkn/vkn_shader.c, once per engine shader at creation and once per
+// pipeline variant): a stage bundle exactly as the translator loads it (load_shader_key, all load-time rewrites) and its two per-draw
+// module variants (alpha_module "#at", vtx_retype_module "#vi"), under the engine mutex like every entry point. No state of its own.
+#ifdef DM_GAME_DOS2
+extern "C" int xbg_vkn_shader(const char *key,const void *control,const void *code,xbg_vkn_stage *out){
+    if(!key || !out)return -1;out->shader=nullptr;out->module=VK_NULL_HANDLE;out->binding_count=out->input_count=out->c1_bytes=0;out->c1=nullptr;
+    std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || failed)return -1;
+    Shader *s=load_shader_key(std::string(key),control,code);if(!s)return 1;
+    out->shader=s;out->module=s->unusable.empty()?s->module:VK_NULL_HANDLE;out->stage=s->stage;
+    out->binding_count=uint32_t(std::min<size_t>(s->bindings.size(),256));memcpy(out->bindings,s->bindings.data(),out->binding_count*sizeof(xbg_shader_binding));
+    out->input_count=uint32_t(std::min<size_t>(s->inputs.size(),16));for(uint32_t i=0;i<out->input_count;i++){out->inputs[i]=s->inputs[i];out->input_classes[i]=i<s->input_classes.size()?s->input_classes[i]:0;}
+    out->c1=s->c1.empty()?nullptr:s->c1.data();out->c1_bytes=uint32_t(s->c1.size());return 0;}
+extern "C" VkShaderModule xbg_vkn_alpha_module(void *shader,uint32_t func,float ref){
+    if(!shader)return VK_NULL_HANDLE;std::lock_guard<std::recursive_mutex> lock(mutex);Shader &s=*static_cast<Shader*>(shader);
+    if(!initialized || failed || !s.unusable.empty() || s.stage!=4 || func==8 || !alpha_test_on())return s.module;return alpha_module(s,func,ref);}
+extern "C" VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code){
+    if(!shader)return VK_NULL_HANDLE;std::lock_guard<std::recursive_mutex> lock(mutex);Shader &s=*static_cast<Shader*>(shader);
+    if(!initialized || failed || !s.unusable.empty() || s.stage!=0 || !code)return s.module;return vtx_retype_module(s,code);}
+#endif
 #define XBG_NR_Z5G_BRIDGE
 #include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5: the game thread's entry points (called by the NVN tap)

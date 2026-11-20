@@ -108,6 +108,27 @@ typedef struct xbg_shader_binding {
     uint32_t binding,type,count,bytes,source,slot,sampler_slot,flags;
 } xbg_shader_binding; /* flags: bit0/1 formatless write/read; bit31 image shape present,
                        * dim in bits8..10, array12, MS13, depth14, scalar16..17 */
+/* [DOS2] VK-NATIVE export (xbg_game.cpp, end of file; caller dm/gfx/vkn/vkn_shader.c): one stage bundle of the packs as the translator
+ * loads it (load_shader_key: every load-time SPIR-V rewrite applied), by its program key (xbg_shader_program_key of control + code).
+ * The module and the shader object belong to the translator and live until xbg_game_shutdown; bindings / inputs are copies; c1 points
+ * into the shader object (immutable after load). Each call takes the engine mutex. */
+typedef struct xbg_vkn_stage {
+    void *shader;                      /* opaque: the translator's shader object (argument of the variant getters) */
+    VkShaderModule module;             /* VK_NULL_HANDLE: the device lacks a capability the module needs (its draws are skipped) */
+    uint32_t stage;                    /* bundle stage: 0 vertex, 4 fragment, 5 compute */
+    uint32_t binding_count,input_count,c1_bytes;
+    xbg_shader_binding bindings[256];  /* binding = Vulkan binding (original binding x 6 + bundle stage), one descriptor set */
+    uint32_t inputs[16],input_classes[16];   /* vertex: input locations and their scalar class (xbg_vertex_input_classes) */
+    const uint8_t *c1;                 /* XBG_SOURCE_C1 data (the shader's own constants), c1_bytes long */
+} xbg_vkn_stage;
+/* 0 = loaded; 1 = no bundle for the key (logged and dumped as the translator does for any missing stage); -1 = translator not ready. */
+int xbg_vkn_shader(const char *key,const void *control,const void *code,xbg_vkn_stage *out);
+/* Fragment module with the alpha test of NVN compare func (1 NEVER .. 8 ALWAYS) and reference (alpha_module, key "#at"); the base module
+ * for ALWAYS, with DM_GFX_ALPHA_TEST off, or when the rewrite is refused. */
+VkShaderModule xbg_vkn_alpha_module(void *shader,uint32_t func,float ref);
+/* Vertex module for a retype code (vtx_retype_module, key "#vi": low 32 bits 2 bits per location 0 keep / 1 float / 2 sint / 3 uint,
+ * high 32 bits 2 bits per location 1 = SSCALED bound as SINT, 2 = USCALED bound as UINT); the base module for code 0 or a refusal. */
+VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code);
 #ifdef __cplusplus
 }
 #endif
