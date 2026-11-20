@@ -161,7 +161,7 @@ static void nk_ident(uint64_t r, uint64_t lr) {
         }
     }
     NR_INC(g_nki.draws);
-    t_nk.idp = 1; t_nk.id_key = id; t_nk.id_ts = t_nk.ts_id; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu;
+    t_nk.idp = 1; t_nk.id_key = id; t_nk.id_ts = t_nk.ts_id; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu; NRN_NOTE(r);
 }
 // NR-09: the identity of the NVN draw being recorded on this thread (nvn_nb_draw.inc nbd_draw, inside the engine's draw bracket, after
 // dm_nr_tap_draw). 1 = taken (once); 0 = this NVN draw followed no engine flush on this thread: the record stays a plain OP_X_NB_DRAW.
@@ -262,7 +262,7 @@ static void nk_draw(uint64_t r, uint64_t lr) {
     const uint32_t id_key = e ? e->id : 0;   // NR-09 (read under g_nk_mu: the entry does not move, the copy is for after the unlock)
     pthread_mutex_unlock(&g_nk_mu);
     t_nk.pend = 1; t_nk.shader = k.shader; t_nk.site = si;
-    if (g_nr_draw) { t_nk.idp = 1; t_nk.id_key = id_key; t_nk.id_ts = t_nk.ts_id; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu; }
+    if (g_nr_draw) { t_nk.idp = 1; t_nk.id_key = id_key; t_nk.id_ts = t_nk.ts_id; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu; NRN_NOTE(r); }
     if (g_nr_key == 2) {
         char d[256];
         if (bad_clean) {

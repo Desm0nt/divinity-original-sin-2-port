@@ -9557,6 +9557,7 @@ bool recording_holds_results(){
 // tables, same generation counters. n = payload bytes of the record (a bind-handles record carries only its first a.n handles).
 void exec_bind_buf(uint32_t op,const p_bind_buf &a){need(a.stage>=0 && a.stage<6 && a.index>=0 && a.index<16,"Invalid shader buffer slot");(op==OP_BIND_UBO?state.ub:state.sb)[a.stage][a.index]={a.addr,a.size};++buf_gen[a.stage];}
 void exec_bind_handles(uint32_t op,const p_bind_handles &a,size_t n){need(a.stage>=0 && a.stage<6 && a.first>=0 && a.n>=0 && a.n<=32 && a.first+a.n<=(op==OP_BIND_IMG?16:128) && n>=offsetof(p_bind_handles,h)+size_t(a.n)*8,"Invalid descriptor binding record");uint64_t *dst=op==OP_BIND_IMG?state.img[a.stage]:op==OP_BIND_SAMP?state.samp[a.stage]:state.tex[a.stage];memcpy(dst+a.first,a.h,a.n*8);++tex_gen[a.stage];}
+#include "xbg_nr_nrn.inc"   // [DOS2] NR-NATIVE DM_NRN_<PASS>: the card of an engine draw (the engine's own objects) against what the lane recorded (namespace nrn; before xbg_nb.inc and the lane, which call it)
 #include "xbg_nr_direct.inc"   // [DOS2] NR-09R DM_NR_DIRECT: the tail word of a directly recorded engine draw - counts, the =2 check (namespace nrdirect)
 #include "xbg_nb.inc"   // [DOS2] DM_NB: OP_X_NB_* records, the check of NB-05, the OP_X_NB_DRAW unpack of NB-09
 #include "xbg_nb_state.inc"   // [DOS2] DM_NB_OPS state bits (NB-13a): the OP_X_NB_STATE unpack

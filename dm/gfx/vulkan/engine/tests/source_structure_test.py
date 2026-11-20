@@ -3871,5 +3871,57 @@ def nrz9_check():   # [DOS2] NR-ZERO Z8, the parts of NR-ZERO.md section 28 on (
         assert 'NRZ8_TEST_MID_PUT' not in src, 'Z9: the test hook of Marks::put is the host test\'s only'
     return 'NR-ZERO Z8 parts (sections 28-31): DM_NR_Z8_VAL default 0 / safe-mode step 2 / not set by the app; a tail draw\'s verdict is named from the translation thread\'s own slot (record\'s version) and State, taken by draw2 without reading the walker\'s chunks, a run followed one way; sections 28-30: DM_NR_Z8_VIEW default 0 / safe-mode step 2 / not set by the app; a range is answered through the entry of its number by Z3c\'s own function (range and words compared); sections 28-29: DM_NR_Z8_IMG default 0 / safe-mode step 2 / not set by the app; every write mark is a new write_seq, pass marks counted apart at their two places; the read word is asked before the walk, never while a clear is pending or a read is noted, set after every image passed with prepare_read\'s own "written"; section 28: DM_NR_Z8_THREAD default 0 / safe-mode step 2 / not set by the app; the post replaces the walk under the front lock; the walker writes only the marks, never the command memory; the translation thread takes words by the record\'s place and waits for the walker at the end of a posted submission'
 print('PASS: '+nrz9_check())
+def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md): the card of an engine draw - the engine's own objects - and its verify
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    b = (root / 'gfx/vulkan/engine/xbg_nr_nrn.inc').read_text(encoding='utf-8')
+    h = (root / 'gfx/nr/nr_nrn.h').read_text(encoding='utf-8')
+    f = (root / 'host/hle_dos2_nrn.inc').read_text(encoding='utf-8')
+    nr = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    rec = (root / 'gfx/nvn/nvn_nb_draw.inc').read_text(encoding='utf-8')
+    rh = (root / 'gfx/nvn/nvn_nb_draw.h').read_text(encoding='utf-8')
+    nb = (root / 'gfx/vulkan/engine/xbg_nb.inc').read_text(encoding='utf-8')
+    lane = (root / 'gfx/vulkan/engine/xbg_nr_draw.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    sm = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    # default 0 through the policy function; the app sets nothing; safe-mode step 2 forces every switch off
+    assert 'inline int xbg_nrn_default(){return 0;}' in pol and 'nrn_env_modes(env,xbg_nrn_default(),m,&bad)' in b, 'NRN: default 0 on every family, read through the policy function'
+    for k in ('DM_NRN', 'DM_NRN_SHADOW', 'DM_NRN_PREPASS', 'DM_NRN_GBUF', 'DM_NRN_LIGHT', 'DM_NRN_POST', 'DM_NRN_OTHER'):
+        a = 'add("%s","0");' % k
+        assert a in sm and sm.index('if(step>=2){') < sm.index(a) < sm.index('if(step>=3){'), 'NRN: safe-mode step 2 (%s)' % k
+    assert 'DM_NRN' not in (root / 'android/jni_android.c').read_text(encoding='utf-8'), 'NRN: the app does not set the switches'
+    for q in (root.parent / 'android').rglob('*'):
+        if q.suffix in ('.java', '.kt', '.xml') and 'build' not in q.parts:
+            assert 'DM_NRN' not in q.read_text(encoding='utf-8', errors='replace'), 'NRN: the app does not set the switches (%s)' % q.name
+    # one list of passes and one reader of the switches for both halves
+    assert 'nrn_env_modes(nrn_getenv, 0, mode, &bad)' in f and h.count('"SHADOW", "PREPASS", "GBUF", "LIGHT", "POST", "OTHER"') == 1, 'NRN: both halves read the switches with nr_nrn.h'
+    # =1 is refused by both halves (the replay is not built): a pass asked with 1 is off, never half on
+    for src, name in ((f, 'front end'), (b, 'backend')):
+        assert 'is refused - the replay of a draw from its card is not built' in src, 'NRN: =1 refused (%s)' % name
+    assert 'if (mode[p] == 1) {' in f and 'mode[p] = 0;' in f and 'if(m[p]==1){' in b and 'm[p]=0;}' in b, 'NRN: a refused pass is off'
+    # off = byte for byte: the record grows and gets its flag only when the front end hands a card over; one load otherwise
+    assert 'const int nrn = __builtin_expect(g_nrn_on, 0) && nr && !t_nbd_chk && dm_nrn_draw_card(&nrn_card, &nrn_pass, &nrn_seq);' in rec, 'NRN: the record asks for a card only when armed, only with the NR-09 tail, never in a check bracket'
+    assert rec.index('if (nrn) h->flags |= NRN_F_FLAG;') < rec.index('(nrn ? (uint32_t)NRN_TAIL_BYTES : 0u);') < rec.index('if (nrn) nrn_tail_put(p, size, nrn_tail_off(&t_nbd.s.h), nrn_card, (int)nrn_pass, nrn_seq);'), 'NRN: flag, size, tail - in this order'
+    assert 'void nvn_nrn_enable(int on) { g_nrn_on = on && dm_nrn_draw_card; }' in rec and 'NBD_F_NRN = 32' in rh and 'NRN_F_FLAG = 32' in h and 'static_assert(NBD_F_NRN==NRN_F_FLAG' in b and 'return nrd_tail_off(h) + (uint32_t)sizeof(nrd_tail); }' in rh, 'NRN: the flag bit and the place of the tail'
+    assert f.count('nvn_nrn_enable(1);') == 1 and f.index('if (!draw_on) {') < f.index('nvn_nrn_enable(1);'), 'NRN: armed only with DM_NR_DRAW'
+    assert '#define NRN_NOTE(r) do { if (__builtin_expect(g_nrn_any, 0)) t_nrn_r = (r); } while (0)' in f, 'NRN: the identity hooks pay one load when off'
+    n = sum(s.count('NRN_NOTE(r);') for s in ((root / 'host/hle_dos2_nr_key.inc').read_text(encoding='utf-8'), (root / 'host/hle_dos2_nr_direct.inc').read_text(encoding='utf-8')))
+    assert n == 3, 'NRN: every place that hands an identity over notes the renderer (%d of 3)' % n
+    assert 'if (__builtin_expect(nrn_on(), 0)) nrn_rc55(handle, name);' in nr and 'nrn_arm(g_nr_draw != 0);' in nr and nr.index('nk_draw_install(m, rc == 0);') < nr.index('nrn_arm(g_nr_draw != 0);'), 'NRN: opcode 55 names, armed after DM_NR_DRAW'
+    # the card reads the renderer only (no table of the translation layer), the volatile words are masked unless asked
+    card = h[h.index('static inline uint64_t nrn_card_of('):h.index('// The pass of the draw the renderer is about to make.')]
+    for w in ('NRN_W_VBDIRTY', 'NRN_W_IBFIRST', 'NRN_W_SHREC', 'NRN_W_REN'):
+        assert 'if (!(words & %s)) memset(' % w in card, 'NRN: %s is masked by default' % w
+    assert 'NRN_W_DEFAULT = NRN_W_TEX | NRN_W_SMP' in h and 'return h ? h : 1;' in card, 'NRN: default words, a card is never 0'
+    # the backend: the record is executed as before; the note sits after the lane's commands and cannot be taken by another draw
+    assert 'if(__builtin_expect(nrn::on,0))nrn::record(p,n,h);' in nb and nb.index('nrn::record(p,n,h);') < nb.index('do_draw(h);') < nb.index('nrn::have=false;'), 'NRN: record -> draw -> the card is dropped'
+    i = lane.index('if(__builtin_expect(nrn::have,0))nrn::draw_end(')
+    assert lane.index('else vkCmdDraw(c.command,uint32_t(count),instances,uint32_t(first)+H.k,first_instance);') < i, 'NRN: the values are noted after the draw was recorded'
+    assert 'vkCmd' not in b and 'state.' not in b.replace('state.shader[0]', '').replace('state.shader[4]', ''), 'NRN: the verify records nothing and changes no state'
+    assert g.index('#include "xbg_nr_nrn.inc"') < g.index('#include "xbg_nb.inc"') < g.index('#include "xbg_nr_draw.inc"'), 'NRN: included ahead of its callers'
+    assert 'void reset(){if(!read_env){init();nrn::init(mode);}}' in lane and 'void release(){nrn::release();' in lane, 'NRN: read once with the lane, released with it'
+    assert 'NRN_MUTATE' not in b and 'NRN_MUTATE' not in f and '#define NRN_MUTATE 0' in h, 'NRN: the mutations exist in the host test only'
+    assert (root / 'gfx/vulkan/engine/tests/nr_nrn_test.c').is_file(), 'NRN: the host test exists'
+    return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 refused by both halves; off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
+print('PASS: '+nrn_check())
 _bad=delimiter_gate()
 assert not _bad,_bad

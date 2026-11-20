@@ -28,7 +28,10 @@ enum { NBD_B_TEX = 0, NBD_B_SAMP = 1, NBD_B_IMG = 2, NBD_B_UBO = 3, NBD_B_KINDS 
 // after it); the backend executes those and only compares (xbg_nb.inc nbdraw::check), it does not draw this record.
 // NBD_F_NR (NR-09, DM_NR_DRAW): the record is an OP_X_NR_DRAW - an nrd_tail (the NR identity of the draw, below) follows the binds. Every reader of
 // OP_X_NB_DRAW takes the record as before (nbd_view / nbd_unpack accept a longer payload); only the backend's nrdraw reads the tail.
+// NBD_F_NRN (NR-NATIVE, DM_NRN_<PASS>; dm/gfx/nr/nr_nrn.h): an nrn_tail (the card of the draw: the engine's objects in one word, and its pass)
+// follows the nrd_tail. Only with NBD_F_NR. Every reader that does not know it takes the record as before (a longer payload).
 enum { NBD_F_REN = 1, NBD_F_REN_ON = 2, NBD_F_COND = 4, NBD_F_CHECK = 8, NBD_F_NR = 16 };
+enum { NBD_F_NRN = 32 };
 typedef struct {
     uint8_t ver, engine_op, draw, flags;      // NBD_VER; 36 / 37; NBD_DRAW_*; NBD_F_*
     uint16_t nbind; uint8_t cond_mode, _pad0;
@@ -60,6 +63,8 @@ _Static_assert(sizeof(nrd_tail) == 16, "OP_X_NR_DRAW tail");
 #endif
 // Bytes of the binds part of a record with header h (the tail, when flagged, starts right after it).
 static inline uint32_t nrd_tail_off(const nbd_hdr *h) { return (uint32_t)(sizeof(nbd_hdr) + sizeof(nbd_bind) * (size_t)h->nbind); }
+// NR-NATIVE: where the nrn_tail of a record flagged NBD_F_NRN starts (right after the NR-09 tail).
+static inline uint32_t nrn_tail_off(const nbd_hdr *h) { return nrd_tail_off(h) + (uint32_t)sizeof(nrd_tail); }
 // Writes the tail after a packed record (dst = the payload nbd_pack wrote with NBD_F_NR set in its header, cap = payload bytes).
 // 1 = written, 0 = no room / the header is not flagged.
 static inline int nrd_tail_put(uint8_t *dst, size_t cap, uint32_t key, uint32_t texset, unsigned why, unsigned site) {

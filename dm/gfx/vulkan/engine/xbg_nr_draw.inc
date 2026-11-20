@@ -113,8 +113,8 @@ void init(){read_env=true;
         "(row 0 of the direct table, the variant decides the pipeline); Iggy passes of DM_NB_UIAREA get the full uiarea step; QUADS draws bind one index pattern a "
         "submission; folds DM_NR_DRAW_FOLD=%d; per-draw fallback to draw(); needs DM_NB_PIPE (now %d) and DM_GFX_DRAW_FAST=1 (now %d), not DM_NR",um,
         um==2?"compare - the old path draws, every value of the UI lane is checked against it":"on",fold,nbpipe::mode,draw_fast_mode());}
-void reset(){if(!read_env)init();}   // the state reset (init): DM_NR_DRAW once
-void release(){nrz3::release();nrzx::release();nrz5::release();if(tab_ok){nrp_tab_free(&T);tab_ok=false;}++tgen;mode=0;ui_mode=0;cur=nullptr;armed=false;QP=QuadPat{};}
+void reset(){if(!read_env){init();nrn::init(mode);}}   // [DOS2] NR-NATIVE reads its switches with the lane's (it needs the lane)   // the state reset (init): DM_NR_DRAW once
+void release(){nrn::release();nrz3::release();nrzx::release();nrz5::release();if(tab_ok){nrp_tab_free(&T);tab_ok=false;}++tgen;mode=0;ui_mode=0;cur=nullptr;armed=false;QP=QuadPat{};}
 // From nbdraw::apply (only while mode != 0): the tail of the record whose draw starts now (null: a plain OP_X_NB_DRAW).
 void record(const nrd_tail *t){++s.records;cur=t;if(!t)++s.plain;}
 // NR-12: the fragment shader is an Iggy program (looked at once per shader). true = this draw goes to lane() with the UI identity.
@@ -146,6 +146,7 @@ void tick(){   // every submission (nbdraw::tick)
     if(__builtin_expect((nrzx::bmode|nrzx::cmode|nrzx::dmode)!=0,0))nrzx::tick();   // [DOS2] NR-ZERO Z3b / Z3c / Z3d: their line
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::tick();   // [DOS2] NR-ZERO Z5: its line
     if(__builtin_expect(nrz5t::gmode!=0,0)){if(nrz5t::z8)nrz8t::tick();else nrz5t::tick();}   // [DOS2] NR-ZERO Z5, the game thread's half: its lines ([Z8] DM_NR_Z8: the submit walk's)
+    if(__builtin_expect(nrn::on,0))nrn::tick();   // [DOS2] NR-NATIVE: its lines
     if(__builtin_expect(nrmdi::mode>0,0))nrmdi::tick();   // [DOS2] NR-MDI: its line
     if(__builtin_expect(nrpo::mode>0,0))nrpo::tick();   // [DOS2] NR-POSONLY: its line
     if(__builtin_expect(nrps::mode>0,0))nrps::tick();   // [DOS2] NR-PRESKIN: its line
@@ -344,6 +345,7 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::draw_end(bc,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),   // [DOS2] NR-ZERO Z5 DM_NR_Z5=2: the same draw by the run assembler, compared
         indexed?uint32_t(indexed->instances):instances,indexed?H.first_index:uint32_t(first)+H.k,indexed?int32_t(indexed->base_vertex)+int32_t(H.k):0,indexed?uint32_t(indexed->base_instance):first_instance,cond_gpu_draw);
     S->cmds+=n;
+    if(__builtin_expect(nrn::have,0))nrn::draw_end(H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,indexed!=nullptr,H.first_index,H.k);   // [DOS2] NR-NATIVE DM_NRN_<PASS>=2: what was recorded, noted under the draw's card
     if(__builtin_expect(nrz5t::z8,0)){nrz8t::Hint &zh=nrz8t::hint;zh.pent=H.have_ent?H.ent:nullptr;zh.zero=H.zero;zh.qpat=H.qpat;zh.pp=pp;zh.special=nrpo::P.on || nrps::P.on;zh.lane_gen=tab_gen();}   // [NR-ZERO Z8] what a template needs besides the values
     if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::recorded(bc,ui,cond_gpu_draw,H.t.key,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),z5i,z5f,z5v,z5b,H.first_index,H.k);   // [NR-ZERO Z5] =2: the comparison; the template of the record's slot
     }

@@ -102,7 +102,7 @@ static void nrd_ident(uint64_t r, int si) {
     if (!nr_dsite_is_draw(kind)) return;   // a flush alone / a dispatch: no NVN draw follows
     uint32_t id = 0, why = 0;
     if (!nrd_ident_core(r, kind, &id, &why)) { nk_ident(r, si >= 0 ? g_nk_base + k_nk_site[si].bl + 4 : 0); return; }
-    t_nk.idp = 1; t_nk.id_key = id; t_nk.id_ts = 0; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu;
+    t_nk.idp = 1; t_nk.id_key = id; t_nk.id_ts = 0; t_nk.id_why = why; t_nk.id_site = si >= 0 ? (uint32_t)si : 0xffu; NRN_NOTE(r);
 }
 static void nrd_ident_lr(uint64_t r, uint64_t lr) { nrd_ident(r, nk_site(lr)); }   // the flush hook (nk_draw) with g_nrd_lean == 1
 // DM_NR_DIRECT=2, after nk_ident: the lean identity of the same draw against the one nk_ident left.

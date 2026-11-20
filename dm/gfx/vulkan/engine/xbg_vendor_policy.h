@@ -171,6 +171,10 @@ inline int xbg_nr_z5_default(){return 0;}
 // the answer without a key or a lookup. 0 on every family: never run on a phone, and by the model it lengthens the submitting thread
 // (the longest one after the change) - =2 on the Mi 14 Ultra first. The app never sets it; safe-mode step 2 forces 0.
 inline int xbg_nr_z8_default(){return 0;}
+// [DOS2] NR-NATIVE (docs/dos2/nr/NR-NATIVE.md): DM_NRN / DM_NRN_<PASS> - an engine draw carries its card (the engine's own mesh / material /
+// target objects in one word) and the backend notes what was recorded for it. 0 on every family: =2 is a verify that costs the game
+// thread a hash a draw, =1 (the replay) is not built. The app never sets them; safe-mode step 2 forces every one to 0.
+inline int xbg_nrn_default(){return 0;}
 // [DOS2] NR-ZERO Z8, the parts of section 28 on (each its own switch; all 0 on every family until the phone runs; the app sets none;
 // safe-mode step 2 forces 0): DM_NR_Z8_THREAD - the walk on a thread of its own instead of the submitting thread.
 inline int xbg_nr_z8_thread_default(){return 0;}

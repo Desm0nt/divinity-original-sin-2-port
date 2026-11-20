@@ -113,6 +113,14 @@ static void z5g_draw(NVNcommandBuffer *c, uint8_t *p, uint32_t key) {
 }
 #define Z5G_DRAW(nr, c, p, key) do { if (Z5G_ON() && (nr)) z5g_draw((c), (p), (key)); } while (0)
 static int g_nrd_on;
+// [DOS2] NR-NATIVE (DM_NRN_<PASS>, armed by hle_dos2_nrn.inc before guest code runs): the card of the engine draw - the renderer's own
+// state cache in one word - and its pass, 16 bytes after the NR-09 tail (flag NRN_F_FLAG). g_nrn_on == 0: one load, the record as before.
+#include "../nr/nr_nrn.h"
+_Static_assert(sizeof(nrn_tail) == NRN_TAIL_BYTES, "the NR-NATIVE tail of OP_X_NB_DRAW");
+static int g_nrn_on;
+int dm_nrn_draw_card(uint64_t *card, unsigned *pass, uint32_t *seq) __attribute__((weak));
+void nvn_nrn_enable(int on);
+void nvn_nrn_enable(int on) { g_nrn_on = on && dm_nrn_draw_card; }
 static uint64_t g_nrds[2];   // records with the tail / without an identity (atomics)
 int dm_nr_draw_ident(uint32_t *key, uint32_t *texset, unsigned *why, unsigned *site) __attribute__((weak));
 void nvn_nr_draw_enable(int on);
@@ -129,12 +137,16 @@ static int nbd_draw(NVNcommandBuffer *c, int kind, int prim, int itype, int coun
     uint32_t nr_key = 0, nr_ts = 0; unsigned nr_why = 0, nr_site = 0xff;   // [DOS2] NR-09 DM_NR_DRAW
     const int nr = __builtin_expect(g_nrd_on, 0) && dm_nr_draw_ident(&nr_key, &nr_ts, &nr_why, &nr_site);
     if (nr) h->flags |= NBD_F_NR;
-    const uint32_t size = nbd_size(&t_nbd.s) + (nr ? (uint32_t)sizeof(nrd_tail) : 0u);
+    uint64_t nrn_card = 0; unsigned nrn_pass = 0; uint32_t nrn_seq = 0;   // [DOS2] NR-NATIVE DM_NRN_<PASS>
+    const int nrn = __builtin_expect(g_nrn_on, 0) && nr && !t_nbd_chk && dm_nrn_draw_card(&nrn_card, &nrn_pass, &nrn_seq);
+    if (nrn) h->flags |= NRN_F_FLAG;
+    const uint32_t size = nbd_size(&t_nbd.s) + (nr ? (uint32_t)sizeof(nrd_tail) : 0u) + (nrn ? (uint32_t)NRN_TAIL_BYTES : 0u);
     const int e = t_nbd.emitting; t_nbd.emitting = 1;
     uint8_t *p = (uint8_t *)rec(c, OP_X_NB_DRAW, size);
     t_nbd.emitting = e;
     nbd_pack(&t_nbd.s, p, size);
     if (nr) nrd_tail_put(p, size, nr_key, nr_ts, nr_why, nr_site);
+    if (nrn) nrn_tail_put(p, size, nrn_tail_off(&t_nbd.s.h), nrn_card, (int)nrn_pass, nrn_seq);
     NRD_EXT_PUT(nr, p, size);   // [DOS2] NR-09R DM_NR_DIRECT: the tail's spare word (nothing without the switch)
     Z5G_DRAW(nr && !t_nbd_chk, c, p, nr_key);   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the mark and the slot of this record (nothing without the switch)
     if (__builtin_expect(g_nrd_on, 0)) __atomic_fetch_add(&g_nrds[nr ? 0 : 1], 1, __ATOMIC_RELAXED);

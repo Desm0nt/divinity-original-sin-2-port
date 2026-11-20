@@ -297,10 +297,12 @@ void apply(const uint8_t *p,size_t n){
     ++s.records;s.binds+=h.nbind;++records;binds+=h.nbind;note_ren(h);
     condr::from_nb(h.flags,h.cond_mode,h.cond_addr);   // [DOS2] DM_GFX_COND_RENDER (no-op at 0)
     nrd_tail nrt;if(__builtin_expect(nrdraw::mode,0))nrdraw::record(nrd_tail_get(p,n,&h,&nrt)?&nrt:nullptr);   // [DOS2] NR-09 DM_NR_DRAW: the identity of an OP_X_NR_DRAW, for the draw() below
+    if(__builtin_expect(nrn::on,0))nrn::record(p,n,h);   // [DOS2] NR-NATIVE DM_NRN_<PASS>: the card of this record, for the lane's tail of the draw() below
     if(__builtin_expect(nrz5t::gmode,0))nrz5t::rec_begin(h,p);   // [DOS2] NR-ZERO Z5: the mark and the slot the game thread gave this record
     do_draw(h);
     if(__builtin_expect(nrz5t::gmode,0))nrz5t::rec_end();   // (a marked record whose draw did not reach the lane's command section cuts its run)
     if(__builtin_expect(nrdraw::mode,0))nrdraw::stale();
+    nrn::have=false;   // [DOS2] NR-NATIVE: a card whose draw did not reach the lane's tail belongs to no later draw
     nbdesc::cand=false;}   // [DOS2] NB-11: a draw() that returned before descriptors() leaves no candidate
 // NB-09: the faithful unpack - the binds become, one by one in call order, exactly the NVN bind records they replaced (exec_bind_buf /
 // exec_bind_handles of xbg_game.cpp, same checks, tables and per-bind generation bumps). Kept behind DM_NB_DRAW_UNPACK=1.

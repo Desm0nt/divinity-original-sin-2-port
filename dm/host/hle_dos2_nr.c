@@ -129,6 +129,7 @@ static int g_nrd_ubd;
 static void nrd_ident_lr(uint64_t r, uint64_t lr);
 static void nrd_ident_cmp(uint64_t r, uint64_t lr);
 static void nrd_report(uint64_t frames);
+static int nrn_on(void); static void nrn_rc55(uint64_t handle, uint64_t name); static void nrn_report(uint64_t frames);   // NR-NATIVE (hle_dos2_nrn.inc)
 // NR-09S (hle_dos2_nr_state.inc): DM_NR_STATE; 0 = off (no native opcode handler)
 static int g_nrs;
 static void nrs_report(uint64_t frames);
@@ -523,6 +524,7 @@ static void nr_report(uint64_t now) {   // g_nr_rep_mu held
     pthread_mutex_unlock(&g_nr_mu);
     if (g_nr_key) nk_report(now, df, dump_now);   // outside g_nr_mu: lock order key mutex -> registry mutex
     if (g_nrs) nrs_report(df);   // NR-09S
+    nrn_report(df);   // NR-NATIVE
     const double f = df ? (double)df : 1., mb = 1048576.;
     const uint64_t rt_new = NR_GET(g_nr.rt_new), tr_new = NR_GET(g_nr.tr_new);
     LOG("[nr] objects (DM_NR=%d, last %.1f s, %llu frames): %s; NVN objects outside an engine call: tex %llu prog %llu smp %llu buf %llu; unreadable %llu, nesting past %d: %llu, programs with unreadable code %llu; reads process_vm_readv refused %llu, of them read through the pipe %llu",
@@ -872,6 +874,7 @@ static void nr_rc_pre(uint64_t list, unsigned op, uint64_t pkt) {
     const uint8_t *p = (const uint8_t *)(uintptr_t)pkt;   // the packet the engine's handler reads next
     uint64_t handle, name; memcpy(&handle, p + 8, 8); memcpy(&name, p + 0x10, 8);
     const unsigned state = p[1];
+    if (__builtin_expect(nrn_on(), 0)) nrn_rc55(handle, name);   // NR-NATIVE: the class of the named target
     pthread_mutex_lock(&g_nr_mu);
     int fresh = nr_trans_find(g_reg, name, state) ? nr_trans_note(g_reg, name, NULL, handle, state) : 2;
     pthread_mutex_unlock(&g_nr_mu);
@@ -913,6 +916,7 @@ static const struct nr_site { uint32_t off; uint32_t pro[4]; const char *name; v
 };
 enum { NR_SITES = sizeof k_nr_site / sizeof k_nr_site[0] };
 
+#include "hle_dos2_nrn.inc"   // NR-NATIVE: DM_NRN_<PASS> (the card of an engine draw; nothing while every pass is 0)
 #include "hle_dos2_nr_key.inc"   // NR-02: DM_NR_KEY (draw identity; nothing while it is 0)
 #include "hle_dos2_nr_nocall.inc"   // NR-23: DM_NR_NOCALL (the engine's own NVN calls at a draw; nothing while it is 0)
 #include "hle_dos2_nr_ubo.inc"   // NR-09U: DM_NR_UBO (the uniform blocks of a direct draw as native code; nothing while it is 0)
@@ -961,6 +965,7 @@ void dm_dos2_nr_install(void) {
     nru_arm(m);   // NR-09U: DM_NR_UBO (code hashes)
     if (key) nk_install(m, key, rc == 0);
     nk_draw_install(m, rc == 0);   // NR-09: DM_NR_DRAW (after DM_NR_KEY: the identity comes from its hook, or from the hook alone)
+    nrn_arm(g_nr_draw != 0);   // NR-NATIVE: DM_NRN_<PASS> (after DM_NR_DRAW: the card follows its tail)
     nc_install();   // NR-23: after the flush hook (needs it)
     nrd_install();   // NR-09R: after DM_NR_DRAW and NR-23 (needs the identity; =1 takes the draw hook's native handler)
     nru_install(g_nrd, g_nrd_parts);   // NR-09U: inside NR-09R's native draw handler
