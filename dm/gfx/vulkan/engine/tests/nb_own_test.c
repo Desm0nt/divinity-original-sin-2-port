@@ -14,6 +14,10 @@
 //   and counts the same cases. Mutations of the model (attach without the "newest job" check, without the "closed" check, a job never
 //   closed, the queued job not read again after the submission, the present queued as well as attached, what is attached kept in one
 //   place instead of in the queued job) are each caught.
+// - [NR-ZERO Z8, NR-ZERO.md section 36] the submit number: nvnQueueSubmitCommands tells the walk of a recording "the next number"
+//   before its job is queued; in every script and every mode that is the number the job got and the number the translation thread
+//   executed it under - for the frame's open job as for any submit (so DM_NR_Z8_THREAD does not have to stay off under DM_NB_OWN);
+//   a queue that numbered the open job at its close is caught.
 // Build + run (from this directory):
 //   clang -std=c11 -Wall -Wextra -D_CRT_SECURE_NO_WARNINGS nb_own_test.c -o nb_own_test && ./nb_own_test
 #include "../../../nb/nb_own.h"
@@ -208,7 +212,7 @@ enum { ST_SUBMIT, ST_PRESENT, ST_FRAME };
 typedef struct { uint8_t kind; uint64_t sub, id; } step;   // id: which submit / present / frame of the script
 typedef struct { int kind; uint64_t sub, id, pid, fid; int parts; } mjob;   // kind as XJ_*: 0 submit 1 present 2 frame 3 own
 enum { MQ = 4, MAXSTEPS = 4096 };
-enum { HM_NONE, HM_NO_NEWEST, HM_NO_DONE, HM_NO_CLOSE, HM_NO_REREAD, HM_DOUBLE, HM_ONE_SLOT, HM_N };
+enum { HM_NONE, HM_NO_NEWEST, HM_NO_DONE, HM_NO_CLOSE, HM_NO_REREAD, HM_DOUBLE, HM_ONE_SLOT, HM_LATE_NUMBER, HM_N };   // HM_LATE_NUMBER: the frame's open job gets its submit number when it is closed, not when it is queued
 typedef struct {
     int mode, mut;                 // DM_NB_OWN 0 / 1 / 2
     nbw_hand h; int armed;
@@ -217,6 +221,10 @@ typedef struct {
     mjob one; int one_set;                  // HM_ONE_SLOT: what is attached kept in one place instead of in the queued job
     step out[MAXSTEPS]; int nout;
     uint64_t job_of_present[MAXSTEPS], ticket[MAXSTEPS];
+    // [NR-ZERO Z8, NR-ZERO.md section 36] nvnQueueSubmitCommands announces "the next submit number" to the walk of the recording BEFORE
+    // the job is queued (Z8G_SUBMIT_BEGIN: g_x_subs + 1, under the Z8 lock that also covers the push) and compares it with the number
+    // the job got (Z8G_SUBMIT_END). said_of[id]: what submit `id` was announced as.
+    uint64_t said_of[MAXSTEPS], z8_said, z8_differ;
 } mq;
 static void mq_parts(mq *m, const mjob *j, uint64_t job) {
     if (j->kind == 1 || (j->kind == 3 && (j->parts & NBW_P_PRESENT))) { const uint64_t p = j->kind == 3 ? j->pid : j->id; m->out[m->nout++] = (step){ST_PRESENT, 0, p}; if (p < MAXSTEPS) m->job_of_present[p] = job; }
@@ -232,6 +240,7 @@ static int mq_step(mq *m) {
         if (m->run.kind == 0) { m->out[m->nout++] = (step){ST_SUBMIT, m->run.sub, m->run.id}; m->sub_done = m->run.sub; }
         mq_parts(m, &m->run, job); m->jobs_done = job; return 1;
     }
+    if (m->mut == HM_LATE_NUMBER) m->run.sub = q->sub = ++m->subs;
     m->out[m->nout++] = (step){ST_SUBMIT, m->run.sub, m->run.id};          // translated; now closed under the lock, the queued job read again
     if (m->mut != HM_NO_CLOSE) q->parts |= NBW_P_CLOSED;
     if (m->mut != HM_NO_REREAD) m->run = *q;
@@ -242,21 +251,33 @@ static int mq_step(mq *m) {
 }
 static uint64_t mq_push(mq *m, mjob *j) {
     while (m->jobs_in - m->jobs_done >= MQ) mq_step(m);   // pthread_cond_wait until the translation thread made room
-    if (j->kind == 0 || j->kind == 3) j->sub = ++m->subs;
+    if (j->kind == 0 || (j->kind == 3 && m->mut != HM_LATE_NUMBER)) j->sub = ++m->subs;
     const uint64_t job = ++m->jobs_in;
     if (j->kind == 3) nbw_hand_opened(&m->h, job, j->sub, 0);
     m->ring[job % MQ] = *j;
     return job;
 }
+static void mq_z8_end(mq *m, uint64_t said, const mjob *j) {   // Z8G_SUBMIT_END(z8, z8n, j.sub)
+    m->z8_said++; if (said != j->sub) m->z8_differ++;
+    if (j->id < MAXSTEPS) m->said_of[j->id] = said;
+}
 static void mq_submit(mq *m, uint64_t id, int has_job, int armed_thread) {   // nvnQueueSubmitCommands
     mjob j = {0, 0, id, 0, 0, 0};
-    if (!m->mode) { mq_push(m, &j); return; }
+    const uint64_t said = m->subs + 1;   // Z8G_SUBMIT_BEGIN: atomic_load(&g_x_subs) + 1
+    if (!m->mode) { mq_push(m, &j); mq_z8_end(m, said, &j); return; }
     const int virt = m->mode != 1;
     const int open = nbw_hand_submit(&m->h, armed_thread && m->armed, has_job, 0);
     if (m->mut == HM_ONE_SLOT) m->one_set = 0;   // the bug this mutation models: one flag for every frame, reset by the next submit
     if (open && !virt) { j.kind = 3; j.parts = NBW_P_SUBMIT; }
     const uint64_t job = mq_push(m, &j);
     if (open && virt) nbw_hand_opened(&m->h, job, j.sub, 1);
+    mq_z8_end(m, said, &j);
+}
+// Every submit the translation thread executed ran under the number its walk was told.
+static int z8_numbers_ok(const mq *m) {
+    if (m->z8_differ) return 0;
+    for (int i = 0; i < m->nout; i++) if (m->out[i].kind == ST_SUBMIT && m->out[i].id < MAXSTEPS && m->said_of[m->out[i].id] != m->out[i].sub) return 0;
+    return 1;
 }
 static void mq_present(mq *m, uint64_t pid, uint64_t fid, int armed_thread) {   // nvnQueuePresentTexture
     uint64_t own = 0;
@@ -289,7 +310,7 @@ static void run_script(mq *m, const uint8_t *scr, int len, int mode, int mut) {
         m->armed = present_bit;
         mq_submit(m, ++g_sid, has_job, 1);                                                // EndFrame's submit
         for (int k = 0; k < ((t >> 2) & 3); k++) mq_step(m);                              // ... it may start, even finish, before the present
-        if (inter == 1) { mjob o = {0, 0, ++g_sid, 0, 0, 0}; mq_push(m, &o); }            // another thread submits
+        if (inter == 1) { mjob o = {0, 0, ++g_sid, 0, 0, 0}; const uint64_t said = m->subs + 1; mq_push(m, &o); mq_z8_end(m, said, &o); }   // another thread submits (its own nvnQueueSubmitCommands: under the Z8 lock)
         if (inter == 2) { mjob o = {2, 0, 5000 + (uint64_t)i, 0, 0, 0}; mq_push(m, &o); } // another job is queued
         if (inter == 3) { const uint64_t p = ++g_pid; mq_present(m, p, 6000 + (uint64_t)i, 0); }   // a present of another thread
         if (inter == 4) while (mq_step(m)) {}                                             // somebody waits for the queue (x_drain)
@@ -311,7 +332,7 @@ static int tickets_ok(const mq *m) {
 static void test_hand(void) {
     static mq ref, one, chk, bad;
     unsigned scripts = 0, caught[HM_N] = {0};
-    uint64_t st1[NBW_H_N] = {0}, st2[NBW_H_N] = {0}, jobs_ref = 0, jobs_one = 0;
+    uint64_t st1[NBW_H_N] = {0}, st2[NBW_H_N] = {0}, jobs_ref = 0, jobs_one = 0, z8_said = 0, z8_open = 0;
     for (int it = 0; it < 4000; it++) {
         uint8_t scr[192]; const int len = 2 + 2 * (int)rn(95);
         for (int i = 0; i < len; i += 2) { scr[i] = (uint8_t)(rn(3) ? (rnd() & 0xe8) | 8 : rnd()); scr[i + 1] = (uint8_t)(rn(3) ? rnd() & 0x33 : rnd()); }
@@ -321,11 +342,15 @@ static void test_hand(void) {
         CHECK(same_steps(&ref, &one));                 // the translation thread does what it did, in the same order, with the same submit numbers
         CHECK(one.subs == ref.subs && one.jobs_done == one.jobs_in && !one.h.open);
         CHECK(tickets_ok(&one) && tickets_ok(&ref));   // the ticket of a present names the job that runs it
+        // [NR-ZERO Z8] the number announced to the walk before the push is the number of the job - an ordinary submit and the frame's
+        // open job alike - and the number the translation thread executes it under (DM_NR_Z8_THREAD needs nothing else of DM_NB_OWN)
+        CHECK(z8_numbers_ok(&ref) && z8_numbers_ok(&one) && one.z8_said == ref.z8_said && one.z8_said == g_sid);
+        z8_said += one.z8_said; z8_open += one.h.st[NBW_H_OPEN];
         const uint64_t *s = one.h.st;
         CHECK(one.jobs_in + 2 * s[NBW_H_ONE] == ref.jobs_in);   // exactly two jobs saved a frame whose present was attached
         CHECK(s[NBW_H_OPEN] == s[NBW_H_ONE] + s[NBW_H_LATE] + s[NBW_H_BEHIND] + s[NBW_H_NOPRESENT] && s[NBW_H_OPEN] == s[NBW_H_FINAL]);
         run_script(&chk, scr, len, 2, HM_NONE);        // check mode: the old queue; the counters of the rule
-        CHECK(same_steps(&ref, &chk) && chk.jobs_in == ref.jobs_in && tickets_ok(&chk));
+        CHECK(same_steps(&ref, &chk) && chk.jobs_in == ref.jobs_in && tickets_ok(&chk) && z8_numbers_ok(&chk));
         const uint64_t *v = chk.h.st;
         CHECK(v[NBW_H_OPEN] == v[NBW_H_ONE] + v[NBW_H_LATE] + v[NBW_H_BEHIND] + v[NBW_H_NOPRESENT]);
         // what does not depend on how far the translation thread got is the same number at 1 and at 2
@@ -334,6 +359,7 @@ static void test_hand(void) {
         for (int k = 0; k < NBW_H_N; k++) { st1[k] += s[k]; st2[k] += v[k]; }
         for (int mut = 1; mut < HM_N; mut++) {
             run_script(&bad, scr, len, 1, mut);
+            if (mut == HM_LATE_NUMBER) { if (!z8_numbers_ok(&bad)) caught[mut]++; continue; }   // (asked of the Z8 check alone)
             if (!same_steps(&ref, &bad) || !tickets_ok(&bad) || bad.subs != ref.subs) caught[mut]++;
         }
     }
@@ -343,6 +369,9 @@ static void test_hand(void) {
            scripts, (unsigned long long)st1[NBW_H_FINAL], (unsigned long long)st1[NBW_H_ONE], (unsigned long long)st1[NBW_H_LATE], (unsigned long long)st1[NBW_H_BEHIND],
            (unsigned long long)st1[NBW_H_NOPRESENT], (unsigned long long)jobs_ref, (unsigned long long)jobs_one, (unsigned long long)st2[NBW_H_ONE], (unsigned long long)st2[NBW_H_LATE],
            caught[HM_NO_NEWEST], caught[HM_NO_DONE], caught[HM_NO_CLOSE], caught[HM_NO_REREAD], caught[HM_DOUBLE], caught[HM_ONE_SLOT]);
+    printf("z8 submit numbers (DM_NB_OWN=1): %llu submits announced to the walk before their job was queued, %llu of them the frame's open job: each got the announced number and was executed under it; "
+           "mutation (the open job numbered when it is closed) caught in %u scripts\n", (unsigned long long)z8_said, (unsigned long long)z8_open, caught[HM_LATE_NUMBER]);
+    CHECK(z8_said > 100000 && z8_open > 30000);
     CHECK(st1[NBW_H_ONE] > 20000 && st1[NBW_H_LATE] > 5000 && st1[NBW_H_BEHIND] > 5000 && st1[NBW_H_NOPRESENT] > 1000);
     for (int mut = 1; mut < HM_N; mut++) CHECK(caught[mut] > scripts / 2);
     // the rule itself, case by case

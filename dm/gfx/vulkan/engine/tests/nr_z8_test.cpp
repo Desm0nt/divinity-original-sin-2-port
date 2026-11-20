@@ -39,8 +39,15 @@
 //            field at a time (the same code, field for field); in the THREAD runs the model takes tail draws by Reader::draw2 -
 //            neither the side chunk nor the chunk's packets are read - and the logs are still TODAY's; in VERIFY the old verdict
 //            finds in the chunks what the model named (k_bad 0).
-// The mutation check: built with -DNRZ8_MUTATE=k (k = 1..26 but 9, nr_z8.h) this test must FAIL (9 - no vertex-range compare in match() -
-// must PASS: those words only give values, which the reader compares again).
+//   PHONE    (NR-ZERO.md section 36: what the first phone series met and the host model had not) the descriptor sets of the model are
+//            laid out by the real plan builder (nr_desc.c) the way a device with dynamic uniform buffers lays out EVERY set of the game:
+//            the support block of the vertex stage, of the fragment stage and the c1 constants are dynamic buffers too - a set has
+//            more dynamic offsets than ring blocks (the phone: 7.1 offsets a bind, 4.2 ring blocks a draw). Every draw the model
+//            records must be describable (nr_z8.h describe(), the function the engine's publish calls), its template must give the
+//            offsets of both kinds, and the verdict must compare both. The set of the phone alone (7 offsets, 4 ring blocks), a set
+//            with a ring block baked in (refused), 16 / 17 offsets. And the walk's own thread with DM_NB_OWN (walker_thread()).
+// The mutation check: built with -DNRZ8_MUTATE=k (k = 1..30 but 9, nr_z8.h) this test must FAIL (9 - no vertex-range compare in match() -
+// must PASS: those words only give values, which the reader compares again). 27 and 30 are the engine as the phone ran it.
 // Build (Vulkan headers: any vulkan/ + vk_video/ include tree, e.g. the NDK sysroot's usr/include), from the repository root:
 //   clang++ -std=c++17 -O2 -Wall -Wextra -DDM_GAME_DOS2 -Idm/gfx/nvn/include -I<vk> dm/gfx/vulkan/engine/tests/nr_z8_test.cpp -o nr_z8_test && ./nr_z8_test
 //   g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -DDM_GAME_DOS2 -Idm/gfx/nvn/include -I<vk> dm/gfx/vulkan/engine/tests/nr_z8_test.cpp -o nr_z8_tsan && ./nr_z8_tsan
@@ -80,6 +87,9 @@ extern "C" {
 static void (*g_mid_put)() = nullptr;   // marks_test: a reader in the middle of Marks::put
 #define NRZ8_TEST_MID_PUT() do { if (g_mid_put) g_mid_put(); } while (0)
 #include "../../../nr/nr_z8.h"
+extern "C" {
+#include "../../../nr/nr_desc.c"   // the real plan builder (nr_dplan_build): the model's descriptor sets are laid out by it, as the engine's
+}
 
 static long fails = 0, checks = 0;
 #define CHECK(c, ...) do { ++checks; if (!(c)) { ++fails; if (fails < 20) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
@@ -266,13 +276,36 @@ struct World {
 // ---------------- the model of the translation thread: resolution from its State alone ----------------
 static uint64_t mix(uint64_t h, uint64_t v) { h = (h ^ v) * 0xBF58476D1CE4E5B9ull; return h ^ h >> 29; }
 static uint64_t mixb(uint64_t h, const void *p, size_t n) { return mix(h, nrz8::hash_bytes(p, n)); }
-struct Plan { unsigned nrow = 0, noff = 0; uint8_t rns[4], rslot[4], rsamp[4], dst[4], dsl[4]; uint16_t used = 0; uint64_t layout = 0; };
+// nring: the game's uniform blocks (ring blocks); noff: the dynamic offsets of the set = the ring blocks + the support / c1 blocks
+// the layout binds as dynamic buffers (dp: the plan the real builder makes of the two stages' binding tables).
+struct Plan { unsigned nrow = 0, noff = 0, nring = 0; uint8_t rns[4], rslot[4], rsamp[4], dst[4], dsl[4]; uint16_t used = 0; uint64_t layout = 0; nr_dplan dp; };
 static bool plan_of(const TS &S, Plan &p) {
     if (!S.tprog[0] || !S.tprog[4]) return false;
     const uint32_t vp = uint32_t(S.tprog[0]->serial - 100), fp = uint32_t(S.tprog[4]->serial - 100);
+    static Plan memo[16][16]; static bool have[16][16];
+    if (vp < 16 && fp < 16 && have[vp][fp]) { p = memo[vp][fp]; return true; }
     p.nrow = fp % 4; for (unsigned i = 0; i < p.nrow; i++) { p.rns[i] = 1; p.rslot[i] = uint8_t((i * 5 + fp) % 16); p.rsamp[i] = (fp & 8) ? 0xff : p.rslot[i]; }
-    p.noff = 1 + vp % 3; for (unsigned i = 0; i < p.noff; i++) { p.dst[i] = uint8_t(i & 1); p.dsl[i] = uint8_t(i); }
-    p.used = (vp & 1) ? 0x3 : 0x1; p.layout = 0x2000 + mix(vp, fp) % 4; return true;
+    p.nring = 1 + vp % 3; for (unsigned i = 0; i < p.nring; i++) { p.dst[i] = uint8_t(i & 1); p.dsl[i] = uint8_t(i); }
+    p.used = (vp & 1) ? 0x3 : 0x1; p.layout = 0x2000 + mix(vp, fp) % 4;
+    // The binding tables of the two stages as the device lays them out with dynamic uniform buffers on: every uniform buffer dynamic.
+    // Vertex stage: its support block first, then its ring blocks. Fragment stage: its support block (two programs in three), its ring
+    // blocks, the c1 constants (one program in four), the textures. So the offsets of the fixed blocks lie before, between and behind
+    // the ring blocks' in the set's order.
+    nr_dbind vs[8], fs[16]; uint8_t dv[8], df[16]; unsigned nv = 0, nf = 0; uint32_t bind = 0;
+    auto ubo = [&bind](nr_dbind *t, uint8_t *d, unsigned &n, uint32_t source, uint32_t slot) { t[n] = nr_dbind{bind++, NRD_T_UBO, 1, source == NRD_S_UNIFORM ? 256u : 1392u, source, slot, 0xffffffffu, 0}; d[n++] = 1; };
+    ubo(vs, dv, nv, NRD_S_SUPPORT, 0);
+    for (unsigned i = 0; i < p.nring; i += 2) ubo(vs, dv, nv, NRD_S_UNIFORM, i);
+    if (fp % 3 != 1) ubo(fs, df, nf, NRD_S_SUPPORT, 0);
+    for (unsigned i = 1; i < p.nring; i += 2) ubo(fs, df, nf, NRD_S_UNIFORM, i);
+    if (fp % 4 == 2) ubo(fs, df, nf, NRD_S_C1, 0);
+    for (unsigned i = 0; i < p.nrow; i++) { fs[nf] = nr_dbind{bind++, NRD_T_COMBINED, 1, 0, NRD_S_TEXTURE, p.rslot[i], p.rsamp[i] == 0xff ? 0xffffffffu : uint32_t(p.rsamp[i]), 0}; df[nf++] = 0; }
+    nr_dstage st[NRD_STAGES]; memset(st, 0, sizeof st);
+    st[0].b = vs; st[0].dyn = dv; st[0].n = nv; st[0].ns = nvn_stage[0]; st[0].present = 1; st[4].b = fs; st[4].dyn = df; st[4].n = nf; st[4].ns = nvn_stage[4]; st[4].present = 1;
+    const int why = nr_dplan_build(&p.dp, st);
+    ++checks; if (why != NRD_OK || p.dp.nubo != p.nring || p.dp.nimg != p.nrow || p.dp.nstat || p.dp.ndyn <= p.dp.nubo) { ++fails; printf("FAIL: the model's set of programs %u / %u is not the plan expected (why %d, %u ring blocks, %u offsets)\n", vp, fp, why, unsigned(p.dp.nubo), unsigned(p.dp.ndyn)); }
+    p.noff = p.dp.ndyn;
+    if (vp < 16 && fp < 16) { memo[vp][fp] = p; have[vp][fp] = true; }
+    return true;
 }
 struct Answer { uint64_t did = 0, pent = 0; };
 // the "NR-08 entry" and the "NR-09 entry" of the draw the State describes (every field such an entry depends on, listed here)
@@ -281,7 +314,7 @@ static Answer resolve(const TS &S, const Plan &p, uint32_t key) {
     h = mix(h, uint64_t(uint32_t(S.viewport.width)) << 32 | uint32_t(S.viewport.height)); h = mix(h, uint64_t(uintptr_t(S.texture_pool.pool))); h = mix(h, uint64_t(S.texture_pool.off)); h = mix(h, uint64_t(S.texture_pool.n));
     h = mix(h, uint64_t(uintptr_t(S.sampler_pool.pool))); h = mix(h, uint64_t(S.sampler_pool.off));
     for (unsigned i = 0; i < p.nrow; i++) { h = mix(h, S.tex[p.rns[i]][p.rslot[i]]); h = mix(h, p.rsamp[i] != 0xff ? S.samp[p.rns[i]][p.rsamp[i]] : 0); }
-    for (unsigned i = 0; i < p.noff; i++) { const uint64_t z = S.ub[p.dst[i]][p.dsl[i]].size; h = mix(h, z < 256 ? z : 256); }
+    for (unsigned i = 0; i < p.nring; i++) { const uint64_t z = S.ub[p.dst[i]][p.dsl[i]].size; h = mix(h, z < 256 ? z : 256); }
     a.did = h;
     h = mix(key, S.tprog[0]->serial); h = mix(h, S.tprog[4]->serial); h = mixb(h, &S.rt, sizeof S.rt); h = mixb(h, S.attrib, sizeof S.attrib); h = mixb(h, S.stream, sizeof S.stream);
     h = mixb(h, S.blend, sizeof S.blend); h = mixb(h, &S.color, sizeof S.color); h = mixb(h, &S.mask, sizeof S.mask); h = mixb(h, &S.ms, sizeof S.ms); h = mixb(h, S.blend_color, sizeof S.blend_color);
@@ -293,7 +326,9 @@ static Answer resolve(const TS &S, const Plan &p, uint32_t key) {
 // the values of the draw from an answer and what is of the moment (generations, uniform addresses, vertex ranges, viewport)
 static bool values(const TS &S, const Plan &p, const Answer &a, const Gens &g, const nbd_hdr &h, nrz5_vals &v, uint32_t *off) {
     memset(&v, 0, sizeof v); v.pipe = 0x1000 + mix(a.pent, g.pipe_gen) % 9; v.layout = p.layout; v.set = 0x3000 + mix(a.did, g.set_gen) % 7; v.noff = p.noff; v.off = off;
-    for (unsigned i = 0; i < p.noff; i++) { const uint64_t ad = S.ub[p.dst[i]][p.dsl[i]].address; if (!ad || ad < g.ring_delta || ad - g.ring_delta > 0xffffffffull) return false; off[i] = uint32_t(ad - g.ring_delta); }
+    for (unsigned i = 0; i < p.dp.nrow; i++) { const nr_drow &r = p.dp.row[i];   // the set's dynamic offsets, in the set's order (dyn_at)
+        if (r.kind == NRD_K_RING_DYN) { const uint64_t ad = S.ub[r.ns][r.slot].address; if (!ad || ad < g.ring_delta || ad - g.ring_delta > 0xffffffffull) return false; off[r.dyn_at] = uint32_t(ad - g.ring_delta); }   // a ring block: of the moment
+        else if (r.kind == NRD_K_FIXED_DYN) off[r.dyn_at] = 256u * uint32_t(1 + mix(a.did, r.binding) % 5); }   // a support / c1 block: the entry's offset (as nrdesc::Ent::off)
     VkViewport vp{S.viewport.x, S.viewport.y, S.viewport.width, S.viewport.height, S.viewport.minDepth, S.viewport.maxDepth}; memcpy(v.vp, &vp, sizeof vp); memcpy(v.sc, &S.scissor, sizeof S.scissor);
     v.used = p.used;
     for (uint32_t m = p.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); if (!S.vb[i].address || !S.vb[i].size) return false; v.vb[i] = 0x4000 + (S.vb[i].address >> 31 & 1) + (S.vb[i].size >> 13 & 1) * 2; v.vbo[i] = S.vb[i].address & 0xffffff; }
@@ -422,7 +457,7 @@ struct Walk {
 
 // ---------------- the translation thread ----------------
 struct Priv { uint32_t ver = 0; Answer a; uint32_t set_gen = 0, pipe_gen = 0; };
-struct Tot { uint64_t draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0, m_got = 0, m_not = 0, m_nobase = 0, m_desync = 0, m_resync = 0, waits = 0, splits = 0, walk_ns = 0, v_ask = 0, v_rep = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_N] = {}; } tot;
+struct Tot { uint64_t described = 0, not_desc = 0, draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0, m_got = 0, m_not = 0, m_nobase = 0, m_desync = 0, m_resync = 0, waits = 0, splits = 0, walk_ns = 0, v_ask = 0, v_rep = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_N] = {}; } tot;
 static nrz5r::Reader *g_R = nullptr;
 static void pre_hook() { if (g_R && g_R->holding) g_R->flush(nrz5r::CUT_WRITE); }
 static uint64_t sig() { const nbmtq::Stats &q = nbmt::q.st; return q.cmds * 8 + q.sync[nbmtq::NBMT_SY_PNEXT] + q.sync[nbmtq::NBMT_SY_ALLOC] + q.sync[nbmtq::NBMT_SY_CALLER]; }
@@ -451,10 +486,16 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
     void publish(const nbd_hdr &h, uint32_t key, const Plan &p, const Answer &a, const nrz5_vals &v) {
         if (mode == 0 || h._pad2 <= 0 || uint32_t(h._pad2 - 1) >= g_tab.n) return;
         nrz8::Desc d; nrz5_site_make(&d.site, key, h.draw == NBD_DRAW_IDX ? NRZ5S_IDX : NRZ5S_ARRAYS, h.prim, h.itype, h.count, h.base_vertex, h.base_instance, h.instances, h.first, h.ibuf, S.vb[0].address);
-        d.fixid = uint32_t(h.cond_addr); d.v = &v; d.first_index = 0; d.k = 0; d.noff = p.noff;
-        for (unsigned i = 0; i < p.noff; i++) { const NVNbufferRange &u = S.ub[p.dst[i]][p.dsl[i]]; d.dyn[i].st = p.dst[i]; d.dyn[i].sl = p.dsl[i]; d.dyn[i].addr = u.address; d.dyn[i].rbytes = 256; d.dyn[i].copy = uint32_t(u.size < 256 ? u.size : 256); }
-        unsigned nvb = 0; for (uint32_t m = v.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); d.vb[nvb].at = uint8_t(i); d.vb[nvb].addr = S.vb[i].address; d.vb[nvb].size = S.vb[i].size; ++nvb; }
-        d.nvb = nvb; d.nrow = p.nrow; for (unsigned i = 0; i < p.nrow; i++) { d.row[i].ns = p.rns[i]; d.row[i].slot = p.rslot[i]; d.row[i].samp = p.rsamp[i]; d.row[i].tex = S.tex[p.rns[i]][p.rslot[i]]; d.row[i].smp = p.rsamp[i] != 0xff ? S.samp[p.rns[i]][p.rsamp[i]] : 0; }
+        d.fixid = uint32_t(h.cond_addr); d.first_index = 0; d.k = 0;
+        // the description is nr_z8.h's - the function the engine's publish calls - over the plan of the set and this thread's State
+        uint32_t copy[NRD_MAX_UBO]; for (unsigned u = 0; u < p.dp.nubo; u++) { const nr_drow &r = p.dp.row[p.dp.ubo_row[u]]; const uint64_t z = S.ub[r.ns][r.slot].size; copy[u] = uint32_t(z < 256 ? z : 256); }
+        struct A { const TS &S;
+            bool ub(unsigned st, unsigned sl, uint64_t *x, uint64_t *z) const { if (st >= 6 || sl >= 16) return false; *x = S.ub[st][sl].address; *z = S.ub[st][sl].size; return true; }
+            bool vb(unsigned i, uint64_t *x, uint64_t *z) const { if (i >= 16) return false; *x = S.vb[i].address; *z = S.vb[i].size; return true; }
+            uint64_t tex(unsigned ns, unsigned sl) const { return ns < 6 && sl < 128 ? S.tex[ns][sl] : ~0ull; } uint64_t samp(unsigned ns, unsigned sl) const { return ns < 6 && sl < 128 ? S.samp[ns][sl] : ~0ull; } };
+        const int why = nrz8::describe(p.dp, copy, v, A{S}, d); ++tot.described;
+        CHECK(why == nrz8::P_OK, "phone: a recorded draw whose set binds %u ring blocks and %u support / c1 blocks as dynamic buffers is a template (not describable, reason %d - on the phone: \"a static uniform block\", every draw)", unsigned(p.dp.nubo), unsigned(p.dp.ndyn - p.dp.nubo), why);
+        if (why) { ++tot.not_desc; return; }
         uint64_t w[nrz8::MAX_WORDS]; const unsigned nw = nrz8::pack(d, w); if (!nw) return;
         Priv &pv = priv[h._pad2 - 1]; const uint32_t nv = g_tab.put(uint32_t(h._pad2 - 1), w, nw); if (nv != pv.ver) ++tot.published; pv.ver = nv; pv.a = a; pv.set_gen = g.set_gen; pv.pipe_gen = g.pipe_gen;
     }
@@ -482,7 +523,7 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         if (!answered) a = resolve(S, p, key);
         if (mode == 2 && ver && h._pad2 > 0 && priv[h._pad2 - 1].ver == ver && priv[h._pad2 - 1].set_gen == g.set_gen && priv[h._pad2 - 1].pipe_gen == g.pipe_gen) { ++tot.a_cmp;
             if (priv[h._pad2 - 1].a.did != a.did || priv[h._pad2 - 1].a.pent != a.pent) { ++tot.a_bad; CHECK(false, "verify: the walk's answer is the model's (key %u)", key); } }
-        nrz5_vals v; uint32_t off[8];
+        nrz5_vals v; uint32_t off[nrz8::MAX_DYN];
         if (!values(S, p, a, g, h, v, off)) { miss(); if (outcome) outcome->push_back('D'); return; }
         const bool foreign = key % 41 == 0;
         if (!mode || nbmt::cur != c) { if (mode) R->abandon(mw); ref_tail(c, bc, v); ++tot.recorded; if (mode) publish(h, key, p, a, v); if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; } if (outcome) outcome->push_back('R'); return; }
@@ -660,7 +701,8 @@ static void values_test() {
         d.fixid = 1 + r.upto(9); d.noff = r.upto(nrz8::MAX_DYN + 1); d.k = r.upto(5); d.first_index = r.upto(7);
         uint64_t ub[6][16] = {};
         v.pipe = 0x1000 + r.upto(9); v.layout = 0x2000 + r.upto(4); v.set = 0x3000 + r.upto(7); v.noff = d.noff; v.off = voff; v.indexed = indexed;
-        for (unsigned i = 0; i < d.noff; i++) { d.dyn[i].st = uint8_t(i % 6); d.dyn[i].sl = uint8_t(i); voff[i] = 256 * r.upto(4000); d.dyn[i].addr = 0x7300000000ull + voff[i]; d.dyn[i].rbytes = 256; d.dyn[i].copy = 256; }
+        for (unsigned i = 0; i < d.noff; i++) { d.dyn[i].st = uint8_t(i % 6); d.dyn[i].sl = uint8_t(i); voff[i] = 256 * r.upto(4000); d.dyn[i].addr = 0x7300000000ull + voff[i]; d.dyn[i].rbytes = 256; d.dyn[i].copy = 256;
+            d.dyn[i].fixed = r.upto(3) == 0; }   // (a support / c1 block: the template holds the offset itself)
         VkViewport vp{0, 0, float(640u << r.upto(2)), 360, 0, 1}; VkRect2D sc{{0, 0}, {640u << r.upto(2), 360}}; memcpy(v.vp, &vp, sizeof vp); memcpy(v.sc, &sc, sizeof sc);
         v.used = uint16_t(1u << r.upto(4) | (r.upto(2) ? 1u << (4 + r.upto(4)) : 0u)); unsigned nvb = 0;
         for (uint32_t m = v.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); v.vb[i] = 0x4000 + r.upto(4); v.vbo[i] = 64 * r.upto(1000); d.vb[nvb].at = uint8_t(i); d.vb[nvb].addr = 0x7200000000ull + 4096 * i; d.vb[nvb].size = 4096; ++nvb; }
@@ -690,6 +732,79 @@ static void values_test() {
     CHECK(same > 20000 && differ > 20000, "values: both verdicts were asked (%ld the same, %ld differ)", same, differ);
     printf("values: %ld draws with the walk's values, %ld with one field changed: expect_diff = pv_diff over the side record\n", same, differ);
 }
+// ---------------- the set the phone binds (NR-ZERO.md section 36) and the walk's thread with DM_NB_OWN ----------------
+// Fort Joy on the Mi 14 Ultra, 20.11: "NVN PERF binds ... offsets_per_bind=7.1", "[nr] desc ... 4.2 ring blocks a draw", and the
+// line "[nr] z8, translation thread ... templates published 0, not describable 1428743 (... a static uniform block 1428743 ...)":
+// every set has the support blocks of its stages (and c1) as dynamic buffers beside the game's blocks. With no template published
+// the walk answered nothing ("slot empty or being written" for every draw record), so every verify of the series compared nothing.
+static void phone_test() {
+    // vertex stage: support, 3 ring blocks (slots 0 2 3); fragment stage: support, ring block slot 1, c1, 2 textures. dyn_mode: 1 every
+    // uniform buffer dynamic (Adreno: 16 allowed) / 2 the game's blocks only / 3 one ring block baked into the set (DM_NR_DESC_SPLIT)
+    auto build = [](nr_dplan &p, int dyn_mode, unsigned more_ring) {
+        nr_dbind vs[20], fs[8]; uint8_t dv[20], df[8]; unsigned nv = 0, nf = 0; uint32_t b = 0;
+        vs[nv] = nr_dbind{b++, NRD_T_UBO, 1, 1392, NRD_S_SUPPORT, 0, 0xffffffffu, 0}; dv[nv++] = dyn_mode == 1;
+        const uint32_t vslot[3] = {0, 2, 3}; for (unsigned i = 0; i < 3; i++) { vs[nv] = nr_dbind{b++, NRD_T_UBO, 1, 256, NRD_S_UNIFORM, vslot[i], 0xffffffffu, 0}; dv[nv++] = !(dyn_mode == 3 && i == 2); }
+        for (unsigned i = 0; i < more_ring; i++) { vs[nv] = nr_dbind{b++, NRD_T_UBO, 1, 256, NRD_S_UNIFORM, 4 + i, 0xffffffffu, 0}; dv[nv++] = 1; }
+        fs[nf] = nr_dbind{b++, NRD_T_UBO, 1, 1392, NRD_S_SUPPORT, 0, 0xffffffffu, 0}; df[nf++] = dyn_mode == 1;
+        fs[nf] = nr_dbind{b++, NRD_T_UBO, 1, 256, NRD_S_UNIFORM, 1, 0xffffffffu, 0}; df[nf++] = 1;
+        fs[nf] = nr_dbind{b++, NRD_T_UBO, 1, 64, NRD_S_C1, 0, 0xffffffffu, 0}; df[nf++] = dyn_mode == 1;
+        fs[nf] = nr_dbind{b++, NRD_T_COMBINED, 1, 0, NRD_S_TEXTURE, 3, 0xffffffffu, 0}; df[nf++] = 0;
+        fs[nf] = nr_dbind{b++, NRD_T_COMBINED, 1, 0, NRD_S_TEXTURE, 5, 2, 0}; df[nf++] = 0;
+        nr_dstage st[NRD_STAGES]; memset(st, 0, sizeof st);
+        st[0].b = vs; st[0].dyn = dv; st[0].n = nv; st[0].ns = nvn_stage[0]; st[0].present = 1; st[4].b = fs; st[4].dyn = df; st[4].n = nf; st[4].ns = nvn_stage[4]; st[4].present = 1;
+        return nr_dplan_build(&p, st); };
+    struct St { uint64_t ub[6][16], ubz[6][16], vb[16], vbz[16], tex[6][128], samp[6][128]; };
+    struct A { const St &S;
+        bool ub(unsigned st, unsigned sl, uint64_t *x, uint64_t *z) const { if (st >= 6 || sl >= 16) return false; *x = S.ub[st][sl]; *z = S.ubz[st][sl]; return true; }
+        bool vb(unsigned i, uint64_t *x, uint64_t *z) const { if (i >= 16) return false; *x = S.vb[i]; *z = S.vbz[i]; return true; }
+        uint64_t tex(unsigned ns, unsigned sl) const { return ns < 6 && sl < 128 ? S.tex[ns][sl] : ~0ull; } uint64_t samp(unsigned ns, unsigned sl) const { return ns < 6 && sl < 128 ? S.samp[ns][sl] : ~0ull; } };
+    auto st = std::make_unique<St>(); memset(st.get(), 0, sizeof(St)); const uint64_t ring = 0x7300000000ull;
+    for (unsigned ns = 0; ns < 2; ns++) for (unsigned sl = 0; sl < 16; sl++) { st->ub[ns][sl] = ring + 4096 * (1 + ns * 16 + sl); st->ubz[ns][sl] = 256; }
+    st->vb[0] = 0x7200000000ull; st->vbz[0] = 8192; st->tex[1][3] = 0x111; st->tex[1][5] = 0x222; st->samp[1][2] = 0x333;
+    // the values the tail bound for the draw: 7 offsets in the set's order
+    auto vals = [&](const nr_dplan &p, nrz5_vals &v, uint32_t *off) { memset(&v, 0, sizeof v); v.pipe = 0x1001; v.layout = 0x2001; v.set = 0x3001; v.noff = p.ndyn; v.off = off; v.used = 1; v.vb[0] = 0x4000; v.vbo[0] = 64; v.indexed = 1; v.ib = 0x5000; v.it = 1; v.count = 36; v.instances = 1;
+        for (unsigned i = 0; i < p.nrow; i++) { const nr_drow &r = p.row[i]; if (r.kind == NRD_K_RING_DYN) off[r.dyn_at] = uint32_t(st->ub[r.ns][r.slot] - ring); else if (r.kind == NRD_K_FIXED_DYN) off[r.dyn_at] = 0x10000u + 1536u * r.binding; } };
+    nr_dplan p; uint32_t copy[NRD_MAX_UBO]; for (auto &c : copy) c = 256;
+    CHECK(build(p, 1, 0) == NRD_OK && p.ndyn == 7 && p.nubo == 4 && p.nstat == 0 && p.nimg == 2, "phone: the set as the device lays it out - 7 dynamic offsets, 4 of them ring blocks (%u / %u)", unsigned(p.ndyn), unsigned(p.nubo));
+    nrz5_vals v; uint32_t off[32]; vals(p, v, off);
+    CHECK(nrz8::plan_form(p, v) == nrz8::P_OK, "phone: a set with support / c1 blocks as dynamic buffers can be a template (plan_form says %d; the phone: 2, \"a static uniform block\", for every draw)", nrz8::plan_form(p, v));
+    nrz8::Desc d; nrz5_site_make(&d.site, 77, NRZ5S_IDX, 4, 1, 36, 0, 0, 1, 0, 0x7100000000ull, st->vb[0]); d.fixid = 5; d.first_index = 0; d.k = 0;
+    const int why = nrz8::describe(p, copy, v, A{*st}, d); CHECK(why == nrz8::P_OK, "phone: the draw is described (%d)", why);
+    if (why == nrz8::P_OK) {
+        unsigned nfix = 0; for (unsigned i = 0; i < d.noff; i++) nfix += d.dyn[i].fixed; CHECK(d.noff == 7 && nfix == 3 && d.nrow == 2 && d.nvb == 1, "phone: 7 offsets, 3 of them fixed (%u / %u)", d.noff, nfix);
+        uint64_t w[nrz8::MAX_WORDS]; const unsigned nw = nrz8::pack(d, w); CHECK(nw == nrz8::HEAD_WORDS + 7 * 3 + 5 + 2 * 3, "phone: the template's words (%u)", nw);
+        // the next frame: the game's blocks moved in the ring, the support / c1 blocks did not
+        for (unsigned ns = 0; ns < 2; ns++) for (unsigned sl = 0; sl < 16; sl++) st->ub[ns][sl] += 256 * (3 + ns + sl);
+        nrz5_vals now; uint32_t noff[32]; vals(p, now, noff);
+        nrz5_vals m; uint32_t moff[nrz8::MAX_DYN]; const int mm = nrz8::match(w, &d.site, 5, 36, 1, 0, 0, 0, A{*st}, &m, moff);
+        CHECK(mm == nrz8::M_OK && m.noff == 7, "phone: the walk's copy matches the template (%d)", mm);
+        if (mm == nrz8::M_OK) { for (unsigned i = 0; i < 7; i++) CHECK(moff[i] == noff[i], "phone: offset %u of the walk's values is the offset the tail binds (%#x / %#x, %s)", i, moff[i], noff[i], d.dyn[i].fixed ? "a support / c1 block" : "a ring block");
+            CHECK(m.pipe == now.pipe && m.set == now.set && m.layout == now.layout && m.used == now.used, "phone: the walk's values");
+            struct U { const St &S; bool ub(unsigned s2, unsigned sl, uint64_t *x, uint64_t *z) const { if (s2 >= 6 || sl >= 16) return false; *x = S.ub[s2][sl]; *z = S.ubz[s2][sl]; return true; } };
+            auto W = [&w](unsigned j) { return w[j]; };
+            CHECK(nrz8::expect_diff(W, &now, 36, 1, 0, 0, 0, U{*st}) == 0, "phone: the verdict from the slot's words: the same values");
+            for (unsigned i = 0; i < 7; i++) { nrz5_vals x = now; uint32_t xo[32]; memcpy(xo, noff, sizeof xo); x.off = xo; xo[i] += 256;
+                CHECK(nrz8::expect_diff(W, &x, 36, 1, 0, 0, 0, U{*st}) == 3, "phone: the verdict sees offset %u (%s) moved", i, d.dyn[i].fixed ? "a support / c1 block" : "a ring block"); } }
+        st->tex[1][5] ^= 0x1000; CHECK(nrz8::match(w, &d.site, 5, 36, 1, 0, 0, 0, A{*st}, &m, moff) == nrz8::M_TEX, "phone: another texture in a row of the plan is another answer"); st->tex[1][5] ^= 0x1000;
+    }
+    // the other layouts
+    CHECK(build(p, 2, 0) == NRD_OK && p.ndyn == 4 && p.nubo == 4, "partial dynamic: only the game's blocks are dynamic"); vals(p, v, off);
+    { nrz8::Desc e; CHECK(nrz8::describe(p, copy, v, A{*st}, e) == nrz8::P_OK && e.noff == 4, "partial dynamic: described, 4 offsets"); }
+    CHECK(build(p, 3, 0) == NRD_OK && p.nstat == 1, "split: a ring block baked into the set"); vals(p, v, off);
+    { nrz8::Desc e; CHECK(nrz8::describe(p, copy, v, A{*st}, e) == nrz8::P_STATIC, "split: a set that depends on a block's offset is never a template"); }
+    CHECK(build(p, 1, 9) == NRD_OK && p.ndyn == 16, "16 offsets: the device limit"); vals(p, v, off);
+    { nrz8::Desc e; nrz5_site_make(&e.site, 78, NRZ5S_IDX, 4, 1, 36, 0, 0, 1, 0, 0x7100000000ull, st->vb[0]); e.fixid = 6; uint64_t w[nrz8::MAX_WORDS];
+      CHECK(nrz8::describe(p, copy, v, A{*st}, e) == nrz8::P_OK && nrz8::pack(e, w) == nrz8::HEAD_WORDS + 16 * 3 + 5 + 2 * 3, "16 offsets: a template");
+      nrz5_vals m; uint32_t moff[nrz8::MAX_DYN]; CHECK(nrz8::match(w, &e.site, 6, 36, 1, 0, 0, 0, A{*st}, &m, moff) == nrz8::M_OK && m.noff == 16 && !memcmp(moff, off, 16 * 4), "16 offsets: matched, every offset the tail's"); }
+    CHECK(build(p, 1, 10) == NRD_OK && p.ndyn == 17, "17 offsets"); vals(p, v, off);
+    { nrz8::Desc e; CHECK(nrz8::describe(p, copy, v, A{*st}, e) == nrz8::P_MANY, "17 offsets: more than a template holds"); }
+    { nr_dplan q; build(q, 1, 0); vals(q, v, off); v.noff = 6; nrz8::Desc e; CHECK(nrz8::describe(q, copy, v, A{*st}, e) == nrz8::P_STATIC, "a tail that bound another number of offsets than the plan has is not described"); }
+    // the walk's own thread: DM_NB_OWN is the game's default (the app's JNI block) - the thread must start with it
+    CHECK(nrz8::walker_thread(1, 1) == 1, "thread: DM_NR_Z8_THREAD=1 with DM_NB_OWN=1 gets the walker thread (the phone: \"the submitting thread walks\" - DM_NR_Z8_VIEW / _VAL went off with it)");
+    CHECK(nrz8::walker_thread(1, 2) == 1 && nrz8::walker_thread(1, 0) == 1 && nrz8::walker_thread(0, 1) == 0 && nrz8::walker_thread(0, 0) == 0, "thread: the switch decides");
+    printf("phone: the set of Fort Joy (7 dynamic offsets: 4 ring blocks + 2 support + c1) is a template, its offsets of both kinds are the tail's; a ring block baked into the set is refused; 16 offsets fit, 17 do not; the walker thread starts with DM_NB_OWN\n");
+}
+
 // ---------------- the ranges of a submission: a number a range ----------------
 static void ranges_test() {
     auto R = std::make_unique<nrz8::Ranges>(); R->begin();
@@ -724,8 +839,8 @@ int main(int argc, char **argv) {
     const int frames = argc > 1 ? atoi(argv[1]) : 60;
     for (int i = 0; i < 12; i++) { memset(&g_prog[i], 0, sizeof g_prog[i]); g_prog[i].nstage = 2; g_prog[i].serial = 100 + uint64_t(i); }
     for (int i = 0; i < 4; i++) { memset(&g_mem[i], 0, sizeof g_mem[i]); g_pool[i].pool = &g_mem[i]; g_pool[i].off = 64 * i; g_pool[i].n = 100 + i; }
-    dict_test(); table_race(); marks_test(); ranges_test(); values_test();
-    uint64_t taken = 0, answered = 0, draws = 0, vcmp = 0, th_answered = 0, th_taken = 0, th_got = 0, th_asked = 0, th_waits = 0, th_vcmp = 0, th_dig = 0, th_splits = 0, th_vask = 0, th_vrep = 0, th_known = 0, th_kcmp = 0;
+    dict_test(); table_race(); marks_test(); ranges_test(); values_test(); phone_test();
+    uint64_t described = 0, not_desc = 0, taken = 0, answered = 0, draws = 0, vcmp = 0, th_answered = 0, th_taken = 0, th_got = 0, th_asked = 0, th_waits = 0, th_vcmp = 0, th_dig = 0, th_splits = 0, th_vask = 0, th_vrep = 0, th_known = 0, th_kcmp = 0;
     for (uint64_t seed = 1; seed <= 3; seed++) {
         World w(seed); std::vector<Frame> prog; for (int i = 0; i < frames; i++) prog.push_back(w.frame());
         setup(Cfg{0, 256, 64, 64, 0}); const auto ref = run(prog, 0, seed); finish(); const uint64_t ref_draws = tot.recorded;
@@ -734,7 +849,7 @@ int main(int argc, char **argv) {
             const bool first = &cf == &shapes[0] && frames >= 40;   // (the shares are asked of a run long enough to warm the table up)
             setup(cf); { const auto logs = run(prog, 1, seed * 77 + cf.mode);
                 for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "apply: seed %llu queue mode %d flush %u: frame %zu's call log is today's (%zu / %zu bytes)", (unsigned long long)seed, cf.mode, cf.flush, f, logs[f].size(), ref[f].size()); }
-            const Tot t = tot; finish();
+            const Tot t = tot; finish(); described += t.described; not_desc += t.not_desc;
             CHECK(t.valid + t.recorded == ref_draws, "apply: every draw taken or recorded once (%llu + %llu of %llu)", (unsigned long long)t.valid, (unsigned long long)t.recorded, (unsigned long long)ref_draws);
             CHECK(first ? t.answered > t.draws / 4 && t.valid > t.draws / 8 : t.answered > 0 && t.valid > 0, "apply: the walk's answers are used (%llu answered, %llu taken of %llu)", (unsigned long long)t.answered, (unsigned long long)t.valid, (unsigned long long)t.draws);
             taken += t.valid; answered += t.answered; draws += t.draws;
@@ -800,6 +915,8 @@ int main(int argc, char **argv) {
     CHECK(th_known > 0 && th_kcmp > 0, "values: tail draws were taken by the verdict without the chunks (%llu) and compared with the old one (%llu)", (unsigned long long)th_known, (unsigned long long)th_kcmp);
     printf("values (the verdict from the translation thread's own memory): %llu tail draws taken without reading the walker's chunks, %llu verdicts compared with the chunks\n", (unsigned long long)th_known, (unsigned long long)th_kcmp);
     printf("ranges (the walker's numbers against the translation thread's State): %llu ranges asked by number, %llu of them a repeat inside their frame (%.0f%%)\n", (unsigned long long)th_vask, (unsigned long long)th_vrep, th_vask ? 100. * double(th_vrep) / double(th_vask) : 0.);
+    CHECK(described > 0 && not_desc == 0, "phone: every draw the model recorded on the submitting-thread runs was described (%llu, not %llu)", (unsigned long long)described, (unsigned long long)not_desc);
+    printf("phone (sets laid out by nr_desc.c with support / c1 blocks as dynamic buffers): %llu recorded draws described for a template, not describable %llu\n", (unsigned long long)described, (unsigned long long)not_desc);
     printf("nr_z8_test: %ld checks, %ld failed; %llu draw records, %llu answered without State, %llu packets taken, %llu packets compared by verify\n", checks, fails, (unsigned long long)draws, (unsigned long long)answered,
            (unsigned long long)taken, (unsigned long long)vcmp);
     return fails ? 1 : 0;

@@ -30,6 +30,8 @@
 //   - the values the packets were written from are compared, field for field, with the values the translation thread resolves at the
 //     moment (nr_z5r.h Reader: pipeline now in the NR-09 entry, set of the NR-08 entry, ring offsets, views, viewport, arguments), and
 //     the bind cache with the run's model - a draw is taken only when all are equal; else its commands are recorded as today.
+// A template carries the set's dynamic offsets of both kinds: a game uniform block (the offset follows the address the draw binds)
+// and a support / c1 block the layout binds as a dynamic buffer (the offset is the NR-08 entry's; nr_z8.h describe()).
 // Never answered: a UI draw, a draw with a render condition, QUADS, a draw the prologue changes (pre-pass override, twins, LIGHTFUSE,
 // PRESKIN, POSONLY - their draws are not published), a record reached through OP_CALL, a re-executed shadow-cache range, a record of
 // a handle submitted again, DM_NR_SORT / DM_NR_MDI.
@@ -51,6 +53,8 @@
 //                    only when the walk of this submission wrote them for this record (a translation thread that is ahead of the
 //                    walk resolves and records the draw itself), and waits for the walker at the END of a submission before the
 //                    submission counts as executed (the game may reuse the command memory after that). Checked by DM_NR_Z8=2.
+//                    Works with DM_NB_OWN (the game's default): the number of a submission is the queue's next number whichever
+//                    kind of job carries it; the front compares the two at every submission (xbg_nr_z8_sub_end).
 //   DM_NR_Z8_IMG     [section 29] 0 default (xbg_nr_z8_img_default). 1: an answered draw does not walk the images of its NR-08 entry
 //                    while the entry's read word stands (nr_z3e.h nrz_rtq: the walk - get_image and prepare_read of every image the
 //                    GPU wrote - would do nothing); 2: the word is asked, the walk runs and must have changed nothing.
@@ -86,6 +90,7 @@ uint32_t split0=8;                  // DM_NR_Z8_SPLIT
 nrz8::Marks marks;                  // the words of each draw record by its place in the submission: written by the walker, read by the translation thread; never freed
 std::atomic<uint64_t> t_done{0};    // the last submission the translation thread finished (the walker asks: is it close behind me?)
 std::atomic<uint64_t> posted{0};    // the last submission posted to the walker (a later one was never posted: nobody waits for its walk)
+std::atomic<uint64_t> sub_said{0},sub_differ{0};   // the front: submissions whose announced number was compared with the number the queue gave the job / of them not the same (never expected)
 std::atomic<uint64_t> post_ns{0},posts{0},wakes{0},cpu_ns{0},jobs_done{0},passed{0};   // the submitting threads' cost of a post; the walker's thread CPU time
 struct Sh:State{uint64_t sprog[6]{};};   // the copy: State + the program word of each stage (shader[] stays null)
 // the words of State the digest of =2 covers, by part (everything fold() / nbd_apply / nr_state3 can write; not shader[], which is compared
@@ -249,22 +254,18 @@ void publish(const nbd_hdr &rh,uint32_t key,const nrz5_vals &v,uint32_t first_in
     // what cannot be a template (never answered)
     int why=0;
     if(!pl || pl->p.why || pl->last<0)why=1;                                   // NR-08 did not serve the draw
-    else if(pl->p.nubo!=pl->p.ndyn || pl->p.ndyn!=v.noff || pl->p.nstat)why=2;  // a static uniform block: the set depends on its offset
-    else if(pl->p.nimg>nrz8::MAX_ROWS || v.noff>nrz8::MAX_DYN)why=3;
+    else if((why=nrz8::plan_form(pl->p,v))!=0){}                               // 2: a ring block baked into the set (the set depends on its offset); 3: more rows / offsets than a template holds. A support / c1 block bound as a dynamic buffer IS described - its offset is the entry's (nr_z8.h; NR-ZERO.md section 36)
     else if(!hint.pent || hint.special || hint.qpat || hint.zero>=0)why=4;      // no NR-09 entry of its own (PRESKIN / POSONLY variant), a pattern or zero stream
     else if(hint.pp || guarded)why=5;                                           // the prologue changed State for this draw: its words are not the walk's copy
     else if(!state.shader[0] || state.shader[1] || state.shader[2] || state.shader[3])why=6;
     if(why){++s.pub_no;++s.pub_why[why];if(pv.ver){const uint64_t none[nrz8::HEAD_WORDS]={uint64_t(nrz8::HEAD_WORDS)};pv=Priv{};pv.ver=nrz8g::tab.put(slot,none,nrz8::HEAD_WORDS);}return;}
-    const nr_dplan &p=pl->p;nrz8::Desc d;
+    nrz8::Desc d;
     nrz5_site_make(&d.site,key,rh.draw==NBD_DRAW_IDX?NRZ5S_IDX:NRZ5S_ARRAYS,rh.prim,rh.itype,rh.count,rh.base_vertex,rh.base_instance,rh.instances,rh.first,rh.ibuf,state.vb[0].address);
-    d.fixid=uint32_t(rh.cond_addr);d.v=&v;d.first_index=first_index;d.k=k;d.noff=v.noff;
-    for(unsigned u=0;u<p.nubo;u++){const nr_drow &r=p.row[p.ubo_row[u]];if(r.kind!=NRD_K_RING_DYN || r.dyn_at>=v.noff || r.ns>=6 || r.slot>=16){why=2;break;}
-        d.dyn[r.dyn_at].st=r.ns;d.dyn[r.dyn_at].sl=r.slot;d.dyn[r.dyn_at].addr=uint64_t(state.ub[r.ns][r.slot].address);d.dyn[r.dyn_at].rbytes=r.bytes;d.dyn[r.dyn_at].copy=pl->copy[u];}
-    unsigned nvb=0;for(uint32_t m=v.used;m && !why;m&=m-1){const uint32_t i=uint32_t(__builtin_ctz(m));if(nvb>=nrz8::MAX_VB){why=3;break;}
-        d.vb[nvb].at=uint8_t(i);d.vb[nvb].addr=uint64_t(state.vb[i].address);d.vb[nvb].size=uint64_t(state.vb[i].size);++nvb;}
-    d.nvb=nvb;d.nrow=p.nimg;
-    for(unsigned i=0;i<p.nimg && !why;i++){const nr_drow &r=p.row[p.img_row[i]];d.row[i].ns=r.ns;d.row[i].slot=r.slot;d.row[i].samp=r.samp;
-        d.row[i].tex=state.tex[r.ns][r.slot];d.row[i].smp=r.samp!=0xff?state.samp[r.ns][r.samp]:0;}
+    d.fixid=uint32_t(rh.cond_addr);d.first_index=first_index;d.k=k;
+    struct A{bool ub(unsigned st,unsigned sl,uint64_t *x,uint64_t *z) const{if(st>=6 || sl>=16)return false;*x=uint64_t(state.ub[st][sl].address);*z=uint64_t(state.ub[st][sl].size);return true;}
+             bool vb(unsigned i,uint64_t *x,uint64_t *z) const{if(i>=16)return false;*x=uint64_t(state.vb[i].address);*z=uint64_t(state.vb[i].size);return true;}
+             uint64_t tex(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.tex[ns][sl]:~0ull;}uint64_t samp(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.samp[ns][sl]:~0ull;}};
+    why=nrz8::describe(pl->p,pl->copy,v,A{},d);   // the dynamic offsets (ring blocks by their uniform slot, support / c1 blocks by their offset), the vertex ranges, the texture rows - from State
     uint64_t w[nrz8::MAX_WORDS];const unsigned nw=why?0u:nrz8::pack(d,w);
     if(!nw){++s.pub_no;++s.pub_why[why?why:7];return;}
     Priv n;n.ver=nrz8g::tab.put(slot,w,nw);n.plan=uint64_t(uintptr_t(pl));n.did=pl->last;n.pent=uint64_t(uintptr_t(hint.pent));n.passdef=uint64_t(uintptr_t(last_pass.pass.definition));
@@ -409,8 +410,10 @@ void boot(){
     g.wr.q=&nbmt::q;g.wr.ring=&nrz8g::ring;g.wr.min_tails=nrz8g::min_tails;g.ready=true;
     {const char *t=getenv("DM_NR_Z8_THREAD");int tm=t && *t?atoi(t):xbg_nr_z8_thread_default();
      if(tm<0 || tm>1){xbg_logf("【红】[nr] DM_NR_Z8_THREAD=%d: only 0 / 1: 0",tm);tm=0;}
-     const char *o=getenv("DM_NB_OWN");
-     if(tm && o && *o && atoi(o)!=0){xbg_logf("[nr] DM_NR_Z8_THREAD=1: DM_NB_OWN queues a frame's last submission under a number the walk cannot know: the submitting thread walks");tm=0;}
+     // (DM_NB_OWN - the game's default - does not stand in the way: the frame's open job is numbered by the queue as any submission,
+     // under the lock the post is made under; the front checks the number at every submission - xbg_nr_z8_sub_end. NR-ZERO.md section 36)
+     {const char *o=getenv("DM_NB_OWN");const int own=o && *o?atoi(o):0;
+      if(tm && !nrz8::walker_thread(tm,own)){xbg_logf("[nr] DM_NR_Z8_THREAD=1: not with DM_NB_OWN=%d: the submitting thread walks",own);tm=0;}}
      if(tm){e=getenv("DM_NR_Z8_SPLIT");nrz8g::split0=e && *e?uint32_t(std::clamp(atoi(e),0,1024)):8u;
         if(!nrz8g::marks.init(65536)){xbg_logf("【红】[nr] DM_NR_Z8_THREAD=1: no memory for the marks: the submitting thread walks");tm=0;}
         else{pthread_t th;
@@ -435,6 +438,8 @@ bool init(int draw_mode){
     mode=m;nrz5t::gmode=m;nrz8g::armed.store(2,std::memory_order_release);
     {auto part=[](const char *n,int d){const char *e=getenv(n);int v=e && *e?atoi(e):d;if(v<0 || v>2){xbg_logf("【红】[nr] %s=%d: only 0 / 1 / 2: 0",n,v);v=0;}return v;};
      imode=part("DM_NR_Z8_IMG",xbg_nr_z8_img_default());
+     if(imode && m==2)xbg_logf("[nr] DM_NR_Z8_IMG=%d with DM_NR_Z8=2: the read word is asked only by a draw that TAKES the walk's answer (the hook of draw(), DM_NR_Z8=1) - a verify run of DM_NR_Z8 does not exercise it; "
+        "its own verify is DM_NR_Z8=1 DM_NR_Z8_IMG=2",imode);
      kmode=part("DM_NR_Z8_VAL",xbg_nr_z8_val_default());
      if(kmode && !nrz8g::thread_mode){xbg_logf("[nr] DM_NR_Z8_VAL=%d needs DM_NR_Z8_THREAD=1 (the packet count of a tail draw comes with its mark): off",kmode);kmode=0;}
      if(kmode)xbg_logf("[nr] DM_NR_Z8_VAL=%d (NR-ZERO Z8 values, %s): the verdict of a tail draw from the translation thread's own memory - the values the walk wrote from are the slot's template (this thread's own, same "
@@ -504,18 +509,22 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
     if(pub[G_BAD].load(std::memory_order_relaxed) && mode){red("the walk met a record it cannot follow (the copy is no longer State): no answers from here on");mode=0;}   // (the draws it marked before are still taken draw by draw: their values are compared)
     if(!g[G_RECORDS] && !s.asked)return;
     const double dr=g[G_DRAWS]?double(g[G_DRAWS]):1.,runs=g[G_RUNS]?double(g[G_RUNS]):1.,subs=g[G_SUBS]?double(g[G_SUBS]):1.;
+    static uint64_t sub_l[2];const uint64_t sn=sub_said.load(std::memory_order_relaxed),sb=sub_differ.load(std::memory_order_relaxed);
     xbg_logf("[nr] z8 walk (DM_NR_Z8=%d): %llu submissions walked, %.0f records and %.0f draw records each; answered (template matched) %llu (%.1f%%); not: no key / UI / condition / QUADS %llu, through OP_CALL %llu, "
         "slot empty or being written %llu, another site %llu, another fix id %llu, texture / sampler handles differ %llu, vertex ranges differ %llu, uniform range / size %llu, form %llu; head draws %llu, "
         "tail draws written ahead %llu (%.1f%% of the draw records; %.0f bytes of packets and %.0f bytes of values each) in %llu runs (%.1f tail draws a run; published without chunks: %llu runs with %llu tail draws; "
         "no spare chunk %llu, ring full %llu, chunk full %llu); fix ids: %llu new, %llu group refreshes (%.2f a draw record), dictionary cleared %llu; "
-        "walk %.0f ns a record = %.3f ms a submission; a draw record (fold of its binds, fix id, template, packets; 1 in 64) %.0f ns",
-        boot,(unsigned long long)g[G_SUBS],double(g[G_RECORDS])/subs,double(g[G_DRAWS])/subs,(unsigned long long)g[G_VALUES],100.*double(g[G_VALUES])/dr,(unsigned long long)g[G_NO_KEY],(unsigned long long)g[G_CALLED],
+        "walk %.0f ns a record = %.3f ms a submission; a draw record (fold of its binds, fix id, template, packets; 1 in 64) %.0f ns; "
+        "submission numbers: %llu announced to the walk and compared with the number the queue gave the job, differ %llu",
+        nrz8g::boot,(unsigned long long)g[G_SUBS],double(g[G_RECORDS])/subs,double(g[G_DRAWS])/subs,(unsigned long long)g[G_VALUES],100.*double(g[G_VALUES])/dr,(unsigned long long)g[G_NO_KEY],(unsigned long long)g[G_CALLED],
         (unsigned long long)g[G_EMPTY],(unsigned long long)g[G_MISS+nrz8::M_SITE],(unsigned long long)g[G_MISS+nrz8::M_FIX],(unsigned long long)g[G_MISS+nrz8::M_TEX],(unsigned long long)g[G_MISS+nrz8::M_VB],
         (unsigned long long)g[G_MISS+nrz8::M_UBO],(unsigned long long)g[G_MISS+nrz8::M_FORM],(unsigned long long)g[G_HEADS],(unsigned long long)g[G_TAILS],100.*double(g[G_TAILS])/dr,
         g[G_TAILS]?double(g[G_TAIL_BYTES])/double(g[G_TAILS]):0.,g[G_TAILS]?double(g[G_SIDE_BYTES])/double(g[G_TAILS]):0.,(unsigned long long)g[G_RUNS],double(g[G_TAILS])/runs,
         (unsigned long long)g[G_SHORT_RUNS],(unsigned long long)g[G_SHORT_TAILS],(unsigned long long)g[G_NO_CHUNK],(unsigned long long)g[G_RING_FULL],(unsigned long long)g[G_CHUNK_FULL],
         (unsigned long long)g[G_FIX_NEW],(unsigned long long)g[G_FIX_REFRESH],double(g[G_FIX_REFRESH])/dr,(unsigned long long)g[G_FIX_CLEARS],
-        g[G_RECORDS]?double(g[G_WALK_NS])/double(g[G_RECORDS]):0.,double(g[G_WALK_NS])/subs/1e6,g[G_DRAW_TIMED]?double(g[G_DRAW_NS])/double(g[G_DRAW_TIMED]):0.);
+        g[G_RECORDS]?double(g[G_WALK_NS])/double(g[G_RECORDS]):0.,double(g[G_WALK_NS])/subs/1e6,g[G_DRAW_TIMED]?double(g[G_DRAW_NS])/double(g[G_DRAW_TIMED]):0.,
+        (unsigned long long)(sn-sub_l[0]),(unsigned long long)(sb-sub_l[1]));
+    sub_l[0]=sn;sub_l[1]=sb;
     if(thread_mode){   // [DM_NR_Z8_THREAD=1] who pays what: the submitting thread, the walker, the translation thread's wait
         const uint64_t pn=post_ns.load(std::memory_order_relaxed),pc=posts.load(std::memory_order_relaxed),cn=cpu_ns.load(std::memory_order_relaxed),jd=jobs_done.load(std::memory_order_relaxed),
             wkk=wakes.load(std::memory_order_relaxed),ps=passed.load(std::memory_order_relaxed);
@@ -547,13 +556,14 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
         is=IStats{};}
     const nrz5r::RStats &r=nrz5t::R.st;static nrz5r::RStats rl;auto d=[&](uint64_t nrz5r::RStats::*f){return r.*f-rl.*f;};
     const nrz5t::Stats &q=nrz5t::s;const double tails=q.tails?double(q.tails):1.;
-    xbg_logf("[nr] z8, translation thread (DM_NR_Z8=%d): %llu engine draw records at the hook of draw(); took the walk's answer %llu (%.1f%%); not: the walk had no template %llu, the slot was published again %llu, "
+    xbg_logf("[nr] z8, translation thread (DM_NR_Z8=%d): %llu engine draw records at the hook of draw()%s; took the walk's answer %llu (%.1f%%); not: the walk had no template %llu, the slot was published again %llu, "
         "a generation moved (NR-08 / NR-09 / objects) %llu, another pass definition or a pre-pass override %llu, a gate %llu, other shader objects %llu; records of another walk %llu, of a re-executed range %llu; "
         "at the lane's command section %llu draws (marked %llu), %s %llu (%.1f%%); runs met %llu, followed %llu: complete %llu, cut by: the bind cache did not hold the model %llu, values differ %llu "
         "(pipeline %llu, set %llu, offsets %llu, viewport %llu, scissor %llu, vertex %llu, index %llu, arguments %llu), chunk ends early %llu, a record did not come %llu, another command %llu; first tail draw not taken %llu; "
         "chunks %s %llu; runs gone %llu, never reached %llu; templates published %llu, not describable %llu (NR-08 did not serve %llu, a static uniform block %llu, too many rows / offsets %llu, "
         "no entry of its own / pattern / zero stream %llu, State changed by the prologue %llu, stages %llu, an offset above its address %llu); spot checks of an answered draw's words %llu, bad %llu",
-        mode,(unsigned long long)s.asked,(unsigned long long)s.taken_path,s.asked?100.*double(s.taken_path)/double(s.asked):0.,(unsigned long long)s.no_tmpl,(unsigned long long)s.replaced,(unsigned long long)s.stale,
+        mode,(unsigned long long)s.asked,mode==2?" (verify never asks the hook: the path resolves every draw itself and the walk's answer is compared at the lane's tail - \"answers of the walk ... compared\" in the line z8 check)":"",
+        (unsigned long long)s.taken_path,s.asked?100.*double(s.taken_path)/double(s.asked):0.,(unsigned long long)s.no_tmpl,(unsigned long long)s.replaced,(unsigned long long)s.stale,
         (unsigned long long)s.passdef,(unsigned long long)s.gate,(unsigned long long)s.shaders,(unsigned long long)s.stamp,(unsigned long long)s.again,(unsigned long long)q.tails,(unsigned long long)q.marked,mode==2?"would take":"taken",
         (unsigned long long)q.taken,100.*double(q.taken)/tails,(unsigned long long)d(&nrz5r::RStats::runs),(unsigned long long)d(&nrz5r::RStats::started),(unsigned long long)d(&nrz5r::RStats::complete),
         (unsigned long long)(r.cut[nrz5r::CUT_CACHE]-rl.cut[nrz5r::CUT_CACHE]),(unsigned long long)(r.cut[nrz5r::CUT_VALUES]-rl.cut[nrz5r::CUT_VALUES]),
@@ -577,6 +587,9 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
             (unsigned long long)s.dg_unreached,(unsigned long long)g[G_DG_PUSHED],(unsigned long long)g[G_DG_FULL],(unsigned long long)g[G_FIX_STALE],(unsigned long long)s.a_cmp,(unsigned long long)s.a_same,
             (unsigned long long)s.a_stale,(unsigned long long)s.a_bad,(unsigned long long)d(&nrz5r::RStats::v_cmp),(unsigned long long)d(&nrz5r::RStats::v_same),(unsigned long long)d(&nrz5r::RStats::v_bad),
             (unsigned long long)d(&nrz5r::RStats::v_skipped),(unsigned long long)g[G_REF_MISS]);
+    // [NR-ZERO.md section 36] a verify that compared nothing proves nothing (the first phone series: "bad 0" in every line, 0 compared)
+    if(mode==2 && q.tails>=20000 && !s.a_cmp){static unsigned te=0;if(te++<4)xbg_logf("【红】[nr] z8: verify compared NOTHING in this window - %llu engine draws were recorded, the walk answered %llu of %llu draw records, "
+        "templates published %llu, not describable %llu: \"bad 0\" of this window says nothing about Z8",(unsigned long long)q.tails,(unsigned long long)g[G_VALUES],(unsigned long long)g[G_DRAWS],(unsigned long long)s.published,(unsigned long long)s.pub_no);}
     rl=r;s=Stats{};zs=nrz3::Stats{};nrdraw::z8sz=nrdraw::Stats{};nrz5t::s=nrz5t::Stats{};}
 }
 #else
@@ -586,6 +599,15 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
 extern "C" void xbg_nr_z8_game_submit(const uint64_t *handles,int n,uint64_t sub){
     if(!nrz8g::armed.load(std::memory_order_acquire))return;
     if(nrz8g::thread_mode)nrz8g::post(handles,n,sub);else nrz8g::submit(handles,n,sub);}
+// The job of the recording just walked (or posted) as submission `said` is queued, the front still holds its Z8 lock: `got` is the
+// number the queue gave it. They are the same by construction - x_push numbers a submit job and DM_NB_OWN's open frame job alike, and
+// nothing else numbers a submission (tests/nb_own_test.c runs the queue's rule) - and this is where the device says so. Not the same:
+// the walk's words were written for another submission; the walk stops (its records are then not taken: stamp / token of `said`).
+extern "C" void xbg_nr_z8_sub_end(uint64_t said,uint64_t got){
+    nrz8g::sub_said.fetch_add(1,std::memory_order_relaxed);
+    if(__builtin_expect(said==got,1))return;
+    nrz8g::sub_differ.fetch_add(1,std::memory_order_relaxed);
+    if(!nrz8g::g.bad.exchange(true))xbg_logf("【红】[nr] z8: a recording was walked as submission %llu and queued as submission %llu: the walk stops",(unsigned long long)said,(unsigned long long)got);}
 // The translation thread executed the last record of submission `sub` (before the submission counts as executed).
 extern "C" void xbg_nr_z8_exec_done(uint64_t sub){nrz8t::exec_done(sub);}
 // The translation thread is about to execute submission `sub` (xbg_submit takes the number with the handles).

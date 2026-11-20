@@ -3232,8 +3232,15 @@ def nrz8_check():   # [DOS2] NR-ZERO Z8 DM_NR_Z8 (docs/dos2/nr/NR-ZERO.md sectio
     assert 'if(!top){++g.c[G_CALLED];g.wr.no_values();}' in z and 't.site==NRD_SITE_UI' in z and '(h.flags&(NBD_F_REN|NBD_F_COND)) || h.prim==7' in z and 'if(!(h.flags&NBD_F_COND))memcpy(rec+offsetof(nbd_hdr,cond_addr),&ca,8);' in z, 'Z8: what the walk never answers'
     # the walk runs before the job is queued, under the front's lock, with the number the job will get; the translation thread learns the number before the backend executes
     sub = hle[hle.index('NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {'):]
-    assert sub.index('Z8G_SUBMIT_BEGIN(z8, h, n, atomic_load(&g_x_subs) + 1);') < sub.index('if (!XOWN_SUBMIT(&j)) x_push(&j);') < sub.index('Z8G_SUBMIT_END(z8);') and hle.count('Z8G_SUBMIT_BEGIN(') == 1, 'Z8: the walk before the job is queued, the lock over both'
-    assert hle.index('Z8G_EXEC(sub);') < hle.index('    mtl_sub_begin();\n    mtl_sub_index(h, n);') and 'pthread_mutex_lock(&g_z8g_mu); xbg_nr_z8_game_submit(' in tap and tap.count('#define Z8G_SUBMIT_BEGIN') == 2, 'Z8: the front\'s hooks (one load without the switch)'
+    assert sub.index('int z8; uint64_t z8n = 0; Z8G_SUBMIT_BEGIN(z8, z8n, h, n, atomic_load(&g_x_subs) + 1);') < sub.index('if (!XOWN_SUBMIT(&j)) x_push(&j);') < sub.index('Z8G_SUBMIT_END(z8, z8n, j.sub);') and hle.count('Z8G_SUBMIT_BEGIN(') == 1, 'Z8: the walk before the job is queued, the lock over both'
+    # [section 36] the number the walk was given is the number the job got: one place numbers a submission, for both kinds of job, and
+    # the front hands both numbers to the backend before it releases the lock
+    assert hle.count('atomic_fetch_add(&g_x_subs, 1)') == 1 and 'if (j->kind == XJ_SUBMIT || j->kind == XJ_OWN) j->sub = atomic_fetch_add(&g_x_subs, 1) + 1;' in hle and hle.count('{XJ_SUBMIT, n,') == 1 and \
+        hle.count('j->kind = XJ_OWN;') == 1 and 'if (open && !virt) { j->kind = XJ_OWN; j->parts = NBW_P_SUBMIT; }   // x_push numbers it' in hle, 'Z8: x_push is the one place that numbers a submission (a submit job and DM_NB_OWN\'s open frame job alike)'
+    assert '(said) = (next_sub); xbg_nr_z8_game_submit((const uint64_t *)(h), (n), (said));' in tap and 'if (xbg_nr_z8_sub_end) xbg_nr_z8_sub_end((said), (got)); pthread_mutex_unlock(&g_z8g_mu);' in tap and \
+        'extern "C" void xbg_nr_z8_sub_end(uint64_t said,uint64_t got){' in z and 'if(__builtin_expect(said==got,1))return;' in z and 'if(!nrz8g::g.bad.exchange(true))xbg_logf(' in z, \
+        'Z8: the announced number is compared with the job\'s under the lock; a difference stops the walk (red line)'
+    assert hle.index('Z8G_EXEC(sub);') < hle.index('    mtl_sub_begin();\n    mtl_sub_index(h, n);') and 'pthread_mutex_lock(&g_z8g_mu); (said) = (next_sub); xbg_nr_z8_game_submit(' in tap and tap.count('#define Z8G_SUBMIT_BEGIN') == 2, 'Z8: the front\'s hooks (one load without the switch)'
     assert 'const uint64_t z8s=nrz8_next_sub;nrz8_next_sub=0;' in g and g.count('nrz8t::cur_sub=z8s;') == 2 and g.count('nrz8t::cur_sub=0;') == 2, 'Z8: the submission number rides with xbg_submit'
     # a record of another walk, of a re-executed range, carries nothing
     assert 'const bool mine=cur_sub && h._pad0==nrz8::stamp_of(cur_sub) && nrshc::again==NRSHC_R_NONE;' in z and 'h._pad1=0;h._pad2=0;h.cond_addr&=0xffffffffull;return;}' in z and 'if(z8)nrz8t::rec_begin(r_h,rec);' in z5, 'Z8: only the words of this submission\'s walk are read'
@@ -3249,9 +3256,24 @@ def nrz8_check():   # [DOS2] NR-ZERO Z8 DM_NR_Z8 (docs/dos2/nr/NR-ZERO.md sectio
     hk = 'if(nrz8t::mode==1 && !z8g && nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){if(nrz3::mode!=0)nrz3::begin();z3r=nrz8t::draw('
     assert g.count(hk) == 1 and g.index('DRAW_MARK(1);Commands c(true);') < g.index(hk) < g.index('if(__builtin_expect(nrz3::mode!=0,0) && !z3r){nrz3::begin();'), 'Z8: the hook of draw(), where nrz3 asks its table; =2 never enters it'
     # the template is published with the answer under the same version; what cannot be a template is refused
-    assert 'if(z8){nrz8t::publish(r_h,key,v,first_index,k,plan_hint);return;}' in z5 and 'n.ver=nrz8g::tab.put(slot,w,nw);' in z and 'else if(pl->p.nubo!=pl->p.ndyn || pl->p.ndyn!=v.noff || pl->p.nstat)why=2;' in z and \
+    assert 'if(z8){nrz8t::publish(r_h,key,v,first_index,k,plan_hint);return;}' in z5 and 'n.ver=nrz8g::tab.put(slot,w,nw);' in z and 'else if((why=nrz8::plan_form(pl->p,v))!=0){}' in z and 'why=nrz8::describe(pl->p,pl->copy,v,A{},d);' in z and \
         'else if(!hint.pent || hint.special || hint.qpat || hint.zero>=0)why=4;' in z and 'else if(hint.pp || guarded)why=5;' in z and 'const bool z8g=ppg.on || nbpost::inside || nmg.saved || nsg.saved || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;' in g and 'for(unsigned i=0;i<5;i++)if(pv.sh[i]!=state.shader[i]){++s.shaders;return 0;}' in z, 'Z8: publish; a draw whose State the prologue changed is neither answered nor published'
     assert 'zh.pent=H.have_ent?H.ent:nullptr;zh.zero=H.zero;zh.qpat=H.qpat;zh.pp=pp;zh.special=nrpo::P.on || nrps::P.on;zh.lane_gen=tab_gen();' in lane, 'Z8: the lane\'s hint for a template'
+    # [section 36] what a template can carry is decided in nr_z8.h (host-tested with plans the real builder makes): a ring block baked
+    # into the set is refused, a support / c1 block bound as a dynamic buffer is described by its offset - the phone's first series
+    # refused every set of the game for having one ("nubo != ndyn") and nothing was ever published
+    pf = h[h.index('static inline int plan_form(const nr_dplan &p, const nrz5_vals &v) {'):h.index('template <class A> static inline int describe(')]
+    assert 'if (p.nstat || p.ndyn != v.noff) return P_STATIC;' in pf and 'if (p.nimg > MAX_ROWS || v.noff > MAX_DYN) return P_MANY;' in pf and pf.count('p.nubo != p.ndyn') == 1 and 'if (NRZ8_MUTATE == 27 && p.nubo != p.ndyn) return P_STATIC;' in pf, \
+        'Z8: plan_form - a set is refused for a static ring block or its size, never for a fixed dynamic block'
+    ds = h[h.index('template <class A> static inline int describe('):h.index('static inline int walker_thread(int want, int nb_own)')]
+    assert 'if (r.kind != NRD_K_RING_DYN || r.dyn_at >= v.noff' in ds and 'if (r.kind != NRD_K_FIXED_DYN) continue;' in ds and 'd.dyn[r.dyn_at].fixed = 1;' in ds and 'if (seen != (1u << v.noff) - 1u) return P_STATIC;' in ds, 'Z8: describe - every dynamic offset of the set is a ring block or a fixed block'
+    assert 'if (d.dyn[i].fixed) { w[n++] = v.off[i]; w[n++] = DYN_FIXED; w[n++] = 0; continue; }' in h and 'if (q[1] & DYN_FIXED) { off[i] = NRZ8_MUTATE == 28 ? 0u : uint32_t(q[0]); continue; }' in h and \
+        'if (q1 & DYN_FIXED) { if (NRZ8_MUTATE != 29 && r->off[i] != uint32_t(q0)) return 3; continue; }' in h and 'enum { MAX_DYN = 16,' in h, 'Z8: a fixed dynamic offset in the template: packed, given by match(), compared by expect_diff'
+    # the lines name the switch, not a function ("DM_NR_Z8=1643886944" on the phone: `boot` inside namespace nrz8t is the function)
+    tk = z[z.index('void tick(){   // every submission (nrdraw::tick) while the switch is on'):z.index('#else\n// ======== third part')]
+    assert re.search(r'[(,\s]boot,', tk.replace('nrz8g::boot,', '')) is None and tk.count('nrz8g::boot,(unsigned long long)g[G_SUBS]') == 1, 'Z8: the walk line prints nrz8g::boot (nrz8t::boot is a function)'
+    assert 'if(mode==2 && q.tails>=20000 && !s.a_cmp){static unsigned te=0;if(te++<4)xbg_logf("【红】[nr] z8: verify compared NOTHING in this window' in tk and 'if(imode && m==2)xbg_logf("[nr] DM_NR_Z8_IMG=%d with DM_NR_Z8=2:' in z,         'Z8: a verify window that compared nothing says so in red; DM_NR_Z8_IMG under DM_NR_Z8=2 says it is not exercised'
+    assert 'mode==2?" (verify never asks the hook:' in tk and 'sub_said.load(std::memory_order_relaxed)' in tk, 'Z8: the lines say that verify does not ask the hook, and how many submission numbers were compared'
     # needs: NB-MT, NR-09, NR-08, no Z5, records executed in recording order
     assert 'if(z5 && *z5 && atoi(z5)!=0){off(' in z and 'if(nbord::mode>0 || nbkey::mode==1 || nbx::mode!=0){off(' in z and 'nrz8t::init(nrdraw::mode);' in z3, 'Z8: what the switch needs'
     return 'NR-ZERO Z8 (DM_NR_Z8): default 0 / safe-mode step 2 / not set by the app; the copy starts as State at init; every case of execute() that writes State is a state op of nr_z8.h with the same statements; binds through nbd_apply, state packets through nr_state3.h, the walk follows END / JUMP / CALL / state blocks as execute(); the walk before the job is queued under the front\'s lock; only this submission\'s words are read; the hook checks version, generations, pass definition and gates before nrz3::answered'
@@ -3783,7 +3805,9 @@ def nrz9_check():   # [DOS2] NR-ZERO Z8, the parts of NR-ZERO.md section 28 on (
     pr = h[h.index('    int probe(const Marks &m, uint32_t k, const uint8_t *rec, MarkVal *o) const {'):h.index('    // The next draw record the translation thread executes')]
     assert 't != Marks::token(sub, k)) return 1;' in pr and 'x.tok.load(std::memory_order_acquire) != t) return 1;' in pr and 'r != uint64_t(uintptr_t(rec))) return 2;' in pr, 'Z9 thread: the reader\'s three checks'
     assert 'if (max_tails && cur.tails >= max_tails) {' in r5 and 'uint32_t max_tails = 0;' in r5 and 'g.wr.max_tails=close?split0:0;' in z, 'Z9 thread: runs are split only for a walker whose reader is close (0 = never, the default of the writer)'
-    assert 'if(tm && o && *o && atoi(o)!=0){' in z, 'Z9 thread: not with DM_NB_OWN (the submission number of a frame\'s last submit is not known at the post)'
+    # [section 36] the thread is not refused under DM_NB_OWN (the game's default): the open frame job is numbered like any submission
+    assert 'if(tm && o && *o && atoi(o)!=0){' not in z and 'if(tm && !nrz8::walker_thread(tm,own)){' in z and \
+        'static inline int walker_thread(int want, int nb_own) { if (NRZ8_MUTATE == 30 && nb_own) return 0; return want == 1 ? 1 : 0; }' in h, 'Z9 thread: starts with DM_NB_OWN (nr_z8.h walker_thread, host-tested; the number is checked by the front at every submission)'
     # ---- part 2: the read word of an NR-08 entry ----
     # every write mark of an image takes a new write_seq; the marks of a draw that continues its pass are counted apart at both places
     marks = re.findall(r'(?:\.|->)(?:last_write|storage_write|opw)=(?!=)([^;]*);', re.sub(r'//[^\n]*', '', g + ''.join(f.read_text(encoding='utf-8') for f in sorted((root / 'gfx/vulkan/engine').glob('*.inc')))))

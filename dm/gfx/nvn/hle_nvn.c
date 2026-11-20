@@ -2221,9 +2221,9 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     if (n > 0) memcpy(j.h, h, (size_t)n * sizeof *h);
     j.host = mtl_host_latch();
     wt_submitting((const uint64_t *)h, n);   // [DOS2] DM_NVN_WT_DRAIN: recording -> submit number, known to a writer before the job is visible
-    int z8; Z8G_SUBMIT_BEGIN(z8, h, n, atomic_load(&g_x_subs) + 1);   // [DOS2] NR-ZERO Z8 DM_NR_Z8: the walk of this recording, before the translation thread can see it (nothing without the switch)
+    int z8; uint64_t z8n = 0; Z8G_SUBMIT_BEGIN(z8, z8n, h, n, atomic_load(&g_x_subs) + 1);   // [DOS2] NR-ZERO Z8 DM_NR_Z8: the walk of this recording, before the translation thread can see it (nothing without the switch)
     if (!XOWN_SUBMIT(&j)) x_push(&j);   // [DOS2] NB-21 DM_NB_OWN: the frame job rides with its submit; =1 queues the final submit of a frame as its open job
-    Z8G_SUBMIT_END(z8);
+    Z8G_SUBMIT_END(z8, z8n, j.sub);   // (j.sub: x_push numbered the job - an ordinary submit and DM_NB_OWN's open frame job alike)
     wt_submitted((const uint64_t *)h, n, j.sub);
 #ifdef DM_GAME_DOOM
     // [DOOM] nvnCommandBufferFenceSync records: fence their syncs with this submit (j.sub, set by x_push). The game's handle array is

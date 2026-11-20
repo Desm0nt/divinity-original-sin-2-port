@@ -468,20 +468,22 @@ void nvn_nr_z5_enable(int on) { __atomic_store_n(&g_z5g_on, on && xbg_nr_z5_game
 // the engine draws it knows. Armed by the backend at its init (nvn_nr_z8_enable); 0: nvnQueueSubmitCommands pays one load.
 //   Z8G_SUBMIT_BEGIN   before the job is queued: the Z8 lock (one walk at a time, and the walks in the order of the queue: the job's
 //                      number is the next one under the lock), then the walk of the handles
-//   Z8G_SUBMIT_END     the job is queued: the lock is released
+//   Z8G_SUBMIT_END     the job is queued: the number it got against the number the walk was given (the same by construction, also for
+//                      DM_NB_OWN's open frame job - x_push numbers both; the backend counts and reports a difference), the lock is released
 //   Z8G_EXEC           the translation thread, before it hands a submission to the backend: its number
 static int g_z8g_on;
 static pthread_mutex_t g_z8g_mu = PTHREAD_MUTEX_INITIALIZER;
 void xbg_nr_z8_game_submit(const uint64_t *handles, int n, uint64_t sub) __attribute__((weak));
 void xbg_nr_z8_exec_sub(uint64_t sub) __attribute__((weak));
 void xbg_nr_z8_exec_done(uint64_t sub) __attribute__((weak));
+void xbg_nr_z8_sub_end(uint64_t said, uint64_t got) __attribute__((weak));   // the number announced to the walk against the number the queued job got
 void nvn_nr_z8_enable(int on);
 static int g_z8g_seen;   // the switch was armed at some time (never cleared: a walk posted before it went off is still waited for)
 void nvn_nr_z8_enable(int on) { if (on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub) __atomic_store_n(&g_z8g_seen, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&g_z8g_on, on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub, __ATOMIC_RELEASE); }
 #define Z8G_ON() __builtin_expect(__atomic_load_n(&g_z8g_on, __ATOMIC_ACQUIRE), 0)
-#define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = Z8G_ON(); if (z8) { pthread_mutex_lock(&g_z8g_mu); xbg_nr_z8_game_submit((const uint64_t *)(h), (n), (next_sub)); } } while (0)
-#define Z8G_SUBMIT_END(z8) do { if (z8) pthread_mutex_unlock(&g_z8g_mu); } while (0)
+#define Z8G_SUBMIT_BEGIN(z8, said, h, n, next_sub) do { (z8) = Z8G_ON(); if (z8) { pthread_mutex_lock(&g_z8g_mu); (said) = (next_sub); xbg_nr_z8_game_submit((const uint64_t *)(h), (n), (said)); } } while (0)
+#define Z8G_SUBMIT_END(z8, said, got) do { if (z8) { if (xbg_nr_z8_sub_end) xbg_nr_z8_sub_end((said), (got)); pthread_mutex_unlock(&g_z8g_mu); } } while (0)
 #define Z8G_EXEC(sub) do { if (Z8G_ON()) xbg_nr_z8_exec_sub(sub); } while (0)
 //   Z8G_DONE           the translation thread, after the last record of a submission: with DM_NR_Z8_THREAD=1 the walker thread must
 //                      have left the submission's command memory before the submission counts as executed
@@ -590,8 +592,8 @@ static void nbf_draw(uint32_t op) {
 #define Z5G_OTHER(op) ((void)0)
 #define Z5G_END() ((void)0)
 #define Z5G_FRAME() ((void)0)
-#define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = 0; } while (0)
-#define Z8G_SUBMIT_END(z8) ((void)(z8))
+#define Z8G_SUBMIT_BEGIN(z8, said, h, n, next_sub) do { (z8) = 0; (void)(said); } while (0)
+#define Z8G_SUBMIT_END(z8, said, got) ((void)(z8))
 #define Z8G_EXEC(sub) ((void)0)
 #define Z8G_DONE(sub) ((void)0)
 #define NBT(x) ((void)0)

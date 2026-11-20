@@ -27,6 +27,7 @@
 #include <new>
 #include "nr_z5p.h"
 #include "nr_state3.h"
+#include "nr_desc.h"   // nr_dplan: the plan of a shader set (describe())
 
 // The mutation switch of the host test (never defined in the engine build): NRZ8_MUTATE = k - 1 a REF block is executed without its
 // epoch check, 2 OP_CALL is not followed, 3 the stencil fold ignores the face mask, 4 a vertex-stream record is folded without its
@@ -38,7 +39,11 @@
 // read the entry's token again after the words, 18 the writer of the marks publishes the token before the words,
 // 19 Ranges::id_of does not compare the size of a range, 20 it does not compare the submission an id was given in; expect_diff does
 // not compare 21 the pipeline, 22 the set / layout, 23 the dynamic offsets, 24 viewport / scissor, 25 the vertex streams, 26 the index
-// buffer and the draw arguments.
+// buffer and the draw arguments,
+// 27 a set with a support / c1 block bound as a dynamic uniform buffer cannot be a template (plan_form() as it was before NR-ZERO.md
+// section 36: on a device with dynamic uniform buffers on, that is every set of the game - nothing was ever published), 28 match()
+// gives the offset of such a block as 0, 29 expect_diff does not compare it, 30 the walk does not get its own thread while
+// DM_NB_OWN is on (walker_thread() as it was: the game's default - the thread never started).
 // (9 is the one that need NOT fail: the vertex ranges - like the uniform addresses - give values the translation thread resolves again and
 // compares at the moment; without the compare here a draw is only written ahead in vain. The texture rows, the fix id and the uniform
 // sizes pick the ANSWER, which is not resolved again: 7, 8, 10, 14 must fail.)
@@ -268,12 +273,21 @@ struct Fix {
 };
 
 // ---- the template of a slot: the values (as nr_z5p.h) + the words the resolution read, packed as 64-bit words ---------------------
-enum { MAX_DYN = NRZ5T_MAX_DYN, MAX_VB = NRZ5T_MAX_VB, MAX_ROWS = 12, HEAD_WORDS = 19, MAX_WORDS = HEAD_WORDS + MAX_DYN * 3 + MAX_VB * 5 + MAX_ROWS * 3 };
+// MAX_DYN: the dynamic offsets of a set - the game's uniform blocks (offsets into the constant ring) AND the support / c1 blocks the
+// layout binds as dynamic buffers (their offset is the NR-08 entry's and does not move with the draw). 16 = the device limit the
+// plans are held to on Adreno; a Fort Joy frame binds 7.1 a set (4.2 ring blocks + the fixed ones).
+enum { MAX_DYN = 16, MAX_VB = NRZ5T_MAX_VB, MAX_ROWS = 12, HEAD_WORDS = 19, MAX_WORDS = HEAD_WORDS + MAX_DYN * 3 + MAX_VB * 5 + MAX_ROWS * 3 };
+enum : uint64_t { DYN_FIXED = 1ull << 16 };   // word 1 of a dynamic offset: not a ring block - word 0 is the offset itself
+// word 18 of a template: k | used << 32 | offsets << 48 (5 bits) | vertex bindings << 53 (4) | texture rows << 57 (4) | indexed << 61
+static inline unsigned w18_noff(uint64_t w) { return unsigned(w >> 48 & 31); }
+static inline unsigned w18_nvb(uint64_t w) { return unsigned(w >> 53 & 15); }
+static inline unsigned w18_nrow(uint64_t w) { return unsigned(w >> 57 & 15); }
+static inline bool w18_indexed(uint64_t w) { return (w >> 61 & 1) != 0; }
 // What the translation thread describes of a draw it recorded itself.
 struct Desc {
     nrz5_site site; uint32_t fixid = 0;
     const nrz5_vals *v = nullptr; uint32_t first_index = 0, k = 0;           // the values its tail bound; the folds
-    unsigned noff = 0; struct { uint8_t st, sl; uint64_t addr; uint32_t rbytes, copy; } dyn[MAX_DYN];   // dynamic offset i: the uniform slot, the address bound, the row's bytes, the bytes served
+    unsigned noff = 0; struct Dyn { uint8_t st = 0, sl = 0, fixed = 0; uint64_t addr = 0; uint32_t rbytes = 0, copy = 0; } dyn[MAX_DYN];   // dynamic offset i: the uniform slot, the address bound, the row's bytes, the bytes served; fixed: a support / c1 block - the offset is v->off[i] as it stands
     unsigned nvb = 0; struct { uint8_t at; uint64_t addr, size; } vb[MAX_VB];                            // each used binding: the range bound
     unsigned nrow = 0; struct { uint8_t ns, slot, samp; uint64_t tex, smp; } row[MAX_ROWS];              // each texture row of the plan: handles bound
 };
@@ -286,8 +300,10 @@ static inline unsigned pack(const Desc &d, uint64_t *w) {
     w[7] = v.pipe; w[8] = v.layout; w[9] = v.set; w[10] = v.indexed ? v.ib : 0; w[11] = v.indexed ? v.ibo : 0;
     memcpy(w + 12, v.vp, NRZ5_VP_BYTES); memcpy(w + 15, v.sc, NRZ5_SC_BYTES);
     w[17] = uint64_t(v.indexed ? v.it : 0u) | uint64_t(v.indexed ? d.first_index : 0u) << 32;
-    w[18] = uint64_t(d.k) | uint64_t(v.used) << 32 | uint64_t(d.noff) << 48 | uint64_t(d.nvb) << 52 | uint64_t(d.nrow) << 56 | uint64_t(v.indexed ? 1 : 0) << 60;
-    for (unsigned i = 0; i < d.noff; i++) { if (!d.dyn[i].addr || d.dyn[i].addr < v.off[i]) return 0;
+    w[18] = uint64_t(d.k) | uint64_t(v.used) << 32 | uint64_t(d.noff) << 48 | uint64_t(d.nvb) << 53 | uint64_t(d.nrow) << 57 | uint64_t(v.indexed ? 1 : 0) << 61;
+    for (unsigned i = 0; i < d.noff; i++) {
+        if (d.dyn[i].fixed) { w[n++] = v.off[i]; w[n++] = DYN_FIXED; w[n++] = 0; continue; }
+        if (!d.dyn[i].addr || d.dyn[i].addr < v.off[i]) return 0;
         w[n++] = d.dyn[i].addr - v.off[i]; w[n++] = uint64_t(d.dyn[i].st) | uint64_t(d.dyn[i].sl) << 8 | uint64_t(d.dyn[i].copy) << 32; w[n++] = d.dyn[i].rbytes; }
     for (unsigned j = 0; j < d.nvb; j++) { const unsigned at = d.vb[j].at & 15u; w[n++] = at; w[n++] = v.vb[at]; w[n++] = v.vbo[at]; w[n++] = d.vb[j].addr; w[n++] = d.vb[j].size; }
     for (unsigned r = 0; r < d.nrow; r++) { w[n++] = uint64_t(d.row[r].ns) | uint64_t(d.row[r].slot) << 8 | uint64_t(d.row[r].samp) << 16; w[n++] = d.row[r].tex; w[n++] = d.row[r].smp; }
@@ -306,13 +322,14 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
     if (!(w[0] >> 16 & 1) || nw < HEAD_WORDS || nw > MAX_WORDS) return M_FORM;
     if (memcmp(w + 1, s->w, 6 * 8)) return M_SITE;
     if (NRZ8_MUTATE != 7 && uint32_t(w[0] >> 32) != fixid) return M_FIX;
-    const unsigned noff = unsigned(w[18] >> 48 & 15), nvb = unsigned(w[18] >> 52 & 15), nrow = unsigned(w[18] >> 56 & 15);
+    const unsigned noff = w18_noff(w[18]), nvb = w18_nvb(w[18]), nrow = w18_nrow(w[18]);
     if (noff > MAX_DYN || nvb > MAX_VB || nrow > MAX_ROWS || nw != HEAD_WORDS + noff * 3 + nvb * 5 + nrow * 3) return M_FORM;
     memset(v, 0, sizeof *v);
     const uint64_t *q = w + HEAD_WORDS;
     v->pipe = w[7]; v->layout = w[8]; v->set = w[9]; v->noff = noff; v->off = off;
     for (unsigned i = 0; i < noff; i++, q += 3) {
         uint64_t addr = 0, size = 0;
+        if (q[1] & DYN_FIXED) { off[i] = NRZ8_MUTATE == 28 ? 0u : uint32_t(q[0]); continue; }   // a support / c1 block: the entry's offset
         if (!a.ub(unsigned(q[1] & 255), unsigned(q[1] >> 8 & 255), &addr, &size) || !addr || !size) return M_UBO;
         const uint64_t lim = q[2] ? q[2] : 65536u, copy = size < lim ? size : lim;
         if (NRZ8_MUTATE != 10 && copy != (q[1] >> 32)) return M_UBO;
@@ -333,7 +350,7 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
         if (NRZ8_MUTATE != 14 && (sm != 0xff ? a.samp(ns, sm) : 0) != q[2]) return M_TEX;
     }
     memcpy(v->vp, w + 12, NRZ5_VP_BYTES); memcpy(v->sc, w + 15, NRZ5_SC_BYTES);
-    v->indexed = (w[18] >> 60 & 1) != 0; v->count = uint32_t(count);
+    v->indexed = w18_indexed(w[18]); v->count = uint32_t(count);
     const uint32_t k = uint32_t(w[18]);
     if (v->indexed) { v->it = uint32_t(w[17]); v->ib = w[10]; v->ibo = w[11]; v->instances = uint32_t(instances); v->first = uint32_t(w[17] >> 32); v->vertex_offset = int32_t(uint32_t(base_vertex) + k); v->first_instance = uint32_t(base_instance); }
     else { v->instances = 1; v->first = uint32_t(first) + k; v->first_instance = 0; }
@@ -348,17 +365,18 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
 // 4 viewport, 5 scissor, 6 vertex streams, 7 index buffer, 8 draw arguments; 9: the words are not a template).
 template <class Wd, class A> static inline int expect_diff(Wd &&W, const nrz5_vals *r, int32_t count, int32_t instances, int32_t first, int32_t base_vertex, int32_t base_instance, A &&a) {
     const uint64_t w0 = W(0), w18 = W(18); const unsigned nw = words_of(w0);
-    const unsigned noff = unsigned(w18 >> 48 & 15), nvb = unsigned(w18 >> 52 & 15), nrow = unsigned(w18 >> 56 & 15);
+    const unsigned noff = w18_noff(w18), nvb = w18_nvb(w18), nrow = w18_nrow(w18);
     if (!(w0 >> 16 & 1) || noff > MAX_DYN || nvb > MAX_VB || nrow > MAX_ROWS || nw != HEAD_WORDS + noff * 3 + nvb * 5 + nrow * 3) return 9;
     if (NRZ8_MUTATE != 21 && r->pipe != W(7)) return 1;
     if (NRZ8_MUTATE != 22 && (r->layout != W(8) || r->set != W(9))) return 2;
-    const bool indexed = (w18 >> 60 & 1) != 0;
+    const bool indexed = w18_indexed(w18);
     if (r->noff != noff) return 3;
     if (r->used != uint16_t(w18 >> 32)) return 6;
     if (r->indexed != indexed) return 8;
     unsigned q = HEAD_WORDS;
     for (unsigned i = 0; i < noff; i++, q += 3) {
         uint64_t addr = 0, size = 0; const uint64_t q0 = W(q), q1 = W(q + 1);
+        if (q1 & DYN_FIXED) { if (NRZ8_MUTATE != 29 && r->off[i] != uint32_t(q0)) return 3; continue; }
         if (!a.ub(unsigned(q1 & 255), unsigned(q1 >> 8 & 255), &addr, &size) || addr < q0 || addr - q0 > 0xffffffffull) return 3;
         if (NRZ8_MUTATE != 23 && r->off[i] != uint32_t(addr - q0)) return 3;
     }
@@ -372,6 +390,57 @@ template <class Wd, class A> static inline int expect_diff(Wd &&W, const nrz5_va
     else if (r->count != uint32_t(count) || r->instances != 1 || r->first != uint32_t(first) + k || r->first_instance != 0) return 8;
     return 0;
 }
+
+// ---- what the translation thread can describe of a draw it recorded itself (nrz8t::publish; NR-ZERO.md section 36) ---------------
+// The reasons a recorded draw is not a template (the numbers of the line "[nr] z8, translation thread: ... not describable").
+enum { P_OK = 0, P_NOT_SERVED = 1, P_STATIC = 2, P_MANY = 3, P_ENTRY = 4, P_GUARD = 5, P_STAGES = 6, P_OFFSET = 7, P_N = 8 };
+// The plan of the draw's shader set (nr_desc.h) against the values its tail bound. A template can carry: every ring block as a
+// dynamic offset (RING_DYN) and every support / c1 block either as a dynamic buffer whose offset is the entry's (FIXED_DYN - what a
+// device with dynamic uniform buffers on gives EVERY set of the game) or baked into the set (FIXED_STAT). It cannot carry a ring
+// block baked into the set (RING_STAT, DM_NR_DESC_SPLIT: the set itself depends on the block's offset).
+static inline int plan_form(const nr_dplan &p, const nrz5_vals &v) {
+    if (p.why) return P_NOT_SERVED;
+    if (NRZ8_MUTATE == 27 && p.nubo != p.ndyn) return P_STATIC;
+    if (p.nstat || p.ndyn != v.noff) return P_STATIC;
+    if (p.nimg > MAX_ROWS || v.noff > MAX_DYN) return P_MANY;
+    return P_OK;
+}
+// Fills d (dynamic offsets, vertex ranges, texture rows; the caller sets site, fixid, first_index, k) from the plan, the values and
+// the translation thread's State. copy[u]: the bytes NR-08 serves of ring block u (the plan's). A: as match()'s. P_OK or the reason.
+template <class A> static inline int describe(const nr_dplan &p, const uint32_t *copy, const nrz5_vals &v, A &&a, Desc &d) {
+    if (const int w = plan_form(p, v)) return w;
+    d.v = &v; d.noff = v.noff; uint32_t seen = 0;
+    for (unsigned i = 0; i < d.noff; i++) d.dyn[i] = Desc::Dyn{};
+    for (unsigned u = 0; u < p.nubo; u++) {
+        const nr_drow &r = p.row[p.ubo_row[u]]; uint64_t addr = 0, size = 0;
+        if (r.kind != NRD_K_RING_DYN || r.dyn_at >= v.noff || (seen >> r.dyn_at & 1) || !a.ub(unsigned(r.ns), unsigned(r.slot), &addr, &size)) return P_STATIC;
+        seen |= 1u << r.dyn_at; Desc::Dyn &x = d.dyn[r.dyn_at]; x.st = r.ns; x.sl = r.slot; x.addr = addr; x.rbytes = r.bytes; x.copy = copy[u];
+    }
+    for (unsigned i = 0; i < p.nrow; i++) {
+        const nr_drow &r = p.row[i]; if (r.kind != NRD_K_FIXED_DYN) continue;
+        if (r.dyn_at >= v.noff || (seen >> r.dyn_at & 1)) return P_STATIC;
+        seen |= 1u << r.dyn_at; d.dyn[r.dyn_at].fixed = 1;
+    }
+    if (seen != (1u << v.noff) - 1u) return P_STATIC;   // (every offset of the set is one of the two kinds; v.noff <= MAX_DYN)
+    unsigned nvb = 0;
+    for (uint32_t m = v.used; m; m &= m - 1) {
+        const uint32_t i = uint32_t(__builtin_ctz(m)); uint64_t addr = 0, size = 0;
+        if (nvb >= MAX_VB || !a.vb(i, &addr, &size)) return P_MANY;
+        d.vb[nvb].at = uint8_t(i); d.vb[nvb].addr = addr; d.vb[nvb].size = size; ++nvb;
+    }
+    d.nvb = nvb; d.nrow = p.nimg;
+    for (unsigned i = 0; i < p.nimg; i++) {
+        const nr_drow &r = p.row[p.img_row[i]];
+        d.row[i].ns = r.ns; d.row[i].slot = r.slot; d.row[i].samp = r.samp; d.row[i].tex = a.tex(r.ns, r.slot); d.row[i].smp = r.samp != 0xff ? a.samp(r.ns, r.samp) : 0;
+    }
+    return P_OK;
+}
+
+// [DM_NR_Z8_THREAD, NR-ZERO.md sections 28 and 36] Does the walk get its own thread? want: the switch (0 / 1). nb_own: DM_NB_OWN
+// (the game's default: a frame's last submission is queued as the frame's open job). It does not matter: an open job is numbered
+// by the queue exactly as any submission (hle_nvn.c x_push: the next number, under the lock the post is made under - the front
+// compares the number it announced with the number the job got at every submission, xbg_nr_z8_sub_end).
+static inline int walker_thread(int want, int nb_own) { if (NRZ8_MUTATE == 30 && nb_own) return 0; return want == 1 ? 1 : 0; }
 
 // One writer (the translation thread), readers validate with the slot's version (as nr_z5p.h: 0 = never written, odd = being
 // written); every word an atomic. A reader copies only the words the template has.
