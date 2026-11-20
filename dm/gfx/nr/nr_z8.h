@@ -1,0 +1,384 @@
+// [DOS2] NR-ZERO Z8 (DM_NR_Z8, docs/dos2/nr/NR-ZERO.md section 25): the pure part of "the thread that submits knows the draw".
+// C++, no Vulkan / engine object: the engine side is xbg_nr_z8.inc, the host test tests/nr_z8_test.cpp.
+// Needs dm/gfx/nvn/nvn_obj.h before it (the record opcodes and payloads, nvn_nb_draw.h, nvn_nb_state.h).
+//
+// Z5 (nr_z5p.h) PREDICTS the values of a draw record from the last record of the same site. Z8 makes the answer exact:
+//   fold     the submitting thread walks the records of a submission in the order the translation thread will execute them (walk():
+//            OP_JUMP / OP_CALL / OP_X_NB_STATE blocks with their per-epoch dictionary / OP_X_NATIVE_DRAW, as execute()) and applies
+//            every record that writes the backend's State to its own copy (fold(): the statements of execute()'s cases, kept equal by
+//            tests/source_structure_test.py; OP_X_NB_DRAW binds through nbd_apply and OP_X_NR_STATE through nr_state3.h's apply - the
+//            translation thread's own functions). The copy is the State the translation thread will have at each record.
+//   fix id   the part of that State a draw's resolution reads besides tables (targets, viewport, pools, programs, vertex format,
+//            blend, depth-stencil, raster, storage bindings), in five groups; each group's content gets an id from a dictionary that
+//            compares bytes (Dict), the five ids one more: equal fix ids = equal bytes. Ids are never handed out twice.
+//   key      site words (nr_z5p.h) + fix id pick a slot; the slot's template names what else the resolution read - the texture /
+//            sampler handles of the plan's rows, the vertex ranges of the pipeline's bindings, the uniform slots and sizes - WITH the
+//            values they had (the translation thread publishes them from its own State). match() compares them with the copy: a
+//            template is used only for a draw whose every compared word is equal.
+// What is exact by this: the draw's plan, NR-08 entry and NR-09 entry are functions of the compared words and of the translation
+// thread's tables, whose generations it checks when it executes the record. What stays "of the moment" (ring offsets, views, image
+// states, the open pass) is resolved by the translation thread per draw as before and compared (nr_z5r.h Reader).
+#ifndef DM_NR_Z8_H
+#define DM_NR_Z8_H
+#include <atomic>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <new>
+#include "nr_z5p.h"
+#include "nr_state3.h"
+
+// The mutation switch of the host test (never defined in the engine build): NRZ8_MUTATE = k - 1 a REF block is executed without its
+// epoch check, 2 OP_CALL is not followed, 3 the stencil fold ignores the face mask, 4 a vertex-stream record is folded without its
+// first index, 5 the dictionary answers by four bits of the hash alone, 6 a group's id is not refreshed when the fold marked it, 7 match() does not
+// compare the fix id, 8 match() does not compare the texture rows, 9 match() does not compare the vertex ranges, 10 match() does not
+// compare the uniform sizes, 11 the table's reader does not look at the version after the copy, 12 OP_JUMP is not followed,
+// 13 the depth range is folded into the wrong words, 14 match() does not compare the sampler of a row.
+// (9 is the one that need NOT fail: the vertex ranges - like the uniform addresses - give values the translation thread resolves again and
+// compares at the moment; without the compare here a draw is only written ahead in vain. The texture rows, the fix id and the uniform
+// sizes pick the ANSWER, which is not resolved again: 7, 8, 10, 14 must fail.)
+#ifndef NRZ8_MUTATE
+#define NRZ8_MUTATE 0
+#endif
+
+namespace nrz8 {
+
+// ---- fold: what a record leaves in State -------------------------------------------------------------------------------------
+// The dirty bits name the fix group (or table) the record wrote.
+enum : unsigned { D_TARGET = 1u << 0, D_PROG = 1u << 1, D_BLEND = 1u << 2, D_DEPTH = 1u << 3, D_STORE = 1u << 4,   // groups 0..4
+                  D_VB = 1u << 5, D_UB = 1u << 6, D_TEX = 1u << 7, D_OTHER = 1u << 8, D_BAD = 1u << 31 };
+enum { GROUPS = 5 };
+template <class T> static inline bool rd(T &o, const uint8_t *p, size_t n) { if (n < sizeof(T)) return false; memcpy(&o, p, sizeof o); return true; }
+template <class T> static inline void rdv(T &o, const uint8_t *p, size_t n) { memset(&o, 0, sizeof o); memcpy(&o, p, n < sizeof(T) ? n : sizeof(T)); }
+
+// One plain record of op (payload p, n bytes) into the State-shaped S. prog(program, stages): the program bind (the copy keeps the
+// program word per stage; the translation thread its shaders); vattr(state, attributes, n): xbg_vertex_attributes_replace.
+// 0 = the record writes no State; D_BAD = a record execute() would stop on.
+// Every case is the statement of execute()'s case of the same op (xbg_game.cpp), `state` spelled st.
+template <class S, class Prog, class Vattr> static inline unsigned fold(S &st, uint32_t op, const uint8_t *p, size_t n, Prog &&prog, Vattr &&vattr) {
+    switch (op) {
+    case OP_SET_RT: { p_set_rt a; if (!rd(a, p, n)) return D_BAD; st.rt = a; return D_TARGET; }
+    case OP_VIEWPORTS: { p_viewports a; if (!rd(a, p, n) || !(a.first == 0 && a.n == 1)) return D_BAD;
+        st.viewport.x = a.v[0][0]; st.viewport.y = a.v[0][1]; st.viewport.width = a.v[0][2]; st.viewport.height = a.v[0][3]; return D_TARGET; }
+    case OP_SCISSOR: { p_scissor a; if (!rd(a, p, n) || !(a.w >= 0 && a.h >= 0)) return D_BAD; st.scissor = {{a.x, a.y}, {uint32_t(a.w), uint32_t(a.h)}}; return D_TARGET; }
+    case OP_DEPTH_RANGE: { p_depth_range a; if (!rd(a, p, n)) return D_BAD;
+        if (NRZ8_MUTATE == 13) { st.viewport.minDepth = a.f; st.viewport.maxDepth = a.n; return D_TARGET; }
+        st.viewport.minDepth = a.n; st.viewport.maxDepth = a.f; return D_TARGET; }
+    case OP_BIND_PROGRAM: { p_bind_program a; if (!rd(a, p, n)) return D_BAD; return prog(a.prog, a.stages) ? D_PROG : D_BAD; }
+    case OP_BIND_STATE: { p_bind_state a; if (!rd(a, p, n)) return D_BAD;
+        switch (a.kind) {
+        case 0: { blend_st b; memcpy(&b, a.bytes, sizeof(b)); st.blend[b.target] = b; return D_BLEND; }
+        case 1: memcpy(&st.color, a.bytes, sizeof(st.color)); return D_BLEND;
+        case 2: memcpy(&st.mask, a.bytes, sizeof(st.mask)); return D_BLEND;
+        case 3: memcpy(&st.ms, a.bytes, sizeof(st.ms)); return D_BLEND;
+        case 4: memcpy(&st.poly, a.bytes, sizeof(st.poly)); return D_DEPTH;
+        case 5: memcpy(&st.ds, a.bytes, sizeof(st.ds)); return D_DEPTH;
+        default: return D_BAD; } }
+    case OP_BIND_VATTR: { p_bind_vattr a; rdv(a, p, n);
+        if (!(a.first == 0 && a.n >= 0 && a.n <= 16 && n >= offsetof(p_bind_vattr, st) + size_t(a.n) * 4)) return D_BAD;
+        return vattr(st.attrib, reinterpret_cast<const uint32_t *>(a.st), a.n) == 0 ? D_PROG : D_BAD; }
+    case OP_BIND_VSTREAM: { p_bind_vstream a; rdv(a, p, n);
+        if (!(a.first >= 0 && a.n >= 0 && a.first + a.n <= 16 && n >= offsetof(p_bind_vstream, st) + size_t(a.n) * sizeof(vs_st))) return D_BAD;
+        memcpy(st.stream + (NRZ8_MUTATE == 4 ? 0 : a.first), a.st, a.n * sizeof(vs_st)); return D_PROG; }
+    case OP_BIND_VBUF: { p_bind_vbuf a; rdv(a, p, n);
+        if (!(a.first >= 0 && a.n >= 0 && a.first + a.n <= 16 && n >= offsetof(p_bind_vbuf, r) + size_t(a.n) * sizeof(NVNbufferRange))) return D_BAD;
+        memcpy(st.vb + a.first, a.r, a.n * sizeof(NVNbufferRange)); return D_VB; }
+    case OP_BIND_UBO: case OP_BIND_SSBO: { p_bind_buf a; if (!rd(a, p, n) || !(a.stage >= 0 && a.stage < 6 && a.index >= 0 && a.index < 16)) return D_BAD;
+        (op == OP_BIND_UBO ? st.ub : st.sb)[a.stage][a.index] = {a.addr, a.size}; return op == OP_BIND_UBO ? D_UB : D_STORE; }
+    case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: { p_bind_handles a; rdv(a, p, n);
+        if (!(a.stage >= 0 && a.stage < 6 && a.first >= 0 && a.n >= 0 && a.n <= 32 && a.first + a.n <= (op == OP_BIND_IMG ? 16 : 128) && n >= offsetof(p_bind_handles, h) + size_t(a.n) * 8)) return D_BAD;
+        uint64_t *dst = op == OP_BIND_IMG ? st.img[a.stage] : op == OP_BIND_SAMP ? st.samp[a.stage] : st.tex[a.stage];
+        memcpy(dst + a.first, a.h, a.n * 8); return op == OP_BIND_IMG ? D_STORE : D_TEX; }
+    case OP_STENCIL: { p_stencil a; if (!rd(a, p, n) || !(a.face >= 0 && a.face <= 3 && a.which >= 0 && a.which <= 2)) return D_BAD;
+        for (unsigned i = 0; i < 2; i++) if ((a.face & (1 << i)) || NRZ8_MUTATE == 3) { if (a.which == 0) st.stencil_compare[i] = a.value_mask; else if (a.which == 1) st.stencil_write[i] = a.mask; else st.stencil_ref[i] = a.ref; }
+        return D_DEPTH; }
+    case OP_POLY_OFFSET: { p_poly_offset a; if (!rd(a, p, n)) return D_BAD; st.bias[0] = a.factor; st.bias[1] = a.units; st.bias[2] = a.clamp; return D_DEPTH; }
+    case OP_SET_TEX_POOL: { p_set_pool a; if (!rd(a, p, n) || !a.pool) return D_BAD; st.texture_pool = *a.pool; return D_TARGET; }
+    case OP_SET_SAMP_POOL: { p_set_pool a; if (!rd(a, p, n) || !a.pool) return D_BAD; st.sampler_pool = *a.pool; return D_TARGET; }
+    case OP_COPY_STRIDE: { p_copy_stride a; if (!rd(a, p, n) || a.stride < 0) return D_BAD; st.copy_stride = a.stride; return D_OTHER; }
+    case OP_COPY_IMAGE_STRIDE: { p_copy_stride a; if (!rd(a, p, n) || a.stride < 0) return D_BAD; st.copy_image_stride = a.stride; return D_OTHER; }
+    case OP_BLEND_COLOR: { p_blend_color a; if (!rd(a, p, n)) return D_BAD; memcpy(st.blend_color, a.rgba, 16); return D_BLEND; }
+    case OP_X_PATCH_SIZE: { uint32_t size; if (!rd(size, p, n) || !size) return D_BAD; st.patch_size = size; return D_DEPTH; }
+    case OP_X_DEPTH_BOUNDS: { xbg_depth_bounds a; if (!rd(a, p, n)) return D_BAD; st.bounds = a; return D_DEPTH; }
+    case OP_X_PRIM_RESTART: { p_prim_restart a; if (!rd(a, p, n)) return D_BAD; st.restart = a; return D_DEPTH; }
+    case OP_X_DEPTH_CLAMP: { p_flag a; if (!rd(a, p, n)) return D_BAD; st.depth_clamp = a.on != 0; return D_DEPTH; }
+    case OP_X_RAST_DISCARD: { p_flag a; if (!rd(a, p, n)) return D_BAD; st.rast_discard = a.on != 0; return D_DEPTH; }
+    case OP_X_ALPHA_REF: { p_alpha_ref a; if (!rd(a, p, n)) return D_BAD; st.alpha_ref = a.ref; return D_BLEND; }
+    default: return 0;
+    }
+}
+// The ops fold() knows (the walker's "a state record": it ends no run and is applied; anything else ends the run in hand).
+static inline bool is_state_op(uint32_t op) {
+    switch (op) {
+    case OP_SET_RT: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
+    case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
+    case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: case OP_COPY_IMAGE_STRIDE: case OP_BLEND_COLOR: case OP_X_PATCH_SIZE: case OP_X_DEPTH_BOUNDS:
+    case OP_X_PRIM_RESTART: case OP_X_DEPTH_CLAMP: case OP_X_RAST_DISCARD: case OP_X_ALPHA_REF: return true;
+    default: return false;
+    }
+}
+// The dirty bits of an OP_X_NR_STATE record (nr_state3.h), from its header: the parts NR3_DEFINE_APPLY_RAW writes. A header bit this
+// list does not know marks everything.
+static inline unsigned dirty_of_nr3(const uint8_t *p, size_t n) {
+    nr3_hdr h; if (n < sizeof h) return D_BAD; memcpy(&h, p, sizeof h);
+    unsigned d = 0;
+    if (h.nprog || (h.have & (NR3_H_VATTR | NR3_H_VSTREAM))) d |= D_PROG;
+    if (h.have & (NR3_H_DS | NR3_H_SVMASK | NR3_H_SMASK | NR3_H_SREF | NR3_H_POLY)) d |= D_DEPTH;
+    if (h.blend || (h.have & (NR3_H_COLOR | NR3_H_ALPHA))) d |= D_BLEND;
+    if (h.vb) d |= D_VB;
+    if (h.have & ~unsigned(NR3_H_ALL)) d |= D_PROG | D_DEPTH | D_BLEND | D_VB;
+    return d;
+}
+
+// ---- the walk: the records of one command handle in execution order -------------------------------------------------------------
+// H:  void state_op(uint32_t op, const uint8_t *p, size_t n)     a record fold() knows (also inside a state block / a called handle)
+//     void nr_state(const uint8_t *p, size_t n)                  OP_X_NR_STATE
+//     void nb_draw(uint8_t *rec, size_t n, bool top)             OP_X_NB_DRAW payload (writable: the marks); top: reached without OP_CALL
+//     void other(uint32_t op)                                    any other record (it may write packets or state the fold does not hold)
+// The dictionary of OP_X_NB_STATE's DEF blocks is the backend's (xbg_nb_state.inc nbstate::defs): a REF executes the content of the
+// DEF of its (kind, id) in the same epoch, a REF without one is skipped.
+struct Def { uint32_t epoch; const uint8_t *p; };
+template <class H> struct Walker {
+    Def *defs = nullptr; H *h = nullptr; uint64_t ref_miss = 0, records = 0;
+    bool init() { defs = static_cast<Def *>(calloc(size_t(NBS_KINDS) * NBS_MAX_IDS, sizeof(Def))); return defs != nullptr; }
+    void destroy() { free(defs); defs = nullptr; }
+    // false: a record the walk cannot follow (the copy is no longer the State of the translation thread).
+    bool walk(const uint8_t *pc, unsigned depth, uint64_t &budget, bool top) {
+        if (depth >= 64 || !pc) return false;
+        for (;;) {
+            if (budget++ >= 10000000) return false;
+            op_hdr hd; memcpy(&hd, pc, 8);
+            if (hd.size < 8 || (hd.size & 7) || hd.size > (64u << 20)) return false;
+            const uint8_t *p = pc + 8; const size_t n = hd.size - 8; ++records;
+            switch (hd.op) {
+            case OP_END: return true;
+            case OP_BEGIN: break;
+            case OP_JUMP: { uint64_t t; if (!rd(t, p, n)) return false; if (NRZ8_MUTATE == 12) break; pc = reinterpret_cast<const uint8_t *>(uintptr_t(t)); if (!pc) return false; continue; }
+            case OP_CALL: { uint64_t t; if (!rd(t, p, n)) return false; h->other(hd.op);
+                if (NRZ8_MUTATE != 2 && !walk(reinterpret_cast<const uint8_t *>(uintptr_t(t)), depth + 1, budget, false)) return false;
+                h->other(hd.op); break; }
+            case OP_X_NATIVE_DRAW: h->other(hd.op); if (!walk(p, depth + 1, budget, false)) return false; h->other(hd.op); break;
+            case OP_X_NB_STATE: { nbs_hdr sh; nbs_view v[NBS_KINDS]; const int nb = nbs_parse(p, n, &sh, v); if (nb <= 0) return false;
+                for (int i = 0; i < nb; i++) { const nbs_view &b = v[i]; const uint8_t *c = b.content;
+                    Def &d = defs[size_t(b.b.kind) * NBS_MAX_IDS + b.b.id];
+                    if (b.b.how == NBS_B_REF) { if ((d.epoch != sh.epoch && NRZ8_MUTATE != 1) || !d.p) { ++ref_miss; continue; } c = d.p; }
+                    else if (b.b.how == NBS_B_DEF) d = Def{sh.epoch, c};
+                    if (!walk(c, depth + 1, budget, false)) return false; }
+                break; }
+            case OP_X_NR_STATE: h->nr_state(p, n); break;
+            case OP_X_NB_DRAW: h->nb_draw(const_cast<uint8_t *>(p), n, top); break;
+            default: if (is_state_op(hd.op)) h->state_op(hd.op, p, n); else h->other(hd.op); break;
+            }
+            pc += hd.size;
+        }
+    }
+};
+
+// ---- Dict: content -> id, compared byte for byte ----------------------------------------------------------------------------
+// Ids count up for the life of the dictionary and are never handed out twice: when the table or the arena is full it is emptied (the
+// old ids are simply never answered again). One thread.
+static inline uint64_t hash_bytes(const void *p, size_t n) {
+    const uint8_t *b = static_cast<const uint8_t *>(p); uint64_t h = 0x9E3779B97F4A7C15ull ^ (uint64_t(n) * 0xff51afd7ed558ccdull);
+    for (; n >= 8; n -= 8, b += 8) { uint64_t w; memcpy(&w, b, 8); h = (h ^ w) * 0xBF58476D1CE4E5B9ull; h ^= h >> 29; }
+    if (n) { uint64_t w = 0; memcpy(&w, b, n); h = (h ^ w) * 0xBF58476D1CE4E5B9ull; h ^= h >> 29; }
+    return h ^ h >> 32;
+}
+struct Dict {
+    struct E { uint64_t h; uint32_t off, size, id, used; };
+    E *e = nullptr; uint8_t *arena = nullptr; uint32_t cap = 0, n = 0, acap = 0, aused = 0, next_id = 1; uint64_t clears = 0, finds = 0, news = 0;
+    bool init(uint32_t entries, uint32_t bytes) {
+        while (entries & (entries - 1)) entries &= entries - 1;
+        if (!entries) return false;
+        e = static_cast<E *>(calloc(entries, sizeof(E))); arena = static_cast<uint8_t *>(malloc(bytes));
+        if (!e || !arena) { free(e); free(arena); e = nullptr; arena = nullptr; return false; }
+        cap = entries; acap = bytes; return true;
+    }
+    void destroy() { free(e); free(arena); e = nullptr; arena = nullptr; cap = 0; }
+    void clear() { memset(e, 0, size_t(cap) * sizeof(E)); n = 0; aused = 0; ++clears; }
+    // 0 = the content is larger than the arena (never an id).
+    uint32_t id_of(const void *p, uint32_t size) {
+        if (size > acap) return 0;
+        const uint64_t hh = NRZ8_MUTATE == 5 ? (hash_bytes(p, size) & 15u) : hash_bytes(p, size);
+        for (int round = 0; round < 2; round++) {
+            uint32_t i = uint32_t(hh) & (cap - 1);
+            for (;; i = (i + 1) & (cap - 1)) {
+                E &x = e[i];
+                if (!x.used) break;
+                if (x.h == hh && x.size == size && (NRZ8_MUTATE == 5 || !memcmp(arena + x.off, p, size))) { ++finds; return x.id; }
+            }
+            if (n * 2 < cap && aused + size <= acap) {
+                E &x = e[i]; x.h = hh; x.off = aused; x.size = size; x.id = next_id++; x.used = 1; memcpy(arena + aused, p, size); aused += (size + 7u) & ~7u; ++n; ++news;
+                if (!next_id) next_id = 1;   // (2^32 distinct contents: not in a session)
+                return x.id;
+            }
+            clear();
+        }
+        return 0;
+    }
+};
+
+// The five groups of the fix part, serialized (whole fields, in a fixed order). sprog: the program word of each stage.
+// buf: room for GROUP_MAX bytes. Returns the bytes written.
+enum { GROUP_MAX = 2560 };
+template <class S> static inline uint32_t group_bytes(int g, const S &st, const uint64_t *sprog, uint8_t *buf) {
+    uint8_t *q = buf;
+    auto put = [&q](const void *p, size_t n) { memcpy(q, p, n); q += n; };
+    switch (g) {
+    case 0: { put(&st.rt, sizeof st.rt); put(&st.viewport, sizeof st.viewport); put(&st.scissor, sizeof st.scissor);
+        const uint64_t w[6] = {uint64_t(uintptr_t(st.texture_pool.pool)), uint64_t(st.texture_pool.off), uint64_t(uint32_t(st.texture_pool.n)),
+                               uint64_t(uintptr_t(st.sampler_pool.pool)), uint64_t(st.sampler_pool.off), uint64_t(uint32_t(st.sampler_pool.n))};
+        put(w, sizeof w); break; }
+    case 1: put(sprog, 6 * sizeof(uint64_t)); put(st.attrib, sizeof st.attrib); put(st.stream, sizeof st.stream); break;
+    case 2: put(st.blend, sizeof st.blend); put(&st.color, sizeof st.color); put(&st.mask, sizeof st.mask); put(&st.ms, sizeof st.ms);
+        put(st.blend_color, sizeof st.blend_color); put(&st.alpha_ref, sizeof st.alpha_ref); break;
+    case 3: put(&st.ds, sizeof st.ds); put(&st.poly, sizeof st.poly); put(st.bias, sizeof st.bias); put(st.stencil_compare, sizeof st.stencil_compare);
+        put(st.stencil_write, sizeof st.stencil_write); put(st.stencil_ref, sizeof st.stencil_ref); put(&st.bounds, sizeof st.bounds); put(&st.restart, sizeof st.restart);
+        put(&st.depth_clamp, sizeof st.depth_clamp); put(&st.rast_discard, sizeof st.rast_discard); put(&st.patch_size, sizeof st.patch_size); break;
+    default: put(st.sb, sizeof st.sb); put(st.img, sizeof st.img); break;
+    }
+    return uint32_t(q - buf);
+}
+// The fix id of the copy: group ids refreshed for the groups the fold marked, then the id of the five.
+struct Fix {
+    Dict g[GROUPS], tuple; uint32_t gid[GROUPS] = {}, id = 0; unsigned dirty = (1u << GROUPS) - 1; bool ok = false; uint64_t refreshed = 0, asked = 0;
+    bool init() { ok = true; for (auto &d : g) ok = d.init(4096, 1u << 20) && ok; ok = tuple.init(16384, 1u << 20) && ok; return ok; }
+    void destroy() { for (auto &d : g) d.destroy(); tuple.destroy(); ok = false; }
+    void mark(unsigned d) { dirty |= d & ((1u << GROUPS) - 1); }
+    template <class S> uint32_t get(const S &st, const uint64_t *sprog) {
+        ++asked;
+        if (!dirty || NRZ8_MUTATE == 6) { if (id) return id; }
+        uint8_t buf[GROUP_MAX]; bool moved = !id;
+        for (unsigned m = dirty; m; m &= m - 1) { const int k = __builtin_ctz(m); const uint32_t n = group_bytes(k, st, sprog, buf); const uint32_t x = g[k].id_of(buf, n); ++refreshed;
+            if (x != gid[k]) { gid[k] = x; moved = true; } }
+        dirty = 0;
+        if (moved) id = tuple.id_of(gid, sizeof gid);
+        return id;
+    }
+    // (verify) the id from scratch: every group serialized again.
+    template <class S> uint32_t fresh(const S &st, const uint64_t *sprog) {
+        uint8_t buf[GROUP_MAX]; uint32_t x[GROUPS];
+        for (int k = 0; k < GROUPS; k++) { const uint32_t n = group_bytes(k, st, sprog, buf); x[k] = g[k].id_of(buf, n); }
+        return tuple.id_of(x, sizeof x);
+    }
+};
+
+// ---- the template of a slot: the values (as nr_z5p.h) + the words the resolution read, packed as 64-bit words ---------------------
+enum { MAX_DYN = NRZ5T_MAX_DYN, MAX_VB = NRZ5T_MAX_VB, MAX_ROWS = 12, HEAD_WORDS = 19, MAX_WORDS = HEAD_WORDS + MAX_DYN * 3 + MAX_VB * 5 + MAX_ROWS * 3 };
+// What the translation thread describes of a draw it recorded itself.
+struct Desc {
+    nrz5_site site; uint32_t fixid = 0;
+    const nrz5_vals *v = nullptr; uint32_t first_index = 0, k = 0;           // the values its tail bound; the folds
+    unsigned noff = 0; struct { uint8_t st, sl; uint64_t addr; uint32_t rbytes, copy; } dyn[MAX_DYN];   // dynamic offset i: the uniform slot, the address bound, the row's bytes, the bytes served
+    unsigned nvb = 0; struct { uint8_t at; uint64_t addr, size; } vb[MAX_VB];                            // each used binding: the range bound
+    unsigned nrow = 0; struct { uint8_t ns, slot, samp; uint64_t tex, smp; } row[MAX_ROWS];              // each texture row of the plan: handles bound
+};
+// 0 = the draw cannot be a template (an offset above its address).
+static inline unsigned pack(const Desc &d, uint64_t *w) {
+    const nrz5_vals &v = *d.v;
+    if (d.noff > MAX_DYN || d.nvb > MAX_VB || d.nrow > MAX_ROWS || v.noff != d.noff) return 0;
+    unsigned n = HEAD_WORDS;
+    memcpy(w + 1, d.site.w, 6 * 8);
+    w[7] = v.pipe; w[8] = v.layout; w[9] = v.set; w[10] = v.indexed ? v.ib : 0; w[11] = v.indexed ? v.ibo : 0;
+    memcpy(w + 12, v.vp, NRZ5_VP_BYTES); memcpy(w + 15, v.sc, NRZ5_SC_BYTES);
+    w[17] = uint64_t(v.indexed ? v.it : 0u) | uint64_t(v.indexed ? d.first_index : 0u) << 32;
+    w[18] = uint64_t(d.k) | uint64_t(v.used) << 32 | uint64_t(d.noff) << 48 | uint64_t(d.nvb) << 52 | uint64_t(d.nrow) << 56 | uint64_t(v.indexed ? 1 : 0) << 60;
+    for (unsigned i = 0; i < d.noff; i++) { if (!d.dyn[i].addr || d.dyn[i].addr < v.off[i]) return 0;
+        w[n++] = d.dyn[i].addr - v.off[i]; w[n++] = uint64_t(d.dyn[i].st) | uint64_t(d.dyn[i].sl) << 8 | uint64_t(d.dyn[i].copy) << 32; w[n++] = d.dyn[i].rbytes; }
+    for (unsigned j = 0; j < d.nvb; j++) { const unsigned at = d.vb[j].at & 15u; w[n++] = at; w[n++] = v.vb[at]; w[n++] = v.vbo[at]; w[n++] = d.vb[j].addr; w[n++] = d.vb[j].size; }
+    for (unsigned r = 0; r < d.nrow; r++) { w[n++] = uint64_t(d.row[r].ns) | uint64_t(d.row[r].slot) << 8 | uint64_t(d.row[r].samp) << 16; w[n++] = d.row[r].tex; w[n++] = d.row[r].smp; }
+    w[0] = uint64_t(n) | uint64_t(1) << 16 | uint64_t(d.fixid) << 32;
+    return n;
+}
+static inline unsigned words_of(uint64_t w0) { return unsigned(w0 & 0xffffu); }
+enum { M_OK = 0, M_SITE, M_FIX, M_TEX, M_VB, M_UBO, M_FORM, M_N };
+// The submitting thread: is this template the one of the draw it is looking at, and then its values. A: the copy -
+//   bool ub(unsigned st, unsigned sl, uint64_t *addr, uint64_t *size)   uint64_t tex(unsigned ns, unsigned slot)
+//   bool vb(unsigned i, uint64_t *addr, uint64_t *size)                 uint64_t samp(unsigned ns, unsigned slot)
+// off: room for MAX_DYN offsets (v->off points at it). M_OK: every compared word is equal and v holds the draw's values.
+template <class A> static inline int match(const uint64_t *w, const nrz5_site *s, uint32_t fixid, int32_t count, int32_t instances, int32_t first, int32_t base_vertex,
+                                           int32_t base_instance, A &&a, nrz5_vals *v, uint32_t *off) {
+    const unsigned nw = words_of(w[0]);
+    if (!(w[0] >> 16 & 1) || nw < HEAD_WORDS || nw > MAX_WORDS) return M_FORM;
+    if (memcmp(w + 1, s->w, 6 * 8)) return M_SITE;
+    if (NRZ8_MUTATE != 7 && uint32_t(w[0] >> 32) != fixid) return M_FIX;
+    const unsigned noff = unsigned(w[18] >> 48 & 15), nvb = unsigned(w[18] >> 52 & 15), nrow = unsigned(w[18] >> 56 & 15);
+    if (noff > MAX_DYN || nvb > MAX_VB || nrow > MAX_ROWS || nw != HEAD_WORDS + noff * 3 + nvb * 5 + nrow * 3) return M_FORM;
+    memset(v, 0, sizeof *v);
+    const uint64_t *q = w + HEAD_WORDS;
+    v->pipe = w[7]; v->layout = w[8]; v->set = w[9]; v->noff = noff; v->off = off;
+    for (unsigned i = 0; i < noff; i++, q += 3) {
+        uint64_t addr = 0, size = 0;
+        if (!a.ub(unsigned(q[1] & 255), unsigned(q[1] >> 8 & 255), &addr, &size) || !addr || !size) return M_UBO;
+        const uint64_t lim = q[2] ? q[2] : 65536u, copy = size < lim ? size : lim;
+        if (NRZ8_MUTATE != 10 && copy != (q[1] >> 32)) return M_UBO;
+        if (addr < q[0] || addr - q[0] > 0xffffffffull) return M_UBO;
+        off[i] = uint32_t(addr - q[0]);
+    }
+    v->used = uint16_t(w[18] >> 32);
+    for (unsigned j = 0; j < nvb; j++, q += 5) {
+        const unsigned at = unsigned(q[0] & 15); uint64_t addr = 0, size = 0;
+        if (!a.vb(at, &addr, &size)) return M_VB;
+        if (NRZ8_MUTATE != 9 && (addr != q[3] || size != q[4])) return M_VB;
+        v->vb[at] = q[1]; v->vbo[at] = q[2];
+    }
+    for (unsigned r = 0; r < nrow; r++, q += 3) {
+        const unsigned ns = unsigned(q[0] & 255), slot = unsigned(q[0] >> 8 & 255), sm = unsigned(q[0] >> 16 & 255);
+        if (NRZ8_MUTATE == 8) continue;
+        if (a.tex(ns, slot) != q[1]) return M_TEX;
+        if (NRZ8_MUTATE != 14 && (sm != 0xff ? a.samp(ns, sm) : 0) != q[2]) return M_TEX;
+    }
+    memcpy(v->vp, w + 12, NRZ5_VP_BYTES); memcpy(v->sc, w + 15, NRZ5_SC_BYTES);
+    v->indexed = (w[18] >> 60 & 1) != 0; v->count = uint32_t(count);
+    const uint32_t k = uint32_t(w[18]);
+    if (v->indexed) { v->it = uint32_t(w[17]); v->ib = w[10]; v->ibo = w[11]; v->instances = uint32_t(instances); v->first = uint32_t(w[17] >> 32); v->vertex_offset = int32_t(uint32_t(base_vertex) + k); v->first_instance = uint32_t(base_instance); }
+    else { v->instances = 1; v->first = uint32_t(first) + k; v->first_instance = 0; }
+    return M_OK;
+}
+
+// One writer (the translation thread), readers validate with the slot's version (as nr_z5p.h: 0 = never written, odd = being
+// written); every word an atomic. A reader copies only the words the template has.
+struct Slot { std::atomic<uint32_t> ver; std::atomic<uint64_t> w[MAX_WORDS]; };
+struct Table {
+    Slot *s = nullptr; uint32_t n = 0; uint64_t puts = 0, same = 0;
+    bool init(uint32_t slots) {
+        while (slots & (slots - 1)) slots &= slots - 1;
+        if (!slots) return false;
+        void *m = malloc(sizeof(Slot) * size_t(slots)); if (!m) return false;
+        s = static_cast<Slot *>(m); n = slots;
+        for (uint32_t i = 0; i < n; i++) { new (&s[i]) Slot; s[i].ver.store(0, std::memory_order_relaxed); for (int j = 0; j < MAX_WORDS; j++) s[i].w[j].store(0, std::memory_order_relaxed); }
+        return true;
+    }
+    void destroy() { free(static_cast<void *>(s)); s = nullptr; n = 0; }
+    uint32_t slot_of(const nrz5_site *site, uint32_t fixid) const { return uint32_t(nrz5_site_hash(site, fixid) >> 20) & (n - 1); }
+    // writer: the words of a template (nw of them, pack()'s) into slot i unless it holds them. Returns the slot's version (even).
+    uint32_t put(uint32_t i, const uint64_t *w, unsigned nw) {
+        Slot &x = s[i & (n - 1)];
+        const uint32_t v = x.ver.load(std::memory_order_relaxed);
+        if (v) { bool eq = true; for (unsigned j = 0; j < nw && eq; j++) eq = x.w[j].load(std::memory_order_relaxed) == w[j]; if (eq) { ++same; return v; } }
+        x.ver.store(v + 1, std::memory_order_release);
+        for (unsigned j = 0; j < nw; j++) x.w[j].store(w[j], std::memory_order_release);
+        uint32_t nv = v + 2; if (!nv) nv = 2;
+        x.ver.store(nv, std::memory_order_release); ++puts;
+        return nv;
+    }
+    // reader: the template of slot i as one consistent block (w: MAX_WORDS of room) and its version. false = empty, being written, or
+    // written meanwhile.
+    bool get(uint32_t i, uint64_t *w, uint32_t *ver) const {
+        const Slot &x = s[i & (n - 1)];
+        const uint32_t v0 = x.ver.load(std::memory_order_acquire);
+        if (!v0 || (v0 & 1)) return false;
+        w[0] = x.w[0].load(std::memory_order_acquire);
+        unsigned nw = words_of(w[0]); if (nw > MAX_WORDS) nw = MAX_WORDS;
+        for (unsigned j = 1; j < nw; j++) w[j] = x.w[j].load(std::memory_order_acquire);
+        if (NRZ8_MUTATE != 11 && x.ver.load(std::memory_order_acquire) != v0) return false;
+        *ver = v0; return true;
+    }
+};
+
+// The words a draw record carries besides its mark (nbd_hdr): _pad0 = the stamp of the submission whose walk wrote them (1..255; a
+// record of a handle submitted again carries the later walk's stamp and is not taken), _pad2 = slot + 1, cond_addr (unused by a draw
+// without a render condition) = the fix id | the template's version << 32 (0: the walk had no template for the record).
+static inline uint8_t stamp_of(uint64_t sub) { return uint8_t(sub % 255u + 1u); }
+
+} // namespace nrz8
+#endif

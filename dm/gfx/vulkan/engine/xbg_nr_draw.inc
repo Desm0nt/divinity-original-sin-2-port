@@ -78,7 +78,7 @@ struct VpCache{bool ok=false;VkViewport st{},vp{};bool sc_ok=false;VkRect2D sc_s
 struct Stats{uint64_t records=0,plain=0,lane=0,served=0,why[NRW_N]{},why_ne=0,learned=0,relearn=0,cmds=0,c_pipe=0,c_set=0,c_vb=0,c_ib=0,c_vp=0,c_sc=0,folded_i=0,folded_v=0,vindex=0,
     ua_calls=0,ua_short=0,ns=0,timed=0,checks=0,bad=0,bad_pipe=0,bad_bind=0,bad_vb=0,bad_ib=0,bad_vp=0,bad_sc=0,not_compared=0,tab_clears=0,
     quads=0,quad_pats=0,quad_bytes=0,ua_full=0,fills=0,blurs=0,pp_asked=0,pp_served=0;
-    uint64_t sp_n=0,sp_key=0,sp_vtx=0,sp_vp=0,sp_cmd=0,sp_tail=0;} s,su,sz;   // sz: [NR-ZERO Z3] the draws nrz3 answered (the same tail, its own counters)   // [NR-ZERO] a served draw by part (1 in 128; not in `ns`)   // pp_*: NR-30 DM_DOS2_PREPASS override draws   // s: engine draws (NR-09), su: the UI lane (NR-12)
+    uint64_t sp_n=0,sp_key=0,sp_vtx=0,sp_vp=0,sp_cmd=0,sp_tail=0;} s,su,sz,z8sz;   // sz: [NR-ZERO Z3] the draws nrz3 answered (the same tail, its own counters)   // [NR-ZERO] a served draw by part (1 in 128; not in `ns`)   // pp_*: NR-30 DM_DOS2_PREPASS override draws   // s: engine draws (NR-09), su: the UI lane (NR-12)
 Stats *S=&s;   // the counters of the draw in hand: set by lane(), read by fail() / done() of the same draw
 uint64_t next_ns=0,calls=0;unsigned told=0;
 // DM_NR_DRAW=2: does the record's texture-set id (NR-02, the game thread's view of the 2 x 32 slots) name the NR-08 entry the backend
@@ -145,7 +145,7 @@ void tick(){   // every submission (nbdraw::tick)
     if(__builtin_expect(nrz3::mode>0,0))nrz3::tick();   // [DOS2] NR-ZERO Z3: its lines
     if(__builtin_expect((nrzx::bmode|nrzx::cmode|nrzx::dmode)!=0,0))nrzx::tick();   // [DOS2] NR-ZERO Z3b / Z3c / Z3d: their line
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::tick();   // [DOS2] NR-ZERO Z5: its line
-    if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::tick();   // [DOS2] NR-ZERO Z5, the game thread's half: its lines
+    if(__builtin_expect(nrz5t::gmode!=0,0)){if(nrz5t::z8)nrz8t::tick();else nrz5t::tick();}   // [DOS2] NR-ZERO Z5, the game thread's half: its lines ([Z8] DM_NR_Z8: the submit walk's)
     if(__builtin_expect(nrmdi::mode>0,0))nrmdi::tick();   // [DOS2] NR-MDI: its line
     if(__builtin_expect(nrpo::mode>0,0))nrpo::tick();   // [DOS2] NR-POSONLY: its line
     if(__builtin_expect(nrps::mode>0,0))nrps::tick();   // [DOS2] NR-PRESKIN: its line
@@ -342,6 +342,7 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::draw_end(bc,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),   // [DOS2] NR-ZERO Z5 DM_NR_Z5=2: the same draw by the run assembler, compared
         indexed?uint32_t(indexed->instances):instances,indexed?H.first_index:uint32_t(first)+H.k,indexed?int32_t(indexed->base_vertex)+int32_t(H.k):0,indexed?uint32_t(indexed->base_instance):first_instance,cond_gpu_draw);
     S->cmds+=n;
+    if(__builtin_expect(nrz5t::z8,0)){nrz8t::Hint &zh=nrz8t::hint;zh.pent=H.have_ent?H.ent:nullptr;zh.zero=H.zero;zh.qpat=H.qpat;zh.pp=pp;zh.special=nrpo::P.on || nrps::P.on;zh.lane_gen=tab_gen();}   // [NR-ZERO Z8] what a template needs besides the values
     if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::recorded(bc,ui,cond_gpu_draw,H.t.key,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),z5i,z5f,z5v,z5b,H.first_index,H.k);   // [NR-ZERO Z5] =2: the comparison; the template of the record's slot
     }
     if(__builtin_expect(nrmdi::mode!=0,0) && dr)nrmdi::note(c,*dr,p,indexed,instances,first_instance);   // [DOS2] NR-MDI DM_NR_MDI=2: the batching count (-1: reads its switch once)

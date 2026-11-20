@@ -76,6 +76,7 @@ inline void other(){if(owner.load(std::memory_order_relaxed)==self() && g.init)g
 }
 namespace nrz5t{
 int gmode=0;                      // 0 off, 1 apply, 2 verify (set by nrz5::init)
+bool z8=false;                    // [NR-ZERO Z8] DM_NR_Z8 drives this reader: the runs are the submit walk's (xbg_nr_z8.inc), the templates nrz8t's
 bool held=false;VkCommandBuffer held_cmd{};
 nrz5r::Reader R;
 // the record in hand (nbdraw::apply): its header, whether it carries the NR tail, whether its draw reached the command section
@@ -104,7 +105,7 @@ bool init(int m){
         m,m==2?"verify - the translation thread records everything itself and compares the packets of every draw =1 would take":"apply",nrz5g::tab.n,size_t(nrz5g::tab.n)*sizeof(nrz5p::Slot)/1024,nrz5g::min_tails);
     return true;}
 // Everything written ahead goes back; the tap stops. (The table and the ring stay: the game thread may be inside them.)
-void release(){if(!gmode)return;if(nvn_nr_z5_enable)nvn_nr_z5_enable(0);nrz5g::armed.store(0,std::memory_order_release);
+void release(){if(!gmode)return;if(z8){z8=false;nrz8t::stop();}else{if(nvn_nr_z5_enable)nvn_nr_z5_enable(0);nrz5g::armed.store(0,std::memory_order_release);}
     if(held){held=false;nrsort::pend.store(VK_NULL_HANDLE,std::memory_order_relaxed);}R.drop();gmode=0;r_have=false;}
 inline void sync_pend(VkCommandBuffer cmd){
     if(R.holding && gmode==1){if(!held){held=true;held_cmd=cmd;nrsort::pend.store(cmd,std::memory_order_relaxed);}}
@@ -115,7 +116,8 @@ void cut(){R.flush(nrz5r::CUT_WRITE);held=false;nrsort::pend.store(VK_NULL_HANDL
 void lost(){if(R.holding){R.holding=false;nbmt::q.give_back_spare(R.run.chunk);nbmt::q.give_back_spare(R.run.side);++s.lost;red("a held chunk of %u taken draws outlived its command buffer: given back",R.j);}
     held=false;nrsort::pend.store(VK_NULL_HANDLE,std::memory_order_relaxed);}
 // nbdraw::apply, before the draw() of a record.
-void rec_begin(const nbd_hdr &h){r_h=h;r_have=(h.flags&NBD_F_NR)!=0 && !(h.flags&NBD_F_CHECK);r_done=false;}
+void rec_begin(const nbd_hdr &h,const uint8_t *rec){r_h=h;r_have=(h.flags&NBD_F_NR)!=0 && !(h.flags&NBD_F_CHECK);r_done=false;
+    if(z8)nrz8t::rec_begin(r_h,rec);}   // [NR-ZERO Z8] the words of a record another walk wrote are dropped; =2: the walk's copy of State against State
 // ... and after it: a marked record that did not reach the command section of the lane's tail.
 void rec_end(){
     if(r_have && !r_done && r_h._pad1){++s.missed;
@@ -172,9 +174,10 @@ void recorded(const BindCache &bc,bool ui,bool cond,uint32_t key,VkPipeline pipe
         const uint64_t bad0=R.st.v_bad;
         R.verify_end(readable?cc->data()+from:nullptr,readable?cc->used-from:0,[](const uint8_t *a,uint32_t na,const uint8_t *b,uint32_t nb){uint32_t at=0;return nbmt::same_stream(a,na,b,nb,&at);},sig());
         if(R.st.v_bad!=bad0)red("the packets the game thread wrote for a draw are not the packets the tail recorded (key %u, the values compared equal and the bind cache held the run's model)",key);
-        return;}   // (its template gave the right values: nothing to publish)
+        if(!z8)return;}   // (its template gave the right values: nothing to publish; [NR-ZERO Z8] the walk's answer for it is still compared, below)
     if(ui || cond || !r_have || r_h._pad2<=0 || !key)return;
     nrz5_vals v;vals_of(v,pipe,used,vb,vbo,ib,ibo,it,vp,sc,layout,set,no,off,indexed,count,instances,first,vertex_offset,first_instance);
+    if(z8){nrz8t::publish(r_h,key,v,first_index,k,plan_hint);return;}   // [NR-ZERO Z8] the slot's template with the words the resolution read, and the answer beside it
     nrz5_site site;nrz5_site_make(&site,key,r_h.draw==NBD_DRAW_IDX?NRZ5S_IDX:NRZ5S_ARRAYS,r_h.prim,r_h.itype,r_h.count,r_h.base_vertex,r_h.base_instance,r_h.instances,r_h.first,r_h.ibuf,state.vb[0].address);
     // the uniform slot of each dynamic offset: the plan of the shader set (NR-08)
     const nr_dplan *p=plan_hint;

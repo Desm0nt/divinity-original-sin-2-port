@@ -166,6 +166,11 @@ inline int xbg_nr_sort_default(){return 0;}
 // The app never sets them; safe-mode step 2 forces both to 0.
 inline int xbg_nr_z3_default(){return 0;}
 inline int xbg_nr_z5_default(){return 0;}
+// [DOS2] NR-ZERO Z8 (docs/dos2/nr/NR-ZERO.md section 25): DM_NR_Z8 - the thread that submits a recording folds its records into a copy of
+// State, answers each engine draw from a template keyed by the words of that copy and writes its packets; the translation thread takes
+// the answer without a key or a lookup. 0 on every family: never run on a phone, and by the model it lengthens the submitting thread
+// (the longest one after the change) - =2 on the Mi 14 Ultra first. The app never sets it; safe-mode step 2 forces 0.
+inline int xbg_nr_z8_default(){return 0;}
 // [DOS2] NR-ZERO Z3b / Z3c / Z3d (docs/dos2/nr/NR-ZERO.md section 13): DM_NR_Z3B - an NR-08 entry whose images were all quiet is not walked
 // while the image epoch stands; DM_NR_Z3C - the vertex / index range of a draw from a table under the zero-copy / static-copy epochs;
 // DM_NR_Z3D - a ring block in place by one word. 0 on every family until the phone runs (=2 verify first: bad 0, then the A/B). The app

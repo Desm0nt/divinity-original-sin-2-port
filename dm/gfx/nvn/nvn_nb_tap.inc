@@ -463,6 +463,23 @@ void nvn_nr_z5_enable(int on) { __atomic_store_n(&g_z5g_on, on && xbg_nr_z5_game
 #define Z5G_OTHER(op) do { if (Z5G_ON() && t_z5g_run && (op) != OP_X_NB_DRAW && (op) != OP_X_NB_STATE) { t_z5g_run = 0; xbg_nr_z5_game_other(); } } while (0)
 #define Z5G_END() do { if (Z5G_ON() && t_z5g_run) { t_z5g_run = 0; xbg_nr_z5_game_other(); } } while (0)
 #define Z5G_FRAME() do { if (Z5G_ON()) __atomic_fetch_add(&g_z5g_frame, 1, __ATOMIC_RELAXED); } while (0)
+// [DOS2] NR-ZERO Z8 (DM_NR_Z8 = 1 / 2; docs/dos2/nr/NR-ZERO.md section 25, dm/gfx/vulkan/engine/xbg_nr_z8.inc): the thread that submits a
+// recording walks its records before the job is queued - folds them into a copy of the backend's State and writes the recorder packets of
+// the engine draws it knows. Armed by the backend at its init (nvn_nr_z8_enable); 0: nvnQueueSubmitCommands pays one load.
+//   Z8G_SUBMIT_BEGIN   before the job is queued: the Z8 lock (one walk at a time, and the walks in the order of the queue: the job's
+//                      number is the next one under the lock), then the walk of the handles
+//   Z8G_SUBMIT_END     the job is queued: the lock is released
+//   Z8G_EXEC           the translation thread, before it hands a submission to the backend: its number
+static int g_z8g_on;
+static pthread_mutex_t g_z8g_mu = PTHREAD_MUTEX_INITIALIZER;
+void xbg_nr_z8_game_submit(const uint64_t *handles, int n, uint64_t sub) __attribute__((weak));
+void xbg_nr_z8_exec_sub(uint64_t sub) __attribute__((weak));
+void nvn_nr_z8_enable(int on);
+void nvn_nr_z8_enable(int on) { __atomic_store_n(&g_z8g_on, on && xbg_nr_z8_game_submit && xbg_nr_z8_exec_sub, __ATOMIC_RELEASE); }
+#define Z8G_ON() __builtin_expect(__atomic_load_n(&g_z8g_on, __ATOMIC_ACQUIRE), 0)
+#define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = Z8G_ON(); if (z8) { pthread_mutex_lock(&g_z8g_mu); xbg_nr_z8_game_submit((const uint64_t *)(h), (n), (next_sub)); } } while (0)
+#define Z8G_SUBMIT_END(z8) do { if (z8) pthread_mutex_unlock(&g_z8g_mu); } while (0)
+#define Z8G_EXEC(sub) do { if (Z8G_ON()) xbg_nr_z8_exec_sub(sub); } while (0)
 // ---- NB-15 (DM_NB_FOREIGN=1, default 0): the share of the fallback path, by caller class (classes: nvn_nb_tap.h NBF_*) ----
 // cmd_alloc (NBF_REC, after the NB-13a / NB-09 flushes, so their own records are classified first) files every record of every command
 // buffer; rec (NBF_DRAW) adds the draw records to the class of the record just filed. The packet bracket comes from the front end
@@ -567,6 +584,9 @@ static void nbf_draw(uint32_t op) {
 #define Z5G_OTHER(op) ((void)0)
 #define Z5G_END() ((void)0)
 #define Z5G_FRAME() ((void)0)
+#define Z8G_SUBMIT_BEGIN(z8, h, n, next_sub) do { (z8) = 0; } while (0)
+#define Z8G_SUBMIT_END(z8) ((void)(z8))
+#define Z8G_EXEC(sub) ((void)0)
 #define NBT(x) ((void)0)
 #define NBD_FOREIGN(o) ((void)0)
 #define NBD_TAKE(c) 0

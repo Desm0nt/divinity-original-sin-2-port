@@ -8251,7 +8251,8 @@ namespace nrsort{extern int mode;bool take(Commands &c,Descriptors &d,Pass &p,in
 // the old tail finishes the draw (dp / p are what descriptors_stable and create_pass would have left), 0 = not answered, nothing changed.
 namespace nrz3{extern int mode;void begin();int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);
     void served();void tick();void release();void span_end();extern uint64_t span_t0,span_calls,span_ns,span_n;extern bool ps_called;}
-namespace nrz5t{extern int gmode;extern bool held;extern const nr_dplan *plan_hint;void rec_begin(const nbd_hdr &h);void rec_end();void cut();void lost();void tick();}   // [DOS2] NR-ZERO Z5, the game thread's half (xbg_nr_z5g.inc)
+namespace nrz5t{extern int gmode;extern bool held;extern const nr_dplan *plan_hint;void rec_begin(const nbd_hdr &h,const uint8_t *rec);void rec_end();void cut();void lost();void tick();}   // [DOS2] NR-ZERO Z5, the game thread's half (xbg_nr_z5g.inc)
+namespace nrz8t{extern int mode;void guard(bool on);uint64_t pre_begin();void pre(uint64_t t0);int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);}   // [DOS2] NR-ZERO Z8 (xbg_nr_z8.inc): the hook of draw() for a record the submit walk answered
 namespace nrdraw{enum{F_GI=1,F_QUAD=2,F_UIOFF=4,F_PP=8,F_QUADP=16};extern int mode;extern bool armed;extern const nrd_tail *cur;void reset();void record(const nrd_tail *t);void stale();void tick();void release();
     extern int ui_mode;extern bool ui_rec;bool ui_pick();void ui_end();   // [DOS2] NR-12 DM_NR_UI: plain Iggy draw records through the same lane
     bool lane(Commands &c,Descriptors &d,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,unsigned flags,int draw_fast);
@@ -8265,6 +8266,7 @@ namespace nrdraw{enum{F_GI=1,F_QUAD=2,F_UIOFF=4,F_PP=8,F_QUADP=16};extern int mo
 namespace uix{void geo(const Pass &p,int prim0,bool quad_plain,int first0,int count0,int first,int count,const p_draw_idx *indexed,const std::vector<std::pair<uint32_t,Buffer*>> &vbufs,const Buffer *ib,VkIndexType itype,bool gi);
     void cache_draw(int prim0,bool quad_plain,int first0,int count0,uint32_t instances,const p_draw_idx *indexed,const std::vector<std::pair<uint32_t,Buffer*>> &vbufs,const Buffer *ib,VkIndexType itype);}   // [DOS2] NR-UIX (xbg_nr_uix.inc)
 void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances=1,uint32_t first_instance=0,const GpuIndirect *gi=nullptr){
+    const uint64_t z8t0=__builtin_expect(nrz8t::mode!=0,0)?nrz8t::pre_begin():0;   // [DOS2] NR-ZERO Z8: 1 engine draw in 64, the prologue's time up to the hook (0: one load)
     if(__builtin_expect(nrhack::shfar!=0,0) && !nbpost::inside){if(nrhack::shfar<0)nrhack::init();if(nrhack::shfar>0 && nrhack::far_draw()){if(nbchk::armed)nbchk::draw();return;}}   // [DOS2] N6 DM_HACK_SHFAR: the far cascade
     if(__builtin_expect(nrshc::live,0) && !nbpost::inside && nrshc::draw(prim,first,count,indexed,instances,first_instance,gi!=nullptr)){if(nbchk::armed)nbchk::draw();return;}   // [DOS2] NR-SHCACHE: a member of the cascade's layer
     if(nrocc::mode>0)nrocc::draw_enter(prim,first,count,indexed,instances);   // [DOS2] NR-03: inside an open pair the draw must reach the GPU
@@ -8367,7 +8369,16 @@ void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instan
     // [DOS2] NR-ZERO Z3 DM_NR_Z3 (0: one load and a not-taken branch): an engine draw with a record identity and none of the special forms asks the table first
     Descriptors *dp=nullptr;Pass p;int z3r=0;
     if(nrdraw::cur)nrz3::span_t0=(++nrz3::span_calls&63)?0:timing_clock();else nrz3::span_t0=0;   // "[nr] draw span": 1 engine draw in 64, from here to the end of the tail that records it
-    if(__builtin_expect(nrz3::mode!=0,0)){nrz3::begin();
+    // [DOS2] NR-ZERO Z8 DM_NR_Z8=1 (0: one load and a not-taken branch): a record the submit walk answered takes the answered half of nrz3::draw with that answer
+    if(__builtin_expect(nrz8t::mode!=0,0)){if(z8t0)nrz8t::pre(z8t0);
+#ifdef DM_GAME_DOS2
+        const bool z8g=ppg.on || nbpost::inside || nmg.saved || nsg.saved || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;   // the prologue changed State for this draw (an override, a twin, a redirect): State is not the walk's copy - not answered, not published
+#else
+        const bool z8g=ppg.on;
+#endif
+        nrz8t::guard(z8g);
+        if(nrz8t::mode==1 && !z8g && nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){if(nrz3::mode!=0)nrz3::begin();z3r=nrz8t::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}
+    if(__builtin_expect(nrz3::mode!=0,0) && !z3r){nrz3::begin();
         if(nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){z3r=nrz3::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}
     if(z3r!=2){   // (2: nrz3 answered the descriptors and the pass, its tail left the draw to the old tail below - as a lane() that returned false)
     if(z3r!=3)dp=&descriptors_stable(c,false);   // (3: nrz3 answered the descriptors; the read path of an image ended the open pass)
@@ -9554,12 +9565,18 @@ void exec_bind_handles(uint32_t op,const p_bind_handles &a,size_t n){need(a.stag
 #include "xbg_nb_order.inc"   // [DOS2] NB-17a / NB-17b: DM_NB_ORDER, a part executed segment by segment in the order tail's order (namespace nbord)
 #include "xbg_nb_own.inc"   // [DOS2] NB-21: DM_NB_OWN, the frame job that comes with a submission of the frame IR (namespace nbown)
 #include "xbg_nr_z5.inc"   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the packets of a run written apart from the bind cache - the comparison of =2 (namespace nrz5; before the lane, whose tail calls it)
+#define XBG_NR_Z8_PART 1
+#include "xbg_nr_z8.inc"   // [DOS2] NR-ZERO Z8 DM_NR_Z8: the submit walk's tables and what the translation thread publishes per slot (namespaces nrz8g / nrz8t, first half; before nrz5t, which calls it)
+#undef XBG_NR_Z8_PART
 #include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5 DM_NR_Z5 = 1 / 2: the game thread writes the packets of the draws it has values for, the translation thread takes them draw by draw (namespaces nrz5g, nrz5t)
 #include "xbg_nr_draw.inc"   // [DOS2] NR-09 DM_NR_DRAW: nr_draw, the short executor of an OP_X_NR_DRAW (namespace nrdraw)
 #include "xbg_nr_z3.inc"   // [DOS2] NR-ZERO Z3 DM_NR_Z3: an engine draw whose plan, NR-08 entry and pipeline are already resolved (namespace nrz3)
 #include "xbg_nr_sort.inc"   // [DOS2] NR-21 DM_NR_SORT: order-free draws of a depth-only segment recorded in pipeline order (namespace nrsort)
 #include "xbg_nr_mdi.inc"   // [DOS2] NR-MDI DM_NR_MDI: the multi-draw batching count of depth-only draws (namespace nrmdi; after nrsort: its order-free test)
 #include "xbg_nr_state3.inc"   // [DOS2] NR-09S3 DM_NR_STATE=4 / 5: OP_X_NR_STATE, the state of one opcode-21 packet applied to State (namespace nrstate3)
+#define XBG_NR_Z8_PART 2
+#include "xbg_nr_z8.inc"   // [DOS2] NR-ZERO Z8 DM_NR_Z8: the walk of a submission (nrz8g) and the hook of draw() (nrz8t::draw; after nrz3 and nr_state3.h)
+#undef XBG_NR_Z8_PART
 // Mid-submit chunk (DM_GFX_MID_CHUNK_US): at a command boundary inside execute().
 void mid_chunk_check(){
     Slot &cur=slots[slot_index];if(!cur.recording || !cur.ops || failed)return;
@@ -10016,7 +10033,7 @@ extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t b
      std::string dir=cfg.shader_directory?cfg.shader_directory:"";size_t cut=dir.find_last_of('/');if(cut!=std::string::npos)dir.resize(cut);
      if(spv_opt>0)xbg_spvopt_init((dir+"/spvopt").c_str(),spv_opt);xbg_logf("NVN on-device SPIR-V optimizer DM_GFX_SPV_OPT=%d (active=%d)",spv_opt,xbg_spvopt_mode());}
     xbg_module_id_hook=warm::module_id;{std::string lp=warm::list_path();FILE *nw=fopen((lp.substr(0,lp.find_last_of('/'))+"/gfx-no-warm").c_str(),"rb");warm::enabled=!nw;if(nw)fclose(nw);}warm::start();
-    wtrack::enabled=false;state=State{};nbdesc::P.valid=false;nbdesc::cand=false;nbpipe::reset();nrdraw::reset();nrsort::reset();nrlean::on();   /* [DOS2] NB-11: the state reset moves no counter */state.color.logic_op=3;state.color.alpha_func=8;for(unsigned i=0;i<8;i++)state.blend[i]={i,2,1,2,1,1,1};if(condr::init_counting())state.count_samples=true;nrocc::init();stats.reset();timing=XbgCpuTiming(timing_clock);pipeline_counts={};pipeline_before={};pipeline_tick=0;timing_active=false;timing_first=timing_last=0;live_profile_used=false;descriptor_detail=false;descriptor_timing=XbgDescriptorTiming{};descriptor_root=nullptr;draw_detail=false;draw_timing=XbgDrawTiming{};draw_root=nullptr;completed=0;last_attachment_trace=UINT64_MAX;sampler_mirror_clamp_enabled=VK_FALSE;sampler_minmax_enabled=VK_FALSE;failed=false;error_text[0]=0;initialized=true;
+    wtrack::enabled=false;state=State{};nbdesc::P.valid=false;nbdesc::cand=false;nbpipe::reset();nrdraw::reset();nrsort::reset();nrlean::on();   /* [DOS2] NB-11: the state reset moves no counter */state.color.logic_op=3;state.color.alpha_func=8;for(unsigned i=0;i<8;i++)state.blend[i]={i,2,1,2,1,1,1};if(condr::init_counting())state.count_samples=true;nrz8t::boot();   /* [DOS2] NR-ZERO Z8 DM_NR_Z8: read here - the submit walk copies State as it starts */nrocc::init();stats.reset();timing=XbgCpuTiming(timing_clock);pipeline_counts={};pipeline_before={};pipeline_tick=0;timing_active=false;timing_first=timing_last=0;live_profile_used=false;descriptor_detail=false;descriptor_timing=XbgDescriptorTiming{};descriptor_root=nullptr;draw_detail=false;draw_timing=XbgDrawTiming{};draw_root=nullptr;completed=0;last_attachment_trace=UINT64_MAX;sampler_mirror_clamp_enabled=VK_FALSE;sampler_minmax_enabled=VK_FALSE;failed=false;error_text[0]=0;initialized=true;
     {std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');FILE *m=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-sync-submit").c_str(),"rb");bool sync_submit=false;if(m){sync_submit=fgetc(m)=='1';fclose(m);}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-async-pool-reset").c_str(),"rb");poolreset::enabled=false;if(w){poolreset::enabled=fgetc(w)!='0';fclose(w);}else if(const char *e=getenv("DM_GFX_ASYNC_POOL_RESET"))poolreset::enabled=atoi(e)!=0;poolreset::start();xbg_logf("NVN async command pool reset=%d (marker gfx-async-pool-reset)",int(poolreset::enabled));}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-bindcache").c_str(),"rb");if(w){bind_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-no-imgcache").c_str(),"rb");if(w){img_cache_enabled=false;fclose(w);}}{FILE *w=fopen(((cut==std::string::npos?dir:dir.substr(0,cut))+"/gfx-pass-profile").c_str(),"rb");if(w){pass_prof_enabled=true;unsigned long long from=0,period=0,count=0;if(fscanf(w,"%llu %llu %llu",&from,&period,&count)>=2){pass_prof_next=from;pass_prof_period=period?period:1;if(count)pass_prof_until=from+count;}fclose(w);}}
     // [perf3] DM_GFX_PASS_PROF="from period count" (dm/env; "1" = 300 600 0): the per-pass GPU timestamp profile of the
     // gfx-pass-profile marker without a file push -- one frame every `period` presents logs NVN GPASS lines (tools/gpass_report.py).
@@ -10369,10 +10386,14 @@ extern "C" void xbg_register_sampler(const dpool_t *p,int id,const samp_par *s){
 extern "C" void xbg_legacy_tex_release(tex_t *t){if(!t)return;if(!gfx_async){xbg_legacy_tex_release_now(t);return;}tex_t copy=*t;gfx_enqueue([copy]()mutable{xbg_legacy_tex_release_now(&copy);});}
 extern "C" void xbg_legacy_prog_release(prog_t *p){if(!p)return;if(!gfx_async){xbg_legacy_prog_release_now(p);return;}prog_t copy=*p;gfx_enqueue([copy]()mutable{xbg_legacy_prog_release_now(&copy);});}
 extern "C" void xbg_texture_invalidate(const tex_t *t){if(!t)return;if(!gfx_async){xbg_texture_invalidate_now(t);return;}tex_t copy=*t;gfx_enqueue([copy]{xbg_texture_invalidate_now(&copy);});}
+#define XBG_NR_Z8_PART 3
+#include "xbg_nr_z8.inc"   // [DOS2] NR-ZERO Z8: the entry points of the NVN front (the submit walk, the number of the submission being executed)
+#undef XBG_NR_Z8_PART
 extern "C" void xbg_submit(int n,const uint64_t *handles){
-    if(!gfx_async){xbg_submit_now(n,handles);return;}
+    const uint64_t z8s=nrz8_next_sub;nrz8_next_sub=0;   // [DOS2] NR-ZERO Z8: the number the front announced for this submission (0: none - nothing of the walk is taken)
+    if(!gfx_async){nrz8t::cur_sub=z8s;xbg_submit_now(n,handles);nrz8t::cur_sub=0;return;}
     std::vector<uint64_t> list(handles,handles+n);++gfx_enqueued;
-    gfx_enqueue([list]{xbg_submit_now(int(list.size()),list.data());gfx_executed.store(submitted);});}
+    gfx_enqueue([list,z8s]{nrz8t::cur_sub=z8s;xbg_submit_now(int(list.size()),list.data());nrz8t::cur_sub=0;gfx_executed.store(submitted);});}
 extern "C" void xbg_present_texture(const win_t *window,const tex_t *texture){
     if(!gfx_async){xbg_present_texture_now(window,texture);return;}
     // At most two frames queued ahead of the graphics thread.

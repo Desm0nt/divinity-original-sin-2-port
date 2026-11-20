@@ -77,6 +77,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         add("DM_NB_RP","0");add("DM_NB_OPBARRIER","0");add("DM_NB_UIAREA","0");
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
         add("DM_NR_Z3","0");add("DM_NR_Z5","0");   // NR-ZERO Z3 / Z5: resolved draws from a table / the packet from the game thread (they sit on NR-09)
+        add("DM_NR_Z8","0");   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
         add("DM_NR_Z3B","0");add("DM_NR_Z3C","0");add("DM_NR_Z3D","0");add("DM_NR_Z3K","0");   // NR-ZERO Z3b / Z3c / Z3d / Z3K: the image word, the mesh view table, the ring word, the cheap key
         // batch C defaults (19.11): shader twins, native state / uniform / translator / texture paths, AA with the outline
         add("DM_NR_SH_SURF","0");add("DM_NR_MAT","0");add("DM_NR_STATE","0");add("DM_NR_UBO","0");add("DM_NR_UBD","0");
@@ -96,7 +97,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
 inline const char *xbg_safe_step_text(int step){
     switch(step){case 0:return "nothing changed";
     case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass)";
-    case 2:return "step 1 + the tile pass policies off (noload / store-hist / clear fold / tile barrier / lazy clear, NB-06 planner, NB barriers, UI area) and the native recording paths (NR-09 direct / draw, NR-ZERO Z3 / Z3b / Z3c / Z3d / Z5, NR-20 rotate, NR-04 shaders)";
+    case 2:return "step 1 + the tile pass policies off (noload / store-hist / clear fold / tile barrier / lazy clear, NB-06 planner, NB barriers, UI area) and the native recording paths (NR-09 direct / draw, NR-ZERO Z3 / Z3b / Z3c / Z3d / Z5 / Z8, NR-20 rotate, NR-04 shaders)";
     default:return "step 2 + one pipeline build at a time, no worker recording, PowerVR colour mask of output-less shaders off, culling GS kept, every NR / NB step off (the v0.1.1 renderer)";}
 }
 

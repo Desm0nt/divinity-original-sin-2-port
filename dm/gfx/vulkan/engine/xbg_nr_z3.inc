@@ -97,6 +97,7 @@ void init(){
         "cleared when NR-08's table generation, NR-09's table generation or the object epoch moves",k,k==2?"verify - asked, the table of DM_NR_Z3 answers, the two are compared":"on",max_ents,size_t(max_ents)*sizeof(nrzk_ent)/1024,int(NRZK_HINT_ROWS));
      kmode=k;}
     nrz5::init(nrdraw::mode);   // [Z5] DM_NR_Z5 (xbg_nr_z5.inc): =2 the comparison of the packet side; =1 refused - the game thread's half is not built
+    nrz8t::init(nrdraw::mode);   // [Z8] DM_NR_Z8 (xbg_nr_z8.inc): the submit walk starts answering (or the switch is refused)
     if(m)xbg_logf("[nr] DM_NR_Z3=%d (NR-ZERO Z3: %s): an engine draw whose shader set, texture / sampler handles, pool, key id, variant and render pass definition are in the table "
         "(%u entries, %zu KB) takes its plan, NR-08 entry and pipeline from it; ring offsets, image checks, the set, the pass check, the views, viewport and the commands by the "
         "same code as without the table; stale on NR-08's table generation, NR-09's table generation, the object epoch",
@@ -172,21 +173,40 @@ inline void front_after(const nrz_val *tv,int stale,const nrzk_ent *fe,const nrz
     if(!tv)return;
     nrzk_row row[NRZ_IMG_MAX];front_rows(pl.p,row);
     if(nrzk_put(&F,stamp,K.w,K.n,pl.p.nimg,row,tv))++ks.promoted;}
+// The gates of descriptors() and nrdesc::Scope, of the lane, and the switches whose draws need what an answered draw does not make.
+// 0: none refuses; else the NRZW_* reason. groups: also refresh the state-group ids the variant word names ([NR-ZERO Z8] nrz8t::draw
+// takes its NR-09 entry without the variant: false).
+inline int gate(const nrd_tail &t,bool pp,int draw_fast,bool groups){
+    if(nrdesc::mode!=1 || nrdraw::mode!=1)return NRZW_GATE;
+    if(!t.key || t.key>=NRP_TAB_ROWS || t.site==NRD_SITE_UI)return NRZW_SPECIAL;
+    if(!desc_memo_enabled || capture.active || provenance_file || g_ui_moff!=0 || pgraph::armed || nroc::twin_draw || nrlf::fused_draw || read_preflight)return NRZW_GATE;
+    if(pipe_stats || vtxstats::enabled() || crumbs::active || !bind_cache_enabled || ab_off("nrdraw") || ab_off("passfast"))return NRZW_GATE;
+    if(nroc::mode>0 || nrpo::mode!=0 || nrps::mode<0 || nrsort::mode!=0 || nrmdi::mode!=0)return NRZW_GATE;   // ONCHIP (when DM_NR_LIGHTFUSE supersedes it nroc::mode is 0) adjusts the pass after create_pass; the others read the Descriptors record / their own views; PRESKIN not read yet: the path without the table reads it
+    if(draw_fast!=1 || !pipe_memo || !pipeline_fast_enabled || ab_off("pipefast") || ab_off("pipememo") || (groups && !(pp?nrdraw::groups_pp():nrdraw::groups())))return NRZW_GATE;
+    if(!state.shader[0] || state.shader[1] || state.shader[2] || state.shader[3])return NRZW_SPECIAL;
+    return 0;}
+// The answer of a draw and what the answered half needs of the first half. v: the plan, NR-08 entry id and NR-09 entry; varw: the
+// lane's variant words (null: [NR-ZERO Z8] the answer came without them - nothing is learned from this draw); z8: the caller is
+// nrz8t::draw (nrz3's own key and prediction are not touched); tg / tf / tk: the clock reads of the first half (a draw timed by part).
+struct Ans{const nrz_val *v=nullptr;nrdesc::Plan *pl=nullptr;bool frag=false,fhit=false,psk=false,pp=false,z8=false;const uint64_t *f=nullptr,*varw=nullptr;uint32_t re=0,active_colors=0;const nrd_tail *t=nullptr;uint64_t tg=0,tf=0,tk=0;};
+// The plan of the shader set and create_pass's fast path as they would answer now: 0, or the NRZW_* reason. Nothing is changed.
+inline int plan_pass(const nrdesc::Plan *pl,const Commands &c){
+    const nr_dplan &dpn=pl->p;
+    if(dpn.why || pl->retry || !pl->layout || !pl->layout->definition.valid)return NRZW_NO_PLAN;
+    if(memo_epoch!=nrdesc::my_epoch)return NRZW_DESC;   // views, samplers or the ring buffer were replaced: serve() flushes
+    if(!pass_continues(c))return NRZW_PASS;
+    if(!last_pass.pass.definition || !last_pass.pass.definition->valid)return NRZW_GATE;
+    return 0;}
+int answered(Stats &s,const Ans &a,Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,int draw_fast,nrdraw::Tm &tm);
 // See the header and the declaration before draw(). 0: not answered (the path without the table runs from its first line); 1: recorded;
 // 2: answered, the old tail finishes; 3: the descriptors are answered (dp), the pass is not - create_pass and the lane run.
 int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast){NRCPU_SCOPE(NrZ3);
     if(mode<=0)return 0;
-    ++s.asked;nrdraw::Tm tm;tm.timed=!(++calls&63);tm.t0=tm.timed?timing_clock():0;tm.sp=tm.timed && (calls>>6&1);uint64_t tl=0,td=0,tg=0,tf=0,tk=0,tb=0,ti=0;
+    ++s.asked;nrdraw::Tm tm;tm.timed=!(++calls&63);tm.t0=tm.timed?timing_clock():0;tm.sp=tm.timed && (calls>>6&1);uint64_t tg=0,tf=0,tk=0;
     if(mode==2){resolve_prev();nrdraw::zl=3;}
     // ---- gates: of descriptors() and nrdesc::Scope, of the lane, and the switches whose draws need what a hit does not make ----
     const nrd_tail &t=*nrdraw::cur;
-    if(nrdesc::mode!=1 || nrdraw::mode!=1)return out(NRZW_GATE);
-    if(!t.key || t.key>=NRP_TAB_ROWS || t.site==NRD_SITE_UI)return out(NRZW_SPECIAL);
-    if(!desc_memo_enabled || capture.active || provenance_file || g_ui_moff!=0 || pgraph::armed || nroc::twin_draw || nrlf::fused_draw || read_preflight)return out(NRZW_GATE);
-    if(pipe_stats || vtxstats::enabled() || crumbs::active || !bind_cache_enabled || ab_off("nrdraw") || ab_off("passfast"))return out(NRZW_GATE);
-    if(nroc::mode>0 || nrpo::mode!=0 || nrps::mode<0 || nrsort::mode!=0 || nrmdi::mode!=0)return out(NRZW_GATE);   // ONCHIP (when DM_NR_LIGHTFUSE supersedes it nroc::mode is 0) adjusts the pass after create_pass; the others read the Descriptors record / their own views; PRESKIN not read yet: the path without the table reads it
-    if(draw_fast!=1 || !pipe_memo || !pipeline_fast_enabled || ab_off("pipefast") || ab_off("pipememo") || !(pp?nrdraw::groups_pp():nrdraw::groups()))return out(NRZW_GATE);
-    if(!state.shader[0] || state.shader[1] || state.shader[2] || state.shader[3])return out(NRZW_SPECIAL);
+    if(const int gw=gate(t,pp,draw_fast,true))return out(gw);
     // [PRESKIN] DM_NR_PRESKIN=1 and a skinning vertex shader: nrps::decide (live: the record of this submission) picks the lane's variant, so
     // the pipeline is not the table's - the answered descriptors and pass go to the lane itself (nrdraw::lane, the whole of it)
     const bool psk=nrps::mode==1 && state.shader[0]->psk==1;
@@ -211,12 +231,9 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
     bool frag=false;nrdesc::Plan *pl=nullptr;
     if(fhit){pl=reinterpret_cast<nrdesc::Plan*>(uintptr_t(fv.plan));frag=fv.frag!=0;}else pl=plan_of(frag);
     const nr_dplan &dpn=pl->p;
-    if(dpn.why || pl->retry || !pl->layout || !pl->layout->definition.valid)return out(NRZW_NO_PLAN);
+    // ---- the plan can be served, create_pass's fast path would answer now ----
+    if(const int w=plan_pass(pl,c))return out(w);
     if(dpn.nimg>NRZ_IMG_MAX)return out(NRZW_LONG);
-    if(memo_epoch!=nrdesc::my_epoch)return out(NRZW_DESC);   // views, samplers or the ring buffer were replaced: serve() flushes
-    // ---- create_pass's fast path, as it would answer now ----
-    if(!pass_continues(c))return out(NRZW_PASS);
-    if(!last_pass.pass.definition || !last_pass.pass.definition->valid)return out(NRZW_GATE);
     var.w[2]=uint64_t(uintptr_t(&pl->layout->definition));K.pl=pl;K.frag=frag;
     const nrz_val *v=&fv;
     if(!fhit){
@@ -228,14 +245,23 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
         if(!tv){K.ok=true;return out(stale?NRZW_STALE:NRZW_MISS);}   // served() stores this draw's resolution under K
         v=tv;}
     if(tm.sp)tk=timing_clock();
+    Ans a;a.v=v;a.pl=pl;a.frag=frag;a.fhit=fhit;a.psk=psk;a.pp=pp;a.f=f;a.varw=var.w;a.re=re;a.active_colors=active_colors;a.t=&t;a.tg=tg;a.tf=tf;a.tk=tk;
+    return answered(s,a,c,dp,p,prim,first,count,indexed,instances,first_instance,draw_fast,tm);}
+// The answered half of draw(): NR-08's entry as serve() checks it, the blocks, the set, the image walk, the pass marks, then the
+// lane's shared tail. Returns as draw() does. Nothing is changed before the draw is "answered" (the checks that can refuse come first).
+int answered(Stats &s,const Ans &a,Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,int draw_fast,nrdraw::Tm &tm){
+    auto out=[&s](int w){++s.why[w];return 0;};
+    const nrz_val *v=a.v;nrdesc::Plan *pl=a.pl;const nr_dplan &dpn=pl->p;const uint64_t *f=a.f;const bool psk=a.psk,pp=a.pp,frag=a.frag;const uint32_t active_colors=a.active_colors,re=a.re;
+    uint64_t tl=0,td=0,tb=0,ti=0;
+    if(a.z8){if(const int w=plan_pass(pl,c))return out(w);}   // the plan and the pass as draw() checks them before its key (the answer names the plan; the caller compared its pass definition)
     // ---- NR-08's entry, as serve() checks it ----
-    if(reinterpret_cast<nrdesc::Plan*>(uintptr_t(v->plan))!=pl || v->did<0 || uint32_t(v->did)>=nrdesc::tab.n){++s.odd;K.ok=!fhit;return out(NRZW_DESC);}
+    if(reinterpret_cast<nrdesc::Plan*>(uintptr_t(v->plan))!=pl || v->did<0 || uint32_t(v->did)>=nrdesc::tab.n){++s.odd;if(!a.z8)K.ok=!a.fhit;return out(NRZW_DESC);}
     nrdesc::Ent &e=nrdesc::ents[size_t(v->did)];
     const nrp_tent *pe=reinterpret_cast<const nrp_tent*>(uintptr_t(v->pent));   // NR-09's entry of (key id, variant): the pipeline it holds NOW (0: destroyed - the old tail teaches it again)
     if(!psk && (!pe || !pe->pipe))return out(NRZW_PIPE);
     const VkBuffer rb=nrdesc::ring();
     if(e.plan!=pl || !e.live || e.ring!=rb || !nrdesc::images_alive(e))return out(NRZW_DESC);
-    if(mode==2){P.valid=true;P.v=*v;P.pfh=pass_fast_hits;P.vs=var.w[0];P.fs=var.w[1];++s.predicted;return 0;}   // verify: the path without the table draws; served() / resolve_prev() compare
+    if(!a.z8 && mode==2){P.valid=true;P.v=*v;P.pfh=pass_fast_hits;P.vs=a.varw[0];P.fs=a.varw[1];++s.predicted;return 0;}   // verify: the path without the table draws; served() / resolve_prev() compare
     if(tm.sp)tl=timing_clock();
     uint32_t off[NRD_MAX_DYN],tuple[NRD_MAX_UBO];memcpy(off,e.off,dpn.ndyn*sizeof(uint32_t));
     if(nrdesc::blocks(*pl,rb,off,tuple,false))return out(NRZW_BLOCK);   // (the calls it made are repeated by serve(): idempotent)
@@ -276,11 +302,11 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
         if(nrdraw::lane(c,d,zp,prim,first,count,indexed,instances,first_instance,pp?unsigned(nrdraw::F_PP):0u,draw_fast)){++s.psk_rec;return 1;}
         dp=&d;p=zp;++s.psk_old;return 2;}
     // lane(): the draw in hand, its counters, the pipeline of the table
-    nrdraw::Hand &H=nrdraw::H;
-    nrdraw::armed=false;H.var_ok=true;H.have_ent=true;H.pred=false;H.qpat=false;H.t=t;nrdraw::cur=nullptr;H.ui=false;nrdraw::S=&nrdraw::sz;++nrdraw::sz.lane;if(pp)++nrdraw::sz.pp_asked;
-    state.restart_eff=re;memcpy(H.var.w,var.w,sizeof H.var.w);
+    nrdraw::Hand &H=nrdraw::H;nrdraw::Stats &lz=a.z8?nrdraw::z8sz:nrdraw::sz;
+    nrdraw::armed=false;H.var_ok=a.varw!=nullptr;H.have_ent=true;H.pred=false;H.qpat=false;H.t=*a.t;nrdraw::cur=nullptr;H.ui=false;nrdraw::S=&lz;++lz.lane;if(pp)++lz.pp_asked;
+    state.restart_eff=re;if(a.varw)memcpy(H.var.w,a.varw,sizeof H.var.w);
     H.ent=pe;H.pipe=VkPipeline(pe->pipe);H.used=pe->used;H.inst=pe->inst;H.zero=pe->zero;memcpy(H.stride,pe->stride,sizeof H.stride);
-    DRAW_MARK(3);if(tm.sp){tm.ta=timing_clock();++s.sp_n;s.sp_look+=tl-tm.t0;s.sp_desc+=td-tl;s.sp_pass+=tm.ta-td;s.sp_gate+=tg-tm.t0;s.sp_front+=tf-tg;s.sp_full+=tk-tf;s.sp_blk+=tb-tl;s.sp_img+=ti-tb;}
+    DRAW_MARK(3);if(tm.sp){tm.ta=timing_clock();++s.sp_n;s.sp_look+=tl-tm.t0;s.sp_desc+=td-tl;s.sp_pass+=tm.ta-td;s.sp_gate+=a.tg-tm.t0;s.sp_front+=a.tf-a.tg;s.sp_full+=a.tk-a.tf;s.sp_blk+=tb-tl;s.sp_img+=ti-tb;}
     const nrdraw::DSet ds{pl->layout->pipeline_layout,sv->set,uint32_t(dpn.ndyn),off};
     nrz5t::plan_hint=&dpn;   // [Z5] the template of this record names the uniform slot of each dynamic offset (cleared below)
     if(nrdraw::lane_tail(c,nullptr,ds,zp,first,count,indexed,instances,first_instance,pp?unsigned(nrdraw::F_PP):0u,false,1,active_colors,tm)){nrz5t::plan_hint=nullptr;++s.served;return 1;}
