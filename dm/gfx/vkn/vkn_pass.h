@@ -57,6 +57,20 @@ void vkn_pass_layout(vkn_tex *t, VkImageLayout to);
 typedef struct vkn_pass_stats { uint64_t passes, load, clear, dontcare, clears_folded, clears_cmd, clears_att, breaks_sample, feedback, copies, transitions; } vkn_pass_stats;
 void vkn_pass_stats_get(vkn_pass_stats *s);
 
+// ==== added by the pass piece (stage 3): what the contract above lacked ====
+// Install time (dm_vkn_pass_register): registers the close / begin listeners of vkn_frame. Idempotent; every entry point above also
+// calls it, so a caller that forgot it still gets the listeners before the first pass opens.
+void vkn_pass_init(void);
+// The depth target of the current set (the one NVN would have bound: 0x928be0's depth-only bind changes it), NULL = none. The
+// engine's ClearDepthStencil clears whatever depth target is bound, which is not always the one its call names.
+vkn_tex *vkn_pass_depth(void);
+// Drop reasons and other counters of the census (the header's vkn_pass_stats keeps its fields).
+typedef struct vkn_pass_stats2 {
+    uint64_t no_cb, no_targets, bad_target, dead_target, samples_mismatch, size_mismatch, rp_fail, fb_fail;   // pass not opened
+    uint64_t sampled_undefined, load_stale, clear_bad, clear_lost, region_pass, copy_skip_fmt, copy_drop, copy_blit;
+} vkn_pass_stats2;
+void vkn_pass_stats2_get(vkn_pass_stats2 *s);
+
 #ifdef __cplusplus
 }
 #endif

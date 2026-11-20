@@ -63,6 +63,14 @@ typedef struct vkn_tex {
     VkImageLayout layout;                      // current layout (written by whoever records: uploads now, render passes in stage 3)
     // private (vkn_tex.c)
     uint32_t slot, refs; uint8_t linked, dead; struct vkn_tex *hnext;
+    VkImageView *att_views;                    // vkn_tex_att_view cache: [mip * layers + layer] (NULL until asked; (0, 0) is `att`)
+    // render-pass bookkeeping (stage 3, vkn_pass.c only; the recording thread): see vkn_pass.h
+    uint64_t pass_written;                     // vkn_frame() + 1 of the last write as an attachment / clear / copy (0 = never)
+    uint8_t pass_ever;                         // written by the GPU at least once (attachment, clear, copy destination)
+    uint8_t pass_nclr;                         // remembered colour clears (level 0) in pass_clr
+    uint8_t pass_dclr;                         // remembered depth-stencil clear: bit 0 depth, bit 1 stencil
+    uint32_t pass_stencil; float pass_depth;
+    struct { uint32_t layer; float rgba[4]; } pass_clr[4];
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index
@@ -77,6 +85,16 @@ vkn_tex *vkn_tex_by_cookie(uint64_t cookie);
 // the level tail of the old one into it and swapped the records, so `handle` now owns the new texture. Re-links the handle, unlinks
 // the temporary one, queues the GPU copy of the level tail (old levels (n_old - n_new + i) -> new level i). 0 = ok.
 int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cookie);
+// ---- stage 3 (render passes) ----
+// Attachment view of one (level, layer) of a colour / depth / window target, made on first ask and cached on the texture (destroyed
+// with it; its framebuffers leave the cache through vkn_fb_forget_view when the engine destroys the texture). VK_NULL_HANDLE: not a
+// target (no attachment usage), 3D, out of range, the engine destroyed it already, or vkCreateImageView failed.
+VkImageView vkn_tex_att_view(vkn_tex *t, uint32_t mip, uint32_t layer);
+// One more / one less reference: a holder of a vkn_tex pointer beyond the engine's destroy event (the current render targets of
+// vkn_pass) keeps the object (not the engine's view of it: t->dead still turns 1) alive until it lets go. vkn_tex_ref: 1 = taken,
+// 0 = the object is already on its way out (no reference left: do not keep the pointer).
+int vkn_tex_ref(vkn_tex *t);
+void vkn_tex_unref(vkn_tex *t);
 
 // Samplers: engine arguments of CreateSampler (filter 0..5, wrap U / V / W 0..3, max anisotropy, compare 0..7).
 int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso,

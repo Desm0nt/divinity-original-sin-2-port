@@ -211,10 +211,11 @@ static void tex_free(void *ctx) {
         if (t->view) vkDestroyImageView(d->dev, t->view, NULL);
         if (t->att) vkDestroyImageView(d->dev, t->att, NULL);
         for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) if (t->layer_view[i]) vkDestroyImageView(d->dev, t->layer_view[i], NULL);
+        if (t->att_views) for (uint32_t i = 0, n = t->mips * t->layers; i < n; i++) if (t->att_views[i]) vkDestroyImageView(d->dev, t->att_views[i], NULL);
         if (t->image) vkDestroyImage(d->dev, t->image, NULL);
         if (t->mem) vkFreeMemory(d->dev, t->mem, NULL);
     }
-    free(t);
+    free(t->att_views); free(t);
 }
 static void unref_locked(vkn_tex *t) { if (t->refs && !--t->refs) vkn_retire(tex_free, t); }
 static void unref(vkn_tex *t) { pthread_mutex_lock(&g_mu); unref_locked(t); pthread_mutex_unlock(&g_mu); }
@@ -228,6 +229,7 @@ static void kill_locked(vkn_tex *t) {
     // state piece never calls into this one.)
     vkn_fb_forget_view(t->view); vkn_fb_forget_view(t->att);
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) vkn_fb_forget_view(t->layer_view[i]);
+    if (t->att_views) for (uint32_t i = 0, n = t->mips * t->layers; i < n; i++) vkn_fb_forget_view(t->att_views[i]);
     if (t->slot < TEX_SLOTS && g_slot[t->slot] == t) { g_slot[t->slot] = NULL; g_free_slot[g_nfree++] = t->slot; }
     if (t->cls < VKN_TC_N) { g_st.alive[t->cls]--; g_st.bytes[t->cls] -= t->bytes; }
     g_st.destroyed++;
@@ -540,6 +542,33 @@ int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cook
     vkn_upload_push(tail_run, u, 0);
     return 0;
 }
+
+// ---- stage 3: attachment views of one (level, layer), references ----
+VkImageView vkn_tex_att_view(vkn_tex *t, uint32_t mip, uint32_t layer) {
+    if (!t || !t->att || mip >= t->mips || layer >= t->layers) return VK_NULL_HANDLE;   // att: made for 2D-like targets only (not 3D)
+    if (!mip && !layer) return t->dead ? VK_NULL_HANDLE : t->att;
+    const vkn_dev *dv = vkn_device(); if (!dv) return VK_NULL_HANDLE;
+    const uint32_t i = mip * t->layers + layer;
+    pthread_mutex_lock(&g_mu);
+    if (!t->dead && !t->att_views) t->att_views = (VkImageView *)calloc((size_t)t->mips * t->layers, sizeof(VkImageView));
+    VkImageView v = !t->dead && t->att_views ? t->att_views[i] : VK_NULL_HANDLE; const int dead = t->dead || !t->att_views;
+    pthread_mutex_unlock(&g_mu);
+    if (v || dead) return v;
+    // (made outside the lock; a texture that died meanwhile gets no view: kill_locked forgot the framebuffers of the views it saw)
+    const int d1 = t->nvn_target == 0 || t->nvn_target == 3;
+    VkImageView nv = make_view(dv->dev, t, d1 ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D, t->aspect, mip, 1, layer, 1, (VkComponentMapping){0});
+    if (!nv) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_mu);
+    VkImageView drop = VK_NULL_HANDLE;
+    if (t->dead) { drop = nv; nv = VK_NULL_HANDLE; }
+    else if (t->att_views[i]) { drop = nv; nv = t->att_views[i]; }   // (one recording thread: not expected)
+    else t->att_views[i] = nv;
+    pthread_mutex_unlock(&g_mu);
+    if (drop) vkDestroyImageView(dv->dev, drop, NULL);
+    return nv;
+}
+int vkn_tex_ref(vkn_tex *t) { if (!t) return 0; pthread_mutex_lock(&g_mu); const int ok = t->refs != 0; if (ok) t->refs++; pthread_mutex_unlock(&g_mu); return ok; }
+void vkn_tex_unref(vkn_tex *t) { if (t) unref(t); }
 
 // ---- samplers ----
 static void sampler_free(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroySampler(d->dev, (VkSampler)(uintptr_t)ctx, NULL); }
