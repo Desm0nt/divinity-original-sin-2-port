@@ -55,7 +55,7 @@ def sites():
         words = {m.group(1): [int(m.group(k), 16) for k in range(2, 6)]
                  for m in re.finditer(r'static const uint32_t (k_\w+)\[4\] = \{(0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\};', s)}
         got = [(int(m.group(1), 16), words.get(m.group(2)), m.group(3), m.group(4))
-               for m in re.finditer(r'dm_vkn_site\((0x[0-9a-f]+), (k_\w+), "([^"]+)", \(void \*\)(\w+), &\w+, VKN_M_\w+\);', s)]
+               for m in re.finditer(r'dm_vkn_site\((0x[0-9a-f]+), (k_\w+), "([^"]+)", \(void \*\)(\w+), &\w+, [^;\n]*\);', s)]
         rows = s.count('    dm_vkn_site(0x')
         if len(got) != rows or any(g[1] is None for g in got): sys.exit('%s: parsed %d of %d dm_vkn_site rows (or a row without its words)' % (f.name, len(got), rows))
         out += got

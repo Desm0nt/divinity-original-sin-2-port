@@ -26,6 +26,7 @@ void dm_vkn_site(uint32_t off, const uint32_t pro[4], const char *name, void *ho
 typedef void (*vkn_census_fn)(void);
 void dm_vkn_census(vkn_census_fn fn);   // a part's line(s) of the 10 s census (render thread, after EndFrame)
 
+void dm_vkn_tick(void);                 // once a presented frame (the frame part calls it at the end of its EndFrame in mode 1)
 uint8_t *dm_vkn_base(void);             // host address of main+0 (NULL before install)
 static inline uint64_t vkn_rd64(uint64_t p) { uint64_t v; memcpy(&v, (const void *)(uintptr_t)p, 8); return v; }
 static inline uint32_t vkn_rd32(uint64_t p) { uint32_t v; memcpy(&v, (const void *)(uintptr_t)p, 4); return v; }

@@ -34,29 +34,35 @@ void dm_vkn_site(uint32_t off, const uint32_t pro[4], const char *name, void *ho
     s->off = off; memcpy(s->pro, pro, sizeof s->pro); s->name = name; s->hook = hook; s->orig = orig; s->modes = modes;
 }
 
-void dm_vkn_exec_register(void) __attribute__((weak));     // stage 3: packets, flushes, draws, frame, present
-// ---- the frame tick (window slot 8 = 0x93ccd0 EndFrame(window, bit0 present)): census and, in mode 2, the upload flush ----
+// Stage 3 parts (weak: absent until built). With the frame part in, mode 1's EndFrame is the frame part's own function and it
+// calls dm_vkn_tick itself; this file's EndFrame hook then serves mode 2 only.
+void dm_vkn_frame_register(void) __attribute__((weak));    // hle_dos2_vkn_frame.c: recording, submit, present
+void dm_vkn_pass_register(void) __attribute__((weak));     // hle_dos2_vkn_pass.c: targets, clears, copies
+void dm_vkn_exec_register(void) __attribute__((weak));     // hle_dos2_vkn_exec.c: packets and state functions with NVN inside
+void dm_vkn_draw_register(void) __attribute__((weak));     // hle_dos2_vkn_draw.c: constant / texture flushes, draws
+void dm_vkn_imm_register(void) __attribute__((weak));      // hle_dos2_vkn_imm.c: immediate draws
+void dm_vkn_ui_register(void) __attribute__((weak));       // hle_dos2_vkn_ui.c: the UI entries
+// ---- the frame tick: once a presented frame. Census every 10 s; `own` = nobody records frames (mode 2, or mode 1 without the
+// frame part): then frames advance here (deferred destruction) and queued uploads are flushed by an own submission. ----
 static vkn_fn g_o_endframe; static uint64_t g_census_t;
 static vkn_census_fn g_census[16]; static int g_ncensus;
 void dm_vkn_census(vkn_census_fn fn) { if (g_ncensus < 16) g_census[g_ncensus++] = fn; }
-VKN_HOOK vkn_h_endframe(VKN_A) {
+void dm_vkn_tick(void) {
+    const uint64_t now = vkn_now_ns();
+    const int own = vkn_mode() == VKN_ALONGSIDE || !dm_vkn_frame_register;
+    if (own) { vkn_frame_end(); if (vkn_upload_pending_bytes() > (64ull << 20)) vkn_upload_flush(); }
+    if (now - g_census_t < 10000000000ull) return;
+    g_census_t = now;
+    if (own) vkn_upload_flush();
+    uint64_t used[VKN_ARENAS], res[VKN_ARENAS]; vkn_arena_stats(used, res);
+    vkn_logf("mode %d frame %llu: arenas static %.1f / %.1f MB, staging %.1f / %.1f MB, ring %.1f / %.1f MB (used / reserved)", vkn_mode(), (unsigned long long)vkn_frame(),
+             used[VKN_ARENA_STATIC] / 1048576.0, res[VKN_ARENA_STATIC] / 1048576.0, used[VKN_ARENA_STAGING] / 1048576.0, res[VKN_ARENA_STAGING] / 1048576.0,
+             used[VKN_ARENA_RING] / 1048576.0, res[VKN_ARENA_RING] / 1048576.0);
+    for (int i = 0; i < g_ncensus; i++) g_census[i]();
+}
+VKN_HOOK vkn_h_endframe(VKN_A) {   // window slot 8 = 0x93ccd0 EndFrame(window, bit0 present)
     const uint64_t rc = g_o_endframe(VKN_F);
-    if (a1 & 1) {   // a presented frame
-        const uint64_t now = vkn_now_ns();
-        // Until the frame part (stage 3) records frames itself, this tick stands for it in both modes: frames advance (deferred
-        // destruction) and queued uploads are flushed by an own submission.
-        const int own = vkn_mode() == VKN_ALONGSIDE || !dm_vkn_exec_register;
-        if (own) { vkn_frame_end(); if (vkn_upload_pending_bytes() > (64ull << 20)) vkn_upload_flush(); }
-        if (now - g_census_t >= 10000000000ull) {
-            g_census_t = now;
-            if (own) vkn_upload_flush();
-            uint64_t used[VKN_ARENAS], res[VKN_ARENAS]; vkn_arena_stats(used, res);
-            vkn_logf("mode %d frame %llu: arenas static %.1f / %.1f MB, staging %.1f / %.1f MB, ring %.1f / %.1f MB (used / reserved)", vkn_mode(), (unsigned long long)vkn_frame(),
-                     used[VKN_ARENA_STATIC] / 1048576.0, res[VKN_ARENA_STATIC] / 1048576.0, used[VKN_ARENA_STAGING] / 1048576.0, res[VKN_ARENA_STAGING] / 1048576.0,
-                     used[VKN_ARENA_RING] / 1048576.0, res[VKN_ARENA_RING] / 1048576.0);
-            for (int i = 0; i < g_ncensus; i++) g_census[i]();
-        }
-    }
+    if (a1 & 1) dm_vkn_tick();
     return rc;
 }
 
@@ -65,7 +71,6 @@ void dm_vkn_buf_register(void) __attribute__((weak));      // hle_dos2_vkn_buf.c
 void dm_vkn_tex_register(void) __attribute__((weak));      // hle_dos2_vkn_tex.c: textures, targets, samplers
 void dm_vkn_shader_register(void) __attribute__((weak));   // hle_dos2_vkn_shader.c: shaders
 void dm_vkn_state_register(void) __attribute__((weak));    // hle_dos2_vkn_state.c: state objects, vertex formats
-void dm_vkn_ui_register(void) __attribute__((weak));       // stage 3: the UI entries
 
 void dm_dos2_vkn_install(void);   // main.c host_preload, after every other dm_dos2_*_install (before any guest code runs)
 void dm_dos2_vkn_install(void) {
@@ -78,12 +83,16 @@ void dm_dos2_vkn_install(void) {
     vkn_set_mode(mode);   // before the first hook goes in (they read it); guest code is not running yet
     if (dm_vk_queue_force) dm_vk_queue_force(1);
     static const uint32_t k_endframe[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};
-    dm_vkn_site(0x93ccd0, k_endframe, "EndFrame", (void *)vkn_h_endframe, &g_o_endframe, VKN_M_BOTH);
+    dm_vkn_site(0x93ccd0, k_endframe, "EndFrame", (void *)vkn_h_endframe, &g_o_endframe, dm_vkn_frame_register ? VKN_M_ALONGSIDE : VKN_M_BOTH);
     if (dm_vkn_buf_register) dm_vkn_buf_register();
     if (dm_vkn_tex_register) dm_vkn_tex_register();
     if (dm_vkn_shader_register) dm_vkn_shader_register();
     if (dm_vkn_state_register) dm_vkn_state_register();
+    if (dm_vkn_frame_register) dm_vkn_frame_register();
+    if (dm_vkn_pass_register) dm_vkn_pass_register();
     if (dm_vkn_exec_register) dm_vkn_exec_register();
+    if (dm_vkn_draw_register) dm_vkn_draw_register();
+    if (dm_vkn_imm_register) dm_vkn_imm_register();
     if (dm_vkn_ui_register) dm_vkn_ui_register();
     int in = 0, want = 0;
     for (int i = 0; i < g_nsite; i++) {
