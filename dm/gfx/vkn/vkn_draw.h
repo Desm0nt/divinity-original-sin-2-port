@@ -54,6 +54,34 @@ typedef struct vkn_draw_stats {
 } vkn_draw_stats;
 void vkn_draw_stats_get(vkn_draw_stats *s);
 
+// ==== added by the draw piece (stage 3, vkn_draw.c): not part of the original contract ====
+// Install time (mode 1, dm/host/hle_dos2_vkn_draw.c): registers this module's begin listener (vkn_frame.h) that forgets everything
+// bound and runs the death check below. Without it the draw path still notices a new recording by vkn_cb_serial.
+void vkn_draw_install(void);
+// Every descriptor set of this module goes: its pools are retired (vkn_retire: destroying a pool frees its sets) and the set cache
+// starts empty; the next draws build new sets. Any thread (a request, executed by the recording thread at its next draw). This
+// module calls it itself at every recording begin when the death counter it reads through vkn_tex_get_stats (textures destroyed /
+// swapped, samplers destroyed) and vkn_shader_stats_get (shaders destroyed / replaced) moved, and when the cache exceeds its budget:
+// a dead view / sampler / layout handle can only be reused after its retirement (3 frames), so a check per recording is enough.
+void vkn_draw_forget_all(void);
+// Counters outside vkn_draw_stats (drop reasons and placeholder use the contract struct has no field for).
+typedef struct vkn_draw_stats2 {
+    uint64_t dropped_bind;       // a binding kind / descriptor type the draw path has no source for (storage, driver tables, images in graphics)
+    uint64_t dropped_vb, dropped_ib;   // a stream the vertex format reads has no live vertex buffer / no live index buffer (or out of range)
+    uint64_t dropped_viewport;   // viewport width <= 0 or height 0
+    uint64_t dropped_variant;    // more than 255 distinct retype codes / alpha references (pipeline key variants)
+    uint64_t dropped_set;        // descriptor set allocation failed / too many bindings / dynamic offsets
+    uint64_t dropped_cb;         // no open recording
+    uint64_t scissor_empty;      // scissor clamped to the pass is empty: nothing to draw (not recorded, not an error)
+    uint64_t zero_ubo;           // uniform bindings fed with the 64 KiB zero block (slot never uploaded / no support / c1 block)
+    uint64_t empty_tex;          // texture bindings whose engine slot is -1 (placeholder)
+    uint64_t view_mismatch;      // the texture's view type differs from the binding's dimension (bound anyway; logged)
+    uint64_t placeholder_fail;   // no placeholder for a binding shape (multisample, cube array without the feature, creation failure)
+    uint64_t ubo_announce, ubo_bad;    // vkn_draw_ubo calls / calls with a stage or slot out of range
+    uint64_t forget_all, pools, set_bytes_words;   // cache flushes, pools created, key words held now
+} vkn_draw_stats2;
+void vkn_draw_stats2_get(vkn_draw_stats2 *s);
+
 #ifdef __cplusplus
 }
 #endif

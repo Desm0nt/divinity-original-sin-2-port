@@ -35,6 +35,10 @@ SAMPLER_MIN_TABLE, NOT_HOOKABLE = 0x1f585e8, ((0x919c20, 'engine format -> NVN f
 ARG_REGS = ['x%d' % i for i in range(8)]
 
 
+VKN_HOOKS = set()          # names of the hook functions of dm/host/hle_dos2_vkn*.c (filled by sites())
+VKN_REPLACED = {0x928be0}   # VK-NATIVE sites whose hook never calls the original (vector / x8 reads of the function do not matter)
+
+
 def sites():
     """The hook tables: k_nr_site of hle_dos2_nr.c (NR-01) and k_nr_key_site of hle_dos2_nr_key.inc (NR-02, DM_NR_KEY)."""
     out = []
@@ -59,6 +63,7 @@ def sites():
         rows = s.count('    dm_vkn_site(0x')
         if len(got) != rows or any(g[1] is None for g in got): sys.exit('%s: parsed %d of %d dm_vkn_site rows (or a row without its words)' % (f.name, len(got), rows))
         out += got
+        VKN_HOOKS.update(g[3] for g in got)
     return out
 
 
@@ -320,6 +325,9 @@ def main():
         inb = nb.inbound(m, addr + 4, addr + 16)
         early, walked = early_reads(m, addr)
         fatal = [e for e in early if 'scalar' not in e]
+        # [DOS2] VK-NATIVE: a hook that REPLACES its function (never calls the original through the trampoline) forwards nothing,
+        # so what the function reads later is not its concern. Listed by hand: 0x928be0 ClearDepthStencil (vkn_h_cds uses s0 only).
+        if addr in VKN_REPLACED: fatal = []
         ok = got == words and not rel and boundary != 'NONE' and not inb and not fatal
         if not ok: bad += 1
         print('%-4s 0x%07x %-24s %-9s prev=%-18s %s' % ('ok' if ok else 'FAIL', addr, name, fn, boundary, txt))
@@ -328,8 +336,9 @@ def main():
         if inb: print('       INBOUND ' + ' '.join('0x%x->0x%x' % h for h in inb[:6]))
         for e in early: print('       %s' % e)
     # (a VK-NATIVE hook - function name vkn_h_* / vb_h_* - may sit on a site an older module hooked: dn_hook_chain chains them)
-    vk = [h for h in hooks if h[3].startswith(('vkn_h_', 'vb_h_'))]; old = [h for h in hooks if not h[3].startswith(('vkn_h_', 'vb_h_'))]
-    dup = len(old) - len({h[0] for h in old}) + len(vk) - len({h[0] for h in vk})
+    # (two VK-NATIVE hooks on one site are for different modes or chained: 0x93ccd0 is the core's tick in mode 2, the frame part's in mode 1)
+    old = [h for h in hooks if h[3] not in VKN_HOOKS]
+    dup = len(old) - len({h[0] for h in old})
     if dup: bad += 1; print('FAIL: %d duplicate hook addresses' % dup)
 
     print('\n== not hookable, as the hook file says')
