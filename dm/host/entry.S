@@ -127,6 +127,254 @@ _dm_gate:
     add sp, sp, #800
     ret
 
+// [NR-16] DM_NR_CPU (hle_cpuprof.c): one round trip through dm_gate with a gate of its own (kind "probe", registered at
+// _dm_gate_probe_ret, nothing to do in gate_dispatch), so the cost of a gate frame (800 bytes saved and restored + the lookup) is
+// measured on the phone, not guessed. dm_gate gives back every register it saved, so this is an ordinary void function to C.
+    .globl _dm_gate_probe
+    .globl _dm_gate_probe_ret
+    .p2align 2
+_dm_gate_probe:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    bl _dm_gate
+_dm_gate_probe_ret:
+    ldp x29, x30, [sp], #16
+    ret
+
+// [NR-24] DM_NR_GATE_TICK=1 (hle_os.c, docs/dos2/nr/NR-24.md): the gate entry of every guest thread's KGATE slot (hle.c dm_gate_entry).
+// It looks the gate up by the return point in x30 in hle.c's table (dm_gate_tab, the same hash as gate_dispatch) using x9..x12 saved in
+// a 48-byte frame and, for a clock gate (mrs xN, cntpct_el0 / cntvct_el0, kind 1 / 2) whose destination is x0..x28 but not x18, reads
+// cntvct_el0 and maps it with the current tick block (dm_tick_cur: valid, c0, base, mul) to 19.2 MHz guest ticks; every other gate
+// (SVCs, observation gates, the probe, a frozen clock, a block changed under the read) restores x9..x12 and branches to _dm_gate with
+// sp and every register as they came in. No instruction here writes NZCV or a SIMD register, so nothing else needs saving. The value
+// goes to xN through a table of 16-byte stubs (bti j; ldr xN; b; nop) entered with br x29: x29 is the guest's own value, which the gate
+// block saved at [sp] before the call (stp x29, x30, [sp, #-16]! ... ldr x29, [sp]), so the tail reloads it from there ([sp, #48]).
+// Clamp: a counter value read before the block's anchor c0 (speculated early) gives the block's base, never a wrap.
+// Ordering: the re-check load of dm_tick_cur takes an address dependency on the counter value (Linux arch_counter_enforce_ordering),
+// so a reader whose re-check still sees its block read the counter before a freeze published the next block.
+    .globl _dm_gate_fast
+    .p2align 2
+_dm_gate_fast:
+    stp x9, x10, [sp, #-48]!
+    stp x11, x12, [sp, #16]
+    lsr x9, x30, #2                    // gate_h: ((ret >> 2) * 0x9E3779B97F4A7C15) >> (64 - 12)
+    movz x10, #0x7C15
+    movk x10, #0x7F4A, lsl #16
+    movk x10, #0x79B9, lsl #32
+    movk x10, #0x9E37, lsl #48
+    mul x9, x9, x10
+    lsr x9, x9, #52
+    adrp x10, _dm_gate_tab@PAGE
+    add x10, x10, _dm_gate_tab@PAGEOFF
+Lfg_probe:
+    add x11, x9, x9, lsl #1
+    add x11, x10, x11, lsl #3          // &dm_gate_tab[i] (24-byte entries)
+    ldr x12, [x11]
+    cbz x12, Lfg_slow                  // an empty slot: not a known gate (gate_dispatch reports it)
+    eor x12, x12, x30
+    cbz x12, Lfg_hit
+    add x9, x9, #1
+    and x9, x9, #0xfff
+    b Lfg_probe
+Lfg_hit:
+    ldr w12, [x11, #8]                 // kind: G_CNTPCT 1 / G_CNTVCT 2
+    sub w12, w12, #1
+    and w12, w12, #0xfffffffe
+    cbnz w12, Lfg_slow
+    ldrsw x9, [x11, #12]               // arg = N of mrs xN
+    tbnz x9, #63, Lfg_slow
+    sub x12, x9, #29
+    tbz x12, #63, Lfg_slow             // x29 / x30 come back from the gate block's frame: the full gate
+    sub x12, x9, #18
+    cbz x12, Lfg_slow                  // x18 is not the guest's register
+    str x9, [sp, #40]
+    adrp x10, _dm_gate_prof@PAGE       // [NR-16] DM_NR_CPU=1: count the fast reads (by register)
+    ldr x10, [x10, _dm_gate_prof@PAGEOFF]
+    cbz x10, 1f
+    adrp x10, _dm_tick_fast_n@PAGE
+    add x10, x10, _dm_tick_fast_n@PAGEOFF
+    ldr x12, [x10, x9, lsl #3]
+    add x12, x12, #1
+    str x12, [x10, x9, lsl #3]
+1:  adrp x10, _dm_tick_cur@PAGE
+    add x10, x10, _dm_tick_cur@PAGEOFF
+    ldr x11, [x10]                     // the current tick block
+    cbz x11, Lfg_slow
+    ldr x12, [x11]                     // valid (0 = the guest clock is frozen: the full gate waits / takes the frozen value)
+    cbz x12, Lfg_slow
+    mrs x12, cntvct_el0
+    eor x9, x12, x12
+    ldr x9, [x10, x9]                  // dm_tick_cur again, ordered after the counter read
+    eor x9, x9, x11
+    cbnz x9, Lfg_slow                  // a freeze / thaw published another block meanwhile
+    ldr x9, [x11, #8]                  // c0
+    sub x12, x12, x9
+    tbz x12, #63, 2f
+    mov x12, #0
+2:  ldr x9, [x11, #24]                 // mul: 0 = the counter runs at 19.2 MHz
+    cbz x9, 3f
+    mul x10, x12, x9
+    umulh x12, x12, x9
+    extr x12, x12, x10, #32            // (d * mul) >> 32
+3:  ldr x9, [x11, #16]                 // base
+    add x12, x12, x9
+    str x12, [sp, #32]                 // the value
+    ldr x9, [sp, #40]
+    adr x29, Lfg_tab
+    add x29, x29, x9, lsl #4
+    ldp x11, x12, [sp, #16]
+    ldp x9, x10, [sp]
+    br x29
+Lfg_slow:
+    ldp x11, x12, [sp, #16]
+    ldp x9, x10, [sp], #48
+    b _dm_gate
+    .p2align 4
+Lfg_tab:
+    hint #36
+    ldr x0, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x1, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x2, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x3, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x4, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x5, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x6, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x7, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x8, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x9, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x10, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x11, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x12, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x13, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x14, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x15, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x16, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x17, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36                           // x18: never taken (checked above)
+    b Lfg_tail
+    nop
+    nop
+    hint #36
+    ldr x19, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x20, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x21, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x22, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x23, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x24, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x25, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x26, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x27, [sp, #32]
+    b Lfg_tail
+    nop
+    hint #36
+    ldr x28, [sp, #32]
+    b Lfg_tail
+    nop
+Lfg_tail:
+    ldr x29, [sp, #48]                 // the guest's x29 from the gate block's frame
+    add sp, sp, #48
+    ret
+
+// [NR-24] DM_NR_CPU (hle_cpuprof.c): one clock-gate read through the full gate and one through the short entry, each with a gate of
+// its own (kind "cntvct", arg 0: the value comes back in x0), so the phone's log states what a clock gate costs either way.
+    .globl _dm_gate_probe_clk
+    .globl _dm_gate_probe_clk_ret
+    .p2align 2
+_dm_gate_probe_clk:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    bl _dm_gate
+_dm_gate_probe_clk_ret:
+    ldp x29, x30, [sp], #16
+    ret
+    .globl _dm_gate_probe_fast
+    .globl _dm_gate_probe_fast_ret
+    .p2align 2
+_dm_gate_probe_fast:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    bl _dm_gate_fast
+_dm_gate_probe_fast_ret:
+    ldp x29, x30, [sp], #16
+    ret
+
 // 3) dm_thread_enter(entry, arg, sp)：客体线程起点。切到 SDK 给的客体栈，x0 = 参数调入口；
 //    Horizon 线程须经 ExitThread 退出，入口返回即报错。
 // 3) dm_thread_enter(entry, arg, sp): guest thread start. Switch to the guest stack given by the SDK and call entry with x0 = argument;

@@ -21,6 +21,8 @@ where their elements are:
   minimap_d     minimap = map_mc; btn21 = dmVisTac_mc (the tactical camera button, tools/dos2_minimap_touch.py: the minimap object never gets a
                 mouse button in Iggy, so the host presses d-pad up for a world tap inside this rect, pack 4b)
   playerInfo_d  pi<i> = every visible child of container_mc (the portraits)
+                dos2-touch6: btn<iconId> = every button info over the hot bar (bottombar_mc.btnList: "(A) Move  (X) Actions"), hold1 = the
+                B one in combat and endTurnHint_mc / holdEndTurnHint_mc ("Hold (B) to end the turn": a finger held there holds B, dt_hold_hint)
   overhead_d    hint3 = texts_mc.actionInfo_txt of every visible selection info (charHolder_mc.<CharHolder>.sInfo, the "(X) Actions..." line under
                 "(A) <action>" over the selected target; overhead.swf = UI type 5, no mouse at all: tools/dos2_touchui_pak.py ships it as overhead_d.swf,
                 hle_dos2_touchui.c maps the type). Every RX[movie] frames (10: the line comes and goes with the selection).
@@ -54,7 +56,10 @@ COLUMN_MOVIE = dos2_column_touch.COLUMN_ALL + [n for n, _, _ in dos2_column_touc
 # movie -> [(kind, id, document property or grafted child name)]; kind 'prop' = this.<name>, 'child' = this.getChildByName(name),
 # 'each' = every child of this.<name> (id + index)
 WHAT = {
-    'bottomBar_d.swf': [('prop', 'hotbar', 'bottombar_mc')] + [('child', n, n) for n in GRAFTED] + [('path', 'hint4', 'bottombar_mc.yHint_mc')],
+    'bottomBar_d.swf': [('prop', 'hotbar', 'bottombar_mc')] + [('child', n, n) for n in GRAFTED] + [('path', 'hint4', 'bottombar_mc.yHint_mc')] +
+                       # dos2-touch6 (owner 18.11, combat): the button infos over the hot bar ("(A) Move  (X) Actions": bottombar_mc.btnList, BtnInfo.iconId)
+                       # as "btn<code>" (a tap = that button), the one with the B icon in combat and the end-turn hints as "hold1" (held = B held: end the turn)
+                       [('binfo', 'btn', 'bottombar_mc'), ('path', 'hold1', 'endTurnHint_mc'), ('path', 'hold1', 'holdEndTurnHint_mc')],
     dos2_column_touch.MOVIE: [('child', n, n) for n in COLUMN_MOVIE],
     'minimap_d.swf': [('prop', 'minimap', 'map_mc')],   # pack 4c: the tactical camera moved to bottomBar_d (dmVisTac_mc there, reported with the grafted buttons)   # pack 4b: btn21 = d-pad up by the host (minimap_d gets no Iggy button)   # pack 3o: map_mc minus its map layer (dmHrBox skips mapHolder_mc) = the ring; frame_mc was only the N ornament   # pack 3h: the ring; map_mc as a whole held a hidden map layer (x 1963..3406 y 37..1470, run t3g)
     'playerInfo_d.swf': [('each', 'pi', 'container_mc')],
@@ -81,7 +86,7 @@ class G:
 def patch_any(name, data):
     c = doc_ctx(data); P, S, abc, ref = c.P, c.S, c.abc, c.rbody
     for kind, _, n in WHAT[name]:
-        if kind in ('prop', 'each', 'path', 'ohint'): assert abc.trait(c.ci, n.split('.')[0]) is not None, '%s: no %s on the document' % (name, n)
+        if kind in ('prop', 'each', 'path', 'ohint', 'binfo'): assert abc.trait(c.ci, n.split('.')[0]) is not None, '%s: no %s on the document' % (name, n)
         else: assert n.encode() in abc.strings, '%s: no grafted %s' % (name, n)
         if kind == 'ohint':
             ch, hp = abc.class_index('CharHolder'), abc.class_index('HPBar')
@@ -161,6 +166,27 @@ def patch_any(name, data):
             ('L', 'next'), ('getlocal', 4), ('increment',), ('convert_d',), ('setlocal', 4),
             ('L', 'cond'), ('getlocal', 4), ('getlocal3',), ('iflt', 'loop'),
             ('L', 'end'), ('returnvoid',)], ref)
+    if any(kind == 'binfo' for kind, _, _ in WHAT[name]):
+        assert abc.trait(abc.class_index('bottomBar_c_fla.bottombarMC_1'), 'btnList') is not None and abc.trait(c.ci, 'inActiveCombat') is not None and b'iconId' in abc.strings
+        # dmHrBi(prefix, bb): every visible element of bb.btnList.content_array as prefix + iconId ("hold1" for the B one in combat).
+        # locals 1 prefix 2 bb 3 arr 4 n 5 i 6 el 7 id
+        c.add('dmHrBi', 2, HEAD + obj(3) + num(4) + num(5) + obj(6) + obj(7) + [
+            ('getlocal2',), ('iffalse', 'end'), ('getlocal2',), ('getproperty', P('btnList')), ('coerce_a',), ('setlocal3',), ('getlocal3',), ('iffalse', 'end'),
+            ('getlocal3',), ('getproperty', P('visible')), ('iffalse', 'end'),
+            ('getlocal3',), ('getproperty', P('content_array')), ('coerce_a',), ('setlocal3',), ('getlocal3',), ('iffalse', 'end'),
+            ('getlocal3',), ('getproperty', P('length')), ('convert_d',), ('setlocal', 4),
+            ('jump', 'cond'),
+            ('L', 'loop'), ('label',),
+            ('getlocal3',), ('getlocal', 5), ('getproperty', c.late), ('coerce_a',), ('setlocal', 6), ('getlocal', 6), ('iffalse', 'next'),
+            ('getlocal', 6), ('getproperty', P('iconId')), ('pushundefined',), ('ifstricteq', 'next'),
+            ('getlocal1',), ('getlocal', 6), ('getproperty', P('iconId')), ('add',), ('coerce_a',), ('setlocal', 7),
+            ('getlocal', 6), ('getproperty', P('iconId')), ('pushbyte', 1), ('ifne', 'add'),
+            ('getlocal0',), ('getproperty', P('inActiveCombat')), ('iffalse', 'add'),
+            ('pushstring', S('hold1')), ('coerce_a',), ('setlocal', 7),
+            ('L', 'add'), ('getlocal0',), ('getlocal', 7), ('getlocal', 6), ('callpropvoid', P('dmHrAdd'), 2),
+            ('L', 'next'), ('getlocal', 5), ('increment',), ('convert_d',), ('setlocal', 5),
+            ('L', 'cond'), ('getlocal', 5), ('getlocal', 4), ('iflt', 'loop'),
+            ('L', 'end'), ('returnvoid',)], ref)
     body = []
     for kind, ident, n in WHAT[name]:
         if kind == 'prop': body += [('getlocal0',), ('pushstring', S(ident)), ('getlocal0',), ('getproperty', P(n)), ('callpropvoid', P('dmHrAdd'), 2)]
@@ -171,6 +197,7 @@ def patch_any(name, data):
         elif kind == 'child': body += [('getlocal0',), ('pushstring', S(ident)), ('getlocal0',), ('pushstring', S(n)), ('callproperty', P('getChildByName'), 1),
                                        ('callpropvoid', P('dmHrAdd'), 2)]
         elif kind == 'ohint': body += [('getlocal0',), ('pushstring', S(ident)), ('getlocal0',), ('getproperty', P(n)), ('callpropvoid', P('dmHrOh'), 2)]
+        elif kind == 'binfo': body += [('getlocal0',), ('pushstring', S(ident)), ('getlocal0',), ('getproperty', P(n)), ('callpropvoid', P('dmHrBi'), 2)]
         else: body += [('getlocal0',), ('pushstring', S(ident)), ('getlocal0',), ('getproperty', P(n)), ('callpropvoid', P('dmHrEach'), 2)]
     # dmHrTick(e). locals 1 e 2 st
     c.add('dmHrTick', 1, HEAD + obj(2) + [

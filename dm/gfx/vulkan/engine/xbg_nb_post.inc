@@ -43,7 +43,7 @@
 #include "../../nb/nb_post_aa.h"
 namespace nbpost{
 int mode=-1;bool inside=false;
-int aa=0,luma=0;   // DM_NB_POST_AA, DM_NB_POST_LUMA (read in on())
+int aa=0,luma=0,aa_outline=0;   // DM_NB_POST_AA, DM_NB_POST_LUMA, NR-33A DM_NB_POST_AA_OUTLINE (read in on())
 enum{FXA=NB_FXK_KINDS,NFX};   // F[]: NB_FXK_F1, NB_FXK_F2, FXA = the F1A bundle of the chosen luma proxy (host = F1's)
 const char *const luma_name[3]={"g (linear light)","sqrt(g)","sqrt(g / (g + 1))"};const char *const luma_fx[3]={"F1A.","F1AS.","F1AR."};
 enum{SPARE_TEX=120,SPARE_UBO=15};
@@ -61,10 +61,13 @@ struct Alias{bool valid=false,would=false;uint64_t O2=0,S=0;uint32_t tex_id=0,w=
 uint64_t a_e=0,a_f1a=0,a_f1a_ok=0,a_plain=0,a_back=0,a_step=0,a_step_skip=0,a_step_ok=0,a_step_late=0,a_redir=0,a_redir_would=0,a_drop=0,a_carry=0,a_carry_ok=0;
 int pfd=-1;std::vector<xpack::Ent> pidx;bool popen=false;
 void tick();
+// DM_NB_POST / DM_NB_POST_AA / DM_NB_POST_LUMA as on() reads them, without touching the state (any thread: the warm-up's workers).
+void settings(int &m,int &a_,int &l_){const char *e=getenv("DM_NB_POST");const int v=e && *e?atoi(e):0;m=v>=1 && v<=3?v:0;
+    const char *a=getenv("DM_NB_POST_AA"),*l=getenv("DM_NB_POST_LUMA");a_=m && a && a[0]=='1' && !a[1];l_=l && l[0]>='0' && l[0]<='2' && !l[1]?l[0]-'0':0;}
 int on(){if(mode<0){const char *e=getenv("DM_NB_POST");const int m=e && *e?atoi(e):0;mode=m>=1 && m<=3?m:0;
     if(mode)xbg_logf("[nb] DM_NB_POST=%d: post-tail fusion in the backend (%s); fused bundles from %s/native-post.xgspack or native::get",mode,
         mode==2?"check only, the chain runs as recorded":mode==1?"elide + fused draw":"elide + fused draw + magenta poison of the elided target",cfg.shader_directory?cfg.shader_directory:"-");
-    const char *a=getenv("DM_NB_POST_AA"),*l=getenv("DM_NB_POST_LUMA");aa=mode && a && a[0]=='1' && !a[1];luma=l && l[0]>='0' && l[0]<='2' && !l[1]?l[0]-'0':0;
+    const char *a=getenv("DM_NB_POST_AA"),*l=getenv("DM_NB_POST_LUMA");aa=mode && a && a[0]=='1' && !a[1];{const char *o=getenv("DM_NB_POST_AA_OUTLINE");aa_outline=aa && o && o[0]=='1' && !o[1];}luma=l && l[0]>='0' && l[0]<='2' && !l[1]?l[0]-'0':0;
     if(aa)xbg_logf("[nb] DM_NB_POST_AA=1 (route A): bundle %s<Sight key> = FXAA on the pre-LUT image -> LUT -> Sight; luma proxy DM_NB_POST_LUMA=%d = %s%s; "
         "the console's FXAA pass after Sight is elided only in a submission where F1A was drawn, else it runs as recorded",luma_fx[luma],luma,luma_name[luma],
         l && *l && (l[0]<'0' || l[0]>'2' || l[1])?" (value not understood: 0 / 1 / 2)":"");}
@@ -72,26 +75,30 @@ int on(){if(mode<0){const char *e=getenv("DM_NB_POST");const int m=e && *e?atoi(
 uint64_t key64(const std::string &k){return k.size()>=16?strtoull(k.substr(0,16).c_str(),nullptr,16):0;}
 int fx_of_host(int cls){return cls==NB_PSH_SIGHT?NB_FXK_F1:cls==NB_PSH_COMB?NB_FXK_F2:0;}
 int fx_of_elided(int cls){return cls==NB_PSH_LUT?NB_FXK_F1:cls==NB_PSH_VIG?NB_FXK_F2:0;}
-bool fused_key(const std::string &k){if(mode<=0 || k.size()<=3 || k[0]!='F' || (k[1]!='1' && k[1]!='2'))return false;   // "F1." "F2." "F1A." "F1AS." "F1AR."
-    const size_t d=k.find('.');return d>=2 && d<=4;}
+bool fused_name(const std::string &k){if(k.size()<=3 || k[0]!='F' || (k[1]!='1' && k[1]!='2'))return false;   // "F1." "F2." "F1A." "F1AS." "F1AR." (any mode)
+    const size_t d=k.find('.');return d!=std::string::npos && d>=2 && d<=4;}
+bool fused_key(const std::string &k){return mode>0 && fused_name(k);}
 bool read_bundle(const std::string &k,std::vector<uint8_t> &out){for(auto &f:F)if(f.ok || f.tried)if(f.key==k && !f.bundle.empty()){out=f.bundle;return true;}return false;}
+std::once_flag ponce;   // NR-0407 fix: pack_get runs on the warm-up's workers too (warm_bundle)
 bool pack_get(const std::string &key,std::vector<uint8_t> &out){
-    if(!popen){popen=true;if(cfg.shader_directory){const std::string path=std::string(cfg.shader_directory)+"/native-post.xgspack";int f=::open(path.c_str(),O_RDONLY|O_CLOEXEC);
+    std::call_once(ponce,[]{popen=true;if(cfg.shader_directory){const std::string path=std::string(cfg.shader_directory)+"/native-post.xgspack";int f=::open(path.c_str(),O_RDONLY|O_CLOEXEC);
         if(f>=0){struct stat sb{};uint32_t h[4]={};bool ok=!fstat(f,&sb) && pread(f,h,16,0)==16 && h[0]==0x50534758u && h[1]==1u && h[2]<4096u;std::vector<xpack::Ent> v;
             if(ok){v.resize(h[2]);ok=pread(f,v.data(),v.size()*sizeof(xpack::Ent),16)==ssize_t(v.size()*sizeof(xpack::Ent));}
             for(size_t i=0;ok && i<v.size();i++)ok=v[i].key[31]==0 && v[i].off+v[i].size<=uint64_t(sb.st_size);
             if(ok){pfd=f;pidx.swap(v);xbg_logf("[nb] post: %s, %zu fused bundles",path.c_str(),pidx.size());}else{::close(f);xbg_logf("[nb] post: %s damaged: ignored",path.c_str());}}
-        else xbg_logf("[nb] post: no %s (native::get only)",path.c_str());}}
+        else xbg_logf("[nb] post: no %s (native::get only)",path.c_str());}});
     if(pfd>=0)for(const auto &e:pidx)if(key==e.key){out.resize(e.size);if(pread(pfd,out.data(),out.size(),off_t(e.off))==ssize_t(out.size()) && xpack::crc(out.data(),out.size())==e.hash)return true;return false;}
     return xpack::native::get(key,out);}
-// Load + validate + rewrite the extras of fx kind k once (its host key known from the program table). false: F[k].why says why.
-bool prepare(int k){Fx &x=F[k];if(x.tried)return x.ok;if(hkey(k).empty()){x.why="host shader not seen yet";return false;}
-    x.tried=true;x.key=std::string(k==NB_FXK_F1?"F1.":k==FXA?luma_fx[luma]:"F2.")+hkey(k);const char *w=nullptr;
-    auto fail=[&](const std::string &s){x.why=s;xbg_logf("[nb] post: %s unusable: %s (the chain runs as recorded)",x.key.c_str(),s.c_str());return false;};
-    if(!pack_get(x.key,x.blob))return fail("no bundle");
+// The fused bundle of key ("F1." / "F2." / "F1A*." + the host's translated key): read (native-post.xgspack or native::get), parsed, its host
+// head checked against the translated host bundle, the extras put on the spare slots (x.blob, x.fx, x.bundle, x.spare, x.linear). No
+// shared state but the pack (opened once): any thread - prepare() on the render thread and warm_bundle() on the warm-up's workers build
+// the same bytes. false: why says why.
+bool compose(const std::string &key,const std::string &host,Fx &x,std::string &why){
+    const char *w=nullptr;auto fail=[&](const std::string &s){why=s;return false;};
+    if(!pack_get(key,x.blob))return fail("no bundle");
     if(nb_fx_parse(x.blob.data(),x.blob.size(),&x.fx,&w))return fail(std::string("XGF1 ")+w);
     if(x.fx.n_elided!=1)return fail("not one elided pass");
-    {std::vector<uint8_t> tb;bool fp=false;if(!xpack::read_translated(hkey(k),tb,fp) || !nb_fx_host_head_matches(&x.fx,tb.data(),tb.size()))return fail("host head differs from the translated bundle (rebuild with tools/dos2_post_fuse.py)");}
+    {std::vector<uint8_t> tb;bool fp=false;if(!xpack::read_translated(host,tb,fp) || !nb_fx_host_head_matches(&x.fx,tb.data(),tb.size()))return fail("host head differs from the translated bundle (rebuild with tools/dos2_post_fuse.py)");}
     x.bundle.assign(x.fx.bundle,x.fx.bundle+x.fx.bundle_size);
     int nt=0,nu=0;
     for(uint32_t i=0;i<x.fx.host_bindings;i++){xbg_shader_binding b;memcpy(&b,x.bundle.data()+32+32*i,32);
@@ -103,6 +110,30 @@ bool prepare(int k){Fx &x=F[k];if(x.tried)return x.ok;if(hkey(k).empty()){x.why=
         if(e.src_slot>=(e.src_kind==NB_FX_K_TEX?128u:16u))return fail("extra source slot");
         if(e.flags&NB_FX_E_LINEAR){if(e.src_kind!=NB_FX_K_TEX)return fail("NB_FX_E_LINEAR on a buffer");x.linear=true;}   // NB-18b-8: fed with a linear clamp sampler (elide())
         memcpy(ent+16,&src,4);memcpy(ent+20,&slot,4);x.spare[i]=int(slot);}
+    return true;}
+// [DOS2] NR-0407 fix: the bundle of a fused key for the boot warm-up (warm::bundle_words, any thread). The warm-up list records the fused
+// draws' pipelines with their stage keys ("F1.<host>", "F1A.<host>"), but the warm build read every stage from the game's shader pack
+// (xpack::read), which has no fused bundle: each such record failed at every boot and the draw built the pipeline in the frame (phone run
+// nr4_b2: records 1183 / 1188 / 1223 / 1240 'failed'). Here they are composed as prepare() does, from the key alone (its host key is the
+// part after the '.'); only the bundles the current DM_NB_POST / _AA / _LUMA would draw (the others' records are not built, as an
+// alpha-test record while the alpha test is off). false: not a fused key / not drawn now / why says why (first 8 logged).
+std::atomic<unsigned> warm_told{0};std::atomic<uint64_t> warm_ok{0},warm_refused{0};
+bool warm_bundle(const std::string &key,std::vector<uint8_t> &out){
+    if(!fused_name(key))return false;const size_t d=key.find('.');
+    int m=0,a=0,l=0;settings(m,a,l);std::string why;const std::string prefix=key.substr(0,d+1),host=key.substr(d+1);
+    if(!m)why="DM_NB_POST off: no fused draw";
+    else if(prefix!="F1." && prefix!="F2." && (!a || prefix!=luma_fx[l]))why=a?"another DM_NB_POST_LUMA's bundle":"DM_NB_POST_AA off: no F1A draw";
+    else if(host.size()<16)why="no host key";
+    else{Fx x;if(compose(key,host,x,why)){out=x.bundle;
+            if(++warm_ok<=4)xbg_logf("[nb] post: warm-up record stage %s composed (%zu bytes, %u extra bindings): its pipeline is built by the warm-up, not in the frame",key.c_str(),out.size(),x.fx.n_extra);
+            return true;}}
+    ++warm_refused;if(warm_told.fetch_add(1)<8)xbg_logf("[nb] post: warm-up record stage %s not built: %s",key.c_str(),why.c_str());
+    return false;}
+// Load + validate + rewrite the extras of fx kind k once (its host key known from the program table). false: F[k].why says why.
+bool prepare(int k){Fx &x=F[k];if(x.tried)return x.ok;if(hkey(k).empty()){x.why="host shader not seen yet";return false;}
+    x.tried=true;x.key=std::string(k==NB_FXK_F1?"F1.":k==FXA?luma_fx[luma]:"F2.")+hkey(k);
+    auto fail=[&](const std::string &s){x.why=s;xbg_logf("[nb] post: %s unusable: %s (the chain runs as recorded)",x.key.c_str(),s.c_str());return false;};
+    {std::string why;if(!compose(x.key,hkey(k),x,why))return fail(why);}
     x.sh=load_shader_key(x.key,nullptr,nullptr);
     if(!x.sh || !x.sh->module || !x.sh->unusable.empty() || x.sh->stage!=4)return fail("fused module did not build");
     {std::vector<VkDescriptorSetLayoutBinding> lb;for(const auto &b:x.sh->bindings){VkDescriptorSetLayoutBinding l{};l.binding=b.binding;l.descriptorType=VkDescriptorType(b.type);
@@ -281,7 +312,7 @@ int pre(){if(on()<=0)return 0;if(!(++calls&255))tick();   // the 10 s line: the 
         const uint64_t m=uint64_t(uintptr_t(state.rt.color[0]->mem));
         if(m==al.O2 || (m==al.S && !(r==2 && la.ok && la.seq==x.h.seq && la.S==m))){al.valid=false;++a_drop;}}
     if(!r && (fl&NB_NP_AA) && aa && !cls && !((fl&NB_NP_FUSE) && state.shader[4] && fx_of_host(nb_post_class(key64(state.shader[4]->key)))==NB_FXK_F1)){   // not Sight: its Base is the LUT's output, not an alias
-        if(!(fl&NB_NP_FUSE) && la.ok && la.seq==x.h.seq && state.shader[4] && nb_post_aa_carry(key64(state.shader[4]->key))){   // NB-18b-10: F1A's output goes through this pass
+        if(!(fl&NB_NP_FUSE) && la.ok && la.seq==x.h.seq && state.shader[4] && nb_post_aa_carry2(key64(state.shader[4]->key),aa_outline)){   // NB-18b-10: F1A's output goes through this pass
             if(!(la.carry_seq==x.h.seq && la.carry_node==int(x.h.node))){la.carry_seq=x.h.seq;la.carry_node=int(x.h.node);carry();}}
         else r=redirect();}
     return r;}

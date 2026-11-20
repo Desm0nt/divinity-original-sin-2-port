@@ -1,0 +1,21 @@
+#version 450
+// [DOS2] NR-DRIFT GPU clock probe (xbg_nr_growth.inc, namespace nrgrowth, DM_NR_GPUPROBE): a fixed ALU loop whose time between two
+// BOTTOM_OF_PIPE stamps is proportional to 1 / the GPU core clock (no memory traffic: four independent dependent FMA chains in
+// registers, one store per thread at the end so the compiler keeps the loop). Recorded once per probe period at the start of a
+// submission, outside any render pass. The iteration count comes in a push constant (calibrated on the device so one run is
+// ~40-80 us); the loop cannot be folded (n is not known at compile time, the recurrence has no closed form a compiler uses).
+// Regenerate xbg_nr_probe_spv.h after editing (the command is at the top of that file).
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) buffer Out { float o[]; } o;
+layout(push_constant) uniform P { uint n; float seed; } p;
+void main() {
+    float a = p.seed + float(gl_LocalInvocationIndex) * 0.001;
+    float b = a * 0.5 + 0.25, c = a * 0.25 + 0.5, d = a * 0.125 + 0.75;
+    for (uint i = 0u; i < p.n; i++) {
+        a = a * 0.9990 + 0.0010;
+        b = b * 0.9991 + 0.0020;
+        c = c * 0.9992 + 0.0030;
+        d = d * 0.9993 + 0.0040;
+    }
+    o.o[gl_GlobalInvocationID.x] = a + b + c + d;
+}

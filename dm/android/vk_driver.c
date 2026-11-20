@@ -56,6 +56,32 @@ static int g_custom;              // 1 = the active driver is a custom package
 static char g_requested[160];     // [DOOM] DM_VK_DRIVER as load_driver saw it ("" = system)
 static int g_gpus_logged, g_game_verified;   // [DOOM] log_gpus / verify_game_instance once per loaded driver (again after a fallback)
 int dm_vk_driver_custom(void) { return g_custom; }
+// [DOS2] NR-GMEM DM_GFX_PASS_GMEM=1 (docs/dos2/nr/NR-GMEM.md, dm/gfx/nr/nr_gmem.h): our own GMEM / sysmem choice per render pass on Turnip.
+// load_driver loads Turnip with TU_DEBUG=gmem when dm/env sets no TU_DEBUG (instead of sysmem), and every vkCreateRenderPass of the process
+// gets one VERTEX -> VERTEX self-dependency per subpass (pgm_create_rp), so the engine may end a pass that must stay in sysmem with a
+// VERTEX -> VERTEX barrier (Turnip tu_barrier: "Non-framebuffer-space barrier" -> rp.disable_gmem, checked before TU_DEBUG(GMEM)).
+// Turnip ignores self-dependencies when it creates the pass (tu_pass.cc tu_render_pass_add_subpass_dep), so they change nothing else.
+// g_pgm: 1 = applied (a custom Adreno package, TU_DEBUG without "sysmem"), 0 = not. Passes made outside xbg_game.cpp (the present pass)
+// call dm_vk_pass_end_sysmem before vkCmdEndRenderPass.
+static int g_pgm;
+static PFN_vkCreateRenderPass g_pgm_create;
+static VKAPI_ATTR VkResult VKAPI_CALL pgm_create_rp(VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
+    VkSubpassDependency deps[48];
+    if (!ci || ci->pNext || !ci->subpassCount || ci->dependencyCount + ci->subpassCount > 48)   // a multiview chain counts dependencies: as asked
+        return g_pgm_create(d, ci, a, out);
+    uint32_t n = ci->dependencyCount;
+    if (n) memcpy(deps, ci->pDependencies, n * sizeof *deps);
+    for (uint32_t i = 0; i < ci->subpassCount; i++) {
+        VkSubpassDependency x = {0}; x.srcSubpass = x.dstSubpass = i;
+        x.srcStageMask = x.dstStageMask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT; deps[n++] = x;
+    }
+    VkRenderPassCreateInfo c = *ci; c.dependencyCount = n; c.pDependencies = deps;
+    return g_pgm_create(d, &c, a, out);
+}
+int dm_vk_pass_gmem_state(void) { return g_pgm && g_custom; }   // g_custom: the package really runs (verified)
+void dm_vk_pass_end_sysmem(VkCommandBuffer cmd) {
+    if (g_pgm && g_custom) vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, NULL, 0, NULL, 0, NULL);
+}
 const char *dm_vk_driver_requested(void) { return g_requested; }
 
 // [DOOM] Hardware facts for the driver choice (BUGS_AND_FIXES 2.22, 2.25). Turnip (Mesa freedreno) drives the Adreno through the Qualcomm
@@ -322,8 +348,14 @@ static void load_driver(void) {
         // sysmem gave ~20% less GPU time per draw than GMEM with binning (the scene is geometry-bound, binning shades vertices
         // twice); on Adreno 750 both modes were equal. TU_DEBUG= (empty) lets Turnip choose.
         if (fam == FAM_ADRENO || fam == FAM_ANY) {
-            if (!getenv("TU_DEBUG")) setenv("TU_DEBUG", "sysmem", 0);
-            LOG("[vk] TU_DEBUG=%s (Turnip reads it when the driver loads)", getenv("TU_DEBUG") ? getenv("TU_DEBUG") : "(unset)");
+            // [DOS2] NR-GMEM: DM_GFX_PASS_GMEM=1 -> gmem (the engine keeps the passes its rule rejects in sysmem by a barrier)
+            const char *pg = getenv("DM_GFX_PASS_GMEM"); const int pgm1 = pg && atoi(pg) == 1;
+            if (!getenv("TU_DEBUG")) setenv("TU_DEBUG", pgm1 ? "gmem" : "sysmem", 0);
+            const char *tu = getenv("TU_DEBUG");
+            g_pgm = pgm1 && (fam == FAM_ADRENO || (fam == FAM_ANY && kgsl)) && !(tu && strstr(tu, "sysmem"));
+            LOG("[vk] TU_DEBUG=%s (Turnip reads it when the driver loads)%s", tu ? tu : "(unset)",
+                pgm1 ? (g_pgm ? "; DM_GFX_PASS_GMEM=1: render passes get VERTEX self-dependencies, the engine picks GMEM / sysmem per pass"
+                              : "; DM_GFX_PASS_GMEM=1 not applied (TU_DEBUG has sysmem, or the package is not an Adreno one)") : "");
         }
         // [DOOM] PanVK (the JimVulkan kbase build) and the window's buffers (BUGS_AND_FIXES 2.58, issue #33: Mali-G57 MT6789, the whole
         // picture turned into grey stripes and dots a minute or two into the game). The buffers of a swapchain come from the phone's
@@ -523,6 +555,9 @@ __attribute__((visibility("hidden"))) void *dm_vk_resolve(unsigned i) {
         const char *n = dm_vk_names[i];
         if (!strcmp(n, "vkGetInstanceProcAddr")) p = (void *)g_gipa;
         else if (!strcmp(n, "vkCreateInstance")) p = (void *)create_instance;
+        else if (g_pgm && g_custom && !strcmp(n, "vkCreateRenderPass")) {   // [DOS2] NR-GMEM: the self-dependencies
+            g_pgm_create = (PFN_vkCreateRenderPass)g_gipa(g_instance, n); p = g_pgm_create ? (void *)pgm_create_rp : NULL;
+        }
         else p = (void *)g_gipa(g_instance, n);
         if (!p) { LOG("[vk] %s: the driver has no such function (instance %p)", n, (void *)g_instance); abort(); }
         dm_vk_table[i] = p;
@@ -544,7 +579,7 @@ void dm_vk_driver_reset_to_system(void) {
     LOG("[vk] driver fallback: forgetting %s (requested %s), the next Vulkan call loads the system driver", g_driver_name, g_requested[0] ? g_requested : "system");
     for (int i = 0; i < DM_VK_COUNT; i++) dm_vk_table[i] = NULL;
     g_gipa = NULL; g_create_instance = NULL; g_instance = VK_NULL_HANDLE;
-    g_custom = 0; g_expect_lib[0] = 0; g_gpus_logged = g_game_verified = 0;
+    g_custom = 0; g_expect_lib[0] = 0; g_gpus_logged = g_game_verified = 0; g_pgm = 0;   // [DOS2] NR-GMEM: the system driver takes no barrier rule
     snprintf(g_driver_name, sizeof g_driver_name, "system");
     unsetenv("DM_VK_DRIVER");
     pthread_mutex_unlock(&g_lock);

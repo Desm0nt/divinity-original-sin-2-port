@@ -26,7 +26,9 @@ enum { NBD_B_TEX = 0, NBD_B_SAMP = 1, NBD_B_IMG = 2, NBD_B_UBO = 3, NBD_B_KINDS 
 // neither (hle_nvn.c logs them once and draws anyway), so the unpack ignores them; NB-10+ may use them.
 // NBD_F_CHECK (NB-10, DM_NB_OPS_CHECK): the old NVN records of this draw were written too (binds before this record, the draw record right
 // after it); the backend executes those and only compares (xbg_nb.inc nbdraw::check), it does not draw this record.
-enum { NBD_F_REN = 1, NBD_F_REN_ON = 2, NBD_F_COND = 4, NBD_F_CHECK = 8 };
+// NBD_F_NR (NR-09, DM_NR_DRAW): the record is an OP_X_NR_DRAW - an nrd_tail (the NR identity of the draw, below) follows the binds. Every reader of
+// OP_X_NB_DRAW takes the record as before (nbd_view / nbd_unpack accept a longer payload); only the backend's nrdraw reads the tail.
+enum { NBD_F_REN = 1, NBD_F_REN_ON = 2, NBD_F_COND = 4, NBD_F_CHECK = 8, NBD_F_NR = 16 };
 typedef struct {
     uint8_t ver, engine_op, draw, flags;      // NBD_VER; 36 / 37; NBD_DRAW_*; NBD_F_*
     uint16_t nbind; uint8_t cond_mode, _pad0;
@@ -44,6 +46,48 @@ _Static_assert(sizeof(nbd_hdr) == 64 && sizeof(nbd_bind) == 24, "OP_X_NB_DRAW la
 #endif
 
 static inline uint32_t nbd_size(const nbd_shadow *s) { return (uint32_t)(sizeof(nbd_hdr) + sizeof(nbd_bind) * (size_t)s->h.nbind); }
+// ---- NR-09: OP_X_NR_DRAW = OP_X_NB_DRAW + NBD_F_NR + nrd_tail (docs/dos2/nr/NR-09.md) ----
+// The engine's identity of the draw, taken by the NR-02 hook on the renderer's texture flush right before the NVN draw (same thread):
+// key = nr_key id (shader, blend, depth-stencil, raster, vertex format handles, blend argument, RT format set, primitive, alpha test;
+// 1.., 0 = none), texset = nr_texset id (pool ids of the 2 x 32 texture and sampler slots; 0 = none), why = NR_NE_* mask of the key
+// (0 = every handle known to the registry), site = index of the engine call site of the flush (0xff = unknown).
+enum { NRD_VER = 1 };
+typedef struct { uint32_t key, texset; uint16_t why; uint8_t ver, site; uint32_t _pad; } nrd_tail;
+#ifdef __cplusplus
+static_assert(sizeof(nrd_tail) == 16, "OP_X_NR_DRAW tail");
+#else
+_Static_assert(sizeof(nrd_tail) == 16, "OP_X_NR_DRAW tail");
+#endif
+// Bytes of the binds part of a record with header h (the tail, when flagged, starts right after it).
+static inline uint32_t nrd_tail_off(const nbd_hdr *h) { return (uint32_t)(sizeof(nbd_hdr) + sizeof(nbd_bind) * (size_t)h->nbind); }
+// Writes the tail after a packed record (dst = the payload nbd_pack wrote with NBD_F_NR set in its header, cap = payload bytes).
+// 1 = written, 0 = no room / the header is not flagged.
+static inline int nrd_tail_put(uint8_t *dst, size_t cap, uint32_t key, uint32_t texset, unsigned why, unsigned site) {
+    nbd_hdr h;
+    if (!dst || cap < sizeof h) return 0;
+    memcpy(&h, dst, sizeof h);
+    if (!(h.flags & NBD_F_NR) || h.nbind > NBD_MAX_BINDS || cap < nrd_tail_off(&h) + sizeof(nrd_tail)) return 0;
+    nrd_tail t; memset(&t, 0, sizeof t);
+    t.key = key; t.texset = texset; t.why = (uint16_t)why; t.ver = NRD_VER; t.site = (uint8_t)site;
+    memcpy(dst + nrd_tail_off(&h), &t, sizeof t);
+    return 1;
+}
+// NR-09R (DM_NR_DIRECT, dm/gfx/nr/nr_direct.h NRD_X_*): the tail's spare word of a record whose tail nrd_tail_put just wrote. Readers that
+// do not know it (every reader but the backend's nrdirect) never look at it; without DM_NR_DIRECT it stays 0.
+static inline void nrd_tail_ext_put(uint8_t *dst, size_t cap, uint32_t ext) {
+    nbd_hdr h;
+    if (!dst || cap < sizeof h) return;
+    memcpy(&h, dst, sizeof h);
+    if (!(h.flags & NBD_F_NR) || h.nbind > NBD_MAX_BINDS || cap < nrd_tail_off(&h) + sizeof(nrd_tail)) return;
+    memcpy(dst + nrd_tail_off(&h) + offsetof(nrd_tail, _pad), &ext, sizeof ext);
+}
+// Reads the tail of a record payload of n bytes whose header (already viewed) is h. 1 = *out is the tail; 0 = the record has none
+// (not flagged, too short, another version): it is a plain OP_X_NB_DRAW.
+static inline int nrd_tail_get(const uint8_t *p, size_t n, const nbd_hdr *h, nrd_tail *out) {
+    if (!p || !(h->flags & NBD_F_NR) || h->nbind > NBD_MAX_BINDS || n < nrd_tail_off(h) + sizeof(nrd_tail)) return 0;
+    memcpy(out, p + nrd_tail_off(h), sizeof *out);
+    return out->ver == NRD_VER;
+}
 // Bind slot limits the backend accepts (xbg_game.cpp execute: UBO / image 16 slots, texture / sampler 128, stages 0..5).
 static inline int nbd_bind_ok(unsigned kind, int stage, int slot) {
     return kind < NBD_B_KINDS && stage >= 0 && stage < 6 && slot >= 0 && slot < ((kind == NBD_B_UBO || kind == NBD_B_IMG) ? 16 : 128);

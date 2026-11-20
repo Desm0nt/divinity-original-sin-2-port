@@ -28,6 +28,7 @@ static_assert(sizeof(PipeMemoKey::fixed)==NBP_O(viewport)-NBP_O(attrib) && sizeo
               sizeof(PipeMemoKey::tail)==NBP_O(count_samples)-NBP_O(patch_size),"the spans below are the memo key's slices");
 inline nbp_span span(size_t a,size_t b,size_t c=0,size_t d=0){nbp_span s{};s.off[0]=uint16_t(a);s.len[0]=uint16_t(b-a);s.off[1]=uint16_t(c);s.len[1]=uint16_t(d-c);return s;}
 int mode=0;bool read_env=false;
+uint64_t epoch=0;   // [DOS2] NR-09: moves whenever group ids restart or cached pipelines / layouts / render passes go (the table of nrdraw keys on the ids and the pointers)
 nbp_groups *G=nullptr;nbp_memo *M=nullptr;
 std::vector<PipeMemoKey> full;      // mode 2: the full memo key each entry was stored under (index = entry)
 nbp_key key{};uint64_t khash=0;bool khash_ok=false;
@@ -65,8 +66,8 @@ void reset(){   // the state reset (init): DM_NB_PIPE once; every group is re-re
         xbg_logf("[nb] DM_NB_PIPE=%d (NB-13b: draw()'s pipeline memo by state-group id %s; works inside DM_GFX_DRAW_FAST's fast block, i.e. with gfx-pipe-memo / DM_GFX_PIPE_MEMO=1)",mode,
                  mode==1?"- hits taken when DM_GFX_DRAW_FAST=1":mode==2?"- check: would-be hits compared with the old memo / full lookup, none taken":"- off");}
     if(G)G->dirty=(1u<<NBP_GROUPS)-1;}
-void clear(){if(!M)return;nbp_memo_clear(M);prev=nullptr;would=nullptr;++s.clears_cache;}   // wherever the POD map is cleared
-void erase(VkPipeline old){if(!M)return;uint64_t v=0;memcpy(&v,&old,sizeof old);nbp_kill(M,v);}   // an evicted pipeline: its entries go dead
+void clear(){++epoch;if(!M)return;nbp_memo_clear(M);prev=nullptr;would=nullptr;++s.clears_cache;}   // wherever the POD map is cleared
+void erase(VkPipeline old){++epoch;if(!M)return;uint64_t v=0;memcpy(&v,&old,sizeof old);nbp_kill(M,v);}   // an evicted pipeline: its entries go dead
 // execute(): the groups this record writes (NB-13a's kind table for the state ops, + the misc group)
 inline void mark(uint32_t op,const uint8_t *p,size_t n){
     uint32_t k32;const int k=nbs_kind(op,p,uint32_t(n),&k32);
@@ -112,7 +113,7 @@ int look(VkPipeline &out,const void *layout,const void *pass_def,VkRenderPass pa
         if(st){++s.stale;G->dirty|=st;
             if(told<16){++told;for(int g=0;g<NBP_GROUPS;g++)if(st>>g&1)xbg_logf("[nb] pipe check differs: the %s group changed with no record marking it (frame %llu; vs=%s)",gname(g),
                 (unsigned long long)stats.presents.load(),state.shader[0]?state.shader[0]->key.c_str():"-");}}}
-    if(G->dirty && nbp_refresh(G,base)){nbp_memo_clear(M);prev=nullptr;++s.clears_ids;}
+    if(G->dirty && nbp_refresh(G,base)){nbp_memo_clear(M);prev=nullptr;++s.clears_ids;++epoch;}
     key_fill(layout,pass_def,pass,pl,prim,samples,colors);++s.keyed;khash_ok=false;
     nbp_ent *e=nullptr;bool via_prev=false;
     if(prev && !memcmp(&prev->k,&key,sizeof key)){e=prev;via_prev=true;}

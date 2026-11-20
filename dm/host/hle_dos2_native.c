@@ -58,6 +58,10 @@ static int g_dn_draw_mode;
 // Declared again in hle_dos2_nb.c.
 typedef struct dn_draw_handler { void (*pre)(uint64_t renderer, unsigned op); void (*post)(uint64_t renderer, unsigned op); } dn_draw_handler;
 static const dn_draw_handler *g_draw_h;
+// NR-23 (DM_NR_NOCALL, hle_dos2_nr_nocall.inc): asked before the engine's draw function, inside the handler's bracket. take() = 1: it
+// ran the draw itself (the engine's function is not called); 0: the engine's function runs, then after(). Declared again there.
+typedef struct dn_draw_native { int (*take)(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint64_t a4); void (*after)(unsigned op, uint64_t r); } dn_draw_native;
+static const dn_draw_native *g_draw_nv;
 void nvn_native_draw_begin(const void *renderer, int mode);   // hle_nvn.c
 void nvn_native_draw_end(void);
 void nvn_native_draw_stats(uint64_t *draws, uint64_t *recs, uint64_t *bytes, uint64_t *split);
@@ -122,10 +126,15 @@ static const dn_rc_handler k_count = {dn_count_pre, dn_count_post}, k_mark_h = {
 enum { DN_RC_MAX = 4 };
 static const dn_rc_handler *g_rc_h[DN_RC_MAX];
 static int g_rc_nh;
+// [DOS2] NR-09S (DM_NR_STATE): an optional native handler of some opcodes (g_rc_take_ops, bit = opcode): take() = 1 - the packet was
+// executed (*len = its length), the original does not run; 0 - the original runs as before. The pre / post handlers run either way.
+static int (*g_rc_take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
+static uint64_t g_rc_take_ops;
 static uint64_t dn_rc_hook(uint64_t list, uint64_t op, uint64_t pkt, uint64_t a3, uint64_t a4, uint64_t a5) {
     const unsigned c = (unsigned)op & 0xff; const int n = g_rc_nh;
     for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
-    uint64_t len = g_rc_orig(list, op, pkt, a3, a4, a5);
+    uint64_t len;
+    if (!(__builtin_expect(g_rc_take_ops != 0, 0) && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, op, pkt, a3, a4, a5);
     for (int i = 0; i < n; i++) if (g_rc_h[i]->post) g_rc_h[i]->post(list, c, pkt, len);
     return len;
 }
@@ -144,7 +153,10 @@ static uint64_t dn_draw_common(dn_fn orig, unsigned op, uint64_t r, uint64_t a1,
     const int m = g_dn_draw_mode; const dn_draw_handler *h = g_draw_h;
     if (m) nvn_native_draw_begin((const void *)(uintptr_t)r, m);
     if (h) h->pre(r, op);
-    uint64_t v = orig(r, a1, a2, a3, a4, a5);
+    const dn_draw_native *nv = g_draw_nv;   // [DOS2] NR-23 DM_NR_NOCALL (NULL = off: the engine's function, as before)
+    uint64_t v = 0;
+    if (!nv) v = orig(r, a1, a2, a3, a4, a5);
+    else if (!nv->take(op, r, a1, a2, a4)) { v = orig(r, a1, a2, a3, a4, a5); nv->after(op, r); }
     if (h) h->post(r, op);
     if (m) { nvn_native_draw_end(); dn_draw_report(); }
     return v;
@@ -214,6 +226,19 @@ int dn_install_rc(const dn_rc_handler *h) {
     return 0;
 }
 
+// NR-09S: the native handler of the opcodes in mask (installs the ExecuteRenderCommand hook if nobody did). Install time only. 0 = in.
+int dn_install_rc_take(uint64_t mask, int (*take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len));
+int dn_install_rc_take(uint64_t mask, int (*take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len)) {
+    if (g_rc_take) { LOG("【红】[native] ExecuteRenderCommand: a second native opcode handler"); return -1; }
+    static const dn_rc_handler none = {NULL, NULL};
+    if (!g_rc_orig && dn_install_rc(&none)) return -1;   // the hook itself (with an empty handler)
+    g_rc_take = take; g_rc_take_ops = mask;
+    return 0;
+}
+// NR-09S DM_NR_STATE=2: the engine's own handler of one packet, from inside a native handler (the original past the hook).
+uint64_t dn_rc_call_orig(uint64_t list, unsigned op, uint64_t pkt);
+uint64_t dn_rc_call_orig(uint64_t list, unsigned op, uint64_t pkt) { return g_rc_orig(list, op, pkt, 0, 0, 0); }
+
 // NB-09: one handler around both engine draw functions (installs the hooks if DM_NATIVE_DRAW did not). Install time only. 0 = registered.
 int dn_install_draw(const dn_draw_handler *h);
 int dn_install_draw(const dn_draw_handler *h) {
@@ -225,6 +250,21 @@ int dn_install_draw(const dn_draw_handler *h) {
     if (rc == -1) { LOG("【红】[native] mmap / mprotect failed: no draw hooks"); return -1; }
     if (rc == -2) { LOG("【红】[native] the draw hooks are half in (DrawElements only): no draw handler"); return -1; }
     g_draw_h = h;
+    return 0;
+}
+
+// NR-23: the native handler of both engine draw functions (installs the hooks if nobody did). Install time only. 0 = registered.
+int dn_install_draw_native(const dn_draw_native *h);
+int dn_install_draw_native(const dn_draw_native *h) {
+    if (g_draw_nv) { LOG("【红】[native] engine draw: a second native handler"); return -1; }
+    module_t *m = dn_main();
+    if (!g_draw_orig || !g_drawi_orig) {
+        if (!m || !dn_words_ok(m, DN_DRAW, k_dn_draw) || !dn_words_ok(m, DN_DRAWI, k_dn_draw)) {
+            LOG("【红】[native] main+%#x / +%#x differ: not DOS2 update v786432 main (build 4979b200): no draw hooks", DN_DRAW, DN_DRAWI); return -1; }
+        const int rc = dn_draw_hooks(m);
+        if (rc) { LOG("【红】[native] %s: no native draw handler", rc == -1 ? "mmap / mprotect failed: no draw hooks" : "the draw hooks are half in (DrawElements only)"); return -1; }
+    }
+    g_draw_nv = h;
     return 0;
 }
 

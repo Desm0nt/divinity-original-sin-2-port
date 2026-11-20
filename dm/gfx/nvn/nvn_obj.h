@@ -232,6 +232,7 @@ enum {
     OP_X_NB_STATE,                 // nvn_nb_state.h nbs_hdr + blocks               ([DOS2] DM_NB_OPS state bits: deduplicated state blocks, NB-13a)
     OP_X_RENDER_COND,              // p_render_cond                                 ([DOS2] SetRenderEnable(Conditional); only with DM_GFX_COND_RENDER != 0)
     OP_X_NB_KEY,                   // nvn_nb_key.h nbk_hdr + units                  ([DOS2] DM_NB_RELOC: the state an IR pass starts from, right after its OP_X_NB_PASS, NB-14)
+    OP_X_NR_STATE,                 // nr/nr_state3.h nr3_hdr + parts                ([DOS2] DM_NR_STATE=4 / 5: the state of one opcode-21 packet, NR-09S3)
     OP_X_END_
 };
 // [DOS2] DM_NATIVE_DRAW=2: the texture handles the engine's state cache holds at a draw (stage 0 vertex, 1 fragment; bit i of mask = slot i
@@ -252,6 +253,7 @@ typedef struct {
     uint64_t att[NB_REC_ATT]; uint8_t slot[NB_REC_ATT];          // images (texture storage address) and colour slot (8 = depth / stencil)
     uint8_t load[NB_REC_ATT], store[NB_REC_ATT];                 // plan (nb_ir.h NB_LOAD_* / NB_STORE_*), by attachment
     uint8_t end, flags, plan_ok, read_over;                      // IR end reason (NB_END_*), plan flags (NB_NP_*), plan valid, reads beyond the list
+    uint8_t oc;                                                  // NR-ONCHIP chain mark (dm/gfx/nb/nb_onchip.h; byte 111, the former padding)
     uint16_t cover_dc, clear_mask;                               // attachments whose LOAD becomes DONT_CARE if the first draw covers them; with a CLEAR load
     uint32_t draws, nclear, nread;                               // IR draws, in-pass clears, distinct reads
     uint64_t read[NB_REC_READS]; uint64_t bloom[NB_REC_BLOOM];

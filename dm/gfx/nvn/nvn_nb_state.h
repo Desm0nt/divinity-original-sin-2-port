@@ -169,6 +169,10 @@ static inline void nbs_unknown(nbs_state *s, unsigned mask) {
         s->s[k].n = 0; s->s[k].used = 0; s->emitted[k] = -1; s->dirty &= (uint8_t)~(1u << k);
     }
 }
+// [NR-13] DM_NR_LEAN_AB: the capture comes back after a pause in which every state record was written plainly, unseen by the shadow.
+// Nothing the shadow holds or remembers as emitted can be trusted: every kind is forgotten (as after a plain record of each kind) and a
+// new epoch starts, so the first taken call of a kind is emitted in full (a DEF) with only the entries set since.
+static inline void nbs_resume(nbs_state *s, uint32_t epoch) { nbs_unknown(s, (1u << NBS_KINDS) - 1u); s->dirty = 0; nbs_new_epoch(s, epoch); }
 // The OP_X_NB_STATE payload for the dirty kinds into dst (cap >= NBS_PAYLOAD_MAX). Returns its bytes, 0 = nothing to emit. Clears dirty.
 static inline uint32_t nbs_pack(nbs_state *s, uint8_t *dst, size_t cap) {
     if (!s->dirty || cap < (size_t)NBS_PAYLOAD_MAX) { s->dirty = 0; return 0; }

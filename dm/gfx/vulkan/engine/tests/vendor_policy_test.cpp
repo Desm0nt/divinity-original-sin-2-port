@@ -99,6 +99,22 @@ int main(){
     t=s;xbg_sim_subgroup(0,&t);CHECK(t.subgroupSize==64 && t.quadOperationsInAllStages);
     VkPhysicalDeviceLimits l{};l.maxTexelBufferElements=1u<<27;xbg_sim_limits(XBG_SIM_PROFILE_MALI,&l);CHECK(l.maxTexelBufferElements==1u<<27);
     xbg_sim_limits(XBG_SIM_PROFILE_POWERVR,&l);CHECK(l.maxTexelBufferElements==65536);
+    // [DOS2] NR-08: the dynamic uniform buffer limit of Mali / PowerVR / Xclipse, by name only (the profiles keep the device's), and the split rule
+    l.maxDescriptorSetUniformBuffersDynamic=16;xbg_sim_limits(XBG_SIM_PROFILE_MALI|XBG_SIM_PROFILE_POWERVR|XBG_SIM_PROFILE_XCLIPSE,&l);CHECK(l.maxDescriptorSetUniformBuffersDynamic==16);
+    CHECK(xbg_sim_parse("mali,ubdyn8")==(XBG_SIM_PROFILE_MALI|XBG_SIM_UBDYN8));xbg_sim_limits(xbg_sim_parse("ubdyn8"),&l);CHECK(l.maxDescriptorSetUniformBuffersDynamic==8);
+    l.maxDescriptorSetUniformBuffersDynamic=4;xbg_sim_limits(XBG_SIM_UBDYN8,&l);CHECK(l.maxDescriptorSetUniformBuffersDynamic==4);
+    CHECK(xbg_nr_desc_split_default(true) && !xbg_nr_desc_split_default(false));
+    CHECK(xbg_nr_draw_fold_default()==3);   // NR-09: index + vertex folds on every family (never a command more than the old tail)
+    CHECK(xbg_nr_sort_default()==0);   // NR-21: off on every family until the phone runs
+    // [DOS2] NR-08b DM_NR_UBODYN: default 1 on PowerVR (17.11, phone SIM batch 12), 0 elsewhere; the read-only rule only where dynamic buffers are
+    // off (PowerVR policy, the SIM powervr family on an Adreno, DM_GFX_UBO_DYNAMIC=0); DM_GFX_UBO_DYNAMIC=2 forces it anywhere; DM_NR_UBODYN=0
+    // (the safe-mode step 1 value) turns it off on PowerVR
+    for(int f=0;f<=XBG_GPU_MALEOON;f++)CHECK(xbg_nr_ubodyn_default(XbgGpuFamily(f))==(f==XBG_GPU_POWERVR?1:0));
+    {const XbgGpuFamily sim=xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_PROFILE_POWERVR);const bool fon=xbg_ubo_dynamic_default(sim);CHECK(!fon);
+     CHECK(xbg_nr_ubodyn_active(-1,-1,fon,sim));CHECK(!xbg_nr_ubodyn_active(0,-1,fon,sim));CHECK(xbg_nr_ubodyn_active(1,-1,fon,sim));CHECK(!xbg_nr_ubodyn_active(2,-1,fon,sim));
+     CHECK(!xbg_nr_ubodyn_active(1,1,fon,sim));CHECK(xbg_nr_ubodyn_active(1,0,fon,sim));CHECK(xbg_nr_ubodyn_active(-1,2,fon,sim));CHECK(xbg_nr_ubodyn_active(0,2,fon,sim));}
+    for(XbgGpuFamily f:{XBG_GPU_ADRENO,XBG_GPU_MALI,XBG_GPU_XCLIPSE,XBG_GPU_MALEOON,XBG_GPU_OTHER}){const bool fon=xbg_ubo_dynamic_default(f);CHECK(fon);
+        CHECK(!xbg_nr_ubodyn_active(1,-1,fon,f));CHECK(!xbg_nr_ubodyn_active(-1,-1,fon,f));CHECK(xbg_nr_ubodyn_active(1,0,fon,f));CHECK(xbg_nr_ubodyn_active(-1,2,fon,f));}
 
     // Texel buffer ranges: unchanged when they fit (Adreno's 2^27 covers any DOOM buffer), cut to whole texels otherwise.
     CHECK(xbg_texel_range_clamp(64ull<<20,1,1u<<27)==64ull<<20);
@@ -150,6 +166,16 @@ int main(){
     // [tile] render-pass policy (DM_GFX_CLEAR_FOLD / STORE_HIST / TILE_BARRIER / NOLOAD): Adreno and unknown GPUs keep the old behaviour.
     CHECK(!xbg_clear_fold_default(XBG_GPU_ADRENO) && !xbg_store_hist_default(XBG_GPU_ADRENO) && !xbg_tile_barrier_default(XBG_GPU_ADRENO) && !xbg_noload_default(XBG_GPU_ADRENO));
     CHECK(!xbg_clear_fold_default(XBG_GPU_OTHER) && !xbg_store_hist_default(XBG_GPU_OTHER));
+    // [DOS2] NR-27 DM_NR_UBOVEC: on where the compiler does not merge the loads itself and it was measured (Mali), nowhere else yet
+    CHECK(xbg_nr_ubovec_default(XBG_GPU_MALI)==1 && !xbg_nr_ubovec_default(XBG_GPU_ADRENO) && !xbg_nr_ubovec_default(XBG_GPU_POWERVR) && !xbg_nr_ubovec_default(XBG_GPU_XCLIPSE) && !xbg_nr_ubovec_default(XBG_GPU_OTHER));
+    CHECK(xbg_nr_ubovec_default(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_FAMILY_MALI))==1);   // DM_GFX_SIM_GPU=mali exercises it on an Adreno phone
+    CHECK(xbg_nr_xlq_default(XBG_GPU_MALI)==1 && xbg_nr_xlq_default(XBG_GPU_POWERVR)==1 && xbg_nr_xlq_default(XBG_GPU_MALEOON)==1 && !xbg_nr_xlq_default(XBG_GPU_ADRENO) && !xbg_nr_xlq_default(XBG_GPU_XCLIPSE) && !xbg_nr_xlq_default(XBG_GPU_OTHER));   // NR-32
+    CHECK(xbg_nr_xlq_default(xbg_effective_family(XBG_GPU_ADRENO,XBG_SIM_FAMILY_MALI))==1);
+    CHECK(xbg_nr_idvs_default(XBG_GPU_MALI)==1 && xbg_nr_idvs_default(XBG_GPU_POWERVR)==1 && xbg_nr_idvs_default(XBG_GPU_MALEOON)==1 && !xbg_nr_idvs_default(XBG_GPU_ADRENO) && !xbg_nr_idvs_default(XBG_GPU_XCLIPSE) && !xbg_nr_idvs_default(XBG_GPU_OTHER));   // T2 DM_NR_IDVS: 0 until a device run
+    // [DOS2] NR-30 DM_DOS2_PREPASS: 1 on the tile families, 0 elsewhere; SIM mali / powervr exercise it on the Mi 14
+    CHECK(xbg_dos2_prepass_default(XBG_GPU_MALI)==1 && xbg_dos2_prepass_default(XBG_GPU_POWERVR)==1);
+    CHECK(!xbg_dos2_prepass_default(XBG_GPU_ADRENO) && !xbg_dos2_prepass_default(XBG_GPU_XCLIPSE) && !xbg_dos2_prepass_default(XBG_GPU_MALEOON) && !xbg_dos2_prepass_default(XBG_GPU_OTHER));
+    CHECK(xbg_dos2_prepass_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==1 && xbg_dos2_prepass_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("powervr")))==1);
     CHECK(xbg_clear_fold_default(XBG_GPU_MALI)==1 && xbg_store_hist_default(XBG_GPU_MALI)==1 && xbg_tile_barrier_default(XBG_GPU_MALI) && xbg_noload_default(XBG_GPU_MALI));
     CHECK(xbg_clear_fold_default(XBG_GPU_POWERVR)==1 && xbg_store_hist_default(XBG_GPU_POWERVR)==1 && xbg_tile_barrier_default(XBG_GPU_POWERVR));
     CHECK(xbg_clear_fold_default(XBG_GPU_XCLIPSE)==1 && !xbg_store_hist_default(XBG_GPU_XCLIPSE) && !xbg_tile_barrier_default(XBG_GPU_XCLIPSE));
@@ -157,6 +183,45 @@ int main(){
     // [DOS2] DM_NB_RP (NB-06): off on every family until the phone confirms it (then 1 on Mali / PowerVR / Xclipse).
     for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++)CHECK(xbg_nb_rp_default(XbgGpuFamily(f))==0);
     CHECK(xbg_nb_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==0);
+    // [DOS2] NR-03 DM_NR_OCC path: GPU predicate (1) on Adreno / Xclipse / other, previous frames (2) on the tilers + Maleoon; SIM mali -> 2
+    CHECK(xbg_nr_occ_path_default(XBG_GPU_ADRENO)==1 && xbg_nr_occ_path_default(XBG_GPU_XCLIPSE)==1 && xbg_nr_occ_path_default(XBG_GPU_OTHER)==1);
+    CHECK(xbg_nr_occ_path_default(XBG_GPU_MALI)==2 && xbg_nr_occ_path_default(XBG_GPU_POWERVR)==2 && xbg_nr_occ_path_default(XBG_GPU_MALEOON)==2);
+    CHECK(xbg_nr_occ_path_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==2);
+    // [DOS2] NR-10 DM_NR_RP (audit P0): 1 exactly where DM_GFX_TILE_BARRIER is on (the tile families), so the DM_NB_RP pre-pass barrier the
+    // JNI enables everywhere stays fragment-only there; 0 on Adreno / Xclipse / Maleoon / unknown. DM_NR_RP_FRESH (tiler plan step 1, batch D
+    // D_rp3): the same set - on exactly where DM_NR_RP is 1 by default and TILE_BARRIER is on, off on every other family.
+    for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++){const XbgGpuFamily g=XbgGpuFamily(f);CHECK(xbg_nr_rp_default(g)==(xbg_tile_barrier_default(g)?1:0));
+        CHECK(xbg_nr_rp_fresh_default(g)==xbg_tile_barrier_default(g));CHECK(xbg_nr_rp_fresh_default(g)==(xbg_nr_rp_default(g)==1));}
+    CHECK(xbg_nr_rp_fresh_default(XBG_GPU_MALI) && xbg_nr_rp_fresh_default(XBG_GPU_POWERVR));
+    CHECK(!xbg_nr_rp_fresh_default(XBG_GPU_ADRENO) && !xbg_nr_rp_fresh_default(XBG_GPU_XCLIPSE) && !xbg_nr_rp_fresh_default(XBG_GPU_MALEOON) && !xbg_nr_rp_fresh_default(XBG_GPU_OTHER));
+    CHECK(xbg_nr_rp_default(XBG_GPU_MALI)==1 && xbg_nr_rp_default(XBG_GPU_POWERVR)==1);
+    // NR-SHCACHE (owner 18.11): 1 on Adreno only; DM_GFX_SIM_GPU=mali on the Mi 14 takes the tiler's 0
+    CHECK(xbg_nr_shcache_default(XBG_GPU_ADRENO)==1);
+    for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++)if(f!=XBG_GPU_ADRENO)CHECK(xbg_nr_shcache_default(XbgGpuFamily(f))==0);
+    CHECK(xbg_nr_shcache_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==0);
+    CHECK(xbg_nr_rp_default(XBG_GPU_ADRENO)==0 && xbg_nr_rp_default(XBG_GPU_XCLIPSE)==0 && xbg_nr_rp_default(XBG_GPU_MALEOON)==0 && xbg_nr_rp_default(XBG_GPU_OTHER)==0);
+    CHECK(xbg_nr_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==1);   // DM_GFX_SIM_GPU=mali on the Mi 14 takes it (with TILE_BARRIER)
+    CHECK(xbg_nr_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("family-mali")))==1 && xbg_nr_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("powervr")))==1);
+    CHECK(xbg_nr_rp_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("xclipse")))==0 && xbg_nr_rp_default(xbg_effective_family(XBG_GPU_ADRENO,0))==0);
+    // DM_GFX_SIM_GPU on the Mi 14: mali / family-mali / powervr / family-powervr take FRESH; xclipse / no SIM do not
+    CHECK(xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali"))) && xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("family-mali"))));
+    CHECK(xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("powervr"))) && xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("family-powervr"))));
+    CHECK(!xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("xclipse"))) && !xbg_nr_rp_fresh_default(xbg_effective_family(XBG_GPU_ADRENO,0)));
+    // [DOS2] NR-UIX (tiler plan step 1, batch D D_uix1): DM_NR_UIX_DS (0) and DM_NR_UIX_AREA (1) on exactly the tile families; the counting parts
+    // RB (2) / CACHE (3) off everywhere; out-of-range part indices 0
+    for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++){const XbgGpuFamily g=XbgGpuFamily(f);const int t=xbg_tile_family(g)?1:0;
+        CHECK(xbg_nr_uix_default(g,0)==t && xbg_nr_uix_default(g,1)==t);CHECK(xbg_nr_uix_default(g,0)==(xbg_tile_barrier_default(g)?1:0));
+        CHECK(xbg_nr_uix_default(g,2)==0 && xbg_nr_uix_default(g,3)==0 && xbg_nr_uix_default(g,-1)==0 && xbg_nr_uix_default(g,4)==0);}
+    CHECK(xbg_nr_uix_default(XBG_GPU_MALI,0)==1 && xbg_nr_uix_default(XBG_GPU_MALI,1)==1 && xbg_nr_uix_default(XBG_GPU_POWERVR,0)==1 && xbg_nr_uix_default(XBG_GPU_POWERVR,1)==1);
+    CHECK(xbg_nr_uix_default(XBG_GPU_ADRENO,0)==0 && xbg_nr_uix_default(XBG_GPU_ADRENO,1)==0 && xbg_nr_uix_default(XBG_GPU_XCLIPSE,0)==0 && xbg_nr_uix_default(XBG_GPU_XCLIPSE,1)==0);
+    CHECK(xbg_nr_uix_default(XBG_GPU_MALEOON,0)==0 && xbg_nr_uix_default(XBG_GPU_MALEOON,1)==0 && xbg_nr_uix_default(XBG_GPU_OTHER,0)==0 && xbg_nr_uix_default(XBG_GPU_OTHER,1)==0);
+    for(const char *sim:{"mali","family-mali","powervr","family-powervr"}){const XbgGpuFamily g=xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse(sim));
+        CHECK(xbg_nr_uix_default(g,0)==1 && xbg_nr_uix_default(g,1)==1 && xbg_nr_uix_default(g,2)==0 && xbg_nr_uix_default(g,3)==0);}
+    for(const char *sim:{"xclipse","family-xclipse","nobc"}){const XbgGpuFamily g=xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse(sim));
+        CHECK(xbg_nr_uix_default(g,0)==0 && xbg_nr_uix_default(g,1)==0);}
+    CHECK(xbg_nr_uix_default(xbg_effective_family(XBG_GPU_ADRENO,0),0)==0 && xbg_nr_uix_default(xbg_effective_family(XBG_GPU_ADRENO,0),1)==0);
+    for(int f=XBG_GPU_OTHER;f<=XBG_GPU_MALEOON;f++)CHECK(xbg_nr_cover_default(XbgGpuFamily(f))==0);   // [DOS2] NR-10b: off until the phone confirms
+    CHECK(xbg_nr_cover_default(xbg_effective_family(XBG_GPU_ADRENO,xbg_sim_parse("mali")))==0);
 
     if(failures){printf("%d failure(s)\n",failures);return 1;}
     printf("vendor_policy_test: all checks passed\n");return 0;

@@ -157,6 +157,7 @@ void tick(){if(!armed)return;nbdraw::tick();const uint64_t now=timing_clock();if
 // Every counter is printed with the 10 s "[nb] check" lines as "[nb] rp ..." (any DM_NB_RP != 0).
 namespace nbrp{
 nb_rp_dec cur{},lazy{};bool cur_ok=false,lazy_ok=false;uint32_t bi_dc=0,prebar_uid=0;unsigned told=0;At cur_at{},lazy_at{};uint64_t store_kept=0;
+At open_at{};uint8_t open_why=1;   // the last open(): its span's IR pass, 0 applied / 1 no header / 2 later host pass / 3 guest barriers / 4 attachments differ (VIOLATION lines)
 struct Stats{uint64_t opens,decided,nohdr,later,att,guestbar,clear_missing,clear_extra,twin_fail,dc_load,store_dc,poison_load,carried,landed,
     prebar,prebar_bar,prebar_nobar,prebar_trans,prebar_land,cmp,cmp_fallback,cmp_differ,ld[3][4],st[2][2];}s{};
 int map(const Pass &p,const p_nb_pass &h,nb_rp_dec &d){
@@ -165,21 +166,38 @@ int map(const Pass &p,const p_nb_pass &h,nb_rp_dec &d){
     return nb_rp_map(h.plan_ok,h.natt,h.att,h.load,h.store,h.cover_dc,h.flags,n,a,&d);}
 const p_nb_pass *span_hdr(){const nbchk::Span &x=nbchk::sp;return x.open && !x.closing && x.h.patched?&x.h:nullptr;}
 void prebar(const Pass &p,const p_nb_pass &h0,VkCommandBuffer cmd){if(prebar_uid==nbchk::sp.uid)return;prebar_uid=nbchk::sp.uid;++s.prebar;
-    auto reads=[&](const p_nb_pass &h){
+    bool nr_full=false,nr_frag=false,nr_over=false;   // [DOS2] NR-10 DM_NR_RP: is a read image of the header(s) written beyond what its reader sees?
+    auto reads=[&](const p_nb_pass &h){if(h.read_over)nr_over=true;
     for(uint32_t i=0;i<h.nread && i<NB_REC_READS;i++){const uint64_t m=h.read[i];if(!m)continue;bool att=false;for(auto *im:p.images)if(nbchk::key(*im)==m)att=true;if(att)continue;
-        Image *hit[4]{};int nh=0;for_images_overlapping(m,1,[&](Image &im){if(nbchk::key(im)==m && nh<4)hit[nh++]=&im;});
+        Image *hit[4]{};int nh=0;bool more=false;for_images_overlapping(m,1,[&](Image &im){if(nbchk::key(im)==m){if(nh<4)hit[nh++]=&im;else more=true;}});if(more)nr_over=true;
         for(int j=0;j<nh;j++){Image &im=*hit[j];if(pclear_n){const size_t before=pclear_n;pclear_flush_image(im,0);if(pclear_n!=before)++s.prebar_land;}
-            if(im.layout!=VK_IMAGE_LAYOUT_GENERAL){im.transition(cmd,VK_IMAGE_LAYOUT_GENERAL);++s.prebar_trans;}}}};
+            if(im.layout!=VK_IMAGE_LAYOUT_GENERAL){im.transition(cmd,VK_IMAGE_LAYOUT_GENERAL);++s.prebar_trans;}
+            if(nrrp::mode){if(nr_rp_written(im.last_write,im.storage_write,0,nrrp::seen_full(im),im.nrvis_full))nr_full=true;
+                if(nr_rp_written(im.last_write,im.storage_write,0,nrrp::seen_frag(im),im.nrvis_frag))nr_frag=true;}}}};
     reads(h0);
     if(nbord::in_run){p_nb_pass m;for(int k=1;nbord::unit_member(h0,k,m);k++){reads(m);if(k==1)nbord::note_unit_prebar();}}   // [DOS2] NB-17b: the unit's barrier covers every member's reads
+    if(nrrp::mode){   // [DOS2] NR-10: the barrier by the header's read images (nr_rp_prebar); 2: the old rule below is executed and compared
+        const int narrow=nr_rp_prebar(nr_full,nr_frag,storage_unbarriered || (nr_over && write_seq>nrrp::gb()),tile_barrier_on,nrrp::frag_first && !nrrp::need_full.count(uint64_t(p.framebuffer)));
+        ++nrrp::s.pb;if(narrow==NR_PB_NONE)++nrrp::s.pb_none;else if(narrow==NR_PB_FRAG)++nrrp::s.pb_frag;else{++nrrp::s.pb_full;if(!nr_full)++nrrp::s.pb_unknown;}
+        if(nrrp::apply()){if(narrow==NR_PB_NONE){++s.prebar_nobar;return;}
+            if(narrow==NR_PB_FRAG)frag_barrier(cmd);else full_barrier(cmd);
+            for(auto *im:p.images)im->last_write=++write_seq;++s.prebar_bar;return;}
+        const int old=write_seq>barrier_seq || storage_unbarriered?NR_PB_FULL:NR_PB_NONE;if(old)++nrrp::s.pb_old;
+        const int c=nr_rp_compare(old,narrow);
+        if(c==NR_CMP_MORE){++nrrp::s.more;if(nrrp::told<16){++nrrp::told;xbg_logf("【红】[nr] rp check: the narrow barrier before IR pass seq=%u node=%d wants %s, the old rule records none (reads %u, over %d, storage %d)",h0.seq,int(h0.node),narrow==NR_PB_FULL?"a full barrier":"a fragment barrier",h0.nread,int(nr_over),int(storage_unbarriered));}
+            if(narrow==NR_PB_FULL)nrrp::nr_sh_b=nrrp::nr_sh_f=write_seq;else nrrp::nr_sh_f=write_seq;}
+        else if(c!=NR_CMP_SAME){nrrp::nr_mute=true;if(c==NR_CMP_FRAG)nrrp::nr_sh_f=write_seq;}}   // dropped / fragment only: the shadow's full point stays
     if(write_seq>barrier_seq || storage_unbarriered){full_barrier(cmd);for(auto *im:p.images)im->last_write=++write_seq;++s.prebar_bar;}   // the pass's own writes stay after it
-    else ++s.prebar_nobar;}
+    else ++s.prebar_nobar;
+    nrrp::nr_mute=false;}
 bool open(const Pass &p,VkCommandBuffer cmd){cur_ok=false;++s.opens;const p_nb_pass *h=span_hdr();
+    open_why=1;open_at=At{};if(h){open_at.seq=h->seq;open_at.node=h->node;}
     if(!h || !h->plan_ok){++s.nohdr;return false;}
-    if(nbchk::sp.begun || nbchk::sp.cont){++s.later;return false;}   // a second host pass of the span (split) or a continued one: heuristics
-    if(guest_barrier>0){++s.guestbar;return false;}
+    if(nbchk::sp.begun || nbchk::sp.cont){++s.later;open_why=2;return false;}   // a second host pass of the span (split) or a continued one: heuristics
+    if(guest_barrier>0){++s.guestbar;open_why=3;return false;}
     if(h->flags&NB_NP_PREBAR)prebar(p,*h,cmd);
-    if(map(p,*h,cur)!=NB_RP_OK){++s.att;return false;}
+    if(map(p,*h,cur)!=NB_RP_OK){++s.att;open_why=4;return false;}
+    open_why=0;
     // [DOS2] NB-17b: a unit (passes run as one Vulkan pass) stores what its last pass stores: DONT_CARE only where both headers say so
     if(nbord::in_run){p_nb_pass t;if(nbord::unit_last(*h,t)){nb_rp_dec d2{};if(map(p,t,d2)==NB_RP_OK)cur.store_dc&=d2.store_dc;else cur.store_dc=0;}}
     ++s.decided;cur_ok=true;cur_at.seq=h->seq;cur_at.node=h->node;return true;}
@@ -265,17 +283,22 @@ void apply(const uint8_t *p,size_t n){
         int texb=0;if(nbdesc::P.valid)nbw=nb_desc_pre(&nbdesc::P.s,tex_gen,buf_gen,&h,b,(const uint64_t(*)[128])state.tex,(const uint64_t(*)[128])state.samp,
                                                       (const uint64_t(*)[16])state.img,(const nbd_range(*)[16])ub_tab(),&texb);
         if(same_tg){++nbdesc::s.texgen_same;if(texb)++nbdesc::s.texgen_tex;}}
+    if(__builtin_expect(nrdirect::mode,0)){if(nrdirect::mode<0)nrdirect::init();if(nrdirect::mode>0 && (h.flags&NBD_F_NR))nrdirect::pre(p,n,h,b);}   // [DOS2] NR-09R DM_NR_DIRECT: before the binds land
     need(nbd_apply(&h,b,state.tex,state.samp,state.img,ub_tab(),&ts,&bs)==0,"Invalid OP_X_NB_DRAW bind");
     for(unsigned m=ts;m;m&=m-1){++tex_gen[__builtin_ctz(m)];++s.tex_bumps;}
     for(unsigned m=bs;m;m&=m-1){++buf_gen[__builtin_ctz(m)];++s.buf_bumps;}
-    if(nbubo::mode!=0)nbubo::note(h,b);   // [DOS2] NB-12 DM_NB_UBO: the record's uniform ranges are the engine's constant ring (first call reads the switch)
+    if(nbubo::mode!=0 && !nrlean::skip_notes())nbubo::note(h,b);   // [DOS2] NB-12 (NR-13 DM_NR_LEAN: no notes while NR-06 serves the ring)
+    if(__builtin_expect(nrlean::mode>0,0))nrlean::record((h.flags&NBD_F_NR)!=0,nbdesc::mode>0 && nbdesc::P.valid,nbdesc::mode>0 && nbw==NBDS_OK);   // [DOS2] NR-13: the NB-11 census (nbw: before nb_desc_post)
+    //   [DOS2] NB-12 DM_NB_UBO: the record's uniform ranges are the engine's constant ring (first call reads the switch)
     if(nbdesc::mode>0){if(nbw==NBDS_OK)nbw=nb_desc_post(&nbdesc::P.s,ts|bs);
         if(nbw!=NBDS_OK)++nbdesc::s.why[nbw];   // reasons found in descriptors() are counted there
         nbdesc::cand=nbw==NBDS_OK;memcpy(nbdesc::etex,tex_gen,sizeof nbdesc::etex);memcpy(nbdesc::ebuf,buf_gen,sizeof nbdesc::ebuf);}
-    if(timed){s.bind_ns+=timing_clock()-t0;++s.timed;}
+    if(timed){const uint64_t dt=timing_clock()-t0;s.bind_ns+=dt;++s.timed;if(__builtin_expect(nrlean::mode>0,0))nrlean::apply_ns(dt);}
     ++s.records;s.binds+=h.nbind;++records;binds+=h.nbind;note_ren(h);
     condr::from_nb(h.flags,h.cond_mode,h.cond_addr);   // [DOS2] DM_GFX_COND_RENDER (no-op at 0)
+    nrd_tail nrt;if(__builtin_expect(nrdraw::mode,0))nrdraw::record(nrd_tail_get(p,n,&h,&nrt)?&nrt:nullptr);   // [DOS2] NR-09 DM_NR_DRAW: the identity of an OP_X_NR_DRAW, for the draw() below
     do_draw(h);
+    if(__builtin_expect(nrdraw::mode,0))nrdraw::stale();
     nbdesc::cand=false;}   // [DOS2] NB-11: a draw() that returned before descriptors() leaves no candidate
 // NB-09: the faithful unpack - the binds become, one by one in call order, exactly the NVN bind records they replaced (exec_bind_buf /
 // exec_bind_handles of xbg_game.cpp, same checks, tables and per-bind generation bumps). Kept behind DM_NB_DRAW_UNPACK=1.
@@ -324,14 +347,14 @@ void seen(int prim,int first,int count,const p_draw_idx *d){pend=false;
     else snprintf(w,sizeof w,"draw arguments: record kind %u prim %d first %d count %d; old DRAW prim %d first %d count %d",unsigned(pend_h.draw),pend_h.prim,
         pend_h.first,pend_h.count,prim,first,count);
     differs(pend_h,w);}
-void exec(const uint8_t *p,size_t n){
+void exec(const uint8_t *p,size_t n){NRCPU_SCOPE(NbDraw);   // [DOS2] NR-CPU
     need(p && n>=sizeof(nbd_hdr),"Invalid OP_X_NB_DRAW record");
     if(p[offsetof(nbd_hdr,flags)]&NBD_F_CHECK){check(p,n);return;}
     if(unpack_mode<0){const char *e=getenv("DM_NB_DRAW_UNPACK");unpack_mode=e && atoi(e)==1;
         xbg_logf("[nb] OP_X_NB_DRAW: %s (DM_NB_DRAW_UNPACK=%d, NB-10)",unpack_mode?"NB-09 faithful unpack into the old bind records":"applied to the state directly",unpack_mode);}
     if(unpack_mode)unpack(p,n);else apply(p,n);}
 // Every submission (from nbchk::tick); one pair of lines every 10 s while records come.
-void tick(){nbdesc::tick();   // [DOS2] NB-11 "[nb] desc" line (own 10 s clock)
+void tick(){nbdesc::tick();nrdraw::tick();nrlean::tick();nrdirect::tick();   // [DOS2] NB-11 "[nb] desc" line, NR-09 "[nr] draw" line, NR-09R "[nr] direct" line (own 10 s clocks)
     if(!s.records && !s.unpacked && !s.checks)return;const uint64_t now=timing_clock();if(!next_ns){next_ns=now+10000000000ull;return;}if(now<next_ns)return;next_ns=now+10000000000ull;
     const uint64_t rec=s.records+s.unpacked;
     if(rec)xbg_logf("[nb] draw apply (10 s): %llu OP_X_NB_DRAW %s (%.1f binds a record; tex_gen %.2f / buf_gen %.2f bumps a record), binds %.0f ns a record "

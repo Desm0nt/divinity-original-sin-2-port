@@ -31,6 +31,14 @@ SHADERS = {
     '010472595b342188': ('EoCOutlineCombine', 'EoCOutlineCombine_mobile.frag'),
     'f23c09d198b55dc5': ('LinearizeDepth', 'LinearizeDepth_mobile.frag'),
     'cbe8649300e9c8cd': ('PPDownSampleLog2', 'PPDownSampleLog2_mobile.frag'),
+    # NR-33A (engine post)
+    'd8aeec640d465275': ('DeferredFog', 'DeferredFog_mobile.frag'),
+    '4e290c9cf1162fe9': ('PPBloomUpsampleAndBlur', 'PPBloomUpsampleAndBlur_mobile.frag'),
+    '98186c22a7209861': ('CombineUI_NoFetch', 'CombineUI_NoFetch_mobile.frag'),
+    '74fe9ae2066d53da': ('PPBloomScaleBiasDownsampleAndBlur', 'PPBloomScaleBiasDownsampleAndBlur_mobile.frag'),
+    '0e3fc07b320db1e9': ('PPBloomDownsampleAndBlur', 'PPBloomDownsampleAndBlur_mobile.frag'),
+    '691768aa08545d95': ('PPFXAA', 'PPFXAA_mobile.frag'),
+    # end NR-33A (engine post)
 }
 SHADOW_KEYS = ('1372db843749e1d3', 'a758e42af8853343', '2a221ee245d55aab')
 W, H = 24, 16
@@ -88,6 +96,56 @@ def case(name, rng, general):
                 {10: tex(rng, 0.0, 1.0, special=[0.0, 1.0, 0.5])})
     if name == 'PPDownSampleLog2':
         return ({'FragCoord': fc, 1: uv}, {}, {10: tex(rng, 0.0, 8.0, special=[0.0, 2.0, 2.0000002, np.inf, -np.inf, np.nan, 1e38, -1.0])})
+    # NR-33A (engine post)
+    uvn = (float(rng.choice([uv[0], uv[0], uv[0], np.nan])), float(rng.choice([uv[1], uv[1], uv[1], np.nan])), 0.0, 1.0)
+    if name == 'DeferredFog':
+        # K4..6 = fog colour x (far), y (near) per channel; z / w = distance start (K4) and end (K5), equal ends -> 1/0;
+        # K6.z / K6.w = height base / range (0 -> 1/0)
+        zs, ws = rng.uniform(0, 20), rng.uniform(0, 20)
+        ze, we = float(rng.choice([zs, zs + rng.uniform(0.1, 60)])), float(rng.choice([ws, ws + rng.uniform(0.1, 60)]))
+        k = {4: (rng.uniform(0, 2), rng.uniform(0, 2), zs, ws), 5: (rng.uniform(0, 2), rng.uniform(0, 2), ze, we),
+             6: (rng.uniform(0, 2), rng.uniform(0, 2), rng.uniform(-5, 5), float(rng.choice([0.0, rng.uniform(-10, 10), rng.uniform(-10, 10)])))}
+        ray = (rng.uniform(-30, 30), rng.uniform(-30, 30), rng.uniform(-30, 30), 0.0)
+        return ({'FragCoord': fc, 2: ray}, {4: sb, 22: cbuf(k), 28: cbuf({12: (0, rng.uniform(-5, 5), 0, 1)})},
+                {10: tex(rng, 0.0, 1.0, special=[0.0, 1.0, np.nan, np.inf]), 16: tex(rng, 0.0, 6.0, special=[0.0, np.nan])})
+    if name == 'PPBloomUpsampleAndBlur':
+        wh = (float(rng.choice([W, W / 2, rng.uniform(1, 64)])), float(rng.choice([H, H / 2, rng.uniform(1, 64)])))
+        return ({1: uvn}, {22: cbuf({13: (0, 0) + wh}), 28: cbuf({0: (rng.uniform(0, 2), 0, 0, 0)})},
+                {10: tex(rng, 0.0, 4.0), 16: tex(rng, 0.0, 4.0)})
+    if name == 'CombineUI_NoFetch':
+        th = float(rng.choice([0.001, 0.001, 0.001, rng.uniform(0, 1)]))   # c1[0].x of the bundle = 0.001
+        c1 = struct.pack('<f', th) + bytes(252)
+        off = (float(rng.choice([0.0, 0.0, 0.5, 3.0, -2.0])), float(rng.choice([0.0, 0.0, 0.5, 2.0])), 0, 0)
+        g = float(rng.choice([2.2, 1.0, 0.4545, rng.uniform(0.3, 3)]))
+        ui = tex(rng, -0.2, 1.3, alpha=[0.0, 0.0005, 0.001, 0.3, 0.7, 1.0, 1.0, np.nan], special=[0.0, 1.0, np.nan])
+        return ({'FragCoord': fc, 1: uvn}, {4: sb, 22: cbuf({0: off, 1: (0, g, 0, 0)}), 28: c1},
+                {10: ui, 16: tex(rng, 0.0, 1.5)})
+    if name in ('PPBloomScaleBiasDownsampleAndBlur', 'PPBloomDownsampleAndBlur'):
+        wh = (float(rng.choice([W, W / 2, rng.uniform(1, 64)])), float(rng.choice([H, H / 2, rng.uniform(1, 64)])))
+        src = tex(rng, 0.0, 4.0, special=[0.0, np.nan, np.inf])
+        if name == 'PPBloomDownsampleAndBlur': return ({1: uvn}, {16: cbuf({13: (0, 0) + wh})}, {10: src})
+        w = (0.59, 0.11) if rng.random() < 0.75 else (rng.uniform(0, 1), rng.uniform(0, 1))   # c1[0].xy of the bundle = 0.59, 0.11
+        c1 = struct.pack('<2f', *w) + bytes(248)
+        return ({1: uvn}, {16: cbuf({13: (0, 0) + wh}), 22: c1, 28: cbuf({0: (rng.uniform(0, 2), float(rng.choice([0.0, rng.uniform(0.1, 4)])), 0, 0)})},
+                {10: src})
+    if name == 'PPFXAA':
+        kind = rng.integers(0, 4)
+        if kind == 0: img = tex(rng, special=[0.0, 1.0, np.nan])                     # noise: short spans, NaN texels
+        else:                                                                        # straight edges at random angles: long spans
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+            a = rng.uniform(0, np.pi); lvl = rng.uniform(0, 1, 2)
+            side = (np.cos(a) * (xx - rng.uniform(0, W)) + np.sin(a) * (yy - rng.uniform(0, H))) > 0
+            d = np.where(side[..., None], lvl[0], lvl[1]).repeat(4, 2) + rng.uniform(-0.02, 0.02, (H, W, 4)) * (kind == 1)
+            if kind == 3: d[rng.random((H, W)) < 0.04] = np.float32(rng.choice([0.0, 1.0]))
+            img = SI.Texture(d.astype(np.float32), 'linear')
+        px, py = rng.integers(0, W) + 0.5, rng.integers(0, H) + 0.5
+        wh = (float(W), float(H)) if rng.random() < 0.8 else (rng.uniform(8, 64), rng.uniform(8, 64))
+        u = (px / W, py / H) if rng.random() < 0.85 else (rng.uniform(-0.1, 1.1), rng.uniform(-0.1, 1.1))
+        u = (float(rng.choice([u[0]] * 15 + [np.nan])), float(rng.choice([u[1]] * 15 + [np.nan])), 0.0, 1.0)
+        k = (1 / 12, 0.5) if rng.random() < 0.8 else (rng.uniform(0, 0.3), rng.uniform(0, 1))   # c1 of the bundle: 1/12, 0.5, int 1
+        c1 = struct.pack('<2fi', k[0], k[1], int(rng.choice([1, 1, 1, 0, 2]))) + bytes(244)
+        return ({'FragCoord': (px, py, 0.5, 1.0), 1: u}, {16: cbuf({13: (0, 0) + wh}), 22: c1}, {10: img})
+    # end NR-33A (engine post)
     raise KeyError(name)
 
 

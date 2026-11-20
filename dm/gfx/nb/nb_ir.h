@@ -83,7 +83,19 @@ typedef struct nb_frame {
     nb_node node[NB_MAX_NODES];
     nb_ref ref[NB_MAX_REFS];
     nb_clear_rec clr[NB_MAX_CLEARS];
+    // [DOS2] NR-CPU NR-TAPSET (docs/dos2/nr/NR-CPU.md): nb_read's "does the open pass already read this image" through a hash set of the
+    // pass's refs instead of a scan of all of them (a G-buffer / forward pass of Fort Joy holds hundreds: the scan was quadratic in the
+    // pass). rs_mode (set by the front end, kept by nb_frame_reset): 0 the scan (default), 1 the set, 2 both, the scan's answer used and
+    // a different answer counted in rs_bad. The set mirrors refs [ref_first, ref_first + nref) of node rs_node and catches up with refs
+    // appended by anyone (only nb_read / nb_op / nb_clear append; nothing removes or rewrites a ref); entries are valid while their tag
+    // is rs_tag (a new pass = a new tag, no clearing). Over NB_RS_MAX refs in one pass: the scan (counted in rs_big).
+    uint8_t rs_mode;
+    int32_t rs_node, rs_first, rs_n;
+    uint32_t rs_tag;
+    uint64_t rs_bad, rs_big, rs_hits, rs_lookups;
+    struct { uint64_t image; uint32_t tag, _pad; } rs[2048];
 } nb_frame;
+enum { NB_RS_SLOTS = 2048, NB_RS_MAX = 1024 };
 
 // Persistent per-image attributes (between frames; nb_persist_forget on re-creation of the image).
 typedef struct nb_img_state {
@@ -117,6 +129,7 @@ typedef struct nb_node_plan {
     uint8_t load[NB_MAX_ATT], store[NB_MAX_ATT];   // by attachment index (same order as nb_node.att)
     int16_t clear[NB_MAX_ATT];     // load == CLEAR: index of the clear record giving the values, else -1
     uint8_t flags;                 // NB_NP_*
+    uint8_t oc;                    // NR-ONCHIP (nb_onchip.h nb_onchip_plan, DM_NR_ONCHIP): chain mark, 0 = none; set after nb_plan
     uint16_t cover_dc;             // NB-05: colour attachments (bit = index) whose LOAD would be DONT_CARE with a coverage proof of the
                                    // first draw (exact rules, no feedback): the BE proves it at the draw (first_draw_covers), the FE cannot
 } nb_node_plan;

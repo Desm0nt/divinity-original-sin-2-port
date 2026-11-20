@@ -31,4 +31,7 @@ bool submit(XbgAlJob &&job);
 // Entries committed since the last call (appended to out); cheap when there are none (one atomic load).
 size_t take(std::vector<XbgAcEntry> &out);
 XbgAlStats stats();
+// [DOS2] NR-29 DM_NR_MEM trim: the jobs still waiting are dropped (their textures stay decoded this run; the engine does not offer them
+// again before the next run). Bytes of storage copies freed; *jobs (may be NULL) their count. Any thread.
+uint64_t drop_queue(uint64_t *jobs);
 }

@@ -79,7 +79,16 @@ void nvn_bigstack_entry(void);
 void *nvn_real_big[NVN_NFUNC];
 static __thread uint8_t *t_big;
 #define NVN_BIGSTACK (1u << 20)
+#ifdef DM_GAME_DOS2
+static int g_nc_count;                 // [DOS2] NR-23 DM_NR_NOCALL=2: count the NVN calls of each thread (nvn_nr_nocall.inc)
+static __thread uint64_t t_nc_calls;
+#endif
+#include "nvn_leancall.inc"   // [DOS2] NR-28 DM_NR_LEANCALL: the lean entry's table, nvn_lc_top, the install, the calibration and report
 void *nvn_bigstack_top(uintptr_t sp) {   // the top of this thread's 1 MiB host stack, or NULL when sp already runs on it
+#ifdef DM_GAME_DOS2
+    if (__builtin_expect(g_nc_count, 0)) t_nc_calls++;   // [DOS2] NR-23: every implemented NVN call passes here once
+#endif
+    if (__builtin_expect(g_lc_mode, 0)) return nvn_lc_top(sp);   // [DOS2] NR-28 DM_NR_LEANCALL 1 / 2 (nvn_leancall.inc)
     if (!t_big) {
         uint8_t *m = mmap(NULL, NVN_BIGSTACK + 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (m == MAP_FAILED) die("NVN big stack mmap");
@@ -102,6 +111,12 @@ void dm_nvn_trace_dump(void) {   // crash handler: no locks, no allocation
                 (unsigned long long)(m ? g_trace[k].ra - (uint64_t)(uintptr_t)m->base : g_trace[k].ra));
     }
 }
+#endif
+#ifndef NVN_LC_TAB
+static void *const *nvn_thunk_tab(void) { return dm_cpu_lse() ? nvn_thunk : nvn_thunk_v80; }   // [NR-28] (no big stack: no lean path)
+#define NLC() do { } while (0)
+#else
+#define NLC() do { if (__builtin_expect(g_lc_mode, 0)) nvn_lc_submit(); } while (0)   // [NR-28] DM_NR_LEANCALL 1 / 2: counts, calibration, report
 #endif
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
     unsigned i = (unsigned)(slot - nvn_slot);
@@ -204,6 +219,7 @@ static const struct { const char *name; void *fn; } k_et_nvn[] = {
     {"nvnCommandBufferOverrideSubtileSize", (void *)et_CommandBufferOverrideSubtileSize}, {"nvnDeviceSetAutomaticCheckpointsMask", (void *)et_DeviceSetAutomaticCheckpointsMask},
 };
 #endif
+static void nvn_p2_install(void);   // [NR-16] DM_NVN_PROF=2 (nvn_cpuprof.inc)
 static void *nvn_lookup(const char *name) {
     nvn_init_slots();
 #if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2) || defined(DM_GAME_D3)
@@ -216,15 +232,17 @@ static void *nvn_lookup(const char *name) {
     { const char *e = getenv("DM_NVN_BIGSTACK"); if (!(e && *e == '0'))
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry) { nvn_real_big[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_bigstack_entry; } }
+    nvn_lc_install();   // [DOS2] NR-28 DM_NR_LEANCALL: the lean entry in front of the same bodies (before DM_NVN_PROF=2, which goes under it)
     } }
 #endif
 #ifdef DM_GAME_DOOM
     nvn_count_start();
 #endif
+    nvn_p2_install();   // [NR-16] DM_NVN_PROF=2: once, after the big-stack wrapper (it goes under it)
     // [DOOM] LSE phones get the same thunk addresses as before; ARMv8.0 cores (no HWCAP_ATOMICS) the stadd-free set
-    void *const *tab = dm_cpu_lse() ? nvn_thunk : nvn_thunk_v80;
-    { static int said; if (!said++) LOG("[nvn] thunks: %s", tab == nvn_thunk ? "LSE stadd (ARMv8.1+)" : "ARMv8.0 (no LSE: plain counter)"); }
-    { void pc_note(const char *, int, const char *, ...); pc_note("lse-select", tab != nvn_thunk, "%s", tab == nvn_thunk ? "CPU has LSE: the LSE code runs unchanged" : dm_cpu_hw_lse() ? "ARMv8.0 thunks / entry / stubs, forced by DM_CPU_NOLSE" : "no LSE: ARMv8.0 thunks / entry / stubs; APP-04"); }   // [pc]
+    void *const *tab = nvn_thunk_tab();   // [NR-28] DM_NR_LEANCALL=1: the plain-counter set on every CPU
+    { static int said; if (!said++) LOG("[nvn] thunks: %s", tab == nvn_thunk ? "LSE stadd (ARMv8.1+)" : dm_cpu_lse() ? "plain counter (DM_NR_LEANCALL=1, the CPU has LSE)" : "ARMv8.0 (no LSE: plain counter)"); }
+    { void pc_note(const char *, int, const char *, ...); pc_note("lse-select", !dm_cpu_lse(), "%s", dm_cpu_lse() ? "CPU has LSE: the LSE code runs unchanged" : dm_cpu_hw_lse() ? "ARMv8.0 thunks / entry / stubs, forced by DM_CPU_NOLSE" : "no LSE: ARMv8.0 thunks / entry / stubs; APP-04"); }   // [pc]
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (!strcmp(nvn_names[i], name)) return tab[i];
 #if defined(DM_GAME_ETERNAL) || defined(DM_GAME_XC2) || defined(DM_GAME_D3)
@@ -535,7 +553,10 @@ static _Atomic uint64_t g_wt_id_mem[WT_IDS]; static _Atomic uint32_t g_wt_id_use
 static _Atomic uint32_t g_wt_rec_n, g_wt_cur, g_wt_evict, g_wt_sub_rec; static _Atomic int g_wt_open, g_wt_multi;
 static pthread_mutex_t g_wt_mu = PTHREAD_MUTEX_INITIALIZER;
 #include "nvn_nb_tap.inc"   // [DOS2] DM_NB: frame IR tap (NB-04), NBT(...) lines below; reads g_wt_id_mem
-#include "nvn_nr_tap.inc"   // [DOS2] DM_NR: engine object registry tap (NR-01), four NRT(...) lines below (empty outside DOS2)
+#include "nvn_nr_tap.inc"   // [DOS2] DM_NR: engine object registry tap (NR-01 four NRT(...) lines, NR-02 eight more; empty outside DOS2)
+#include "nvn_nr_nocall.inc"   // [DOS2] NR-23 DM_NR_NOCALL=2: the capture and its four NCT(...) lines (empty outside DOS2)
+#include "nvn_nr_state.inc"   // [DOS2] NR-09S DM_NR_STATE=2: the capture of the opcode-21 calls, 19 NST(...) lines (empty outside DOS2)
+#include "nvn_nr_ubo.inc"   // [DOS2] NR-09U DM_NR_UBO=2: the capture of the engine's BindUniformBuffer calls, one NUB line at the top of the body (empty outside DOS2)
 static int wt_mode(void) {
     static int m = -1;
     if (m < 0) { const char *e = getenv("DM_NVN_WT_DRAIN"); int v;
@@ -582,6 +603,7 @@ static inline void wt_use_ids(const uint64_t *h, int n) {
 // the storage registered now - it inherits the id's last use.
 static void wt_register(int id, const tex_t *t) {
     if (id < 0 || (uint32_t)id >= WT_IDS) return;
+    NRD_REGGEN();   // [DOS2] NR-09R DM_NR_DIRECT: the image of a pool id changes (the tap memo's signature)
     uint64_t mem = t ? (uint64_t)(uintptr_t)t->mem : 0;
     if (wt_mode() == 1) { NBT(atomic_store(&g_wt_id_mem[id], mem)); return; }   // [DOS2] DM_NB resolves bound ids through this table too
     atomic_store(&g_wt_id_mem[id], mem);
@@ -774,7 +796,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     NRT(nrt_texture(o));   // [DOS2] DM_NR: what the builder held, to the engine call open on this thread
     return 1;
 }
-NVN(nvnTextureFinalize, void, NVNtexture *t) { SNAP_DROP(TX(t), tex_t); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
+NVN(nvnTextureFinalize, void, NVNtexture *t) { NRT(nrt_texture_gone(TX(t))); SNAP_DROP(TX(t), tex_t); mtl_tex_release(TX(t)); TX(t)->magic = 0; }   // [DOS2] DM_NR_TEX: the serial's entry dies
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
 NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
@@ -896,7 +918,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
       if (on) for (int i = 0; i < n; i++) o->sd[i].control = nvn_ctrl_intern(sd[i].control); }
 #endif
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
-    NRT(nrt_program(o));   // [DOS2] DM_NR: the program and the pack key of its control section
+    NRT(nrt_program(o));   // [DOS2] DM_NR: the program and its shader pack key (control + code)
     return 1;
 }
 
@@ -922,6 +944,46 @@ static void gw_report(void) {
         sn / 300.0, hit / 300.0, an / 300.0, sns / 300e6, sn ? (double)lag / sn : 0, en / 300.0, ens / 300e6);
 }
 static int x_wait_sub(uint64_t sub, uint64_t timeout);
+static int x_sub_translated(uint64_t sub);   // [DOS2] PERF-E01 / TL2 #12: 1 = submit `sub` is translated (DM_NVN_SYNC_XWAIT)
+// [DOS2] the guest call chain of the calling thread from its frame records (diagnostics of DM_NVN_SYNC_XWAIT only; TL2 hle_nvn.c, #12):
+// the NVN entry shims sit between us and the game, so __builtin_return_address names our code. process_vm_readv: a bad record ends the walk.
+#ifdef __ANDROID__
+#include <sys/uio.h>
+#include <sys/syscall.h>
+static int nvn_guest_chain(uintptr_t *out, int n) {
+    int k = 0; uint64_t fp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+    for (int i = 0; i < 24 && k < n && fp && !(fp & 7); i++) {
+        uint64_t rec[2]; struct iovec l = {rec, sizeof rec}, r = {(void *)(uintptr_t)fp, sizeof rec};
+        if (syscall(SYS_process_vm_readv, getpid(), &l, 1UL, &r, 1UL, 0UL) != (long)sizeof rec) break;
+        if (module_of((const void *)(uintptr_t)rec[1])) out[k++] = (uintptr_t)rec[1];
+        if (rec[0] <= fp) break;
+        fp = rec[0];
+    }
+    return k;
+}
+#else
+static int nvn_guest_chain(uintptr_t *out, int n) { (void)out; (void)n; return 0; }
+#endif
+static void nvn_chain_str(char *b, size_t bn, const uintptr_t *ra, int n) {
+    size_t at = 0; b[0] = 0;
+    for (int i = 0; i < n && at + 40 < bn; i++) { module_t *m = module_of((const void *)ra[i]);
+        at += (size_t)snprintf(b + at, bn - at, "%s%s+%#llx", i ? " <- " : "", m ? m->name : "?", m ? (unsigned long long)(ra[i] - (uintptr_t)m->base) : (unsigned long long)ra[i]); }
+    if (!n) snprintf(b, bn, "(no guest frames)");
+}
+// [DOS2] DM_NVN_SYNC_XWAIT (KB PERF-E01, port-common/migration/sync-xwait.md; from TL2 hle_nvn.c #12 / DOOM Eternal cmp16 b654ecf / 5749b46):
+// xbg_legacy_wait answers a wait on a fence whose submit the translation thread has not translated yet with "not done" at once (fence >
+// submitted), whatever the timeout. On the Switch a timed nvnSyncWait blocks; a game that does not retry then rewrites command memory /
+// UI / uniform data the translator still has to replay (TL2 on Mali-G925: "NVN command size outside pool", garbage opcodes). Whether DOS2
+// waits like that is not known from the saved logs (the Mi 14 hides it: translation is never 2 submits behind) - so DOS2's default is 2:
+// count and log every such wait (the first 4 and every 512th with the game call chain), answer as today. 1 = wait for the translation
+// first (as the HarmonyOS path does), then ask the GPU with the rest of the timeout; 0 = nothing. DM_NVN_SYNC_XWAIT_MS: cap of the
+// translation wait (0 = the game's own timeout, the default here as in TL2).
+#ifdef DM_GAME_DOS2
+#define DM_NVN_SYNC_XWAIT_DEFAULT 2
+#else
+#define DM_NVN_SYNC_XWAIT_DEFAULT 0
+#endif
+static _Atomic uint64_t g_sx_untr, g_sx_slow;
 #ifndef __OHOS__
 // [Android] Fence of the last present (p0) and of the one before (p1), set in nvnQueuePresentTexture. A SyncWait target is
 // classed by frame age: 0 = <= p1 (two+ frames old), 1 = (p1, p0] (the frame just presented), 2 = > p0 (frame being built).
@@ -962,6 +1024,26 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
 #else
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+#endif
+#ifndef __OHOS__
+    // [DOS2] DM_NVN_SYNC_XWAIT (see above): a timed wait on a fence not translated yet; 2 = count / log, 1 = wait for the translation first
+    if (timeout && !x_sub_translated(o->fence)) {
+        static int sx = -1; static uint64_t sx_cap;
+        if (sx < 0) { const char *e = getenv("DM_NVN_SYNC_XWAIT"), *m = getenv("DM_NVN_SYNC_XWAIT_MS");
+            sx_cap = (uint64_t)(m ? atoi(m) : 0) * 1000000ull; sx = e && *e ? atoi(e) : DM_NVN_SYNC_XWAIT_DEFAULT;
+            LOG("[nvn] DM_NVN_SYNC_XWAIT=%d (cap %llu ms, 0 = the game's timeout): a timed SyncWait on an untranslated fence %s", sx, (unsigned long long)(sx_cap / 1000000),
+                sx == 1 ? "waits for its translation first" : sx == 2 ? "is counted and answered as before (TIMEOUT_EXPIRED / the GPU's state)" : "is answered as before"); }
+        const uint64_t n = atomic_fetch_add(&g_sx_untr, 1) + 1, ahead = x_fence() - o->fence;
+        if (sx && (n <= 4 || n % 512 == 0)) { uintptr_t ra[6]; char cs[400]; nvn_chain_str(cs, sizeof cs, ra, nvn_guest_chain(ra, 6));
+            LOG("[nvn] SyncWait on an untranslated fence (#%llu): fence %llu, %llu submits enqueued after it, timeout %llu, %s; game %s", (unsigned long long)n,
+                (unsigned long long)o->fence, (unsigned long long)ahead, (unsigned long long)timeout, sx == 1 ? "waiting for translation" : "answered as before (DM_NVN_SYNC_XWAIT=2: count)", cs); }
+        if (sx == 1) { const uint64_t t0 = now_ns(), cap = sx_cap && sx_cap < timeout ? sx_cap : timeout;
+            const int ok = x_wait_sub(o->fence, cap); const uint64_t used = now_ns() - t0;
+            if (!ok || used > 250000000ull) { const uint64_t k = atomic_fetch_add(&g_sx_slow, 1) + 1;
+                if (k <= 4 || k % 256 == 0) LOG("[nvn] SyncWait translation wait %s after %.1f ms (fence %llu, #%llu)", ok ? "done" : "TIMED OUT", used / 1e6, (unsigned long long)o->fence, (unsigned long long)k); }
+            if (timeout < 3600000000000ull) timeout = used >= timeout ? 0 : timeout - used;
+            if (!timeout && !ok) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    }
 #endif
 #ifdef __OHOS__   // 鸿蒙：先在翻译队列上等目标提交译完再问 GPU，并记等待统计（其他平台保持原逻辑）| HarmonyOS: wait on the translation queue for the target submit first, then ask the GPU, with wait statistics (other platforms keep the original logic)
     atomic_fetch_add(&g_gw_sync_n, 1); atomic_fetch_add(&g_gw_sync_lag, x_fence() - o->fence); if ((const void *)s == g_acq_sync) atomic_fetch_add(&g_gw_acq_n, 1); gw_report();
@@ -1386,6 +1468,8 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     }
     wt_begin();   // [DOS2] DM_NVN_WT_DRAIN
     NBD_TEXGEN();   // [DOS2] NB-09: a new recording starts a new texture set
+    NRD_BT_BEGIN(o);   // [DOS2] NR-09R DM_NR_DIRECT: a new recording knows nothing of the backend's binding tables
+    NRUB_BEGIN(o);   // [DOS2] NR-UBD DM_NR_UBD: nor of its uniform-buffer table
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_BEGIN, 8); o->begin = p;
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
@@ -1399,6 +1483,8 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
+    NRD_BT_NESTED(CB(c));   // [DOS2] NR-09R DM_NR_DIRECT: foreign records run inside this recording
+    NRUB_NESTED(CB(c));   // [DOS2] NR-UBD DM_NR_UBD: the same for the uniform-buffer table
     if (n > 0 && wt_mode() != 1) wt_set_multi("nested command handles (CallCommands / CopyCommands)");   // [DOS2] DM_NVN_WT_DRAIN
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
@@ -1481,9 +1567,13 @@ static void nd_check(NVNcommandBuffer *c) {
 #define RECN(c, OP, T, ARR, N) ((T *)rec((c), (OP), offsetof(T, ARR) + sizeof(((T *)0)->ARR[0]) * (size_t)(N)))
 // [DOS2] DM_GFX_COND_RENDER (read once; xbg_game.cpp namespace condr): any value but 0 records SetRenderEnable / SetRenderEnableConditional
 // as OP_X_RENDER_COND for the engine (count only, or the host / GPU applies them). 0 (default) = no record, the calls are only logged as before.
+// NR-03 DM_NR_OCC 1..3 (xbg_nr_occ.inc) records them the same way; both unset / 0 = no record (byte-identical stream).
 static int condr_rec(void) {
     static int v = -1;
-    if (__builtin_expect(v < 0, 0)) { const char *e = getenv("DM_GFX_COND_RENDER"); v = e && *e && atoi(e) != 0; }
+    if (__builtin_expect(v < 0, 0)) {
+        const char *e = getenv("DM_GFX_COND_RENDER"), *o = getenv("DM_NR_OCC");
+        v = (e && *e && atoi(e) != 0) || (o && *o && atoi(o) >= 1 && atoi(o) <= 3);
+    }
     return v;
 }
 static void condr_write(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) { *REC(c, OP_X_RENDER_COND, p_render_cond) = (p_render_cond){kind, mode, addr}; }
@@ -1522,22 +1612,26 @@ NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, 
 }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
+    NRT(dm_nr_tap_bind(c, p, stages));   // [DOS2] DM_NR_KEY (NR-02)
+    NST(NRST_F_PROGRAM, c, p, 0, stages, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     NBT(nbt_program(c, p, stages));   // [DOS2] DM_NB (NB-07: the program per stage -> the slots it samples)
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){snap_prog(p), stages};
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { NBT(nbt_note(c, NBN_STATE)); p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
-NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
-NVN(nvnCommandBufferBindColorState, void, NVNcommandBuffer *c, const NVNcolorState *st) { bind_state(c, 1, st, sizeof(color_st)); }
+NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { NST(NRST_F_BLEND, c, st, 0, 0, 0, 0.f); bind_state(c, 0, st, sizeof(blend_st)); }
+NVN(nvnCommandBufferBindColorState, void, NVNcommandBuffer *c, const NVNcolorState *st) { NST(NRST_F_COLOR, c, st, 0, 0, 0, 0.f); bind_state(c, 1, st, sizeof(color_st)); }
 NVN(nvnCommandBufferBindChannelMaskState, void, NVNcommandBuffer *c, const NVNchannelMaskState *st) { bind_state(c, 2, st, sizeof(chmask_st)); }
 NVN(nvnCommandBufferBindMultisampleState, void, NVNcommandBuffer *c, const NVNmultisampleState *st) { bind_state(c, 3, st, sizeof(ms_st)); }
-NVN(nvnCommandBufferBindPolygonState, void, NVNcommandBuffer *c, const NVNpolygonState *st) { bind_state(c, 4, st, sizeof(poly_st)); }
-NVN(nvnCommandBufferBindDepthStencilState, void, NVNcommandBuffer *c, const NVNdepthStencilState *st) { bind_state(c, 5, st, sizeof(ds_st)); }
+NVN(nvnCommandBufferBindPolygonState, void, NVNcommandBuffer *c, const NVNpolygonState *st) { NST(NRST_F_POLY, c, st, 0, 0, 0, 0.f); bind_state(c, 4, st, sizeof(poly_st)); }
+NVN(nvnCommandBufferBindDepthStencilState, void, NVNcommandBuffer *c, const NVNdepthStencilState *st) { NST(NRST_F_DS, c, st, 0, 0, 0, 0.f); bind_state(c, 5, st, sizeof(ds_st)); }
 NVN(nvnCommandBufferBindVertexAttribState, void, NVNcommandBuffer *c, int n, const NVNvertexAttribState *st) {
+    NST(NRST_F_VATTR, c, st, 0, n, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     if (n < 0 || n > 16) { LOG("【红】BindVertexAttribState n=%d", n); return; }
     NBT(nbt_note(c, NBN_STATE));   // [DOS2] DM_NB
     p_bind_vattr *r = RECN(c, OP_BIND_VATTR, p_bind_vattr, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 4 * n);
 }
 NVN(nvnCommandBufferBindVertexStreamState, void, NVNcommandBuffer *c, int n, const NVNvertexStreamState *st) {
+    NST(NRST_F_VSTREAM, c, st, 0, n, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     if (n < 0 || n > 16) { LOG("【红】BindVertexStreamState n=%d", n); return; }
     NBT(nbt_note(c, NBN_STATE));   // [DOS2] DM_NB
     p_bind_vstream *r = RECN(c, OP_BIND_VSTREAM, p_bind_vstream, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 8 * n);
@@ -1548,11 +1642,15 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
 NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
+    NUB(c, st, i, a, n);   // [DOS2] NR-09U DM_NR_UBO=2
+    const int nrub_same = NRUB_BIND1(c, st, i, a, n);   // [DOS2] NR-UBD DM_NR_UBD: the backend's table already holds this range (0 without the switch)
+    if (nrub_same == 2) return;   // [DOS2] NR-UBD =1: not sent
     NBT(nbt_note(c, NBN_UBO));   // [DOS2] DM_NB
-    if (NBD_TAKE(c) && nbd_take_bind(c, NBD_B_UBO, st, i, a, n)) return;   // [DOS2] DM_NB_OPS (NB-09): into the draw's shadow
+    if (NBD_TAKE(c) && nbd_take_bind(c, NBD_B_UBO, st, i, a, n)) { NRUB_FLAG(nrub_same); return; }   // [DOS2] DM_NB_OPS (NB-09): into the draw's shadow (NR-UBD =2: flagged)
     *REC(c, OP_BIND_UBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
 NVN(nvnCommandBufferBindUniformBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) {
+    NRUB_BINDS(c, st, first, n, rg);   // [DOS2] NR-UBD DM_NR_UBD: the mirror learns the ranges (never left out)
     NBT(nbt_note(c, NBN_UBO));   // [DOS2] DM_NB
     for (int i = 0; i < n; i++) {
         if (NBD_TAKE(c) && nbd_take_bind(c, NBD_B_UBO, st, first + i, rg[i].address, rg[i].size)) continue;   // [DOS2] DM_NB_OPS (NB-09)
@@ -1570,8 +1668,11 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("【红】绑定句柄数 %d", n); return; }
     NBT(nbt_bind(c, op, st, first, n, h));   // [DOS2] DM_NB: BindTexture(s) / BindSeparateTexture(s) / BindImage(s) all come here
+    const int nrd_same = NRD_BT(c, op, st, first, n, h);   // [DOS2] NR-09R DM_NR_DIRECT: the backend's table already holds this handle (0 without the switch)
+    if (nrd_same == 2) { wt_use_ids(h, n); return; }   // [DOS2] NR-09R =1: not sent (the use mark of DM_NVN_WT_DRAIN stays)
     NBD_TEXGEN();   // [DOS2] NB-09: the texture set changed
     if (NBD_TAKE(c) && n == 1 && nbd_take_bind(c, op == OP_BIND_TEX ? NBD_B_TEX : op == OP_BIND_SAMP ? NBD_B_SAMP : NBD_B_IMG, st, first, h[0], 0)) {
+        NRD_BT_FLAG(nrd_same);   // [DOS2] NR-09R =2: a bind =1 would not send, flagged for the backend's check
         if (op == OP_BIND_TEX || op == OP_BIND_IMG) wt_use_ids(h, n);   // [DOS2] DM_NVN_WT_DRAIN, as below
         return;   // [DOS2] DM_NB_OPS (NB-09): into the draw's shadow
     }
@@ -1592,19 +1693,22 @@ NVN(nvnCommandBufferBindSeparateSamplers, void, NVNcommandBuffer *c, NVNshaderSt
 NVN(nvnCommandBufferBindSeparateSampler, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNseparateSamplerHandle h) {
     bind_handles(c, OP_BIND_SAMP, st, i, 1, &h.value);
 }
-NVN(nvnCommandBufferSetStencilValueMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, m, 0, 0, 0}; }
-NVN(nvnCommandBufferSetStencilMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, m, 0, 1}; }
-NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, 0, v, 2}; }
+NVN(nvnCommandBufferSetStencilValueMask, void, NVNcommandBuffer *c, NVNface f, int m) { NST(NRST_F_STENCIL_VMASK, c, 0, 0, f, m, 0.f); *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, m, 0, 0, 0}; }
+NVN(nvnCommandBufferSetStencilMask, void, NVNcommandBuffer *c, NVNface f, int m) { NST(NRST_F_STENCIL_MASK, c, 0, 0, f, m, 0.f); *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, m, 0, 1}; }
+NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) { NST(NRST_F_STENCIL_REF, c, 0, 0, f, v, 0.f); *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, 0, v, 2}; }
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
 NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     if (NBD_TAKE(c) && nbd_draw(c, NBD_DRAW_ARRAYS, pr, 0, n, 0, 0, 0, 0, first)) return;   // [DOS2] DM_NB_OPS (NB-09): one OP_X_NB_DRAW
     *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n};
 }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
+    NCT(nc_cap_draw(c, (int)pr, (int)it, n, (uint64_t)ib, bv || bi ? -2 : inst));   // [DOS2] NR-23 DM_NR_NOCALL=2
     nd_check(c);   // [DOS2] DM_NATIVE_DRAW=2
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     if (NBD_TAKE(c) && nbd_draw(c, NBD_DRAW_IDX, pr, it, n, bv, bi, inst, ib, 0)) return;   // [DOS2] DM_NB_OPS (NB-09): one OP_X_NB_DRAW
@@ -1667,14 +1771,15 @@ NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { 
 // ---------- 状态对象：就地打包（nvn_obj.h） ----------
 // ---------- State objects: packed in place (nvn_obj.h) ----------
 #define ST(T, x) ((T *)(x))
-NVN(nvnBlendStateSetDefaults, void, NVNblendState *s) { *ST(blend_st, s) = (blend_st){0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD}; }
-NVN(nvnBlendStateSetBlendTarget, void, NVNblendState *s, int t) { ST(blend_st, s)->target = t; }
+NVN(nvnBlendStateSetDefaults, void, NVNblendState *s) { NST(NRST_F_BLEND_DEF, 0, s, 0, 0, 0, 0.f); *ST(blend_st, s) = (blend_st){0, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD}; }
+NVN(nvnBlendStateSetBlendTarget, void, NVNblendState *s, int t) { NST(NRST_F_BLEND_TARGET, 0, s, 0, t, 0, 0.f); ST(blend_st, s)->target = t; }
 NVN(nvnBlendStateSetBlendFunc, void, NVNblendState *s, NVNblendFunc sr, NVNblendFunc dr, NVNblendFunc sa, NVNblendFunc da) {
     blend_st *o = ST(blend_st, s); o->src_rgb = sr; o->dst_rgb = dr; o->src_a = sa; o->dst_a = da;
 }
 NVN(nvnBlendStateSetBlendEquation, void, NVNblendState *s, NVNblendEquation er, NVNblendEquation ea) { ST(blend_st, s)->eq_rgb = er; ST(blend_st, s)->eq_a = ea; }
-NVN(nvnColorStateSetDefaults, void, NVNcolorState *s) { *ST(color_st, s) = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; }
+NVN(nvnColorStateSetDefaults, void, NVNcolorState *s) { NST(NRST_F_COLOR_DEF, 0, s, 0, 0, 0, 0.f); *ST(color_st, s) = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; }
 NVN(nvnColorStateSetBlendEnable, void, NVNcolorState *s, int i, uint32_t en) {
+    NST(NRST_F_COLOR_BLEND, 0, s, 0, i, en, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     color_st *o = ST(color_st, s); if (i < 0 || i > 7) return;
     o->blend_en = B(en) ? (o->blend_en | 1u << i) : (o->blend_en & ~(1u << i));
 }
@@ -1948,6 +2053,7 @@ static uint64_t x_push(xjob *j) {   // 返回任务号 | Returns the job number
 static void x_wait(uint64_t job) { pthread_mutex_lock(&g_xmu); while (g_xq_done < job) pthread_cond_wait(&g_xcv, &g_xmu); pthread_mutex_unlock(&g_xmu); }
 static void x_drain(void) { pthread_mutex_lock(&g_xmu); uint64_t job = g_xq_in; pthread_mutex_unlock(&g_xmu); x_wait(job); }
 static uint64_t x_fence(void) { return atomic_load(&g_x_subs); }
+static int x_sub_translated(uint64_t sub) { if (g_x_sync) return 1; pthread_mutex_lock(&g_xmu); const int ok = g_xsub_done >= sub; pthread_mutex_unlock(&g_xmu); return ok; }   // [DOS2] PERF-E01 (TL2 #12, ETR cmp16)
 // 等翻译线程把第 sub 次提交翻完（栅栏值 ≤ 已翻译数才去问引擎）；timeout 纳秒，超时返回 0。同步翻译模式提交当场执行，不用等
 // Wait until the translation thread has translated submit number `sub` (the engine is asked about a fence only once it has been translated); timeout in ns, returns 0 on timeout.
 // In synchronous translation mode submits execute in place, so there is nothing to wait for
@@ -2094,10 +2200,14 @@ static uint64_t x_present_ticket(uint64_t job) {   // 出图任务执行完后�
 static _Atomic int g_fs_seen;
 static void fs_scan(const uint8_t *pc, uint64_t fence, int depth);
 #endif
+#include "nvn_cpuprof.inc"   // [NR-16] DM_NVN_PROF=2 sampled NVN timing of the submitting thread; DM_NR_CPU role tids
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
+    const uint64_t p2_t0 = nvn_p2_enter();   // [NR-16] DM_NVN_PROF=2
+    if (cpf_nvn_on()) atomic_store_explicit(&g_cpf_submit_tid, (int)gettid(), memory_order_relaxed);   // [NR-16] DM_NR_CPU
     { nvn_thr_t *t = nthr_self(); if (t) { atomic_fetch_add_explicit(&t->submits, 1, memory_order_relaxed); atomic_fetch_add_explicit(&t->handles, (uint64_t)(n > 0 ? n : 0), memory_order_relaxed);
         uintptr_t z = 0; atomic_compare_exchange_strong(&t->first_submit_ra, &z, (uintptr_t)__builtin_return_address(0)); nthr_report(); } }   // [DOS2] DM_NVN_THREADS
     NBT(nbt_submit(n, h));   // [DOS2] DM_NB: before the job is queued (the front end plans the IR of this recording)
+    NLC();   // [DOS2] NR-28 DM_NR_LEANCALL 1 / 2
     gfx_enter();
     ((queue_t *)q)->submits++;
     xjob j = {XJ_SUBMIT, n, n > 0 ? malloc((size_t)n * sizeof *h) : NULL};   // 句柄数组是游戏的，入队时拷一份 | The handle array belongs to the game; copy it when enqueuing
@@ -2112,6 +2222,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     if (atomic_load(&g_fs_seen)) for (int i = 0; i < n; i++) fs_scan((const uint8_t *)(uintptr_t)h[i], j.sub, 0);
 #endif
     gfx_leave();
+    nvn_p2_leave(p2_t0);   // [NR-16] DM_NVN_PROF=2: closes / opens this thread's timed window
 }
 
 // 只影响 GPU 状态 / 只在 GPU 上执行的命令：空设备只计数（跳板已计）。
@@ -2170,7 +2281,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
     // DM_NVN_PROF=1：已实现的函数（未实现桩与出图除外：出图含节拍等待，单独计）套计时包装，用于拆「翻译层录制期」耗时
     // DM_NVN_PROF=1: implemented functions (except unimplemented stubs and present: present includes the display-link wait and is counted separately) get a timing wrapper, used to break down the time spent in the "translation layer recording phase"
-    if (getenv("DM_NVN_PROF")) {
+    if (getenv("DM_NVN_PROF") && atoi(getenv("DM_NVN_PROF")) == 1) {   // [NR-16] =2 is the sampled mode (nvn_cpuprof.inc, installed in nvn_lookup)
         void *prof = dm_cpu_lse() ? (void *)nvn_prof_entry : (void *)nvn_prof_entry_v80;   // [DOOM] no stadd on ARMv8.0 cores
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && strcmp(nvn_names[i], "nvnQueuePresentTexture")) { nvn_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = prof; }
@@ -2213,6 +2324,7 @@ __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *
 __attribute__((weak)) void dm_hle_wake_counts(uint64_t *wakes, uint64_t *skips) { *wakes = 0; *skips = 0; }
 extern uint32_t mtl_present_qos(void);
 static uint64_t g_frame;
+static uint64_t nvn_p2_frames(void) { return g_frame; }   // [NR-16]
 static uint64_t g_pa_wait;   // 本帧取图里节拍等待（自适应出图档用） | pacing wait inside acquire this frame (for the adaptive present tier)
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // 取图里节拍等待 / 等出图队列归还的累计，出图时按帧记（一帧内可有多次取图） | Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
@@ -2491,6 +2603,7 @@ static double present_cap_hz(void) {
 // time (0xb07714: dt = real time, at most 1/15 s), and the window's VSyncDivider 2 is already cut by the display interval mode here.
 // One line whenever the target, the refresh or the resulting rate changes (a display-mode switch after the Java side's request).
 int dm_dos2_fps(void);
+static double g_dos2_target_hz = -1;   // [NR-BN] the gear target's pacing rate before DM_PACE_ADAPT's step-down (-1: not DOS2's rule)
 static double dos2_abs(double x) { return x < 0 ? -x : x; }
 static double dos2_pace_hz(double screen_hz, int t) {
     double hz = nvn_pace_target_hz(screen_hz, t);
@@ -2510,7 +2623,21 @@ static double dos2_pace_hz(double screen_hz, int t) {
 #endif
 static double present_auto_hz(double screen_hz) {
 #ifdef DM_GAME_DOS2
-    { int t = dm_dos2_fps(); if (t >= 0) return dos2_pace_hz(screen_hz, t); }
+    { int t = dm_dos2_fps();
+      if (t >= 0) {
+          double hz = dos2_pace_hz(screen_hz, t);
+          // [NR-BN] DM_PACE_ADAPT=1 (default off; before, DOS2 ignored it): a target of 60 or less that the frame cannot hold steps down to
+          // the highest sustainable integer fraction of the refresh (pace_adapt_tick: misses of the display slot; 120 Hz: 60 -> 40 -> 30,
+          // 90 Hz: 45 -> 30), never above the target. The 18.11 Fort Joy windows (bottleneck 17-21 ms, frames quantized to 16.7 / 33.3 /
+          // 50 ms by the 60 Hz beat, 22-40 fps) would show an even 40 on the Mi 14's 120 Hz panel. g_dos2_target_period_ns keeps the gear
+          // target for the DRS controller (hle_dos2_quality.c), so DRS still works towards 60.
+          g_dos2_target_hz = hz;
+          if (t > 0 && t <= 60 && hz > 0 && screen_hz > 0 && pace_adapt_enabled()) {
+              const double a = screen_hz / nvn_adaptive_divisor(screen_hz, g_pa_k, g_pa_screen_hz);
+              if (a < hz) hz = a;
+          }
+          return hz;
+      } }
 #endif
 #ifdef __ANDROID__
     // Android has no Metal display-link pacer, so apply the power-saving target here.
@@ -2609,6 +2736,9 @@ static uint64_t present_period(const win_t *o) {
     int itv = g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; double hz = g_hz_auto ? present_auto_hz(mtl_display_refresh()) : g_hz;
     uint64_t p = hz > 0 ? (uint64_t)(itv * 1e9 / hz) : 0;
     g_nvn_present_period_ns = p;
+#ifdef DM_GAME_DOS2
+    if (g_hz_auto && g_dos2_target_hz > 0 && pace_adapt_enabled()) g_nvn_present_period_ns = (uint64_t)(itv * 1e9 / g_dos2_target_hz);   // [NR-BN] DRS aims at the target, not the stepped-down tier
+#endif
     return p;
 }
 // Host registration: may narrow this present's crop (game thread, at the game's present); null = the window's crop as set.
@@ -2618,6 +2748,11 @@ int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否�
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     NBT(if (idx >= 0 && idx < o->ntex && idx < 4) nbt_present(o->tex[idx]));   // [DOS2] DM_NB
+#ifdef DM_GAME_DOS2
+    { extern void dm_cpu_place_self(void) __attribute__((weak)); if (dm_cpu_place_self) dm_cpu_place_self(); }   // [NR-CPU] DM_CPU_SELF: the main thread re-asserts its own mask
+#endif
+    if (cpf_nvn_on()) { atomic_store_explicit(&g_cpf_present_tid, (int)gettid(), memory_order_relaxed);   // [NR-16] DM_NR_CPU: the sampler (dm/host/hle_cpuprof.c) starts at the first present
+        extern void dm_cpuprof_present(void) __attribute__((weak)); if (dm_cpuprof_present) dm_cpuprof_present(); }
 #ifdef DM_GAME_DOOM
     if (o->presents == 1 || o->presents % 300 == 0) LOG("[nvn] present #%llu (texture %d)", (unsigned long long)o->presents, idx);   // bring-up heartbeat
     // [DOOM] (from the DOOM 2016 port, 3a0d4a7) On-demand dump while the game runs (e.g. stuck behind a loading screen): creating
@@ -2647,7 +2782,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
-    if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF：录制期 = 除提交外全部已实现函数耗时；提交期 = QueueSubmitCommands | DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
+    if ((nvn_real[0] || nvn_real[1]) && !g_p2_on) {   // [NR-16] not with DM_NVN_PROF=2 | DM_NVN_PROF：录制期 = 除提交外全部已实现函数耗时；提交期 = QueueSubmitCommands | DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
         static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
         uint64_t rec = 0, sub = 0;
@@ -2803,7 +2938,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 #endif
     BUF_MAGIC(o, MAGIC('B', 'U', 'F', 'F')); o->pool = s->pool; o->off = s->off; o->size = s->size; o->mem = s->pool->mem + s->off;
     OLOG("Buffer %p mem=%p size=%#llx", (void *)buf, (void *)o->mem, (unsigned long long)o->size);
-    NRT(dm_nr_tap_buffer(o, o->size));   // [DOS2] DM_NR
+    NRT(dm_nr_tap_buffer(o, o->size, o->mem));   // [DOS2] DM_NR (mem: NR-06 DM_NR_BUF)
     return 1;
 }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *b, const char *l) { (void)b; (void)l; }
@@ -2978,10 +3113,10 @@ static void write_texels(const tex_t *o, const view_t *v, const NVNcopyRegion *r
 }
 // DM_GFX_VT_ATOMIC=1: the whole write (unprotect + memcpy) excludes the renderer's protect + partial re-upload (nvn_dirty.h).
 NVN(nvnTextureWriteTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src) {
-    wt_before_write(CTX(t)); int lk = nvn_texel_sync_on(); if (lk) nvn_texel_lock(); write_texels(CTX(t), GVIEW(v), r, src, 0, 0); if (lk) nvn_texel_unlock();
+    wt_before_write(CTX(t)); int lk = nvn_texel_sync_on(); if (lk) nvn_texel_lock(); write_texels(CTX(t), GVIEW(v), r, src, 0, 0); NRT(nrt_texture_written(CTX(t))); if (lk) nvn_texel_unlock();   // [DOS2] DM_NR_TEX
 }
 NVN(nvnTextureWriteTexelsStrided, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src, ptrdiff_t row, ptrdiff_t img) {
-    wt_before_write(CTX(t)); int lk = nvn_texel_sync_on(); if (lk) nvn_texel_lock(); write_texels(CTX(t), GVIEW(v), r, src, row, img); if (lk) nvn_texel_unlock();
+    wt_before_write(CTX(t)); int lk = nvn_texel_sync_on(); if (lk) nvn_texel_lock(); write_texels(CTX(t), GVIEW(v), r, src, row, img); NRT(nrt_texture_written(CTX(t))); if (lk) nvn_texel_unlock();   // [DOS2] DM_NR_TEX
 }
 // ---------- state-object getters / setters D2R never used ----------
 NVN(nvnBlendStateGetBlendTarget, int, const NVNblendState *s) { return (int)((const blend_st *)s)->target; }
@@ -2991,6 +3126,7 @@ NVN(nvnBlendStateGetBlendFunc, void, const NVNblendState *s, NVNblendFunc *sr, N
 NVN(nvnBlendStateGetBlendEquation, void, const NVNblendState *s, NVNblendEquation *er, NVNblendEquation *ea) { *er = (NVNblendEquation)((const blend_st *)s)->eq_rgb; *ea = (NVNblendEquation)((const blend_st *)s)->eq_a; }
 NVN(nvnColorStateSetLogicOp, void, NVNcolorState *s, NVNlogicOp op) { ST(color_st, s)->logic_op = op; }
 NVN(nvnColorStateSetAlphaTest, void, NVNcolorState *s, NVNalphaFunc f) {
+    NST(NRST_F_COLOR_ATEST, 0, s, 0, f, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     ST(color_st, s)->alpha_func = f;
     if (f != NVN_ALPHA_FUNC_ALWAYS) { static int once; if (!once++) LOG("[nvn] ColorStateSetAlphaTest %d: no fixed-function alpha test on Vulkan; the engine adds it to fragment shaders when DM_GFX_ALPHA_TEST is on", (int)f); }
 }
@@ -3083,35 +3219,45 @@ NVN(nvnCommandBufferReportValue, void, NVNcommandBuffer *c, uint32_t v, NVNbuffe
 static void bind_handles_n(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     for (int k = 0; k < n; k += 32) bind_handles(c, op, st, first + k, n - k < 32 ? n - k : 32, h + k);
 }
-NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { uint64_t v = h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v); }
+NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) {
+    NCT(nc_cap_bind(c, (int)st, i, (uint64_t)h));   // [DOS2] NR-23 DM_NR_NOCALL=2
+    uint64_t v = h; bind_handles(c, OP_BIND_TEX, st, i, 1, &v);
+}
 NVN(nvnCommandBufferBindTextures, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) { bind_handles_n(c, OP_BIND_TEX, st, first, n, h); }
 NVN(nvnCommandBufferBindSeparateTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNseparateTextureHandle h) { bind_handles(c, OP_BIND_TEX, st, i, 1, &h.value); }
 NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNimageHandle h) { uint64_t v = h; bind_handles(c, OP_BIND_IMG, st, i, 1, &v); }
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) {
+    NST(NRST_F_VB, c, a, n, i, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     if (i < 0 || i >= 16) { LOG("【红】BindVertexBuffer %d", i); return; }
     NBT(nbt_note(c, NBN_VBUF));   // [DOS2] DM_NB
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, 1); r->first = i; r->n = 1; r->r[0] = (NVNbufferRange){a, n};
 }
 NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
+    NCT(nc_cap_draw(c, (int)pr, (int)it, n, (uint64_t)ib, -1));   // [DOS2] NR-23 DM_NR_NOCALL=2
     nd_check(c);   // [DOS2] DM_NATIVE_DRAW=2
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     if (NBD_TAKE(c) && nbd_draw(c, NBD_DRAW_IDX, pr, it, n, 0, 0, 1, ib, 0)) return;   // [DOS2] DM_NB_OPS (NB-09): one OP_X_NB_DRAW
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, 0, 0, 1, ib};
 }
 NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     if (NBD_TAKE(c) && nbd_draw(c, NBD_DRAW_IDX, pr, it, n, bv, 0, 1, ib, 0)) return;   // [DOS2] DM_NB_OPS (NB-09): one OP_X_NB_DRAW
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, bv, 0, 1, ib};
 }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     *REC(c, OP_X_DRAW_CALL, xbg_draw_call) = (xbg_draw_call){pr, -1, first, n, inst, bi, 0, 0};
 }
 NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     *REC(c, OP_X_DRAW_INDIRECT, xbg_indirect) = (xbg_indirect){ind, 0, 0, pr, -1, 1, 0};
 }
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
+    NRT(dm_nr_tap_draw(c));   // [DOS2] DM_NR_KEY (NR-02)
     NBT(nbt_draw(c, 0));   // [DOS2] DM_NB
     *REC(c, OP_X_DRAW_INDIRECT, xbg_indirect) = (xbg_indirect){ind, 0, ib, pr, it, 1, 0};
 }
@@ -3174,15 +3320,18 @@ NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float w) { (void)c;
 NVN(nvnCommandBufferSetSampleMask, void, NVNcommandBuffer *c, int m) { (void)c; static int once; if ((m & 0xffff) != 0xffff && !once++) LOG("[nvn] SetSampleMask %#x ignored", m); }
 // Alpha test reference: recorded for the Vulkan engine, which emulates the colour state's alpha test in the fragment shader
 // (xbg_game.cpp alpha_module, DM_GFX_ALPHA_TEST); the reference is command-buffer state, as on Maxwell (default 0).
-NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { *REC(c, OP_X_ALPHA_REF, p_alpha_ref) = (p_alpha_ref){r, 0}; }
+NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { NST(NRST_F_ALPHA_REF, c, 0, 0, 0, 0, r); *REC(c, OP_X_ALPHA_REF, p_alpha_ref) = (p_alpha_ref){r, 0}; }
 // [DOS2] DM_GFX_COND_RENDER != 0: recorded as OP_X_RENDER_COND (inside a DM_NB_OPS draw bracket the condition rides in the OP_X_NB_DRAW
 // flags instead, nvn_nb_draw.inc nbd_take_ren; the backend applies it there the same way). NB-16: only the conditional form is an IR hazard
 // (it reads counter reports the GPU wrote); SetRenderEnable(true / false) reads no memory.
 NVN(nvnCommandBufferSetRenderEnable, void, NVNcommandBuffer *c, uint32_t en) {
+    NCT(nc_cap_ren(c, en));   // [DOS2] NR-23 DM_NR_NOCALL=2
+    NST(NRST_F_REN, c, 0, 0, en, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     if (condr_rec()) { if (!(NBD_TAKE(c) && nbd_take_ren(c, B(en) ? 0 : 1, 0, 0))) condr_write(c, B(en) ? 0 : 1, 0, 0); return; }
     NBD_REN(c, B(en) != 0); (void)c; static int once; if (!B(en) && !once++) LOG("【红】SetRenderEnable(false): the host draws anyway");
 }
 NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) {
+    NST(NRST_F_REN_COND, c, a, 0, m, 0, 0.f);   // [DOS2] NR-09S DM_NR_STATE=2
     NBT(nbt_hazard(c, NB_HZ_COND));   // [DOS2] DM_NB (NB-16)
     if (condr_rec()) { if (!(NBD_TAKE(c) && nbd_take_ren(c, 2, (int)m, (uint64_t)a))) condr_write(c, 2, (int)m, (uint64_t)a); return; }
     NBD_COND(c, (int)m, (uint64_t)a);   // [DOS2] DM_NB_OPS (NB-09): noted in the draw record (no record either way)
@@ -3217,6 +3366,8 @@ static void fs_scan(const uint8_t *pc, uint64_t fence, int depth) {
     }
 }
 NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
+    NRD_BT_NESTED(CB(c));   // [DOS2] NR-09R DM_NR_DIRECT: foreign records run inside this recording
+    NRUB_NESTED(CB(c));   // [DOS2] NR-UBD DM_NR_UBD: the same for the uniform-buffer table
     if (n > 0 && wt_mode() != 1) wt_set_multi("nested command handles (CallCommands / CopyCommands)");   // [DOS2] DM_NVN_WT_DRAIN
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
@@ -3495,3 +3646,12 @@ NVN(nvnTextureBuilderGetStorageClass, NVNstorageClass, const NVNtextureBuilder *
 NVN(nvnTextureGetStorageClass, NVNstorageClass, const NVNtexture *t) { (void)t; return 0; }
 NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b) { (void)b; return 1; }
 #endif
+#define NVN_NC_ENTRIES 1
+#include "nvn_nr_nocall.inc"   // [DOS2] NR-23 DM_NR_NOCALL: the direct entries of the five entry points the draw code of the engine calls
+#define NVN_NRD_ENTRIES 1
+#include "nvn_nr_direct.inc"   // [DOS2] NR-09R DM_NR_DIRECT: the binding mirror's hooks and the direct recorder (second part)
+#define NVN_NRS_ENTRIES 1
+#include "nvn_nr_state.inc"   // [DOS2] NR-09S DM_NR_STATE: the executor of the native opcode-21 packet (second part)
+#define NVN_NRU_ENTRIES 1
+#include "nvn_nr_ubo.inc"   // [DOS2] NR-09U DM_NR_UBO: the executor of the native uniform-block calls (second part)
+#include "nvn_nr_state3.inc"   // [DOS2] NR-09S3 DM_NR_STATE=4 / 5: the packet as one OP_X_NR_STATE record (empty outside DOS2)

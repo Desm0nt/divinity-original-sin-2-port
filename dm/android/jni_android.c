@@ -12,6 +12,7 @@
 //   <external private dir>/dm/out/   rewriter products (*.patched.bin and tables, from patch_nso.py DM_TARGET=android), adb push during development
 //   resource dir (default /sdcard/Download/S2X/D2R Mobile/data)  the player's 18 .data archives + .build.config; the App creates romfs/data/ in the internal dir linking to each of them
 //   <internal dir>/save, temp        saves and temporary files
+#include <sys/utsname.h>
 #include "../host/dm.h"
 #include "../host/front.h"
 #include "../host/hle.h"
@@ -23,6 +24,7 @@
 #include "vulkan_present.h"
 #include "touch_android.h"
 #include "lifecycle_dispatch.h"
+#include "../host/cpu_topo.h"  // [cpu-place] thread placement by core capacity: the [cpu] lines, re-applied after onResume, the gear's "CPU cores"
 #ifndef DM_GAME_DOOM   // [DOOM] D2R overlay contract is not built
 #include "overlay_validate.h"
 #include "dm_overlay_contract.h"
@@ -105,6 +107,7 @@ static pthread_mutex_t g_sync_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_sync_cv = PTHREAD_COND_INITIALIZER;
 static int g_sync_dirty, g_sync_on;
 static void log_sync_kick(void) { if (!g_sync_on) return; pthread_mutex_lock(&g_sync_mu); g_sync_dirty = 1; pthread_cond_signal(&g_sync_cv); pthread_mutex_unlock(&g_sync_mu); }
+static int log_sync_default(void);
 static void *log_sync_thread(void *arg) {
     (void)arg; setpriority(PRIO_PROCESS, 0, 10);
     struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -115,13 +118,22 @@ static void *log_sync_thread(void *arg) {
         long ms = (t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000;
         const char *e = getenv("DM_LOG_SYNC_FAST_S"); long fast_ms = (e ? atol(e) : 180) * 1000;   // read each time: dm/env comes after the start
         e = getenv("DM_LOG_SYNC_MS"); long slow_ms = e && atol(e) > 0 ? atol(e) : 1000;
-        e = getenv("DM_LOG_SYNC"); if (e && !atoi(e)) { g_sync_on = 0; return NULL; }   // dm/env DM_LOG_SYNC=0: off from here on
+        e = getenv("DM_LOG_SYNC"); if (e && *e ? !atoi(e) : !log_sync_default()) { g_sync_on = 0; return NULL; }   // dm/env DM_LOG_SYNC=0 (or not old-kernel / safe step): off from here on
         if (ms >= fast_ms) { struct timespec d = {slow_ms / 1000, (slow_ms % 1000) * 1000000}; nanosleep(&d, NULL); }
     }
     return NULL;
 }
+// [DOS2] 19.11 (owner: micro stutter while running): fsync holds the log file's inode lock, so every writer of boot.log waited for it -
+// the 10-s statistics frame cost the translator 30-50 ms (NVN PERF parts log=, Z_1a / H_base / a live run; 0.6-1.7 ms before the merge).
+// The periodic sync is now on by default only where issue #3 lives: a kernel older than 4.14, or a GPU safe step (the app sets
+// DM_FS_NO_EXCHANGE=1 at step >= 1). Elsewhere only the explicit syncs (crash, first save commit, dm_log_flush_sync). DM_LOG_SYNC=1 forces it.
+static int log_sync_default(void) {
+    const char *nx = getenv("DM_FS_NO_EXCHANGE"); if (nx && atoi(nx)) return 1;
+    struct utsname u; int a = 0, b = 0; if (!uname(&u) && sscanf(u.release, "%d.%d", &a, &b) == 2) return a < 4 || (a == 4 && b < 14);
+    return 0;
+}
 static void log_sync_start(void) {
-    const char *e = getenv("DM_LOG_SYNC"); if ((e && !atoi(e)) || g_log_fd < 0) return;
+    const char *e = getenv("DM_LOG_SYNC"); if ((e && *e ? !atoi(e) : !log_sync_default()) || g_log_fd < 0) return;
     pthread_t th; if (pthread_create(&th, NULL, log_sync_thread, NULL)) return;
     pthread_setname_np(th, "dm-logsync"); pthread_detach(th); g_sync_on = 1; log_sync_kick();
 }
@@ -260,6 +272,7 @@ static void log_init(void) {
     char dir[1100]; snprintf(dir, sizeof dir, "%s/logs", g_src);
     { struct stat st; if (!g_src[0] || ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && mkdir(dir, 0775)) || access(dir, W_OK)) snprintf(dir, sizeof dir, "%s", g_runtime); }
     char prev[1220]; snprintf(g_log_path, sizeof g_log_path, "%s/boot.log", dir); snprintf(prev, sizeof prev, "%s/boot.prev.log", dir);
+    setenv("DM_LOG_DIR", dir, 1);   // [DOS2] NR-HEAT: shader-heat.tsv goes next to boot.log (xbg_nr_heat.inc)
     if (rename(g_log_path, prev) && errno != ENOENT) unlink(g_log_path);   // [DOOM] one previous run kept; never append forever
     g_logf = fopen(g_log_path, "w"); g_log_fd = g_logf ? fileno(g_logf) : -1;
     log_limit();
@@ -356,6 +369,23 @@ static void *host_thread(void *arg) {
 
 // 测试用：files/dm/env 每行 KEY=VALUE（# 开头为注释），在下面的缺省值之前设进环境，让 run-as 能改 DM_* 开关（iOS / Mac 用启动环境变量做同样的事）；没有这个文件就什么都不做
 // For testing: each KEY=VALUE line of files/dm/env (# starts a comment) is set before the defaults below, so run-as can change DM_* switches (iOS / Mac do the same with launch environment variables); without the file nothing happens
+// [DOS2][safe-mode] docs/dos2/nr/SAFE-MODE.md: which DM_* keys are the player's own (xbg_safe_mode.inc keeps them; it replaces the app's defaults
+// set below with setenv(..., 0)): every DM_* key already in the environment when nativeStart begins (a launch environment, the gear's Os.setenv)
+// and every key files/dm/env set. Written only on the start thread before the Vulkan start; read later (boot thread). 1 = the player's, 0 = not.
+static char g_player_keys[256][48]; static int g_player_n;
+static void player_key(const char *k, size_t n) {
+    if (n == 0 || n >= sizeof g_player_keys[0]) return;
+    for (int i = 0; i < g_player_n; i++) if (!strncmp(g_player_keys[i], k, n) && !g_player_keys[i][n]) return;
+    if (g_player_n < 256) { memcpy(g_player_keys[g_player_n], k, n); g_player_keys[g_player_n][n] = 0; g_player_n++; }
+}
+int dm_env_player(const char *key);
+int dm_env_player(const char *key) {
+    if (!key) return 0;
+    for (int i = 0; i < g_player_n; i++) if (!strcmp(g_player_keys[i], key)) return 1;
+    return 0;
+}
+extern char **environ;
+static void player_keys_from_environ(void) { for (char **e = environ; e && *e; e++) if (!strncmp(*e, "DM_", 3)) { const char *eq = strchr(*e, '='); if (eq) player_key(*e, (size_t)(eq - *e)); } }
 static void load_env_file(const char *dir) {
     char path[1300]; snprintf(path, sizeof path, "%s/env", dir);
     FILE *fp = fopen(path, "r"); if (!fp) return;
@@ -364,7 +394,7 @@ static void load_env_file(const char *dir) {
         line[strcspn(line, "\r\n")] = 0;
         char *eq = strchr(line, '=');
         if (!line[0] || line[0] == '#' || !eq || eq == line) continue;
-        *eq = 0; setenv(line, eq + 1, 1); LOG("boot: 环境 %s=%s（来自 %s）", line, eq + 1, path);
+        *eq = 0; setenv(line, eq + 1, 1); player_key(line, strlen(line)); LOG("boot: 环境 %s=%s（来自 %s）", line, eq + 1, path);
     }
     fclose(fp);
 }
@@ -374,6 +404,8 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     static int started; if (started) return 0;
     const char *f = (*env)->GetStringUTFChars(env, files, NULL), *x = (*env)->GetStringUTFChars(env, ext, NULL), *s = (*env)->GetStringUTFChars(env, src, NULL), *lg = (*env)->GetStringUTFChars(env, lang, NULL);
     snprintf(g_files, sizeof g_files, "%s", f); snprintf(g_ext, sizeof g_ext, "%s", x); snprintf(g_src, sizeof g_src, "%s", s);
+    player_keys_from_environ();   // [safe-mode] before any setenv of ours: these are the player's (launch env, the gear)
+    setenv("DM_SAFE_DIR", g_files, 1);   // [safe-mode] <files>/gfx-safe-mode, the file SafeMode.java / DmGuard read (getFilesDir)
     // 启动时间线零点：Process.getStartUptimeMillis() 是 SystemClock.uptimeMillis（CLOCK_MONOTONIC），与 now_ns 同一时钟（见 main.c proc_start_mono_ns）
     // Boot timeline zero: Process.getStartUptimeMillis() is SystemClock.uptimeMillis (CLOCK_MONOTONIC), the same clock as now_ns (see main.c proc_start_mono_ns)
     jclass proc = (*env)->FindClass(env, "android/os/Process");
@@ -386,6 +418,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     mkdirs(g_runtime);
     log_init();
     load_env_file(g_runtime);
+    setenv("DM_MARKER_DIR", g_files, 0);   // [TL2] crash markers around pipeline builds: internal storage, not FUSE (xbg_game.cpp fmark)
     LOG("boot: 内部目录 %s，外部目录 %s，资源 %s，系统语言 %s", g_files, g_ext, g_src, lg);
     char romfs[1100], save[1100], temp[1100];
     snprintf(romfs, sizeof romfs, "%s/romfs", g_files); snprintf(save, sizeof save, "%s/save", g_files); snprintf(temp, sizeof temp, "%s/temp", g_files);
@@ -521,11 +554,36 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // Phone A/B 17.11 (Mi 14 Ultra, ship deck, uncapped, 60 s; work/logs g0base / g1all): 97.5 -> 102.2 fps, GPU median 9.01 -> 8.53 ms,
     // NB checks differ 0 / bad 0, no fallbacks, screenshots equal. dm/env still wins: any of them = 0 there turns that step off.
     // DM_NB_POST needs dm/shaders/native-post.xgspack (setup builds it); without the pack the post chain runs as recorded.
+    // [DOS2] NR-15 (docs/dos2/nr/NR-15.md): DM_NB_RELOC, DM_NB_ORDER, DM_NB_TRANSIENT and DM_GFX_HIT_FAST are no longer set here (default 0;
+    // dm/env =1 / =3 still turns each on, the code is kept). On DOS2 they change nothing and cost CPU (phone logs g1all / h1def / rd1, ship deck):
+    // RELOC writes 115 OP_X_NB_KEY a frame (154 KB) for 6.0-7.6 us a pass on the game's render thread (0.69-0.87 ms of its 4.9-6.1 ms) and
+    // 5.2-6.7 us a key on the backend (0.60-0.77 ms), and every key set leaves the state as it was ("0 changed the state"); ORDER=3 runs every
+    // part by an identity tail ("not the stream order 0 parts"): the merge planner is off while DM_NB_POST is on, and reordering needs RELOC;
+    // TRANSIENT judges 28-29 attachments a frame with 0 candidates (each is sampled by a later pass: deferred frame, NB-19); HIT_FAST skips 0
+    // of ~5.7 k images a frame because DM_NB_RP=1 arms the store-hist read hook (hist_on), so every image still takes the full path (NR-08).
+    // DM_NB_OWN does not need the first two: without keys / tail its frame job has KEY address 0 and the identity order (nb_own.h nbw_build).
     static const char *const k_nb_on[][2] = {
         {"DM_NB", "1"}, {"DM_NB_OPS", "0x30002c0fc0"}, {"DM_NB_RP", "1"}, {"DM_NB_OPBARRIER", "1"}, {"DM_NB_PIPE", "1"},
-        {"DM_NB_DESC", "1"}, {"DM_NB_UBO", "1"}, {"DM_GFX_HIT_FAST", "1"}, {"DM_NB_UIAREA", "1"}, {"DM_NB_TRANSIENT", "1"},
-        {"DM_NB_RELOC", "1"}, {"DM_NB_ORDER", "3"}, {"DM_NB_OWN", "1"}, {"DM_NB_POST", "1"}, {"DM_NB_POST_AA", "1"},
-        {"DM_NB_MT", "3"}, {"DM_NB_MX", "1"}, {"DM_GFX_PRESENT_THREAD", "1"}, {"DM_DOS2_PARTICLES_FULL", "1"},
+        {"DM_NB_DESC", "1"}, {"DM_NB_UBO", "1"}, {"DM_NB_UIAREA", "1"},
+        {"DM_NB_OWN", "1"}, {"DM_NB_POST", "1"}, {"DM_NB_POST_AA", "1"},
+        {"DM_NB_MT", "3"}, {"DM_GFX_PRESENT_THREAD", "1"}, {"DM_DOS2_PARTICLES_FULL", "1"},
+        // NR-06 + NR-08 (owner 17.11, phone nr6_c1..c4 / nr7_c5 / nr8_*): constant ring and static buffers served in place / mirrored, native
+        // descriptors; checks 0 bad (also zero-copy off and an 8-UBO limit); nr8: translator -0.75 ms, main +0.15 ms, process -0.4 ms a frame.
+        {"DM_NR", "1"}, {"DM_NR_BUF", "1"}, {"DM_NR_DESC", "1"},
+        // NR-09 + NR-09R (owner 17.11, phone nr11_dir2 / dir2m checks bad 0 incl. zero-copy off + 8-UBO limit; nr11_dir1): engine draws recorded
+        // directly, 3131 NVN calls a frame not made; main thread 5.58 (DRAW=1 alone) -> 5.05 ms, below the no-NR-09 5.20; translator 4.98 -> 4.64.
+        {"DM_NR_DRAW", "1"}, {"DM_NR_DIRECT", "1"},
+        // NR-HEAT (docs/dos2/nr/NR-HEAT.md): the shader / pass heat log, one sampled frame every 20 s -> logs/shader-heat.tsv; between samples
+        // nothing new runs (the pass profiler's hooks were there already); a sample costs ~2 pass-boundary stamps a pass on one frame.
+        {"DM_NR_HEAT", "1"},
+        // Batch C (owner 19.11 "Включай", phone 18.11 Mi 14 Ultra, Fort Joy walking, docs/dos2/nr/STATUS.md): each clean on its own (0 diffs,
+        // 0 red lines) and all together (C_all); neutral on the Mi 14 (GPU-bound ~12 ms), meant for weak CPUs and the tile GPUs.
+        // NR-33C surfaces with a wave early out (needs native-nr33c.xgspack, else off by itself), NR-33B empty FS in depth passes
+        // (native-nr33b.xgspack), NR-09S S3 state records, NR-09U uniform allocator + NR-UBD repeated binds, NR-TRX sticky pages + zero-copy
+        // chunk index, NR-TAPSET hash set, NR-05/22 textures by events + stream worker, NB post AA also with the character outline.
+        {"DM_NR_SH_SURF", "1"}, {"DM_NR_MAT", "1"}, {"DM_NR_STATE", "4"}, {"DM_NR_UBO", "1"}, {"DM_NR_UBD", "1"},
+        {"DM_NR_TRX_STICKY", "1"}, {"DM_NR_TRX_ZC", "1"}, {"DM_NR_TAPSET", "1"}, {"DM_NR_TEX", "1"}, {"DM_NR_TEXSTREAM", "1"},
+        {"DM_NB_POST_AA_OUTLINE", "1"},
     };
     for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) setenv(k_nb_on[i][0], k_nb_on[i][1], 0);
 #endif
@@ -630,6 +688,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
 #endif
     if (!lifecycle_ready()) return -8;
     dm_aperf_start();             // thermal status listener (perf_android.c)
+    dm_cpu_place_start();         // [cpu-place] after the env files (DM_CPU_CORES from the gear): "[cpu] topology" / "[cpu] plan", thread dm-cpu
     dm_haptics_android_start();   // rumble thread, after the env file (DM_RUMBLE...) and before the game asks for vibration devices
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20);
     pthread_t th; int rc = pthread_create(&th, &a, host_thread, NULL); pthread_attr_destroy(&a);
@@ -655,6 +714,21 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSurface(JNIEnv *e
 
 // 触点：Java 按手指槽号（最小空槽，抬起前不变）交整组归一化坐标，n = 0 = 全抬起
 // Touch points: Java hands over the whole set of normalized coordinates by finger slot number (lowest free slot, unchanged until lifted), n = 0 = all lifted
+// [DOS2][safe-mode] (DOOM 2016 jni_android.c, its B&F 2.57; xbg_safe_mode.inc, frontend-common SafeMode.java): this boot's safe-mode decision
+// "<eligible>	<step>	<how>	<family>	<count>	<last why>	<switches set>" ("" before the presenter made it), and the next in-process
+// fallback message "<kind>	<detail>" (pipe; "" = none).
+const char *xbg_safe_mode_status(void) __attribute__((weak));
+int xbg_safe_mode_event(char *out, size_t n) __attribute__((weak));
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSafeModeStatus(JNIEnv *env, jclass cls) {
+    (void)cls; char b[1024]; snprintf(b, sizeof b, "%s", xbg_safe_mode_status ? xbg_safe_mode_status() : "");
+    for (char *c = b; *c; c++) if ((unsigned char)*c >= 0x80) *c = '?';   // NewStringUTF wants modified UTF-8
+    return (*env)->NewStringUTF(env, b);
+}
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSafeModeEvent(JNIEnv *env, jclass cls) {
+    (void)cls; char b[512] = ""; if (xbg_safe_mode_event && !xbg_safe_mode_event(b, sizeof b)) b[0] = 0;
+    for (char *c = b; *c; c++) if ((unsigned char)*c >= 0x80) *c = '?';   // NewStringUTF wants modified UTF-8: the details are ASCII anyway
+    return (*env)->NewStringUTF(env, b);
+}
 // [D3] Vulkan driver status for the gear dialog (vk_driver.c, from the DOOM 2016 port): "<requested>\t<active>\t<reason>", or "" before
 // the driver is loaded.
 const char *dm_vk_driver_status(void);
@@ -702,10 +776,26 @@ JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeFocus(JNIEnv *env
     dm_stall_quiet(2, ev <= 1);                         // [TL2] APP-02 no stall reports while unfocused / in the background
     front_android_sensors(ev == 2 || ev == 3);          // motion sensors only while in front
     dm_haptics_android_foreground(ev == 2 || ev == 3);  // no rumble left running in the background
+    dm_aperf_focus(ev);                                 // [adpf-boost] back in front: a workload reset hint at the next present
+    dm_cpu_place_focus(ev);                             // [cpu-place] paused in the background, thread masks checked again on the way back
     if (lifecycle_ready()) {
         dm_lifecycle_post(&g_lifecycle, ev);
         __android_log_print(ANDROID_LOG_INFO, "dm-lifecycle", "UI posted event=%d", ev);
     }
+}
+
+// [DOS2] NR-29 DM_NR_MEM (hle_dos2_nr_mem.c; weak: other games' builds have no front end and ignore both). nativeMemInfo: the app's
+// ActivityManager.MemoryInfo before nativeStart (totalMem gives the RAM class, threshold the poll's marks). nativeTrimMemory: the activity's
+// onTrimMemory level; only noted here (UI thread), the trim thread frees.
+void dm_nr_mem_java(int64_t total, int64_t threshold) __attribute__((weak));
+void dm_nr_mem_trim_request(int level) __attribute__((weak));
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeMemInfo(JNIEnv *env, jclass cls, jlong total, jlong threshold) {
+    (void)env; (void)cls;
+    if (dm_nr_mem_java) dm_nr_mem_java((int64_t)total, (int64_t)threshold);
+}
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeTrimMemory(JNIEnv *env, jclass cls, jint level) {
+    (void)env; (void)cls;
+    if (dm_nr_mem_trim_request) dm_nr_mem_trim_request((int)level);
 }
 
 // Application Context for the rumble thread (haptics_android.c), before nativeStart: the JavaVM and a global reference kept for the process.
@@ -892,6 +982,8 @@ JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeLogPath(JNIEnv
 // save is committed and quiet, at most DM_QUIT_SAVE_WAIT_MS = 6000, quiet spell DM_QUIT_SAVE_QUIET_MS = 750), then exits gracefully.
 void dm_hold_quit(void);
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeQuit(JNIEnv *env, jclass cls) { (void)env; (void)cls; LOG("[java] the app ends (pause menu)"); dm_hold_quit(); }
+// [cpu-place] Gear "CPU cores" (0 auto, 1 big cores, 2 all cores), live; the next start reads DM_CPU_CORES (DmActivity.applyDoomSettings).
+JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeCpuCores(JNIEnv *env, jclass cls, jint mode) { (void)env; (void)cls; dm_cpu_place_set_mode(mode); }
 JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeOpmode(JNIEnv *env, jclass cls) { (void)env; (void)cls; return dm_opmode(); }
 // [DOS2] live dynamic resolution from the gear (hle_dos2_quality.c dm_dos2_drs_live): on + target fps, or off; false = not possible now
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Drs(JNIEnv *env, jclass cls, jboolean on, jint fps) {

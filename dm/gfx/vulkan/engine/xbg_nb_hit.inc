@@ -53,7 +53,7 @@ void note(const nbd_hdr &h,const uint8_t *b){
 // uniform_snapshot's first step. 0 = the usual path; 1 = z is the in-place view (mode 1); 2 = mode 2: z is the view to compare with.
 int fast(uint64_t address,size_t copy,Buffer &z){
     tick();++s.calls;const bool timed=!(s.calls&63);const uint64_t t0=timed?timing_clock():0;
-    nb_ring_ent *e=nb_ring_find(&ring,address,copy,snapshot_epoch);int why=NBU_NOTRING;
+    nb_ring_ent *e=nb_ring_find(&ring,address,copy,snapshot_epoch);int why=NBU_NOTRING;const bool nrl=e && __builtin_expect(nrlean::mode>0,0);   // [DOS2] NR-13: a note was read
     if(e){++s.ring;
         const size_t n=uniform_range(copy);
         if(g_ui_moff!=0 && address==g_ui_moff_addr)why=NBU_UI;
@@ -66,6 +66,7 @@ int fast(uint64_t address,size_t copy,Buffer &z){
                 ++s.direct;if(mode==1){++zc::hits;zcubo::bound(address,n);}
                 if(mode==2 && e->checked!=slot_serial){e->checked=slot_serial;if(races.size()<8192)races.push_back({address,uint64_t(copy),0,slot_serial,slot_index});}}}}
     if(why!=NBU_DIRECT)++s.why[why];
+    if(nrl)nrlean::ubo_read(why==NBU_DIRECT);
     if(timed){s.ns+=timing_clock()-t0;++s.timed;}
     return why!=NBU_DIRECT?0:mode==1?1:2;}
 // mode 2, after the usual path made b: the bytes a GPU read in place would see now must be the snapshot's
@@ -96,7 +97,7 @@ inline void fill(nb_hit_in &x,const MemoImage &ti,int hk){const tex_t *t=ti.firs
     x.storage=ti.storage;x.hooks=hk;
     const ImgFront &f=img_front[(t->serial*0x9E3779B97F4A7C15ull)>>54];x.front_ok=f.epoch==images_epoch && f.serial==t->serial && f.im==ti.second;
     x.checked=im.checked_submission==stats.submissions;x.has_contents=im.uploaded || im.gpu_written;x.general=im.layout==VK_IMAGE_LAYOUT_GENERAL;
-    x.last_write=im.last_write;x.storage_write=im.storage_write;x.seen=read_frag_only?frag_seq:barrier_seq;if(opbar::mode==1)x.seen=nb_ob_seen(x.seen,read_frag_only?im.opvis_frag:im.opvis_full);   /* [DOS2] NB-08: as prepare_read */x.sampled_ever=im.sampled_ever;
+    x.last_write=nrrp::lw(im);   /* [DOS2] NR-10: as prepare_read */x.storage_write=im.storage_write;x.seen=read_frag_only?frag_seq:barrier_seq;if(opbar::mode==1)x.seen=nb_ob_seen(x.seen,read_frag_only?im.opvis_frag:im.opvis_full);   /* [DOS2] NB-08: as prepare_read */x.sampled_ever=im.sampled_ever;
     x.in_open=open_pass.cmd && std::find(open_pass.images.begin(),open_pass.images.end(),ti.second)!=open_pass.images.end();}
 // Before the full path of one image: true = skip it (mode 1). ok / snap: mode 2 state for after().
 struct Pre{int why;VkCommandBuffer open;uint64_t bseq,fseq,pend;VkImageLayout layout;};

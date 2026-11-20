@@ -19,7 +19,7 @@ enum { HDR = 0x2710, LUT3D = 0x2830, D = 0x2660, O1 = 0x1300, SIGHT = 0x1290, O2
        PH = 0x4440, PL = 0x4450, PO = 0x4460,
        DRT = 0x1181, FM = 0x3790 };   // ship deck: the pooled RGBA8 target that holds linear depth and later the FXAA output; a fog map   // the HUD portrait's mini-pipeline: its HDR, its LUT target, its FXAA target (80x100)
 static const uint64_t K_LUT = 0x921728a5bbb1c71bull, K_SIGHT = 0x91eb2d97a304709aull, K_FXAA = 0x691768aa00000000ull, K_VIG = 0x43e8e8ed2b1df6c2ull,
-                      K_COMB = 0x98186c22a7209861ull, K_OTHER = 0x1234567800000000ull, K_COPY = 0x7b3210191abd90cdull, K_FOG = 0xe94ea226e689801cull;
+                      K_COMB = 0x98186c22a7209861ull, K_OTHER = 0x1234567800000000ull, K_COPY = 0x7b3210191abd90cdull, K_FOG = 0xe94ea226e689801cull, K_OUTL = 0x010472595b342188ull;
 
 // NB-18b-8 variants: copy_step (AntiAliasing 0, no Vignette: a PPDefault copy instead of FXAA), no_step (AntiAliasing 0 + Vignette: it
 // reads Sight's target), outline (a step between Sight and FXAA: FXAA reads its target T), fxaa_inexact, op_reads (a copy from the
@@ -33,7 +33,10 @@ typedef struct { int lut_inexact, lut_draws2, reader_after_sight, compute_betwee
                  // NB-18b-10: fog = the ship deck's tail (dump ra1-dumps f5269): linear depth -> DRT ... LUT -> O1, Sight -> SIGHT, EoCFog
                  // (SIGHT + DRT + fog map) -> O1, FXAA (O1) -> DRT, combine (UI + DRT). fog_* = what is wrong with the fog pass;
                  // fog_no_aa = AntiAliasing 0 (no FXAA pass: the combine samples the fog's target).
-                 int fog, fog_inexact, fog_draws2, fog_feedback, fog_small, fog_stale_depth, fog_rewrite, fog_no_aa; } variant;
+                 int fog, fog_inexact, fog_draws2, fog_feedback, fog_small, fog_stale_depth, fog_rewrite, fog_no_aa;
+                 // NR-33A: fj_outline = the Fort Joy tail (phone 18.11 frame 5240): Sight -> SIGHT, EoCOutlineCombine (SIGHT + mask) -> O1,
+                 // EoCFog (O1 + DRT + fog map) -> SIGHT, FXAA (SIGHT) -> DRT; op_first = a copy from the FXAA target before anything writes it
+                 int fj_outline, op_first; } variant;
 static variant g_v;
 static int sz(void *ctx, uint64_t im, uint32_t *w, uint32_t *h) {
     (void)ctx;
@@ -69,6 +72,14 @@ static void build_deck(nb_frame *f, uint32_t no) {
     { const uint64_t s[2] = { HDR, LUT3D }; pass1(f, O1, K_LUT, 1, s, 2, NULL, 0); }
     nb_barrier(f);
     { const uint64_t s[2] = { O1, DRT }; pass1(f, SIGHT, K_SIGHT, 1, s, 2, NULL, 0); }
+    if (g_v.fj_outline) {
+        { const uint64_t s[2] = { SIGHT, FM }; pass1(f, O1, K_OUTL, 1, s, 2, NULL, 0); }
+        { const uint64_t s[3] = { O1, DRT, FM }; pass1(f, SIGHT, K_FOG, 1, s, 3, NULL, 0); }
+        { const uint64_t s[1] = { SIGHT }; pass1(f, DRT, K_FXAA, 1, s, 1, NULL, 0); }
+        { const uint64_t s[2] = { UI, DRT }; pass1(f, WIN, K_COMB, 1, s, 2, NULL, 0); }
+        { const uint64_t w = WIN; nb_op(f, NB_OP_PRESENT, &w, 1, NULL, 0); }
+        nb_submit(f, 1); return;
+    }
     { const uint64_t s[4] = { SIGHT, DRT, FM, O1 }; pass1(f, O1, K_FOG, !g_v.fog_inexact, s, g_v.fog_feedback ? 4 : 3, NULL, 0); if (g_v.fog_draws2) nb_draw(f, 0); }
     if (g_v.fog_rewrite) { const uint64_t s[1] = { X }; pass1(f, O1, K_OTHER, 1, s, 1, NULL, 0); }   // something draws over the fog's output
     if (!g_v.fog_no_aa) { const uint64_t s[1] = { O1 }; pass1(f, DRT, K_FXAA, 1, s, 1, NULL, 0); }
@@ -85,6 +96,7 @@ static void build(nb_frame *f, uint32_t no) {
         if (g_v.no_3d == 2) nb_clear(f, O1, NB_ASP_COLOR, NB_CLEAR_FULL, z, 0, 0);   // ... after the game cleared it: a real write, no alias
         const uint64_t s[2] = { UI, O1 }, w = WIN; pass1(f, WIN, K_COMB, 1, s, 2, NULL, 0); nb_op(f, NB_OP_PRESENT, &w, 1, NULL, 0); nb_submit(f, 1); return;
     }
+    if (g_v.op_first) { const uint64_t src = O1, dst = X; nb_op(f, NB_OP_COPY, &src, 1, &dst, 1); }   // reads last frame's (aliased) FXAA output
     if (g_v.vig_read_next) { const uint64_t s[1] = { O2 }; pass1(f, X, K_OTHER, 1, s, 1, NULL, 0); }   // last frame's O2 sampled first
     if (g_v.portrait == 3) portrait(f);
     nb_clear(f, O2, NB_ASP_COLOR, NB_CLEAR_FULL, z, 0, 0);
@@ -252,10 +264,21 @@ static void route_a(void) {
         CHECK(AS.n == 1 && AS.t[0].image == O1 && !AS.t[0].bad && AO.readers == 1, "A portrait %d vig %d: only the 3D FXAA target is aliased, one reader (%d, readers %d)", where, vig, AS.n, AO.readers);
         CHECK(AO.d_host < 0, "A portrait %d vig %d: no refusal recorded", where, vig);
     }
-    {   // an operation reads the aliased target in a later frame: bad for good
+    {   // NR-33A: an operation reads the tracked target after its real write in that submission (the save-game thumbnail, phone 18.11):
+        // the AA pass runs in that submission only, the fusion goes on in the next one (before: bad for good)
+        g_v = (variant){ 0 }; aa_reset(); aa_frame(1); aa_frame(2);
+        CHECK(AO.f1a_fxaa == 1, "A op after the write: fused first");
+        g_v = (variant){ .op_reads = 1 }; aa_frame(3);
+        int any = 0; for (int n = 0; n < F.nnode; n++) any |= P.node[n].flags & NB_NP_AA;
+        CHECK(AO.op_reads == 0 && AO.op_fresh == 1 && !AS.t[0].bad && AS.t[0].now && AO.plain == 1 && AO.f1a == 0 && aa_why() == NB_PAW_OPREAD && !any,
+              "A op after the write: the AA pass runs in this submission, the target is not bad (op_reads %d fresh %d bad %d '%s')", AO.op_reads, AO.op_fresh, AS.t[0].bad, nb_post_aa_why_name(aa_why()));
+        g_v = (variant){ 0 }; aa_frame(4);
+        CHECK(AO.f1a_fxaa == 1 && AO.plain == 0 && !AS.t[0].now, "A op after the write: fused again in the next submission (fxaa %d plain %d)", AO.f1a_fxaa, AO.plain);
+    }
+    {   // an operation reads the aliased target before anything writes it in its submission (a stale read): bad for good
         g_v = (variant){ 0 }; aa_reset(); aa_frame(1); aa_frame(2);
         CHECK(AO.f1a_fxaa == 1, "A sticky: fused first");
-        g_v = (variant){ .op_reads = 1 }; aa_frame(3);
+        g_v = (variant){ .op_first = 1 }; aa_frame(3);
         CHECK(AO.op_reads == 1 && AS.t[0].bad && AO.plain == 1 && AO.f1a == 0, "A sticky: the copy marks the target bad (op_reads %d bad %d)", AO.op_reads, AS.t[0].bad);
         g_v = (variant){ 0 }; aa_frame(4);
         int any = 0; for (int n = 0; n < F.nnode; n++) any |= P.node[n].flags & NB_NP_AA;
@@ -274,6 +297,22 @@ static void route_a(void) {
         CHECK(fl(lin) == 0 && fl(lit) == 0 && AO.readers == 1, "A deck frame %u: LinearizeDepth rewrites the pooled target, lighting reads it as it is (%#x %#x readers %d)", i, fl(lin), fl(lit), AO.readers);
         CHECK(AO.step[x] == sg && AS.n == 1 && AS.t[0].image == DRT && !AS.t[0].bad, "A deck frame %u: the aliased target is the FXAA pass's (the pooled depth target)", i);
     }
+    // NR-33A: the Fort Joy tail Sight -> outline -> fog (into Sight's own target) -> FXAA. Without DM_NB_POST_AA_OUTLINE the outline is
+    // no carry (plain F1 + the console's FXAA, as on the phone 18.11); with it both carry and the FXAA pass is elided.
+    for (int ol = 0; ol < 2; ol++) {
+        g_v = (variant){ .fog = 1, .fj_outline = 1 }; aa_reset(); AS.outline = (uint8_t)ol;
+        for (uint32_t i = 1; i <= 12; i++) aa_frame(i);
+        const int sg = node_of(K_SIGHT, 0), ou = node_of(K_OUTL, 0), fg = node_of(K_FOG, 0), x = node_of(K_FXAA, 0), c = node_of(K_COMB, 0);
+        if (!ol) CHECK(AO.f1a == 0 && AO.plain == 1 && aa_why() == NB_PAW_OTHER_FXAA && AO.d_first == ou && AO.d_other == x, "A Fort Joy, outline carry off: plain F1 ('%s' first %d other %d)",
+                       nb_post_aa_why_name(aa_why()), AO.d_first, AO.d_other);
+        else {
+            CHECK(AO.f1a == 1 && AO.f1a_fxaa == 1 && AO.carried == 2 && AO.plain == 0 && aa_why() < 0, "A Fort Joy, outline carry on: F1A, both carry, FXAA elided (f1a %d fxaa %d carried %d '%s')",
+                  AO.f1a, AO.f1a_fxaa, AO.carried, nb_post_aa_why_name(aa_why()));
+            CHECK(fl(sg) == (NB_NP_FUSE | NB_NP_AA) && fl(ou) == NB_NP_AA && fl(fg) == NB_NP_AA && fl(x) == (NB_NP_ELIDE | NB_NP_AA) && fl(c) == NB_NP_AA && AS.n == 1 && AS.t[0].image == DRT,
+                  "A Fort Joy, outline carry on: flags Sight %#x outline %#x fog %#x FXAA %#x combine %#x", fl(sg), fl(ou), fl(fg), fl(x), fl(c));
+        }
+    }
+    AS.outline = 0;
     g_v = (variant){ .fog = 1, .fog_no_aa = 1 }; aa_reset();
     for (uint32_t i = 1; i <= 10; i++) aa_frame(i);
     CHECK(AO.f1a == 1 && AO.f1a_nostep == 1 && AO.carried == 0 && AS.n == 0 && fl(node_of(K_FOG, 0)) == 0 && fl(node_of(K_COMB, 0)) == 0,

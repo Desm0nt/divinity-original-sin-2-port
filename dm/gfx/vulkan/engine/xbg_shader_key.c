@@ -47,6 +47,28 @@ int xbg_shader_program_key(const void *control, const void *code, char out[17]) 
     sha_final_hex16(&s, out); return 0;
 }
 
+/* [DOS2] NR-01 fix (docs/dos2/nr/NR-01-fix.md): the same key as xbg_shader_program_key, with the code area read through
+ * rd(dst, address, n) (1 = read) in 4 KiB pieces instead of by loads of this function: the engine object registry
+ * (dm/host/hle_dos2_nr.c) reads guest memory through the kernel. The control is read in place as above (the host's own copy).
+ * -1 (out = "") when there is no control / reader or a read fails. */
+int xbg_shader_program_key_rd(const void *control, uint64_t code, int (*rd)(void *dst, uint64_t address, size_t n), char out[17]) {
+    if (!out) return -1;
+    out[0] = 0;
+    if (!control || !rd) return -1;
+    const uint8_t *ctl = (const uint8_t *)control; uint32_t own, ncode; memcpy(&own, ctl + 0x20, 4); memcpy(&ncode, ctl + 0x704, 4);
+    size_t nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
+    sha_ctx s; sha_init(&s); sha_update(&s, ctl, nctl);
+    if (code && ncode && ncode < (1u << 24)) {
+        uint8_t piece[4096];
+        for (uint32_t at = 0; at < ncode;) {
+            const uint32_t m = ncode - at < sizeof piece ? ncode - at : (uint32_t)sizeof piece;
+            if (!rd(piece, code + at, m)) return -1;
+            sha_update(&s, piece, m); at += m;
+        }
+    }
+    sha_final_hex16(&s, out); return 0;
+}
+
 /* [DOS2] SHA-256 of any byte string, first 16 hex digits (pipeguard v2, KB SH-06: the SPIR-V a list entry was recorded for; same
  * contract as the DOOM 2016 port's xbg_sha256_hex16, here on the streaming SHA-256 above). */
 int xbg_sha256_hex16(const void *data, size_t n, char out[17]) {

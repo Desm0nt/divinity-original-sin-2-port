@@ -1,0 +1,27 @@
+// ---- vs3.vert
+#version 450
+layout(location=0) in vec4 p; layout(location=4) in vec4 t;
+layout(location=1) out vec4 o1; layout(location=2) out vec4 o2; layout(location=3) out vec4 o3;
+layout(set=0,binding=0) uniform U{ mat4 m; } u;
+void main(){ vec4 w=u.m*p; gl_Position=w; o1=w; o2=vec4(t.xy*2.0,0,1); o3=vec4(sin(p.xyz),1); }
+// ---- vsrd.vert
+#version 450
+layout(location=0) in vec4 p; layout(location=1) out vec4 o1; layout(location=2) out vec4 o2;
+void main(){ o1=p*2.0; o2=p; gl_Position=o1+o2; }
+// ---- fsk.frag
+#version 450
+layout(location=2) in vec4 uv; layout(location=0) out vec4 c; layout(set=0,binding=1) uniform sampler2D s;
+void main(){ vec4 x=texture(s,uv.xy); if(x.a<0.5) discard; c=x; }
+// ---- fsd.frag
+#version 450
+layout(location=3) in vec4 v; layout(location=0) out vec4 c;
+void main(){ c=v; gl_FragDepth=v.z; }
+// ---- fsw.frag
+#version 450
+layout(location=1) in vec4 v; layout(location=0) out vec4 c; layout(set=0,binding=2,r32f) uniform image2D im;
+layout(set=0,binding=3) buffer B{ float x[]; } b;
+void main(){ c=v; b.x[0]=v.x; }
+// ---- fsp.frag
+#version 450
+layout(location=2) in vec4 uv; layout(location=3) in vec4 w; layout(location=0) out vec4 c; layout(set=0,binding=1) uniform sampler2D s;
+void main(){ c=texture(s,uv.xy)*w; }

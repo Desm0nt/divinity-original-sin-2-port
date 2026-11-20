@@ -100,15 +100,20 @@ The console HUD also gets on-screen buttons (made from the Switch files alone; t
 
 - **Widescreen (Hor+)**: the game renders in the screen's own shape (e.g. 2400×1080 on a 20:9 phone) with a wider view
   of the world, the HUD at the screen edges.
-- **Render resolution** 720p / 900p / **1080p (the screen's own height, the default)**; **dynamic resolution** (the
-  game's own DRS, off by default) with a target of 30 / 45 / 60 fps.
+- **Resolution:** the window follows the Switch mode (Docked = the screen's own resolution, Handheld = lighter); the
+  **3D resolution** is set per mode: a fixed 100 / 83 / 75 / 67 / 50 % or **dynamic** (the game's own DRS with a target of
+  30 / 45 / 60 / 75 / 90 / 120 fps and a lowest size of 85 / 75 / 60 / 50 %; the default in Handheld), with **FSR 1**
+  upscaling below 100 %. The interface always stays at full resolution.
+- **Graphics quality** page (Off / Light / Medium / Maximum / Custom): bloom, anti-aliasing, shadow maps and filter,
+  distant shadows, texture sharpness, angle filtering, model detail distance, lamps per spot.
 - **Frame rate limit 30 / 60 (default) / 90 / 120 / no limit** (90 and 120 only where the screen has such a mode; above
   60 is experimental: more heat). The game's speed does not change with the frame rate.
 
 **Front end shared with the DOOM / Diablo III / Torchlight II ports**
 
 - Gear button (⚙) → **pause menu** that really holds the game (as the Switch HOME menu), save export / import.
-- Port settings: menu and game language, render resolution, dynamic resolution, frame rate limit, thermal mode, touch as
+- Port settings: menu and game language, Switch mode, 3D resolution, dynamic resolution, FSR 1, sharpening, frame rate limit,
+  thermal mode, graphics quality, safe mode (Mali / PowerVR), touch as
   mouse, left / right stick, button column, Vulkan driver (with a driver manager), vibration, FPS counter, control
   layout and editor.
 - **Textures for phones without BC** (Mali, PowerVR, Xclipse): setup encodes the game's BC textures once to ASTC on your
@@ -331,12 +336,14 @@ Torchlight II Mobile.
   подключённом геймпаде она сворачивается сама), стрелки страниц панели быстрого доступа, конец хода, скрытность,
   тактическую камеру, тапы по ячейкам, а **панели** (инвентарь, снаряжение, персонаж, навыки, журнал, крафт, торговля,
   награды) — ряд кнопок и тапы по вкладкам, предметам и навыкам.
-- **Картинка:** широкий экран по форме телефона (Hor+, например 2400×1080 на 20:9); разрешение рендера 720p / 900p /
-  **1080p (родное экрана, по умолчанию)**; динамическое разрешение игры (по умолчанию выкл.) с целью 30 / 45 / 60 fps;
+- **Картинка:** широкий экран по форме телефона (Hor+, например 2400×1080 на 20:9); окно по режиму Switch (в доке — родное
+  разрешение экрана, портативный — легче); **разрешение 3D** на каждый режим: фиксированное 100 / 83 / 75 / 67 / 50 % или
+  **динамическое** (DRS самой игры, цель 30 / 45 / 60 / 75 / 90 / 120 fps, нижняя граница 85 / 75 / 60 / 50 %; в портативном по
+  умолчанию), ниже 100 % — апскейл **FSR 1**; интерфейс всегда в полном разрешении; страница **«Качество графики»**;
   **лимит кадров 30 / 60 (по умолчанию) / 90 / 120 / без ограничения** (выше 60 — эксперимент: больше нагрев; скорость
   игры от частоты кадров не меняется).
-- **⚙:** меню паузы, которое по-настоящему держит игру, экспорт / импорт сохранений, язык меню и игры, разрешение,
-  динамическое разрешение, лимит кадров, тепловой режим, касание как мышь, левый / правый стик, колонка кнопок, драйвер
+- **⚙:** меню паузы, которое по-настоящему держит игру, экспорт / импорт сохранений, язык меню и игры, режим Switch,
+  разрешение 3D, динамическое разрешение, FSR 1, резкость, лимит кадров, тепловой режим, качество графики, безопасный режим (Mali / PowerVR), касание как мышь, левый / правый стик, колонка кнопок, драйвер
   Vulkan, вибрация, счётчик FPS, раскладка и её редактор.
 - **Текстуры для телефонов без BC** (Mali, PowerVR, Xclipse): setup один раз перекодирует BC-текстуры игры в ASTC на ПК
   (`astc/dos2-astc.pack`, каждая не хуже 42 дБ к оригиналу); такие телефоны грузят их сразу, без распаковки BC, а

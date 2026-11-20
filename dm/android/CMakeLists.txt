@@ -119,7 +119,8 @@ if(DM_GAME_DOOM)
   list(REMOVE_ITEM HLE_SRCS ${HOST}/hle_tact.c ${HOST}/hle_granny.c ${HOST}/hle_charname.c ${HOST}/hle_private_aim.c ${HOST}/hle_target.c)
   # libdeflate was only used by hle_tact.c (BLTE zlib blocks).
   set(LIBDEFLATE_SRCS)
-  if(DM_GAME STREQUAL "xc2")
+  if(DM_GAME STREQUAL "xc2" OR DM_GAME STREQUAL "dos2")
+    # [DOS2] NR-BN: hle_dos2_heat.c inflates a save's meta.lsf (zlib) to name the level a save load enters
     # [XC2] nn::util::DecompressZlib (XBC1 containers) answered by libdeflate (NEON adler32), hle_zlib_xc2.c / DM_ZLIB_FAST
     set(LIBDEFLATE_SRCS ${DM}/third_party/libdeflate/lib/deflate_decompress.c ${DM}/third_party/libdeflate/lib/zlib_decompress.c
         ${DM}/third_party/libdeflate/lib/adler32.c ${DM}/third_party/libdeflate/lib/utils.c ${DM}/third_party/libdeflate/lib/arm/cpu_features.c)

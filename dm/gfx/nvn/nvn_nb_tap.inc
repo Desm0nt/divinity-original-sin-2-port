@@ -13,6 +13,7 @@
 #include "nvn_nb_tap.h"
 #include "../nb/nb_slotmask.h"
 #include "../nb/nb_post.h"   // NB-18b-4a: DM_NB_POST program table
+#include "../nb/nb_onchip.h"   // NR-ONCHIP S2F: the Fog target c0 into Sky's header (nb_oc_tail_image)
 #define NBT(x) do { if (__builtin_expect(g_dm_nb != 0, 0)) { x; } } while (0)
 
 enum { NBT_STAGES = 6, NBT_SLOTS = 64, NBT_IMGS = 1024 };
@@ -30,11 +31,17 @@ static struct {
     // NB-07: the program bound per NVN stage (prog_t serial; 0 = none seen yet / no serial) and, once the backend published it, the slots
     // its shader of that stage samples (pknown 0 = unknown: every bound slot is a read, as before NB-07)
     uint64_t prog[NBT_STAGES], ptex[NBT_STAGES], pimg[NBT_STAGES]; uint8_t pknown[NBT_STAGES]; int sm;   // sm: DM_NB_SLOTMASK (1 default)
+    // NR-ONCHIP (DM_NR_ONCHIP > 0, nvn_nb_tap_pass_sizes): the size of every attachment of each IR pass AS BOUND WHEN THE PASS OPENED
+    // (0 = not known). im[] above keeps only the last size seen per storage address, and the engine's RT pool binds one storage at several
+    // sizes in a frame (DeferredSky's Sp at the 3D size is the bloom target at half size later in the same part): at plan time im[] held
+    // the alias's size and every Sky -> Light chain was "sizes differ" (phone 18.11, D_onchip2 / D_onchip3). psz_n = IR nodes filled.
+    uint8_t psz_on; int psz_n; uint16_t pw[NB_MAX_NODES][NB_MAX_ATT], ph[NB_MAX_NODES][NB_MAX_ATT];
 } g_nbt = { .sx = 0, .sy = 0, .sw = UINT32_MAX, .sh = UINT32_MAX, .em_open = -1 };
 static uint8_t *nb_rec_alloc(cmd_t *o, uint32_t op, uint32_t payload);   // hle_nvn.c: a zeroed record straight into the command memory
 // NB-07: the backend's table "program -> sampled slots" (xbg_nb.inc nbsm, dm/gfx/nb/nb_slotmask.h); weak: no backend = no masks
 nb_sm_table *xbg_nb_slotmask_table(void) __attribute__((weak));
 void nvn_nb_tap_slotmask(int on) { g_nbt.sm = on; }
+#include "nvn_nr_direct.inc"   // [DOS2] NR-09R DM_NR_DIRECT: the switch, the tap memo, the binding mirror's hook macros (first part)
 
 static unsigned nbt_aspects(int fmt) {
     if (fmt == 0x31) return NB_ASP_STENCIL;
@@ -59,9 +66,32 @@ int nvn_nb_tap_image(uint64_t image, uint32_t *w, uint32_t *h, int *fmt) {
         if (g_nbt.im[k].image == image) { *w = g_nbt.im[k].w; *h = g_nbt.im[k].h; *fmt = g_nbt.im[k].fmt; return 1; }
     return 0;
 }
+// NR-ONCHIP: fill the per-pass sizes of the IR nodes added since the last call from the RT set bound now (a pass node is always the set
+// bound at its nb_pass_begin / reopen; every tap call that adds one runs nbt_sync right after it, and nbt_set_rt runs this before it
+// changes the set). An attachment that is not in the bound set (cannot happen; defensive) stays 0 = unknown.
+static void nbt_psz(const nb_frame *f) {
+    while (g_nbt.psz_n < f->nnode && g_nbt.psz_n < NB_MAX_NODES) {
+        const int i = g_nbt.psz_n++; const nb_node *n = &f->node[i];
+        memset(g_nbt.pw[i], 0, sizeof g_nbt.pw[i]); memset(g_nbt.ph[i], 0, sizeof g_nbt.ph[i]);
+        if (n->kind != NB_NODE_PASS) continue;
+        for (int a = 0; a < n->natt && a < NB_MAX_ATT; a++)
+            for (int k = 0; k < g_nbt.nrt; k++)
+                if (g_nbt.rt[k].image == n->att[a].image && g_nbt.rt[k].slot == n->att[a].slot) {
+                    g_nbt.pw[i][a] = (uint16_t)(g_nbt.rtw[k] > 0xffffu ? 0 : g_nbt.rtw[k]); g_nbt.ph[i][a] = (uint16_t)(g_nbt.rth[k] > 0xffffu ? 0 : g_nbt.rth[k]);
+                    break;
+                }
+    }
+}
+void nvn_nb_tap_pass_sizes(int on) { g_nbt.psz_on = (uint8_t)(on != 0); }
+int nvn_nb_tap_pass_size(int node, int att, uint32_t *w, uint32_t *h) {
+    if (!g_nbt.psz_on || node < 0 || node >= NB_MAX_NODES || att < 0 || att >= NB_MAX_ATT) return 0;
+    if (node >= g_nbt.psz_n) { const nb_frame *f = dm_nb_frame(); if (f) nbt_psz(f); }   // the open pass: the set bound now is its own
+    if (node >= g_nbt.psz_n || !g_nbt.pw[node][att] || !g_nbt.ph[node][att]) return 0;
+    *w = g_nbt.pw[node][att]; *h = g_nbt.ph[node][att]; return 1;
+}
 void nvn_nb_tap_reset(void) {
     nb_frame *f = dm_nb_frame();
-    g_nbt.cb = NULL; g_nbt.handle = 0; g_nbt.gen++;
+    g_nbt.cb = NULL; g_nbt.handle = 0; g_nbt.gen++; g_nbt.psz_n = 0;   // NR-ONCHIP: the IR starts again at node 0
     g_nbt.frec = NULL; g_nbt.em_open = -1; g_nbt.bytes = 0; g_nbt.lost = 0; memset(g_nbt.prec, 0, sizeof g_nbt.prec);
     if (f && g_nbt.nrt) { f->last_natt = (uint8_t)g_nbt.nrt; memcpy(f->last_att, g_nbt.rt, sizeof g_nbt.rt[0] * (size_t)g_nbt.nrt); }   // still bound
 }
@@ -107,6 +137,7 @@ static void nbw_frame(void);
 static void nbw_pass(int node);
 static void nbw_key(int node, const uint8_t *payload);
 static void nbt_sync(nb_frame *f) {
+    if (g_nbt.psz_on) nbt_psz(f);   // NR-ONCHIP: sizes of the passes just added (no record; off = nothing)
     if (!g_nbt.cb) return;
     const int open = f->open ? f->nnode - 1 : -1;
     if (g_nbt.em_open >= 0 && g_nbt.em_open != open) {
@@ -164,7 +195,9 @@ uint32_t nvn_nb_tap_patch(const nb_frame *f, const nb_plan_out *po, uint32_t par
                 r->load[k] = np->load[k]; r->store[k] = np->store[k];
                 if (np->load[k] == NB_LOAD_CLEAR) r->clear_mask |= (uint16_t)(1u << k);
             }
-            r->flags = np->flags; r->cover_dc = np->cover_dc; r->plan_ok = 1;
+            r->flags = np->flags; r->cover_dc = np->cover_dc; r->oc = np->oc; r->plan_ok = 1;   // NR-ONCHIP: oc
+            // NR-ONCHIP S2F (nb_onchip.h): Sky's header carries the Fog target c0 in its last attachment slot (natt stays 2)
+            if (nb_oc_tail(np->oc) && nb_oc_role(np->oc) == NB_OCR_SKY && r->natt < NB_REC_ATT) r->att[NB_REC_ATT - 1] = nb_oc_tail_image(f, po, i);
         }
         __atomic_store_n(&r->patched, 1, __ATOMIC_RELEASE);
     }
@@ -176,6 +209,7 @@ uint32_t nvn_nb_tap_patch(const nb_frame *f, const nb_plan_out *po, uint32_t par
 static void nbt_set_rt(NVNcommandBuffer *c, int n, const NVNtexture *const *ct, const NVNtextureView *const *cv, const NVNtexture *dt) {
     nb_frame *f = nbt_f(c); if (!f) return;
     (void)cv;
+    if (g_nbt.psz_on) nbt_psz(f);   // NR-ONCHIP: passes added under the old set take its sizes before it changes
     g_nbt.nrt = 0;
     for (int i = 0; i < n && i < 8; i++) {
         const tex_t *o = ct ? (const tex_t *)ct[i] : NULL; uint64_t im = nbt_image(ct ? ct[i] : NULL);
@@ -247,7 +281,7 @@ static void nbt_bind(NVNcommandBuffer *c, int op, int st, int first, int n, cons
     for (int i = 0; i < n; i++) {
         const int s = first + i; if (s < 0 || s >= NBT_SLOTS) continue;
         const uint32_t v = ((uint32_t)h[i] & (WT_IDS - 1)) + 1;
-        if (tab[s] != v) { tab[s] = v; *dirty |= 1ull << s; }
+        if (tab[s] != v) { NRD_SIG(op != OP_BIND_TEX, st, s, tab[s], v); tab[s] = v; *dirty |= 1ull << s; }   // NRD_SIG: [DOS2] NR-09R, the tables' signature
     }
 }
 // NB-07: BindProgram -> the program of each stage in `stages` (NVN stage bits; NULL = no shader there: nothing sampled, as the backend).
@@ -270,14 +304,16 @@ static uint64_t nbt_mask(int st, int w) {
     return w ? g_nbt.pimg[st] : g_nbt.ptex[st];
 }
 // Per draw / dispatch: did a stage with bound slots have an unknown program (counted once per call: '[nb] slotmask' unknown)?
-static void nbt_mask_note(int s0, int s1) {
-    if (!g_nbt.sm) return;
+// Returns 1 = every stage known (noted), 0 = a stage unknown (noted), 2 = slot masks off (nothing noted) - [DOS2] NR-09R reads it.
+static int nbt_mask_note(int s0, int s1) {
+    if (!g_nbt.sm) return 2;
     for (int st = s0; st < s1; st++) for (int w = 0; w < 2; w++) {
         if (nbt_mask(st, w) != NB_SM_ALL) continue;
         const uint32_t *tab = w ? g_nbt.img[st] : g_nbt.tex[st];
-        for (int s = 0; s < NBT_SLOTS; s++) if (tab[s]) { dm_nb_note(NBN_SM_UNKNOWN, 1); return; }
+        for (int s = 0; s < NBT_SLOTS; s++) if (tab[s]) { dm_nb_note(NBN_SM_UNKNOWN, 1); return 0; }
     }
     dm_nb_note(NBN_SM_KNOWN, 1);
+    return 1;
 }
 // Bound textures / images of stages [s0, s1) -> reads of the open pass (only slots rebound since the pass got its reads, unless all).
 // NB-07: only the slots the bound program samples (nbt_mask); the others stay pending in dirty (nb_sm_take) for a later program of the pass.
@@ -322,7 +358,8 @@ static int nbt_post_mask(int st, uint64_t *tex, uint64_t *img) {
     *tex = g_nbt.ptex[st]; *img = g_nbt.pimg[st];
     return *tex != NB_SM_ALL && *img != NB_SM_ALL;
 }
-static void nbt_prog_draw(nb_frame *f, uint64_t handle) {
+// Returns 1 = the draw's fs key is final (published, or no fragment program) and its sampled list was exact - [DOS2] NR-09R reads it.
+static int nbt_prog_draw(nb_frame *f, uint64_t handle) {
     uint64_t im[NB_MAX_SREAD + 1]; int n = 0, exact = 1;
     const nb_post_prog *e = g_nbt.prog[1] ? dm_nb_post_prog(g_nbt.prog[1]) : NULL;
     const uint64_t fs = e ? e->fs : 0;
@@ -343,6 +380,7 @@ static void nbt_prog_draw(nb_frame *f, uint64_t handle) {
     }
     if (handle) { const uint64_t x = nbt_image_of_id((uint32_t)handle & (WT_IDS - 1)); if (x && n < NB_MAX_SREAD) im[n++] = x; }   // DrawTexture
     nb_draw_prog(f, fs, exact, im, n);
+    return exact && (e || !g_nbt.prog[1]);
 }
 static void nbt_draw(NVNcommandBuffer *c, uint64_t handle) {
     nb_frame *f = nbt_f(c); if (!f) return;
@@ -352,11 +390,13 @@ static void nbt_draw(NVNcommandBuffer *c, uint64_t handle) {
     nbt_sync(f);
     if (!f->open) return;
     const int node = f->nnode - 1, all = node != g_nbt.rd_node || g_nbt.rd_gen != g_nbt.gen;
-    nbt_mask_note(0, 5);
+    nrd_tap_t nrd; if (NRD_TAP_PRE(nrd, f, node, all, handle)) return;   // [DOS2] NR-09R DM_NR_DIRECT=1: this pass already holds this draw's reads
+    const int known = nbt_mask_note(0, 5);
     nbt_reads(f, 0, 5, all);
     if (handle) { uint64_t im = nbt_image_of_id((uint32_t)handle & (WT_IDS - 1)); if (im) nb_read(f, -1, im); }   // DrawTexture
-    if (g_dm_nb_post) nbt_prog_draw(f, handle);   // NB-18b-4a
+    int exact = 1; if (g_dm_nb_post) exact = nbt_prog_draw(f, handle);   // NB-18b-4a
     g_nbt.rd_node = node; g_nbt.rd_gen = g_nbt.gen;
+    NRD_TAP_POST(nrd, f, node, known, exact);   // [DOS2] NR-09R: remember the walk (=1) / check that a walk =1 skips changed nothing (=2)
 }
 static void nbt_dispatch(NVNcommandBuffer *c) {
     nb_frame *f = nbt_f(c); if (!f) return;
@@ -511,6 +551,9 @@ static void nbf_draw(uint32_t op) {
 #define NBD_COND(c, m, a) ((void)0)
 #define NBF_REC(o, size) ((void)0)
 #define NBF_DRAW(op) ((void)0)
+#endif
+#ifndef DM_GAME_DOS2
+#include "nvn_nr_direct.inc"   // [DOS2] NR-09R: its hook macros, empty outside DOS2
 #endif
 #include "nvn_nb_state.inc"   // [DOS2] DM_NB_OPS state bits (NB-13a): the state shadow, OP_X_NB_STATE (NBS_* hooks; empty outside DOS2)
 #include "nvn_nb_key.inc"     // [DOS2] DM_NB_RELOC (NB-14): the key frame of every IR pass, OP_X_NB_KEY (empty outside DOS2)

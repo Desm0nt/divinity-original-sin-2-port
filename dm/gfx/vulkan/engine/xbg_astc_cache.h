@@ -10,6 +10,7 @@
 // the blocks of every entry (level 0 first; a level is tight rows of 16-byte blocks, ceil(w / bw) x ceil(h / bh)), then the index:
 // 48-byte entries sorted by (crc, adler, bytes, format, width, height, levels) - the tool's key tuple order.
 #pragma once
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
@@ -82,6 +83,38 @@ static inline unsigned xbg_ac_sanitize(uint8_t *blocks, uint64_t bytes) {
         if (!(a | b)) { memcpy(blocks + o, void_black, 16); ++n; }
     }
     return n;
+}
+
+// [DOS2] NR-18 (TL2's PERF-X15, docs/port-kb/performance.md): an entry's blocks into a mapped staging buffer. The engine's stream
+// arena is HOST_VISIBLE | HOST_COHERENT without HOST_CACHED (memory type 0x7 on Mali, PowerVR, Xclipse and on the Mi 14's Adreno
+// alike), that is write-combined: reading it back is uncached, and xbg_ac_sanitize reading every block of a pread straight into the
+// map made TL2's 33.9 MB of cache uploads take 252 ms (25 ms through a cached buffer). With `bounce` the bytes go through it in
+// `chunk`-byte pieces (a multiple of 16, small enough for L2): read, sanitized there, one sequential memcpy into `dst` (writes only).
+// Without `bounce` (DM_NR_ASTCREAD=0, the old way) the read and the sanitize work in `dst` itself. Both give the same bytes in `dst`:
+// what the reader returned, a short read (error or end of file) zero-filled, then every all-zero 16-byte block replaced by the void
+// extent (so a lost tail reads as transparent black). read_at(p, n, off) is pread of the entry at offset `off` from its start: bytes
+// read, 0 at end of file, < 0 with errno on an error. Pure (no device calls), so engine/tests/astc_read_test.cpp runs this code.
+#define XBG_AC_READ_CHUNK (256u << 10)
+struct XbgAcRead { uint64_t got; unsigned zero_fixed; int err; };   // bytes read (< bytes: short), all-zero blocks fixed, errno of a failed read
+template <class ReadAt>
+static inline XbgAcRead xbg_ac_read_staged(ReadAt read_at, uint64_t bytes, uint8_t *dst, uint8_t *bounce, size_t chunk) {
+    XbgAcRead r{0, 0, 0}; bool stop = false;
+    if (bounce) { chunk &= ~size_t(15); if (!chunk) chunk = 16; } else chunk = size_t(bytes);
+    for (uint64_t o = 0; o < bytes;) {
+        const size_t n = bytes - o < chunk ? size_t(bytes - o) : chunk;
+        uint8_t *const w = bounce ? bounce : dst + o; size_t have = 0;
+        while (!stop && have < n) {
+            const int64_t k = int64_t(read_at(w + have, n - have, o + have));
+            if (k <= 0) { stop = true; r.err = k < 0 ? errno : 0; break; }
+            have += size_t(k);
+        }
+        r.got += have;
+        if (have < n) memset(w + have, 0, n - have);
+        r.zero_fixed += xbg_ac_sanitize(w, n);
+        if (bounce) memcpy(dst + o, bounce, n);
+        o += n;
+    }
+    return r;
 }
 
 // ---------------------------------------------------------------- the partial cache (round 4)

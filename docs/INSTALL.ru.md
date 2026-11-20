@@ -98,7 +98,7 @@ Nintendo Switch на Android-телефоне. В проекте нет файл
    | 5. Проверка патча | 1–10 мин |
    | 6. Извлечение данных игры (~11.4 ГБ) | 1–15 мин |
    | 7. Перевод шейдеров (12 329 штук) | 2–20 мин |
-   | 8. Слияние шейдеров постобработки (`native-post.xgspack`) | 1–2 мин (в первый раз — загрузка инструментов SPIR-V, ~7 МБ) |
+   | 8. Слияние шейдеров постобработки (`native-post.xgspack`, `native-nr.xgspack`, `native-nr33b.xgspack`, `native-nr33c.xgspack`) | 3–5 мин (в первый раз — загрузка инструментов SPIR-V, ~7 МБ) |
    | 9. Пакет сенсорного интерфейса | меньше минуты |
    | 10. Текстуры для телефонов без BC (ASTC) | 5–20 мин |
 
@@ -137,6 +137,7 @@ Nintendo Switch на Android-телефоне. В проекте нет файл
   Внутренняя память/Download/DivinityOriginalSin2Mobile/dm/out/...
   Внутренняя память/Download/DivinityOriginalSin2Mobile/dm/shaders/shaders.xgspack
   Внутренняя память/Download/DivinityOriginalSin2Mobile/dm/shaders/native-post.xgspack
+  Внутренняя память/Download/DivinityOriginalSin2Mobile/dm/shaders/native-nr.xgspack     (и native-nr33b / native-nr33c)
   Внутренняя память/Download/DivinityOriginalSin2Mobile/astc/...       (нужна только без BC: Mali, PowerVR, Xclipse)
   Внутренняя память/Download/DivinityOriginalSin2Mobile/drivers/       (свои драйверы Vulkan, необязательно)
   ```
@@ -193,6 +194,11 @@ console specific data* (и с тикетом).
 
 **«not enough free space»** — освободите место или вынесите рабочую папку на другой диск: `setup.bat --work D:\dos2-work`
 (Windows) или `bash setup.sh --work /mnt/big/dos2-work`.
+
+**Уже ставил старую версию (0.1.x)** — после загрузки новой версии запустите setup ещё раз в той же папке: он пропустит всё,
+что ещё актуально, и сделает только изменившееся (для 0.2.0 — пакет сенсорного интерфейса и три новых пака шейдеров, несколько
+минут). Потом снова скопируйте на телефон `romfs/Data/TouchUI.pak` и всю папку `dm/shaders` (или всю папку
+`DivinityOriginalSin2Mobile`: неизменившиеся файлы можно спокойно перезаписать).
 
 **Ставил старый выпуск с `.ipa`** — она больше не нужна (setup её пропускает). После обновления запустите setup ещё раз:
 он переделает только пакет сенсорного интерфейса (этап 9); скопируйте `romfs/Data/TouchUI.pak` на телефон заново.

@@ -26,6 +26,7 @@
 // destroy_slots(); the four commands called through function pointers (conditional rendering, indirect count) go through nbmt::P*.
 // Every vkCmd* name used by the translation unit must be in the #define list at the end of this file.
 #include "../../nb/nb_mt.h"
+#include <algorithm>
 #include <tuple>
 #include <new>
 #if defined(__linux__)
@@ -33,8 +34,14 @@
 #include <pthread.h>
 #include <unistd.h>
 #endif
+#ifndef NBMT_ENDRP_HOOK
+#define NBMT_ENDRP_HOOK() ((void)0)   // [safe-mode] xbg_game.cpp defines it (DM_GFX_FAKE_GPU_CRASH=<s>:rec)
+#endif
 #ifndef NBMT_REAL
 #define NBMT_REAL(f) ::f
+#endif
+#ifndef NBMT_PRE
+#define NBMT_PRE(c, op) ((void)0)   // [NR-21] xbg_game.cpp defines it (DM_NR_SORT: queued draws are recorded before any other command); the host test keeps it empty
 #endif
 namespace {
 namespace nbmt {
@@ -44,7 +51,7 @@ enum Op : uint16_t { OP_BeginRenderPass = 1, OP_EndRenderPass, OP_BindPipeline, 
     OP_DrawIndexedIndirectCount, OP_Dispatch, OP_DispatchIndirect, OP_ClearAttachments, OP_ClearColorImage, OP_ClearDepthStencilImage,
     OP_CopyBuffer, OP_CopyBufferToImage, OP_CopyImageToBuffer, OP_CopyImage, OP_BlitImage, OP_ResolveImage, OP_FillBuffer, OP_PipelineBarrier,
     OP_BeginQuery, OP_EndQuery, OP_ResetQueryPool, OP_WriteTimestamp, OP_CopyQueryPoolResults, OP_BeginConditionalRendering,
-    OP_EndConditionalRendering, OP_COUNT };
+    OP_EndConditionalRendering, OP_NextSubpass, OP_COUNT };
 nbmtq::Queue q;
 VkCommandBuffer cur = VK_NULL_HANDLE;   // the command buffer being recorded through packets (null: every wrapper calls directly)
 int mode = 0;
@@ -70,9 +77,17 @@ template <class T> inline const T *dup(uint8_t *&tail, const T *s, uint32_t n) {
 inline void pnext_sync() { ++pnext_calls; q.sync(nbmtq::NBMT_SY_PNEXT); }
 template <class T> inline bool chained(const T *a, uint32_t n) { for (uint32_t i = 0; a && i < n; i++) if (a[i].pNext) return true; return false; }
 
+// [DOS2] NR-ZERO Z5: the packet layouts the chunk builder (Build, below) writes too and same_stream() reads - named here, the
+// wrappers alias them (the same members in the same order as the local structs they replace).
+template <class... A> struct PodP { Pkt k; std::tuple<A...> v; };
+struct PBindSets { Pkt k; VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t first, n, nd; const VkDescriptorSet *sets; const uint32_t *dyn; };
+struct PBindVB { Pkt k; uint32_t first, n; const VkBuffer *b; const VkDeviceSize *o; };
+struct PViewport { Pkt k; uint32_t first, n; const VkViewport *v; };
+struct PScissor { Pkt k; uint32_t first, n; const VkRect2D *v; };
 // A command whose arguments are all values: the packet is the argument tuple.
 template <auto F, uint16_t OP, class... A> inline void pod(VkCommandBuffer c, A... a) {
-    struct P { Pkt k; std::tuple<A...> v; }; uint8_t *t;
+    NBMT_PRE(c, OP);
+    using P = PodP<A...>; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP, 0, t)) {
         new (&p->v) std::tuple<A...>(a...);
         p->k.run = [](void *cb, const Pkt *k) { std::apply([cb](const A &...x) { F(VkCommandBuffer(cb), x...); }, reinterpret_cast<const P *>(k)->v); };
@@ -81,6 +96,7 @@ template <auto F, uint16_t OP, class... A> inline void pod(VkCommandBuffer c, A.
 }
 // The same for a command reached through a function pointer (extension entry points resolved at init).
 template <uint16_t OP, class Fn, class... A> inline void podf(Fn f, VkCommandBuffer c, A... a) {
+    NBMT_PRE(c, OP);
     struct P { Pkt k; Fn f; std::tuple<A...> v; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP, 0, t)) {
         p->f = f; new (&p->v) std::tuple<A...>(a...);
@@ -89,8 +105,12 @@ template <uint16_t OP, class Fn, class... A> inline void podf(Fn f, VkCommandBuf
     f(c, a...);
 }
 
-inline void CmdEndRenderPass(VkCommandBuffer c) { pod<NBMT_REAL(vkCmdEndRenderPass), OP_EndRenderPass>(c); }
+// [safe-mode] NBMT_ENDRP_HOOK (xbg_game.cpp: the DM_GFX_FAKE_GPU_CRASH=<s>:rec test) runs where the call is made: in the packet on the worker,
+// or on the caller when the command is direct. Empty in the host tests.
+template <auto F> inline void end_rp_call(VkCommandBuffer c) { NBMT_ENDRP_HOOK(); F(c); }
+inline void CmdEndRenderPass(VkCommandBuffer c) { pod<end_rp_call<NBMT_REAL(vkCmdEndRenderPass)>, OP_EndRenderPass>(c); }
 inline void CmdBindPipeline(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipeline pl) { pod<NBMT_REAL(vkCmdBindPipeline), OP_BindPipeline>(c, bp, pl); }
+inline void CmdNextSubpass(VkCommandBuffer c, VkSubpassContents sc) { pod<NBMT_REAL(vkCmdNextSubpass), OP_NextSubpass>(c, sc); }   // [DOS2] NR-ONCHIP
 inline void CmdBindIndexBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkIndexType t) { pod<NBMT_REAL(vkCmdBindIndexBuffer), OP_BindIndexBuffer>(c, b, o, t); }
 inline void CmdDraw(VkCommandBuffer c, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) { pod<NBMT_REAL(vkCmdDraw), OP_Draw>(c, vc, ic, fv, fi); }
 inline void CmdDrawIndexed(VkCommandBuffer c, uint32_t n, uint32_t ic, uint32_t first, int32_t vo, uint32_t fi) { pod<NBMT_REAL(vkCmdDrawIndexed), OP_DrawIndexed>(c, n, ic, first, vo, fi); }
@@ -112,6 +132,7 @@ inline void PDrawIndexedIndirectCount(PFN_vkCmdDrawIndexedIndirectCountKHR f, Vk
     podf<OP_DrawIndexedIndirectCount>(f, c, b, o, cb, co, n, stride); }
 inline void PEndConditionalRendering(PFN_vkCmdEndConditionalRenderingEXT f, VkCommandBuffer c) { podf<OP_EndConditionalRendering>(f, c); }
 inline void PBeginConditionalRendering(PFN_vkCmdBeginConditionalRenderingEXT f, VkCommandBuffer c, const VkConditionalRenderingBeginInfoEXT *bi) {
+    NBMT_PRE(c, OP_BeginConditionalRendering);
     struct P { Pkt k; PFN_vkCmdBeginConditionalRenderingEXT f; VkConditionalRenderingBeginInfoEXT bi; }; uint8_t *t;
     if (go(c)) { if (bi->pNext) pnext_sync(); else if (P *p = open<P>(OP_BeginConditionalRendering, 0, t)) {
         p->f = f; p->bi = *bi;
@@ -121,6 +142,7 @@ inline void PBeginConditionalRendering(PFN_vkCmdBeginConditionalRenderingEXT f, 
 }
 
 inline void CmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBeginInfo *b, VkSubpassContents sc) {
+    NBMT_PRE(c, OP_BeginRenderPass);
     struct P { Pkt k; VkRenderPassBeginInfo b; VkSubpassContents sc; }; uint8_t *t;
     if (go(c)) { if (b->pNext) pnext_sync(); else if (P *p = open<P>(OP_BeginRenderPass, asz(b->pClearValues, b->clearValueCount), t)) {
         p->b = *b; p->sc = sc; p->b.pClearValues = dup(t, b->pClearValues, b->clearValueCount);
@@ -129,7 +151,8 @@ inline void CmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBeginInfo *b
     NBMT_REAL(vkCmdBeginRenderPass)(c, b, sc);
 }
 inline void CmdBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t first, uint32_t n, const VkDescriptorSet *sets, uint32_t nd, const uint32_t *dyn) {
-    struct P { Pkt k; VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t first, n, nd; const VkDescriptorSet *sets; const uint32_t *dyn; }; uint8_t *t;
+    NBMT_PRE(c, OP_BindDescriptorSets);
+    using P = PBindSets; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_BindDescriptorSets, asz(sets, n) + asz(dyn, nd), t)) {
         p->bp = bp; p->l = l; p->first = first; p->n = n; p->nd = nd; p->sets = dup(t, sets, n); p->dyn = dup(t, dyn, nd);
         p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdBindDescriptorSets)(VkCommandBuffer(cb), p->bp, p->l, p->first, p->n, p->sets, p->nd, p->dyn); };
@@ -137,7 +160,8 @@ inline void CmdBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint bp, VkP
     NBMT_REAL(vkCmdBindDescriptorSets)(c, bp, l, first, n, sets, nd, dyn);
 }
 inline void CmdBindVertexBuffers(VkCommandBuffer c, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o) {
-    struct P { Pkt k; uint32_t first, n; const VkBuffer *b; const VkDeviceSize *o; }; uint8_t *t;
+    NBMT_PRE(c, OP_BindVertexBuffers);
+    using P = PBindVB; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_BindVertexBuffers, asz(b, n) + asz(o, n), t)) {
         p->first = first; p->n = n; p->b = dup(t, b, n); p->o = dup(t, o, n);
         p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdBindVertexBuffers)(VkCommandBuffer(cb), p->first, p->n, p->b, p->o); };
@@ -145,6 +169,7 @@ inline void CmdBindVertexBuffers(VkCommandBuffer c, uint32_t first, uint32_t n, 
     NBMT_REAL(vkCmdBindVertexBuffers)(c, first, n, b, o);
 }
 inline void CmdPushConstants(VkCommandBuffer c, VkPipelineLayout l, VkShaderStageFlags st, uint32_t off, uint32_t size, const void *v) {
+    NBMT_PRE(c, OP_PushConstants);
     struct P { Pkt k; VkPipelineLayout l; VkShaderStageFlags st; uint32_t off, size; const uint8_t *v; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_PushConstants, asz(static_cast<const uint8_t *>(v), size), t)) {
         p->l = l; p->st = st; p->off = off; p->size = size; p->v = dup(t, static_cast<const uint8_t *>(v), size);
@@ -153,7 +178,8 @@ inline void CmdPushConstants(VkCommandBuffer c, VkPipelineLayout l, VkShaderStag
     NBMT_REAL(vkCmdPushConstants)(c, l, st, off, size, v);
 }
 inline void CmdSetViewport(VkCommandBuffer c, uint32_t first, uint32_t n, const VkViewport *v) {
-    struct P { Pkt k; uint32_t first, n; const VkViewport *v; }; uint8_t *t;
+    NBMT_PRE(c, OP_SetViewport);
+    using P = PViewport; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_SetViewport, asz(v, n), t)) {
         p->first = first; p->n = n; p->v = dup(t, v, n);
         p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdSetViewport)(VkCommandBuffer(cb), p->first, p->n, p->v); };
@@ -161,7 +187,8 @@ inline void CmdSetViewport(VkCommandBuffer c, uint32_t first, uint32_t n, const 
     NBMT_REAL(vkCmdSetViewport)(c, first, n, v);
 }
 inline void CmdSetScissor(VkCommandBuffer c, uint32_t first, uint32_t n, const VkRect2D *v) {
-    struct P { Pkt k; uint32_t first, n; const VkRect2D *v; }; uint8_t *t;
+    NBMT_PRE(c, OP_SetScissor);
+    using P = PScissor; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_SetScissor, asz(v, n), t)) {
         p->first = first; p->n = n; p->v = dup(t, v, n);
         p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdSetScissor)(VkCommandBuffer(cb), p->first, p->n, p->v); };
@@ -169,6 +196,7 @@ inline void CmdSetScissor(VkCommandBuffer c, uint32_t first, uint32_t n, const V
     NBMT_REAL(vkCmdSetScissor)(c, first, n, v);
 }
 inline void CmdClearAttachments(VkCommandBuffer c, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r) {
+    NBMT_PRE(c, OP_ClearAttachments);
     struct P { Pkt k; uint32_t na, nr; const VkClearAttachment *a; const VkClearRect *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_ClearAttachments, asz(a, na) + asz(r, nr), t)) {
         p->na = na; p->nr = nr; p->a = dup(t, a, na); p->r = dup(t, r, nr);
@@ -177,6 +205,7 @@ inline void CmdClearAttachments(VkCommandBuffer c, uint32_t na, const VkClearAtt
     NBMT_REAL(vkCmdClearAttachments)(c, na, a, nr, r);
 }
 inline void CmdClearColorImage(VkCommandBuffer c, VkImage im, VkImageLayout lay, const VkClearColorValue *v, uint32_t n, const VkImageSubresourceRange *r) {
+    NBMT_PRE(c, OP_ClearColorImage);
     struct P { Pkt k; VkImage im; VkImageLayout lay; VkClearColorValue v; uint32_t n; const VkImageSubresourceRange *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_ClearColorImage, asz(r, n), t)) {
         p->im = im; p->lay = lay; p->v = *v; p->n = n; p->r = dup(t, r, n);
@@ -185,6 +214,7 @@ inline void CmdClearColorImage(VkCommandBuffer c, VkImage im, VkImageLayout lay,
     NBMT_REAL(vkCmdClearColorImage)(c, im, lay, v, n, r);
 }
 inline void CmdClearDepthStencilImage(VkCommandBuffer c, VkImage im, VkImageLayout lay, const VkClearDepthStencilValue *v, uint32_t n, const VkImageSubresourceRange *r) {
+    NBMT_PRE(c, OP_ClearDepthStencilImage);
     struct P { Pkt k; VkImage im; VkImageLayout lay; VkClearDepthStencilValue v; uint32_t n; const VkImageSubresourceRange *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_ClearDepthStencilImage, asz(r, n), t)) {
         p->im = im; p->lay = lay; p->v = *v; p->n = n; p->r = dup(t, r, n);
@@ -193,6 +223,7 @@ inline void CmdClearDepthStencilImage(VkCommandBuffer c, VkImage im, VkImageLayo
     NBMT_REAL(vkCmdClearDepthStencilImage)(c, im, lay, v, n, r);
 }
 inline void CmdCopyBuffer(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) {
+    NBMT_PRE(c, OP_CopyBuffer);
     struct P { Pkt k; VkBuffer s, d; uint32_t n; const VkBufferCopy *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_CopyBuffer, asz(r, n), t)) {
         p->s = s; p->d = d; p->n = n; p->r = dup(t, r, n);
@@ -201,6 +232,7 @@ inline void CmdCopyBuffer(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n,
     NBMT_REAL(vkCmdCopyBuffer)(c, s, d, n, r);
 }
 inline void CmdCopyBufferToImage(VkCommandBuffer c, VkBuffer s, VkImage d, VkImageLayout dl, uint32_t n, const VkBufferImageCopy *r) {
+    NBMT_PRE(c, OP_CopyBufferToImage);
     struct P { Pkt k; VkBuffer s; VkImage d; VkImageLayout dl; uint32_t n; const VkBufferImageCopy *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_CopyBufferToImage, asz(r, n), t)) {
         p->s = s; p->d = d; p->dl = dl; p->n = n; p->r = dup(t, r, n);
@@ -209,6 +241,7 @@ inline void CmdCopyBufferToImage(VkCommandBuffer c, VkBuffer s, VkImage d, VkIma
     NBMT_REAL(vkCmdCopyBufferToImage)(c, s, d, dl, n, r);
 }
 inline void CmdCopyImageToBuffer(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkBuffer d, uint32_t n, const VkBufferImageCopy *r) {
+    NBMT_PRE(c, OP_CopyImageToBuffer);
     struct P { Pkt k; VkImage s; VkImageLayout sl; VkBuffer d; uint32_t n; const VkBufferImageCopy *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_CopyImageToBuffer, asz(r, n), t)) {
         p->s = s; p->sl = sl; p->d = d; p->n = n; p->r = dup(t, r, n);
@@ -217,6 +250,7 @@ inline void CmdCopyImageToBuffer(VkCommandBuffer c, VkImage s, VkImageLayout sl,
     NBMT_REAL(vkCmdCopyImageToBuffer)(c, s, sl, d, n, r);
 }
 inline void CmdCopyImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
+    NBMT_PRE(c, OP_CopyImage);
     struct P { Pkt k; VkImage s, d; VkImageLayout sl, dl; uint32_t n; const VkImageCopy *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_CopyImage, asz(r, n), t)) {
         p->s = s; p->sl = sl; p->d = d; p->dl = dl; p->n = n; p->r = dup(t, r, n);
@@ -225,6 +259,7 @@ inline void CmdCopyImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage
     NBMT_REAL(vkCmdCopyImage)(c, s, sl, d, dl, n, r);
 }
 inline void CmdBlitImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) {
+    NBMT_PRE(c, OP_BlitImage);
     struct P { Pkt k; VkImage s, d; VkImageLayout sl, dl; uint32_t n; VkFilter f; const VkImageBlit *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_BlitImage, asz(r, n), t)) {
         p->s = s; p->sl = sl; p->d = d; p->dl = dl; p->n = n; p->f = f; p->r = dup(t, r, n);
@@ -233,6 +268,7 @@ inline void CmdBlitImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage
     NBMT_REAL(vkCmdBlitImage)(c, s, sl, d, dl, n, r, f);
 }
 inline void CmdResolveImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve *r) {
+    NBMT_PRE(c, OP_ResolveImage);
     struct P { Pkt k; VkImage s, d; VkImageLayout sl, dl; uint32_t n; const VkImageResolve *r; }; uint8_t *t;
     if (go(c)) if (P *p = open<P>(OP_ResolveImage, asz(r, n), t)) {
         p->s = s; p->sl = sl; p->d = d; p->dl = dl; p->n = n; p->r = dup(t, r, n);
@@ -242,6 +278,7 @@ inline void CmdResolveImage(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkIm
 }
 inline void CmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags src, VkPipelineStageFlags dst, VkDependencyFlags df, uint32_t nm, const VkMemoryBarrier *m,
                                uint32_t nb, const VkBufferMemoryBarrier *b, uint32_t ni, const VkImageMemoryBarrier *i) {
+    NBMT_PRE(c, OP_PipelineBarrier);
     struct P { Pkt k; VkPipelineStageFlags src, dst; VkDependencyFlags df; uint32_t nm, nb, ni; const VkMemoryBarrier *m; const VkBufferMemoryBarrier *b; const VkImageMemoryBarrier *i; }; uint8_t *t;
     if (go(c)) { if (chained(m, nm) || chained(b, nb) || chained(i, ni)) pnext_sync(); else if (P *p = open<P>(OP_PipelineBarrier, asz(m, nm) + asz(b, nb) + asz(i, ni), t)) {
         p->src = src; p->dst = dst; p->df = df; p->nm = nm; p->nb = nb; p->ni = ni; p->m = dup(t, m, nm); p->b = dup(t, b, nb); p->i = dup(t, i, ni);
@@ -250,6 +287,93 @@ inline void CmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags src, VkPi
     NBMT_REAL(vkCmdPipelineBarrier)(c, src, dst, df, nm, m, nb, b, ni, i);
 }
 
+// ---------------- [DOS2] NR-ZERO Z5: a chunk built apart from the queue ----------------
+// The eight commands of a recorded engine draw (nrdraw::lane_tail) as packets written into a chunk of its own instead of the queue's
+// current one: the same layouts, the same arguments, array copies inside the chunk (a packet points into its own chunk: a chunk is
+// handed over whole - nbmtq::Queue::splice - never copied). false = no room (the chunk is full): the builder ends its run there.
+struct Build { nbmtq::Chunk *c = nullptr; };
+template <class P> inline P *bopen(Build &b, uint16_t op, size_t extra, uint8_t *&tail) {
+    const size_t bytes = nbmtq::al8(sizeof(P)) + extra;
+    if (!b.c || b.c->cap - b.c->used < bytes) return nullptr;
+    Pkt *k = reinterpret_cast<Pkt *>(b.c->data() + b.c->used);
+    k->size = uint32_t(bytes); k->pad = 0; k->op = op; tail = reinterpret_cast<uint8_t *>(k) + nbmtq::al8(sizeof(P));
+    return reinterpret_cast<P *>(k);
+}
+inline void bclose(Build &b, Pkt *k) { b.c->used += k->size; ++b.c->cmds; }
+template <auto F, uint16_t OP, class... A> inline bool bpod(Build &b, A... a) {
+    using P = PodP<A...>; uint8_t *t; P *p = bopen<P>(b, OP, 0, t); if (!p) return false;
+    new (&p->v) std::tuple<A...>(a...);
+    p->k.run = [](void *cb, const Pkt *k) { std::apply([cb](const A &...x) { F(VkCommandBuffer(cb), x...); }, reinterpret_cast<const P *>(k)->v); };
+    bclose(b, &p->k); return true;
+}
+inline bool BBindPipeline(Build &b, VkPipelineBindPoint bp, VkPipeline pl) { return bpod<NBMT_REAL(vkCmdBindPipeline), OP_BindPipeline>(b, bp, pl); }
+inline bool BBindIndexBuffer(Build &b, VkBuffer buf, VkDeviceSize o, VkIndexType t) { return bpod<NBMT_REAL(vkCmdBindIndexBuffer), OP_BindIndexBuffer>(b, buf, o, t); }
+inline bool BDraw(Build &b, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) { return bpod<NBMT_REAL(vkCmdDraw), OP_Draw>(b, vc, ic, fv, fi); }
+inline bool BDrawIndexed(Build &b, uint32_t n, uint32_t ic, uint32_t first, int32_t vo, uint32_t fi) { return bpod<NBMT_REAL(vkCmdDrawIndexed), OP_DrawIndexed>(b, n, ic, first, vo, fi); }
+inline bool BBindDescriptorSets(Build &b, VkPipelineBindPoint bp, VkPipelineLayout l, uint32_t first, uint32_t n, const VkDescriptorSet *sets, uint32_t nd, const uint32_t *dyn) {
+    using P = PBindSets; uint8_t *t; P *p = bopen<P>(b, OP_BindDescriptorSets, asz(sets, n) + asz(dyn, nd), t); if (!p) return false;
+    p->bp = bp; p->l = l; p->first = first; p->n = n; p->nd = nd; p->sets = dup(t, sets, n); p->dyn = dup(t, dyn, nd);
+    p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdBindDescriptorSets)(VkCommandBuffer(cb), p->bp, p->l, p->first, p->n, p->sets, p->nd, p->dyn); };
+    bclose(b, &p->k); return true;
+}
+inline bool BBindVertexBuffers(Build &b, uint32_t first, uint32_t n, const VkBuffer *buf, const VkDeviceSize *o) {
+    using P = PBindVB; uint8_t *t; P *p = bopen<P>(b, OP_BindVertexBuffers, asz(buf, n) + asz(o, n), t); if (!p) return false;
+    p->first = first; p->n = n; p->b = dup(t, buf, n); p->o = dup(t, o, n);
+    p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdBindVertexBuffers)(VkCommandBuffer(cb), p->first, p->n, p->b, p->o); };
+    bclose(b, &p->k); return true;
+}
+inline bool BSetViewport(Build &b, uint32_t first, uint32_t n, const VkViewport *v) {
+    using P = PViewport; uint8_t *t; P *p = bopen<P>(b, OP_SetViewport, asz(v, n), t); if (!p) return false;
+    p->first = first; p->n = n; p->v = dup(t, v, n);
+    p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdSetViewport)(VkCommandBuffer(cb), p->first, p->n, p->v); };
+    bclose(b, &p->k); return true;
+}
+inline bool BSetScissor(Build &b, uint32_t first, uint32_t n, const VkRect2D *v) {
+    using P = PScissor; uint8_t *t; P *p = bopen<P>(b, OP_SetScissor, asz(v, n), t); if (!p) return false;
+    p->first = first; p->n = n; p->v = dup(t, v, n);
+    p->k.run = [](void *cb, const Pkt *k) { const P *p = reinterpret_cast<const P *>(k); NBMT_REAL(vkCmdSetScissor)(VkCommandBuffer(cb), p->first, p->n, p->v); };
+    bclose(b, &p->k); return true;
+}
+// Two packet streams of those eight commands make the same calls: the same operations in the same order with the same arguments and the
+// same array contents. (Raw bytes cannot be compared: a packet holds pointers into its own chunk, the address of its thunk, and padding.)
+// false: *at = index of the first packet that differs (or that is not one of the eight); a stream that ends early differs at its end.
+inline bool same_stream(const uint8_t *a, uint32_t na, const uint8_t *b, uint32_t nb, uint32_t *at) {
+    uint32_t ia = 0, ib = 0, n = 0;
+    auto arr = [](const void *x, const void *y, size_t bytes) { return (!x && !y) || (x && y && !memcmp(x, y, bytes)); };
+    for (; ia < na && ib < nb; ++n) {
+        const Pkt *x = reinterpret_cast<const Pkt *>(a + ia), *y = reinterpret_cast<const Pkt *>(b + ib); bool ok = x->op == y->op && x->size >= sizeof(Pkt) && y->size >= sizeof(Pkt);
+        if (ok) switch (x->op) {
+        case OP_BindPipeline: { using P = PodP<VkPipelineBindPoint, VkPipeline>; ok = reinterpret_cast<const P *>(x)->v == reinterpret_cast<const P *>(y)->v; break; }
+        case OP_BindIndexBuffer: { using P = PodP<VkBuffer, VkDeviceSize, VkIndexType>; ok = reinterpret_cast<const P *>(x)->v == reinterpret_cast<const P *>(y)->v; break; }
+        case OP_Draw: { using P = PodP<uint32_t, uint32_t, uint32_t, uint32_t>; ok = reinterpret_cast<const P *>(x)->v == reinterpret_cast<const P *>(y)->v; break; }
+        case OP_DrawIndexed: { using P = PodP<uint32_t, uint32_t, uint32_t, int32_t, uint32_t>; ok = reinterpret_cast<const P *>(x)->v == reinterpret_cast<const P *>(y)->v; break; }
+        case OP_BindDescriptorSets: { const PBindSets *p = reinterpret_cast<const PBindSets *>(x), *r = reinterpret_cast<const PBindSets *>(y);
+            ok = p->bp == r->bp && p->l == r->l && p->first == r->first && p->n == r->n && p->nd == r->nd && arr(p->sets, r->sets, size_t(p->n) * sizeof(VkDescriptorSet)) && arr(p->dyn, r->dyn, size_t(p->nd) * 4); break; }
+        case OP_BindVertexBuffers: { const PBindVB *p = reinterpret_cast<const PBindVB *>(x), *r = reinterpret_cast<const PBindVB *>(y);
+            ok = p->first == r->first && p->n == r->n && arr(p->b, r->b, size_t(p->n) * sizeof(VkBuffer)) && arr(p->o, r->o, size_t(p->n) * sizeof(VkDeviceSize)); break; }
+        case OP_SetViewport: { const PViewport *p = reinterpret_cast<const PViewport *>(x), *r = reinterpret_cast<const PViewport *>(y); ok = p->first == r->first && p->n == r->n && arr(p->v, r->v, size_t(p->n) * sizeof(VkViewport)); break; }
+        case OP_SetScissor: { const PScissor *p = reinterpret_cast<const PScissor *>(x), *r = reinterpret_cast<const PScissor *>(y); ok = p->first == r->first && p->n == r->n && arr(p->v, r->v, size_t(p->n) * sizeof(VkRect2D)); break; }
+        default: ok = false; }
+        if (!ok) { if (at) *at = n; return false; }
+        ia += x->size; ib += y->size;
+    }
+    if (ia != na || ib != nb) { if (at) *at = n; return false; }
+    return true;
+}
+// The sink of nrz5_emit (dm/gfx/nr/nr_z5.h: handles as words, viewport / scissor as bytes) that writes into a Build.
+struct Z5Sink { Build &b;
+    template <class H> static H h(uint64_t x) { return H(uintptr_t(x)); }
+    bool pipeline(uint64_t p) { return BBindPipeline(b, VK_PIPELINE_BIND_POINT_GRAPHICS, h<VkPipeline>(p)); }
+    bool sets(uint64_t l, uint64_t s, uint32_t n, const uint32_t *off) { const VkDescriptorSet ds = h<VkDescriptorSet>(s); return BBindDescriptorSets(b, VK_PIPELINE_BIND_POINT_GRAPHICS, h<VkPipelineLayout>(l), 0, 1, &ds, n, off); }
+    bool viewport(const uint8_t *vp) { VkViewport v; memcpy(&v, vp, sizeof v); return BSetViewport(b, 0, 1, &v); }
+    bool scissor(const uint8_t *sc) { VkRect2D v; memcpy(&v, sc, sizeof v); return BSetScissor(b, 0, 1, &v); }
+    bool vertex(uint32_t first, uint32_t n, const uint64_t *buf, const uint64_t *off) { VkBuffer bb[16]; VkDeviceSize oo[16]; if (n > 16) return false;
+        for (uint32_t i = 0; i < n; i++) { bb[i] = h<VkBuffer>(buf[i]); oo[i] = off[i]; } return BBindVertexBuffers(b, first, n, bb, oo); }
+    bool index(uint64_t buf, uint64_t off, uint32_t type) { return BBindIndexBuffer(b, h<VkBuffer>(buf), off, VkIndexType(type)); }
+    bool draw_indexed(uint32_t n, uint32_t ic, uint32_t first, int32_t vo, uint32_t fi) { return BDrawIndexed(b, n, ic, first, vo, fi); }
+    bool draw(uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) { return BDraw(b, vc, ic, fv, fi); }
+};
+static_assert(sizeof(VkViewport) == 24 && sizeof(VkRect2D) == 16, "Z5Sink: the bytes nr_z5.h carries");
 // ---------------- engine side: switches, the submission bracket, the report ----------------
 void worker_start() {
 #if defined(__linux__)
@@ -270,6 +394,7 @@ void init() {
     q.max_queued = uint32_t(num("DM_NB_MT_QUEUE", 64, 2, 1024));
     { const char *e = getenv("DM_NB_MT_CPUS"); cpus = e && *e ? strtoul(e, nullptr, 16) : 0; }
     q.on_worker_start = worker_start;
+    { const char *e = getenv("DM_NR_CPU"); q.prof_on = mode && e && atoi(e) > 0; }   // [DOS2] NR-CPU: the replay's time by vkCmd*
     if (mode) xbg_logf("[nb] DM_NB_MT=%d: vkCmd* of the recording slot go through packets, %s (NB-20b; hand-over every %u packets, chunk %u KB, queue %u chunks, worker cpus %#lx)",
         mode, mode == 1 ? "replayed by the translate thread at every hand-over" : mode == 2 ? "recorded by the worker dm-nbmt and checked" : "recorded by the worker dm-nbmt",
         q.flush_cmds, q.chunk_bytes >> 10, q.max_queued, cpus);
@@ -295,6 +420,23 @@ void report(uint64_t now) {
         (unsigned long long)w.checked, (unsigned long long)(w.bad[0] + w.bad[1] + w.bad[2] + w.bad[3]), (unsigned long long)w.bad[nbmtq::NBMT_BAD_HASH_PRE],
         (unsigned long long)w.bad[nbmtq::NBMT_BAD_HASH_POST], (unsigned long long)w.bad[nbmtq::NBMT_BAD_ORDER], (unsigned long long)w.bad[nbmtq::NBMT_BAD_WALK],
         w.bad_seq ? " - FIRST BAD CHUNK SEEN, do not trust DM_NB_MT=3" : "");
+    if (q.prof_on) {   // [DOS2] NR-CPU DM_NR_CPU=1: "[nr] cpu mt" - calls a submission x ns a call (1 in 16 timed) = ms a submission, by vkCmd*
+        static const char *const names[OP_COUNT] = {"?", "BeginRenderPass", "EndRenderPass", "BindPipeline", "BindDescriptorSets", "BindVertexBuffers", "BindIndexBuffer",
+            "PushConstants", "SetViewport", "SetScissor", "Draw", "DrawIndexed", "DrawIndirect", "DrawIndexedIndirect", "DrawIndirectCount", "DrawIndexedIndirectCount",
+            "Dispatch", "DispatchIndirect", "ClearAttachments", "ClearColorImage", "ClearDepthStencilImage", "CopyBuffer", "CopyBufferToImage", "CopyImageToBuffer",
+            "CopyImage", "BlitImage", "ResolveImage", "FillBuffer", "PipelineBarrier", "BeginQuery", "EndQuery", "ResetQueryPool", "WriteTimestamp",
+            "CopyQueryPoolResults", "BeginConditionalRendering", "EndConditionalRendering"};
+        struct Row { unsigned op; double calls, ns, ms; } r[OP_COUNT]; unsigned nr = 0; double tot = 0, totc = 0;
+        for (unsigned op = 0; op < unsigned(OP_COUNT); op++) {
+            const uint64_t c = q.prof.calls[op].exchange(0, std::memory_order_relaxed), t = q.prof.timed[op].exchange(0, std::memory_order_relaxed), ns = q.prof.ns[op].exchange(0, std::memory_order_relaxed);
+            if (!c) continue;
+            const double per = t ? double(ns) / double(t) : 0.0; r[nr++] = {op, double(c) / subs, per, double(c) * per * 1e-6 / subs}; tot += double(c) * per * 1e-6 / subs; totc += double(c) / subs;
+        }
+        std::sort(r, r + nr, [](const Row &a, const Row &b) { return a.ms > b.ms; });
+        char l[1400]; int at = snprintf(l, sizeof l, "[nr] cpu mt (DM_NR_CPU=1, NR-CPU; 1 in 16 packets timed): replay %.2f ms in %.0f vkCmd* a submission (by the timed sample);", tot, totc);
+        for (unsigned i = 0; i < nr && at < int(sizeof l) - 90; i++) at += snprintf(l + at, sizeof l - at, " %s %.1f x %.0f ns = %.2f ms;", names[r[i].op], r[i].calls, r[i].ns, r[i].ms);
+        xbg_logf("%s", l);
+    }
 }
 // recording_slot(): the slot's command buffer has just begun. own_pool: the slot has a command pool of its own.
 void begin(VkCommandBuffer cmd, bool own_pool, bool ab_is_off) {
@@ -307,6 +449,7 @@ void begin(VkCommandBuffer cmd, bool own_pool, bool ab_is_off) {
 }
 // submit_slots(): before vkEndCommandBuffer. Everything is in the command buffer when this returns.
 void end(VkCommandBuffer cmd) {
+    NBMT_PRE(cmd, OP_COUNT + 1);   // [NR-21] the submission ends: queued draws first (nrsort W_SUBMIT)
     if (!mode) return;
     if (cur && cur == cmd) { q.end(); cur = VK_NULL_HANDLE; }
     const uint64_t now = nbmtq::now_ns();
@@ -314,7 +457,7 @@ void end(VkCommandBuffer cmd) {
     else if (now - report_ns >= 10000000000ull) { report(now); report_ns = now; }
 }
 // A caller about to use the command buffer in a way the wrappers do not see: drain first (packets go on afterwards).
-inline void sync(VkCommandBuffer cmd) { if (cur && cur == cmd) q.sync(nbmtq::NBMT_SY_CALLER); }
+inline void sync(VkCommandBuffer cmd) { NBMT_PRE(cmd, OP_COUNT + 2); if (cur && cur == cmd) q.sync(nbmtq::NBMT_SY_CALLER); }   // [NR-21] nrsort W_SYNC
 void stop() { if (!mode) return; q.stop(); cur = VK_NULL_HANDLE; q.trim(); }
 } // namespace nbmt
 } // namespace
@@ -322,6 +465,7 @@ void stop() { if (!mode) return; q.stop(); cur = VK_NULL_HANDLE; q.trim(); }
 // Every vkCmd* the translation unit uses, from here on: the wrapper (direct call unless the command buffer is nbmt::cur).
 #define vkCmdBeginRenderPass nbmt::CmdBeginRenderPass
 #define vkCmdEndRenderPass nbmt::CmdEndRenderPass
+#define vkCmdNextSubpass nbmt::CmdNextSubpass
 #define vkCmdBindPipeline nbmt::CmdBindPipeline
 #define vkCmdBindDescriptorSets nbmt::CmdBindDescriptorSets
 #define vkCmdBindVertexBuffers nbmt::CmdBindVertexBuffers

@@ -86,7 +86,7 @@ interleaved-потока; в тенях это ≈1.46 мс из 3.1 (см. §6,
 - Фиксированная часть ≈1.47 мкс на любой draw (≈3.3 мс/кадр на 2264 draw) — отдельная тема (§6).
 
 ## 5. Что сделано
-### 5.1 `DM_GFX_SAMPLES_TS` (boot env, по умолчанию 1 = как было) — `xbg_game.cpp` namespace `samplets`
+### 5.1 `DM_GFX_SAMPLES_TS` (boot env, по умолчанию 1 = как было; с NR-14 в DOS2 умолчание 0 без потребителя / 4 с ним — `nr/NR-14.md`) — `xbg_game.cpp` namespace `samplets`
 Меняется только путь `DM_GFX_REPORT_INPASS` для samples-passed (`OP_REPORT_COUNTER`); timestamp-отчёты игры и путь вне прохода — без изменений.
 - **1** — BOTTOM_OF_PIPE на каждый отчёт (как раньше).
 - **2** — TOP_OF_PIPE на каждый отчёт (Turnip пишет always-on счётчик без WFI; так же как ETR g1 mode 2). При ретайре слота такой штамп

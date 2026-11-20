@@ -83,15 +83,71 @@ typedef struct thr {
     uint64_t nspin, srun_svc, srun_t0, spin_ret;   // spin-wait passes and the current spin wait (dm_spin_wait)
     uint64_t prun_svc, prun_t0, prun_ns, prun_ret;   // current run of idle timed polls (poll_sleep_ns)
     uint64_t ss_n[5], ss_host, ss_t0, ss_last, ss_chain[4];   // DM_SLEEPSTAT: SleepThread calls by length, host time in them, the last one
+    int tid;                   // [cpu-place] host thread id (Android; 0 elsewhere): hle_cpu_place.c places the guest threads by it
+    // [NR-24] DM_NR_GATE_ARB (hle_thread_arb.inc): the bucket chain of an arbiter wait, the bucket it is linked in (NULL = none / moving
+    // between buckets), "about to sleep on the futex woke" (the waker skips the futex wake while it is 0)
+    struct thr *bnext; struct arb_b *_Atomic wb; int fsleep;
 } thr_t;
 static thr_t *g_all;
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
+// [NR-16] DM_NR_CPU=1 (docs/dos2/nr/NR-16.md): the one global lock G of every arbitration / wait SVC, counted - takes, takes that found
+// it held and the time they waited for it, the time it was held (a condition wait on G ends one hold and its return starts the next).
+// Only &G is counted; every other mutex here goes straight to pthread. Off (default): one address compare and a flag load, then the
+// plain pthread call. The counters are written holding G (no atomics); dm_gstat_read() hands out the running totals in ns.
+static int g_gs_on = -1;
+static uint64_t g_gs_take, g_gs_cont, g_gs_wait, g_gs_wait_max, g_gs_hold;   // ticks; written holding G
+static __thread uint64_t t_gs_t0;                                             // this thread's current hold started (0 = none)
+static inline uint64_t gs_ticks(void) {
+#if defined(__aarch64__)
+    uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v;
+#else
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+static inline int gs_on(void) { if (__builtin_expect(g_gs_on < 0, 0)) { const char *e = getenv("DM_NR_CPU"); g_gs_on = e && atoi(e) > 0; } return g_gs_on; }
+static int gs_lock(pthread_mutex_t *m) {
+    if (m != &G || !gs_on()) return pthread_mutex_lock(m);
+    int r = 0;
+    if (pthread_mutex_trylock(m)) { uint64_t a = gs_ticks(); r = pthread_mutex_lock(m); uint64_t w = gs_ticks() - a; g_gs_cont++; g_gs_wait += w; if (w > g_gs_wait_max) g_gs_wait_max = w; }
+    g_gs_take++; t_gs_t0 = gs_ticks();
+    return r;
+}
+static int gs_unlock(pthread_mutex_t *m) {
+    if (m == &G && gs_on() && t_gs_t0) { g_gs_hold += gs_ticks() - t_gs_t0; t_gs_t0 = 0; }
+    return pthread_mutex_unlock(m);
+}
+static int gs_cwait(pthread_cond_t *c, pthread_mutex_t *m) {
+    if (m != &G || !gs_on()) return pthread_cond_wait(c, m);
+    if (t_gs_t0) g_gs_hold += gs_ticks() - t_gs_t0;
+    int r = pthread_cond_wait(c, m); g_gs_take++; t_gs_t0 = gs_ticks(); return r;
+}
+static int gs_ctwait(pthread_cond_t *c, pthread_mutex_t *m, const struct timespec *dl) {
+    if (m != &G || !gs_on()) return pthread_cond_timedwait(c, m, dl);
+    if (t_gs_t0) g_gs_hold += gs_ticks() - t_gs_t0;
+    int r = pthread_cond_timedwait(c, m, dl); g_gs_take++; t_gs_t0 = gs_ticks(); return r;
+}
+// Running totals: takes, contended takes, wait ns, longest wait ns, held ns (read without G: monotonic counters, the reader takes deltas)
+void dm_gstat_read(uint64_t out[5]) {
+    double ns = 1.0;
+#if defined(__aarch64__)
+    { uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); ns = f ? 1e9 / (double)f : 1.0; }
+#endif
+    out[0] = __atomic_load_n(&g_gs_take, __ATOMIC_RELAXED); out[1] = __atomic_load_n(&g_gs_cont, __ATOMIC_RELAXED);
+    out[2] = (uint64_t)((double)__atomic_load_n(&g_gs_wait, __ATOMIC_RELAXED) * ns); out[3] = (uint64_t)((double)__atomic_exchange_n(&g_gs_wait_max, 0, __ATOMIC_RELAXED) * ns);
+    out[4] = (uint64_t)((double)__atomic_load_n(&g_gs_hold, __ATOMIC_RELAXED) * ns);
+}
+#define pthread_mutex_lock(m) gs_lock(m)
+#define pthread_mutex_unlock(m) gs_unlock(m)
+#define pthread_cond_wait(c, m) gs_cwait(c, m)
+#define pthread_cond_timedwait(c, m, d) gs_ctwait(c, m, d)
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
 static uint64_t g_next_id = 0x51;
 static thr_t *g_wait;          // 全部在等的线程（锁 / 条件 / 地址 / 同步） | All waiting threads (lock / condition / address / synchronization)
+static int g_arb_mode, g_yw_mode;   // [NR-24] DM_NR_GATE_ARB / DM_NR_GATE_YIELD, set once by arb_init (hle_thread_arb.inc)
+static void yw_kick(void);
 
 static uint32_t h_new(int type, void *obj) {     // 调用方持 G | Caller holds G
     for (int i = 1; i < MAX_H; i++) if (!g_h[i].type) { g_h[i].type = type; g_h[i].obj = obj; return 0x1000 + i; }
@@ -135,7 +191,7 @@ void dm_thread_native_wait(int entering) {
     thr_t *t = pthread_getspecific(g_keythr);
     if (!t) return;
     pthread_mutex_lock(&G);
-    if (entering) { t->native_wait++; hand_leave(t); }
+    if (entering) { t->native_wait++; hand_leave(t); if (g_yw_mode == 1) yw_kick(); }   // [NR-24] a guest thread blocking: progress for the yield waiters
     else { if (!t->native_wait) die("unbalanced native HLE wait"); t->native_wait--; }
     pthread_mutex_unlock(&G);
 }
@@ -306,6 +362,9 @@ static void lock_acquire_for(thr_t *t, uint64_t addr, uint32_t tag) {
     t->wseq = ++g_wseq;                                  // 内核把它新插进锁持有者的等待队列：同优先级排在已有锁等待者之后 | The kernel inserts it anew into the lock owner's wait queue: at equal priority it goes after the existing lock waiters
 }
 
+// [NR-24] DM_NR_GATE_ARB / DM_NR_GATE_YIELD: per-address arbiter buckets instead of G for 0x1A-0x1D / 0x34 / 0x35, and the bounded yield wait
+#include "hle_thread_arb.inc"
+
 // ---------- 线程 ----------
 // ---------- Threads ----------
 extern void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp);   // entry.S
@@ -332,6 +391,9 @@ static void *thread_main(void *p) {
     t->mport = pthread_mach_thread_np(pthread_self());
     crash_thread_init();
     guest_thread_init();
+#ifdef __ANDROID__
+    pthread_mutex_lock(&G); t->tid = (int)gettid(); pthread_mutex_unlock(&G);   // [cpu-place]
+#endif
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
 #if defined(__aarch64__)
     // [DOOM] issues #12/#20: remember where this pthread's own 1 MiB stack stands before leaving it for the guest stack. Nothing
@@ -388,6 +450,7 @@ void dm_thread_returned(void) { die("客体线程入口函数返回（Horizon �
 // Register the main thread and return its handle (passed to nnosInitialize as the main thread handle)
 uint32_t svc_thread_main_init(void) {
     pthread_key_create(&g_keythr, NULL);
+    arb_init();   // [NR-24] DM_NR_GATE_ARB / DM_NR_GATE_YIELD are read once, before any guest thread waits
     guest_timer_slack();
     thr_t *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cv, NULL);
@@ -396,6 +459,9 @@ uint32_t svc_thread_main_init(void) {
     pthread_setspecific(g_keythr, t);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
+#ifdef __ANDROID__
+    pthread_mutex_lock(&G); t->tid = (int)gettid(); pthread_mutex_unlock(&G);   // [cpu-place]
+#endif
     return t->handle;
 }
 
@@ -468,6 +534,32 @@ int thr_limit_used(void) {
     int n = 0;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) n += !t->exited && !t->host_owned;
+    pthread_mutex_unlock(&G);
+    return n;
+}
+// [cpu-place] Live guest threads for the thread placement (hle_cpu_place.c): host tid, kind (1 = the main thread registered by
+// svc_thread_main_init), the guest's own name (SDK ThreadType, "" when it has none); returns the count. Android only (tid 0 elsewhere).
+int thr_guest_threads(int32_t *tid, uint8_t *kind, char (*name)[32], int max) {
+    int n = 0; char nb[64];
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t && n < max; t = t->all) {
+        if (!t->started || t->exited || !t->tid) continue;
+        tid[n] = t->tid; kind[n] = !t->entry && !t->arg;   // the main thread has no guest entry / argument (0x1001)
+        const char *nm = t->arg ? thr_name(t, nb, sizeof nb) : ""; snprintf(name[n], 32, "%s", strcmp(nm, "?") ? nm : ""); n++;
+    }
+    pthread_mutex_unlock(&G);
+    return n;
+}
+// [NR-16] DM_NR_CPU: every live guest thread with its host tid, handle, priority, ideal core and mask, guest entry and the guest's own
+// name, for the [cpuprof] roles / threads lines (hle_cpuprof.c). Returns the count.
+int dm_thr_census(int32_t *tid, uint32_t *handle, int32_t *prio, int32_t *core, uint64_t *mask, uint64_t *entry, char (*name)[32], int max) {
+    int n = 0; char nb[64];
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t && n < max; t = t->all) {
+        if (!t->started || t->exited) continue;
+        tid[n] = t->tid; handle[n] = t->handle; prio[n] = t->prio; core[n] = t->core; mask[n] = t->mask; entry[n] = t->entry;
+        const char *nm = t->arg ? thr_name(t, nb, sizeof nb) : (!t->entry ? "main" : ""); snprintf(name[n], 32, "%s", strcmp(nm, "?") ? nm : ""); n++;
+    }
     pthread_mutex_unlock(&G);
     return n;
 }
@@ -731,7 +823,7 @@ static void thr_yield(thr_t *me, const uint64_t *regs) {
     // with the worker poll back-off: 20 us of guest work since the last yield also ends the run (a job done without any SVC)
     int worked = me->handle != 0x1001 && poll_cap_ns() && y0 - me->prun_ret > 20000;
     me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved || worked) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
-    if (!moved) yield_for(me, y0 - me->yrun_t0);
+    if (!moved && !(g_yw_mode > 0 && yw_wait(me, y0 - me->yrun_t0))) yield_for(me, y0 - me->yrun_t0);   // [NR-24] DM_NR_GATE_YIELD: a bounded wait instead
     me->prun_ret = now_ns();
     if (me->handle == 0x1001) { g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
 }
@@ -821,6 +913,8 @@ int svc_thread(int num, uint64_t *regs) {
 static int svc_thread_impl(int num, uint64_t *regs) {
     { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
     if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
+    if (__builtin_expect(g_yw_mode == 1, 0)) yw_progress(num, regs);   // [NR-24] DM_NR_GATE_YIELD=1: a kernel event wakes the yield waiters
+    if (__builtin_expect(g_arb_mode > 0, 0) && arb_svc(num, regs)) return 1;   // [NR-24] DM_NR_GATE_ARB: the arbitration SVCs on buckets
     switch (num) {
     case 0x08: {  // CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核) | CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
         thr_t *t = calloc(1, sizeof *t);

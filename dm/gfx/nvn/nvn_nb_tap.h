@@ -9,6 +9,11 @@ void dm_nb_submit(void);               // front end: the recording of the IR's c
 void dm_nb_note(int what, unsigned n); // front end: counters, NBN_*
 void nvn_nb_tap_reset(void);           // tap: the front end reset the IR (after a submission was planned)
 int  nvn_nb_tap_image(uint64_t image, uint32_t *w, uint32_t *h, int *fmt);   // tap: size / NVN format of an RT image it saw (dump comments)
+// NR-ONCHIP (dm/gfx/nb/nb_onchip.h): the size of attachment `att` (index in nb_node.att) of IR node `node` as bound when that pass opened.
+// nvn_nb_tap_image is the LAST size seen for a storage address (an aliased RT of another size later in the frame overwrites it), so a size
+// rule must use this. Kept only while on (the front end turns it on with DM_NR_ONCHIP > 0); 0 = off / unknown.
+void nvn_nb_tap_pass_sizes(int on);
+int  nvn_nb_tap_pass_size(int node, int att, uint32_t *w, uint32_t *h);
 // tap (NB-05): back-patch the OP_X_NB_* records of this IR with its pass facts and plan (po NULL: no plan); before the submit is queued.
 // Returns the NB record bytes written into the command buffer for this IR.
 uint32_t nvn_nb_tap_patch(const nb_frame *f, const nb_plan_out *po, uint32_t part);

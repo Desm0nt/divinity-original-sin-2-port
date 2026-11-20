@@ -2729,6 +2729,8 @@ caller class (UI block, direct pass draws, opcodes off the mask)`. Решает,
 кампании не укладывается в кадр; 3–4 захода, разбить по итогам 20a. **16.11: запись `vkCmd*` на воркере (`DM_NB_MT`) сделана — NB-20b findings ниже;
 разрез draw() и параллельная трансляция не сделаны.**
 > **NB-20a findings (14.11, ветка `dos2-nb20a`; только чтение `xbg_game.cpp` + P2 `src/work/logs/p2b.log`, телефон не трогался).**
+> (19.11, NR-ZERO Z3: в `draw()` добавлены `nrz3::span_calls` / `nrz3::span_t0` — класс K, счётчик и часы строки `[nr] draw span`; решения прохода / барьеров `nrz3` берёт у того же кода, новых переменных класса S нет.)
+> (20.11, NR-ZERO Z3b–d / Z5, ветка `dos2-z5`: на пути draw появились `nrz3::ps_called` и `snap_how` — класс C, черновик draw / вызова `snapshot()` в руке (при записи в несколько контекстов уходят в контекст); `nrzx::dmode` — класс R, переключатель. Эпохи `nrz_img_ep`, `zc::live_ep`, `nrbuf::st_ep` двигаются под замком движка, как поля, которые они сторожат.)
 > Путь draw = `draw(prim, first, count, …)` + 22 помощника (`create_pass`, `descriptors` / `_stable`, `prepare_read`, `prepare_attachment`,
 > `mark_storage_images`, `begin_open`, `end_open_pass`, `full_barrier`, `snapshot`, `stream_buffer`, `first_draw_covers`, `nbrp_begin`,
 > `lazy_clear_open` / `_begin`, `occlusion_query`, `pass_prof_draw`, `pipeline_lookup`, `recording_slot`, `pipe_memo_fill`, `get_image`,

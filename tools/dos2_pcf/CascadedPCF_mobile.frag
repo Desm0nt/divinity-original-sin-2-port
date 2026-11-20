@@ -16,7 +16,13 @@
 //   PCF_MODE 0  exact:  9 point taps, manual compare (Poisson of c1[0..8]), = the Switch result, without the translation overhead
 //   PCF_MODE 1  mobile: 4 textureGather taps (rotated grid), manual compare + bilinear weights = hardware 2x2 PCF, 16 texels
 //   PCF_MODE 2  ipad16: 16 textureGather taps on the iPad build's Poisson disc (CascadedPCF_2x1024 iPad), 64 texels
+//   PCF_MODE 3  dref:   mode 1's 4 taps as hardware depth compares (sampler2DShadow, OpImageSampleDrefExplicitLod): the sampler's
+//                       LESS compare + linear filter = the same 2x2 PCF per tap, done by the texture unit (no compares / lerps in ALU)
 // textureGather + manual compare needs no compare-enabled sampler (the game's NVN sampler for the atlas has none): any sampler works.
+// PCF_MODE 3 needs one: the host (xbg_game.cpp, COMBINED_IMAGE_SAMPLER bind, Shader::dref_bindings) turns compare on (LESS) with a
+// linear filter for a binding this module declares as a depth image (OpTypeImage Depth=1) - only binding 16 here. Differences to mode 1:
+// the filter weights are the texture unit's (Vulkan: subTexelPrecisionBits, 8 on Adreno / Mali) instead of fp32 fract(), and for a UNORM
+// atlas (D16 / X8_D24) the reference is clamped to [0, 1] first (a texel of exactly 0 with ref < 0 reads shadowed instead of lit).
 
 #ifndef NCASC
 #define NCASC 3
@@ -43,7 +49,11 @@ layout(set = 0, binding = 22, std140) uniform fp_c15 { vec4 _m0[4096]; } c15;
 layout(set = 0, binding = 28, std140) uniform fp_c4 { vec4 _m0[4096]; } c4;
 layout(set = 0, binding = 34, std140) uniform fp_c1 { vec4 _m0[4096]; } c1;
 layout(set = 0, binding = 10) uniform sampler2D LinearDepth;
+#if PCF_MODE == 3
+layout(set = 0, binding = 16) uniform sampler2DShadow Shadow;
+#else
 layout(set = 0, binding = 16) uniform sampler2D Shadow;
+#endif
 
 layout(location = 1) noperspective in vec4 TexCoord0;
 layout(location = 0) out vec4 outColor;
@@ -75,7 +85,7 @@ const vec2 TAPS[9] = vec2[9](vec2(-0.190282002, -0.129061997), vec2(0.722526014,
     vec2(-0.968993187, 0.674672008), vec2(-0.723197997, -0.978820205), vec2(0.0459919982, 0.947386026),
     vec2(-0.977172196, -0.220313996), vec2(0.0448319986, -0.969542623), vec2(-0.57130599, 0.50633198));
 #define NTAPS 9
-#elif PCF_MODE == 1
+#elif PCF_MODE == 1 || PCF_MODE == 3
 const vec2 TAPS[4] = vec2[4](vec2(-0.25, -0.75), vec2(0.75, -0.25), vec2(0.25, 0.75), vec2(-0.75, 0.25));
 #define NTAPS 4
 #else
@@ -102,6 +112,10 @@ float pcf(int i, vec3 uvz)
         vec2 uv = clamp(uvz.xy + r * TAPS[j], lo, hi);
         sum += float(ref < textureLod(Shadow, uv, 0.0).x);
     }
+#elif PCF_MODE == 3
+    vec2 lo = QUAD[i] + 2.0 * HALF_TEXEL, hi = QUAD[i] + 0.5 - 2.0 * HALF_TEXEL;   // as mode 1: the 2x2 footprint stays inside the quadrant
+    [[unroll]] for (int j = 0; j < NTAPS; j++)
+        sum += textureLod(Shadow, vec3(clamp(uvz.xy + r * TAPS[j], lo, hi), ref), 0.0);   // 1 = ref < texel (LESS), bilinear over 2x2
 #else
     vec2 lo = QUAD[i] + 2.0 * HALF_TEXEL, hi = QUAD[i] + 0.5 - 2.0 * HALF_TEXEL;   // the 2x2 footprint stays inside the quadrant
     [[unroll]] for (int j = 0; j < NTAPS; j++) {

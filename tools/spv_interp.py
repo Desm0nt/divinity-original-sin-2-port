@@ -5,10 +5,15 @@ Function / Private / Input / Output / Uniform / UniformConstant / PushConstant s
 OpPhi, float32 arithmetic (numpy float32, IEEE single), 32-bit ints (stored unsigned, sign-interpreted per op), GLSL.std.450
 subset, OpImageFetch / OpImageSample*Lod / OpImageGather on CPU textures (bilinear or nearest, clamp-to-edge; 2D and CubeTexture;
 an explicit lod / bias != 0 scales the result by 1 + lod / 8, so a wrong lod is a mismatch; Texture3D: trilinear, lod 0, for the
-3D LUT of PPApplyLUT), OpKill.
+3D LUT of PPApplyLUT), OpImageSampleDref*Lod (T11: a compare sampler, LESS + the texture's filter, see Module._dref), OpKill, OpImageRead of a subpass input (input attachment: the texel at the fragment's own pixel; the
+attachment is passed in textures= by its binding like a texture; m.subpass_reads counts them).
 Uniform blocks are read from raw bytes with the module's Offset / ArrayStride / MatrixStride (row-major honoured) decorations.
 
 After run(): m.executed = instructions executed (merges / OpLine not counted), m.tex_ops = texture instructions executed.
+Vertex shaders too (NR-33B): built-in inputs as inputs[('bi', BuiltIn)], built-in output blocks as out[('var', id)].
+NR-PRESKIN: scalar Location inputs; integer inputs take 32-bit words (pass ints); stores into a storage buffer land in m.ssbo[(var, path...)].
+NR-33C: OpGroupNonUniformAny = this invocation's predicate (a wave of one), or True with m.any_all (a live neighbour lane);
+OpUnreachable raises; m.max_steps bounds a run (RuntimeError('runaway')).
 Usage:  m = Module(spirv_bytes); out = m.run(inputs={'FragCoord': (x, y, z, w), 1: (..)}, ubos={binding: bytes},
                                             textures={binding: Texture(...)}, push=bytes)  ->  {location: [floats]} or None (discard)
 """
@@ -62,6 +67,7 @@ class Texture:
     def gather(self, u, v, comp):
         # the footprint is chosen in fixed point like a GPU does (8 sub-texel bits): a coordinate at an exact texel centre (FXAA's
         # gathers, NB-18b-8) picks that texel and its +1 neighbours whatever the float rounding of u * w was
+        if not (math.isfinite(float(u)) and math.isfinite(float(v))): u, v = F(0), F(0)    # as sample_c: a non-finite coordinate reads at 0
         x, y = float(u) * self.w - 0.5, float(v) * self.h - 0.5
         x0, y0 = math.floor(round(x * 256) / 256), math.floor(round(y * 256) / 256)
         return [F(self._c(x0, y0 + 1)[comp]), F(self._c(x0 + 1, y0 + 1)[comp]), F(self._c(x0 + 1, y0)[comp]), F(self._c(x0, y0)[comp])]
@@ -120,6 +126,8 @@ class Module:
         assert w[0] == 0x07230203
         self.types, self.consts, self.vars, self.dec, self.mdec, self.funcs = {}, {}, {}, {}, {}, {}
         self.ext = {}
+        self.max_steps = 2000000
+        self.any_all = False   # NR-33C: OpGroupNonUniformAny = this lane's predicate (one invocation alone), True = some other lane is live
         i, fn, blk = 5, None, None
         while i < len(w):
             n, op = w[i] >> 16, w[i] & 0xffff
@@ -207,8 +215,9 @@ class Module:
     # ---------------------------------------------------------------- run
     def run(self, inputs, ubos=None, textures=None, push=b''):
         """inputs: {'FragCoord': vec4, location: vec4}; ubos: {binding: bytes}; textures: {binding: Texture}"""
-        self.ubufs, self.mem, self.tex = {}, {}, {}
-        self.executed, self.tex_ops = 0, 0
+        self.ubufs, self.mem, self.tex, self.ssbo = {}, {}, {}, {}
+        self.executed, self.tex_ops, self.subpass_reads = 0, 0, 0
+        self.fragcoord = inputs.get('FragCoord', (0.5, 0.5, 0, 1))
         outs = {}
         for v, (pt, sc) in self.vars.items():
             t = self.types[pt][1][1]; d = self.dec.get(v, {})
@@ -218,12 +227,19 @@ class Module:
             elif sc == 1:
                 if 11 in d:
                     bi = d[11][0]
-                    self.mem[v] = [F(x) for x in inputs['FragCoord']] if bi == 15 else self._null(t)
+                    self.mem[v] = [F(x) for x in inputs['FragCoord']] if bi == 15 else (inputs[('bi', bi)] if ('bi', bi) in inputs else self._null(t))
+                elif 30 not in d: self.mem[v] = self._null(t)                                  # NR-33B: a built-in block input
                 else:
                     loc = d[30][0]; val = inputs.get(loc)
-                    self.mem[v] = [F(x) for x in val][:self.types[t][1][1]] if val is not None else self._null(t)
+                    if val is None: self.mem[v] = self._null(t)
+                    else:   # NR-PRESKIN: scalar inputs, and integer inputs kept as 32-bit words (pass ints)
+                        top, ta = self.types[t]
+                        ct = self.types[ta[0]][0] if top == 23 else top
+                        conv = (lambda x: int(x) & M32) if ct == 21 else F
+                        vals = [conv(x) for x in (list(val) if isinstance(val, (list, tuple)) else [val])]
+                        self.mem[v] = vals[:ta[1]] if top == 23 else vals[0]
             elif sc in (3, 6, 4): self.mem[v] = self._null(t)
-            if sc == 3: outs[d.get(30, [0])[0]] = v
+            if sc == 3: outs[d[30][0] if 30 in d else ('var', v)] = v                     # NR-33B: built-in blocks (gl_PerVertex) by variable
         try:
             self._call(self.entry, [])
         except Discard:
@@ -243,7 +259,7 @@ class Module:
             nxt = None
             for op, a in fn['blocks'][cur]:
                 steps += 1
-                if steps > 2000000: raise RuntimeError('runaway')
+                if steps > self.max_steps: raise RuntimeError('runaway')
                 if op == 245:                                                                        # OpPhi
                     for k in range(2, len(a), 2):
                         if a[k + 1] == prev: env[a[1]] = self._get(env, a[k]); break
@@ -260,6 +276,9 @@ class Module:
                 if op == 253: return None                                                            # OpReturn
                 if op == 254: return self._get(env, a[0])                                            # OpReturnValue
                 if op in (252, 4416): raise Discard()                                                # OpKill / OpTerminateInvocation
+                if op == 255: raise RuntimeError('OpUnreachable executed')
+                if op == 334:                                                                        # NR-33C: OpGroupNonUniformAny
+                    env[a[1]] = True if self.any_all else bool(self._get(env, a[3])); continue        # any_all: a live neighbour lane
                 self._exec(env, op, a)
             prev, cur = cur, nxt
 
@@ -297,6 +316,10 @@ class Module:
         if op == 12: env[r] = self._ext(rt, a[3], [g(x) for x in a[4:]]); return
         if op in (95, 87, 88, 96):
             env[r] = self._image(op, rt, a, g); return
+        if op in (89, 90):                                                                           # OpImageSampleDref{Implicit,Explicit}Lod
+            env[r] = self._dref(a, g); return
+        if op == 98:                                                                                 # OpImageRead
+            env[r] = self._subpass_read(a, g); return
         if op == 169:                                                                                # OpSelect
             c, x, y = g(a[2]), g(a[3]), g(a[4])
             env[r] = [xx if cc else yy for cc, xx, yy in zip(c, x, y)] if isinstance(c, list) else (x if c else y); return
@@ -339,10 +362,35 @@ class Module:
 
     def _store(self, p, val):
         _, root, path = p
+        if root in self.ubufs: self.ssbo[(root,) + tuple(path)] = self._copy(val); return   # NR-PRESKIN: a storage-buffer store is recorded
         if not path: self.mem[root] = self._copy(val); return
         v = self.mem[root]
         for k in path[:-1]: v = v[k]
         v[path[-1]] = self._copy(val)
+
+    def _subpass_read(self, a, g):
+        """OpImageRead: only a subpass input (Dim SubpassData), modelled as Vulkan defines it: the texel of the bound attachment at the
+        fragment's own framebuffer pixel (floor of FragCoord.xy) plus the read's integer offset (subpassLoad gives (0, 0))."""
+        tex = g(a[2]); c = [s32(x) for x in g(a[3])]; self.tex_ops += 1; self.subpass_reads += 1
+        if tex is None: return [F(0)] * 4
+        x, y = int(math.floor(float(self.fragcoord[0]))) + c[0], int(math.floor(float(self.fragcoord[1]))) + c[1]
+        return tex.fetch(x, y)
+
+    def _dref(self, a, g):
+        """T11 (Dref): depth compare as a Vulkan sampler with compareEnable, compareOp = tex.cmp (default LESS: 1 when ref < texel),
+        filtered like sample() (bilinear: the four 0/1 results weighted; nearest: one). tex.unorm (default True: D16 / X8_D24 atlas)
+        clamps the reference to [0, 1] first, as Vulkan does for a UNORM depth format. Lod operands are ignored (one level)."""
+        tex = g(a[2]); coord = g(a[3]); ref = F(g(a[4])); self.tex_ops += 1
+        if tex is None: return F(0)
+        if getattr(tex, 'unorm', True): ref = F(min(max(float(ref), 0.0), 1.0))
+        cmp = getattr(tex, 'cmp', lambda r, t: r < t)
+        u, v = (F(0) if not math.isfinite(float(c)) else c for c in coord[:2])
+        x, y = float(u) * tex.w - 0.5, float(v) * tex.h - 0.5
+        if tex.filt == 'nearest':
+            return F(1.0 if cmp(ref, F(tex._c(int(math.floor(x + 0.5)), int(math.floor(y + 0.5)))[0])) else 0.0)
+        x0, y0 = math.floor(x), math.floor(y); fx, fy = x - x0, y - y0
+        t = [F(1.0 if cmp(ref, F(tex._c(x0 + i, y0 + j)[0])) else 0.0) for j in (0, 1) for i in (0, 1)]
+        return F((t[0] * (1 - fx) + t[1] * fx) * (1 - fy) + (t[2] * (1 - fx) + t[3] * fx) * fy)
 
     def _image(self, op, rt, a, g):
         tex = g(a[2]); coord = g(a[3]); self.tex_ops += 1
@@ -439,6 +487,12 @@ class Module:
 
     def _ext(self, rt, inst, x):
         vec = isinstance(x[0], list)
+        if inst == 62:                                                        # UnpackHalf2x16 (NR-04: the translated CascadedPCF_*)
+            u = int(x[0]) & M32
+            return [F(np.frombuffer(struct.pack('<H', u & 0xffff), dtype=np.float16)[0]), F(np.frombuffer(struct.pack('<H', u >> 16), dtype=np.float16)[0])]
+        if inst == 58:                                                        # PackHalf2x16
+            lo, hi = (int(np.frombuffer(np.float16(float(c)).tobytes(), dtype=np.uint16)[0]) for c in x[0][:2])
+            return lo | (hi << 16)
         if inst == 66:                                                        # Length
             s = F(0)
             for c in x[0]: s = F(s + F(c * c))

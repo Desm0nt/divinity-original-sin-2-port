@@ -99,6 +99,50 @@ _nvn_prof_entry_v80:
     cbnz w12, 1b
     NVN_PROF_TAIL
 
+// [NR-16] DM_NVN_PROF=2 (nvn_cpuprof.inc): sampled timing of one thread. x16 = this function's slot address (from the thunk) or
+// its slot index (from the big-stack entry, which passes the index). Not the thread whose window is open (nvn_p2_tp != tpidr_el0):
+// a jump to the real implementation with every argument register untouched. That thread: cntvct_el0 before and after the call, the
+// difference and one call added to nvn_p2_acc[i] = {ticks, calls} with plain loads and stores (only that thread writes them).
+// x0-x7 / q0-q7 are not touched before the call and x0 / x1 / q0-q3 not after it (only x9-x12 / x16 / x17, caller-saved scratch),
+// so no save area is needed; NVN functions take no stack arguments (checked by the generator), so the 32-byte frame is harmless.
+    .globl _nvn_prof2_entry
+    .p2align 2
+_nvn_prof2_entry:
+    cmp x16, #4095
+    b.ls 1f                          // already a slot index
+    adrp x9, _nvn_slot@PAGE
+    add x9, x9, _nvn_slot@PAGEOFF
+    sub x16, x16, x9
+    lsr x16, x16, #4                 // slot address -> index
+1:  mrs x17, tpidr_el0
+    adrp x9, _nvn_p2_tp@PAGE
+    ldr x9, [x9, _nvn_p2_tp@PAGEOFF]
+    adrp x10, _nvn_real@PAGE
+    add x10, x10, _nvn_real@PAGEOFF
+    cmp x9, x17
+    b.eq 2f
+    ldr x17, [x10, x16, lsl #3]
+    br x17                           // untimed: straight on
+2:  ldr x17, [x10, x16, lsl #3]
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    str x16, [sp, #16]
+    mrs x9, cntvct_el0
+    str x9, [sp, #24]
+    blr x17
+    mrs x9, cntvct_el0
+    ldp x16, x10, [sp, #16]
+    sub x9, x9, x10
+    adrp x10, _nvn_p2_acc@PAGE
+    add x10, x10, _nvn_p2_acc@PAGEOFF
+    add x10, x10, x16, lsl #4
+    ldp x11, x12, [x10]
+    add x11, x11, x9
+    add x12, x12, #1
+    stp x11, x12, [x10]
+    ldp x29, x30, [sp], #32
+    ret
+
 // [ETERNAL] Trace wrapper (DM_NVN_TRACE=1: every slot points here): same frame as the timing wrapper, calls
 // nvn_trace_c(i, x0, x1, x2) to record the call in a ring (printed on a crash), then the real implementation (nvn_real[i]).
     .globl _nvn_trace_entry
@@ -151,6 +195,7 @@ _nvn_trace_entry:
     .globl _nvn_bigstack_entry
     .p2align 2
 _nvn_bigstack_entry:
+Lnvn_bigstack:                       // [NR-28] a local name for the lean entry's branch (no PLT stub between: x16 stays the slot address)
     sub sp, sp, #240
     stp x29, x30, [sp]
     mov x29, sp
@@ -191,4 +236,118 @@ _nvn_bigstack_entry:
 1:  blr x17
 2:  ldp x29, x30, [sp]
     add sp, sp, #240
+    ret
+
+// [DOS2] NR-23 (DM_NR_NOCALL, nvn_nr_nocall.inc): void *nvn_on_bigstack(void *(*fn)(void *), void *arg) - fn(arg) on this thread's
+// 1 MiB host stack (the stack every NVN call body runs on under the big-stack wrapper above), in place when sp is already on it.
+// The same switch as _nvn_bigstack_entry: nvn_bigstack_top(sp) = the top of the host stack or 0; x29 keeps the caller's stack.
+// Returns fn's x0. Only x0 / x1 are arguments, so nothing but the frame pair is saved.
+    .globl _nvn_on_bigstack
+    .p2align 2
+_nvn_on_bigstack:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    stp x0, x1, [sp, #16]
+    mov x0, sp
+    bl _nvn_bigstack_top
+    mov x9, x0
+    ldp x17, x0, [x29, #16]          // x17 = fn, x0 = arg
+    cbz x9, 1f
+    mov sp, x9
+    blr x17
+    mov sp, x29
+    b 2f
+1:  blr x17
+2:  ldp x29, x30, [sp], #32
+    ret
+
+// [DOS2] NR-28 DM_NR_LEANCALL=1 (nvn_leancall.inc, docs/dos2/nr/NR-28.md): the lean big-stack entry. Every implemented slot points here
+// instead of _nvn_bigstack_entry; the thunk comes in with x16 = the slot address, x0-x7 / q0-q7 / x8 = the call's arguments.
+// The thread's big stack comes from nvn_lc_tab[hash(tpidr_el0)] = {thread pointer, top of its 1 MiB host stack}, filled by
+// nvn_bigstack_top (C) on the thread's first call; no C call, no TLS descriptor, no register is saved: only x9-x11 / x16 / x17
+// (caller-saved scratch) are touched before the body. Not this thread's entry (first call, a hash slot another thread owns): on to
+// _nvn_bigstack_entry with every register as the thunk left it (the old path). Already on the big stack (top - sp <= 1 MiB, the old
+// test): a tail call of the body in place. Else: a 32-byte frame at the top of the big stack {the caller's x29, x30, sp}, the body
+// there with x29 = that frame (the frame chain reaches the guest's frames as before), then back. The body gets x16 = the slot index
+// (the convention under the big-stack wrapper, which DM_NVN_PROF=2's nvn_prof2_entry reads); return values x0 / x1 / q0-q3 come
+// back untouched. The hash is the one nvn_lc_hash computes in C.
+    .globl _nvn_lean_entry
+    .p2align 2
+_nvn_lean_entry:
+    mrs x17, tpidr_el0
+    lsr x9, x17, #12
+    eor x9, x9, x9, lsr #10
+    eor x9, x9, x9, lsr #20
+    and x9, x9, #4095                // NVN_LC_TAB - 1
+    adrp x10, _nvn_lc_tab@PAGE
+    add x10, x10, _nvn_lc_tab@PAGEOFF
+    add x10, x10, x9, lsl #4
+    ldp x9, x10, [x10]               // x9 = the entry's thread pointer, x10 = the top of its big stack
+    cmp x9, x17
+    b.ne Llc_slow
+    adrp x9, _nvn_slot@PAGE
+    add x9, x9, _nvn_slot@PAGEOFF
+    sub x16, x16, x9
+    lsr x16, x16, #4                 // slot address -> index
+    adrp x9, _nvn_real_big@PAGE
+    add x9, x9, _nvn_real_big@PAGEOFF
+    ldr x17, [x9, x16, lsl #3]
+    mov x9, sp
+    sub x11, x10, x9
+    cmp x11, #256, lsl #12           // 1 MiB (NVN_BIGSTACK): already on it
+    b.ls Llc_here
+    stp x29, x30, [x10, #-32]!
+    str x9, [x10, #16]               // the caller's sp
+    mov sp, x10
+    mov x29, sp
+    blr x17
+    ldr x9, [sp, #16]
+    ldp x29, x30, [sp]
+    mov sp, x9
+    ret
+Llc_here:
+    br x17
+Llc_slow:
+    b Lnvn_bigstack
+
+// [DOS2] NR-28 calibration helpers (nvn_lc_calibrate, a host thread of its own, never a guest thread):
+// void nvn_lc_loop(void *fn, void *x16, uint64_t n) - n calls of fn with x16 set as a thunk sets it (an entry gets a slot address);
+// void nvn_lc_ret(void) - an empty function (the loop's own cost); void nvn_lc_on_stack(void (*fn)(void *), void *arg, void *top) -
+// fn(arg) with sp = top (a small stack of the calibration that stands for a guest stack).
+    .globl _nvn_lc_loop
+    .p2align 2
+_nvn_lc_loop:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
+    mov x19, x0
+    mov x20, x1
+    mov x21, x2
+1:  cbz x21, 2f
+    mov x16, x20
+    blr x19
+    sub x21, x21, #1
+    b 1b
+2:  ldr x21, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
+    ret
+
+    .globl _nvn_lc_ret
+    .p2align 2
+_nvn_lc_ret:
+    ret
+
+    .globl _nvn_lc_on_stack
+    .p2align 2
+_nvn_lc_on_stack:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x9, x0
+    mov x0, x1
+    mov sp, x2
+    blr x9
+    mov sp, x29
+    ldp x29, x30, [sp], #16
     ret

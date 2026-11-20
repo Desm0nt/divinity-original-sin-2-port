@@ -52,6 +52,19 @@ int main(){
     CHECK(!xbg_adreno_rewrite_option(false,-1,nullptr,false));
     CHECK(xbg_adreno_rewrite_option(false,-1,"2",false));
 
+    // [DOS2] KB SH-20: the Adreno 8xx policy (DOS2 passes "0" when DM_GFX_ADRENO8_POLICY is unset)
+    CHECK(xbg_adreno_8xx(0x5143,"Adreno (TM) 830") && xbg_adreno_8xx(0x5143,"Adreno (TM) 840") && !xbg_adreno_8xx(0x5143,"Adreno (TM) 750") && !xbg_adreno_8xx(0x13b5,"Mali-G715"));
+    CHECK(xbg_adreno8_policy(0x5143,"Adreno (TM) 830",nullptr));
+    CHECK(xbg_adreno8_policy(0x5143,"Adreno (TM) 830","auto"));
+    CHECK(xbg_adreno8_policy(0x5143,"Adreno (TM) 830","1"));
+    CHECK(!xbg_adreno8_policy(0x5143,"Adreno (TM) 830","0"));
+    CHECK(!xbg_adreno8_policy(0x5143,"Adreno (TM) 750",nullptr));
+    CHECK(!xbg_adreno8_policy(0x5143,"Adreno (TM) 750","1"));
+    CHECK(xbg_adreno8_policy(0x5143,"Adreno (TM) 750","force"));
+    CHECK(!xbg_adreno8_policy(0x13b5,"Mali-G715","force"));
+    CHECK(!xbg_adreno_rewrite_option(false,-1,"1",xbg_adreno_rewrites_fault(0x5143,"Adreno (TM) 830") || xbg_adreno8_policy(0x5143,"Adreno (TM) 830","1")));
+    CHECK(xbg_adreno_rewrite_option(false,-1,"1",xbg_adreno_rewrites_fault(0x5143,"Adreno (TM) 830") || xbg_adreno8_policy(0x5143,"Adreno (TM) 830","0")));
+    CHECK(xbg_adreno_rewrite_option(true,'1',"1",xbg_adreno8_policy(0x5143,"Adreno (TM) 830","1")));   // the marker still wins
     if(failures){printf("FAIL %d check(s)\n",failures);return 1;}
     printf("PASS Adreno policy: 740/750 default off, 730/830 and other vendors unchanged, marker file still wins\n");
     return 0;

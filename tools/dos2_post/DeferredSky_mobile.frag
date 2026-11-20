@@ -20,11 +20,40 @@ SUPPORT_BUFFER(4)
 CBUF(58, c1)
 CBUF(64, c8)
 CBUF(70, c6)
+// NR-ONCHIP (docs/dos2/nr/NR-ONCHIP.md): with OC != 0 (only tools/dos2_onchip_shaders.py defines it) texture n below with bit n of OC set is
+// an input attachment (input_attachment_index n) of a merged render pass: 0 tG0, 1 tDepth, 2 tNormal, 3 tBase; render scale 1 only.
+#ifndef OC
+#define OC 0
+#endif
+#if (OC >> 0) & 1
+layout(input_attachment_index = 0, set = 0, binding = 10) uniform subpassInput tG0;
+#define F_G0(p) subpassLoad(tG0)
+#else
 layout(set = 0, binding = 10) uniform sampler2D tG0;
+#define F_G0(p) texelFetch(tG0, p, 0)
+#endif
+#if (OC >> 1) & 1
+layout(input_attachment_index = 1, set = 0, binding = 16) uniform subpassInput tDepth;
+#define F_DEPTH(p) subpassLoad(tDepth)
+#else
 layout(set = 0, binding = 16) uniform sampler2D tDepth;
+#define F_DEPTH(p) texelFetch(tDepth, p, 0)
+#endif
+#if (OC >> 2) & 1
+layout(input_attachment_index = 2, set = 0, binding = 22) uniform subpassInput tNormal;
+#define F_NORMAL(p) subpassLoad(tNormal)
+#else
 layout(set = 0, binding = 22) uniform sampler2D tNormal;
+#define F_NORMAL(p) texelFetch(tNormal, p, 0)
+#endif
 layout(set = 0, binding = 28) uniform samplerCube tIrr;
+#if (OC >> 3) & 1
+layout(input_attachment_index = 3, set = 0, binding = 34) uniform subpassInput tBase;
+#define F_BASE(p) subpassLoad(tBase)
+#else
 layout(set = 0, binding = 34) uniform sampler2D tBase;
+#define F_BASE(p) texelFetch(tBase, p, 0)
+#endif
 layout(set = 0, binding = 40) uniform sampler2D tExposure;
 layout(set = 0, binding = 46) uniform sampler2D tLut;
 layout(set = 0, binding = 52) uniform samplerCube tSpec;
@@ -37,23 +66,30 @@ vec3 nanz3(vec3 v) { return mix(v, vec3(0.0), isnan(v)); }
 void main()
 {
     ivec2 pE, pD, pN, pB, pX;
+#if OC
+    {   // render scale 1 only
+#else
     [[dont_flatten]] if (sb._m5[0] == 1.0 && sb._m5[1] == 1.0 && sb._m5[2] == 1.0 && sb._m5[3] == 1.0 && sb._m5[5] == 1.0 &&
                          sb._m5[6] == 1.0) {
+#endif
         ivec2 i = ivec2(gl_FragCoord.xy);
         pE = i; pD = i; pN = i; pB = i; pX = ivec2(0);
-    } else {
+    }
+#if !OC
+    else {
         float s0 = sb._m5[0];
         ivec2 c = ivec2(int(trunc(gl_FragCoord.x / s0)), int(trunc(gl_FragCoord.y / s0)));
         pE = rs_fix2(c, sb._m5[1]); pD = rs_fix2(c, sb._m5[2]); pN = rs_fix2(c, sb._m5[3]); pB = rs_fix2(c, sb._m5[5]);
         float s6 = sb._m5[6];
         pX = s6 < 0.0 ? ivec2(int(mod(gl_FragCoord.x, -s6)), int(mod(gl_FragCoord.y, -s6))) : ivec2(0);
     }
-    vec4 g0 = texelFetch(tG0, pE, 0);
-    float d = texelFetch(tDepth, pD, 0).x;
+#endif
+    vec4 g0 = F_G0(pE);
+    float d = F_DEPTH(pD).x;
     int model = int((uint(int(uint(max(roundEven(g0.w * 255.0), 0.0))) & 6u)) >> 1);
     vec3 spec = vec3(0.0), diff = vec3(0.0);
     [[dont_flatten]] if (d != 1.0 && model != 1) {
-        vec2 n = texelFetch(tNormal, pN, 0).xy;
+        vec2 n = F_NORMAL(pN).xy;
         float k = c1._m0[0].x;
         float ex = fma(n.x, k, -1.77769995), ey = fma(n.y, k, -1.77769995);
         float s = 2.0 / (fma(ey, ey, ex * ex) + 1.0);
@@ -73,7 +109,7 @@ void main()
         float Rx = fma(Nx * mn, -2.0, -vn.x), Ry = fma(Ny * mn, -2.0, -vn.y), Rz = fma(Nz * mn, -2.0, -vn.z);
         vec3 irr = texture(tIrr, nanz3(vec3(Nx * m1, Ny * m1, Nz * m1))).xyz;
         float m2 = 1.0 / max(abs(Rz), max(abs(Rx), abs(Ry)));
-        vec3 base = texelFetch(tBase, pB, 0).xyz;
+        vec3 base = F_BASE(pB).xyz;
         float e = texelFetch(tExposure, pX, 0).x;
         vec3 lut = textureLod(tLut, nanz(vec2(ndv, rough)), 0.0).xyz;
         vec4 k6 = c6._m0[2];

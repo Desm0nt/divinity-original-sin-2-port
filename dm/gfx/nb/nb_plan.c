@@ -14,6 +14,7 @@ void nb_frame_reset(nb_frame *f, uint32_t frame_no) {
     f->frame_no = frame_no; f->final = 1; f->open = 0; f->last_natt = 0;
     f->nnode = f->nref = f->nclear = 0; f->overflow = f->stray = 0;
     f->bar_pending = 0; f->bar_kept = f->bar_split = 0; f->track = 0;
+    f->rs_node = -1;   // [NR-CPU] NR-TAPSET: the set describes no pass (node 0 of the next part starts again at ref 0)
 }
 
 static nb_node *new_node(nb_frame *f, int kind) {
@@ -113,10 +114,48 @@ void nb_draw_prog(nb_frame *f, uint64_t fs, int exact, const uint64_t *sampled, 
     }
 }
 
+// [NR-CPU] NR-TAPSET: the set of node `pass`'s refs (see nb_frame.rs_*). 1 = it holds every ref of the pass now; 0 = not usable (too many).
+static inline uint32_t rs_slot(uint64_t image) { return (uint32_t)((image >> 3) * 0x9E3779B97F4A7C15ull >> 53) & (NB_RS_SLOTS - 1); }
+static int rs_put(nb_frame *f, uint64_t image) {   // 1 = it was new
+    for (uint32_t k = rs_slot(image), i = 0; i < NB_RS_SLOTS; i++, k = (k + 1) & (NB_RS_SLOTS - 1)) {
+        if (f->rs[k].tag != f->rs_tag) { f->rs[k].image = image; f->rs[k].tag = f->rs_tag; return 1; }
+        if (f->rs[k].image == image) return 0;
+    }
+    return 0;   // cannot happen below NB_RS_MAX entries
+}
+static int rs_has(const nb_frame *f, uint64_t image) {
+    for (uint32_t k = rs_slot(image), i = 0; i < NB_RS_SLOTS; i++, k = (k + 1) & (NB_RS_SLOTS - 1)) {
+        if (f->rs[k].tag != f->rs_tag) return 0;
+        if (f->rs[k].image == image) return 1;
+    }
+    return 0;
+}
+static int rs_sync(nb_frame *f, int pass, const nb_node *p) {
+    if (p->nref > NB_RS_MAX) { f->rs_big++; return 0; }
+    if (f->rs_node != pass || f->rs_first != p->ref_first || f->rs_n > p->nref) {   // another pass (or a reset part): a new tag
+        if (!++f->rs_tag) { memset(f->rs, 0, sizeof f->rs); f->rs_tag = 1; }
+        f->rs_node = pass; f->rs_first = p->ref_first; f->rs_n = 0;
+    }
+    for (; f->rs_n < p->nref; f->rs_n++) rs_put(f, f->ref[p->ref_first + f->rs_n].image);   // refs appended since (by anyone)
+    return 1;
+}
 int nb_read(nb_frame *f, int pass, uint64_t image) {
     if (pass < 0) pass = f->open ? f->nnode - 1 : -1;
     if (pass < 0 || !f->open || pass != f->nnode - 1) { f->stray++; return -1; }
     nb_node *p = &f->node[pass];
+    if (f->rs_mode && rs_sync(f, pass, p)) {   // [NR-CPU] NR-TAPSET
+        int held = rs_has(f, image); f->rs_lookups++;
+        if (f->rs_mode == 2) {   // compare: the scan decides
+            int scan = 0; for (int i = 0; i < p->nref && !scan; i++) scan = f->ref[p->ref_first + i].image == image;
+            if (scan != held) f->rs_bad++;
+            held = scan;
+        }
+        if (held) { f->rs_hits++; return 0; }
+        if (f->nref >= NB_MAX_REFS) { f->overflow++; return -1; }
+        f->ref[f->nref].image = image; f->ref[f->nref].role = NB_REF_READ; f->nref++; p->nref++;
+        if (p->nref <= NB_RS_MAX) { rs_put(f, image); f->rs_n = p->nref; }
+        return 0;
+    }
     for (int i = 0; i < p->nref; i++) if (f->ref[p->ref_first + i].image == image) return 0;
     if (f->nref >= NB_MAX_REFS) { f->overflow++; return -1; }
     f->ref[f->nref].image = image; f->ref[f->nref].role = NB_REF_READ; f->nref++; p->nref++;

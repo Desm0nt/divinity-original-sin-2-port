@@ -94,9 +94,10 @@ void dm_guest_frame_tick(void) {
     }
     if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
 }
+static void tick_freeze(int on);   // [NR-24] DM_NR_GATE_TICK: the guest tick domain freezes and thaws with the guest clock (below)
 static void guest_clock_freeze_apply(int on) {
-    if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
-    else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
+    if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); tick_freeze(1); }
+    else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); tick_freeze(0); }
 }
 // 冻结有几个互不相干的原因（0 测试用的冻结拍 / 读取画面，1 App 在后台，2 系统键盘弹着）：任一成立就冻结，全部解除才放行——
 // 否则「键盘弹着时切后台再回来」会被回前台那次解冻提前放开
@@ -131,6 +132,155 @@ void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
 // including a freeze still running: the long-frame log (hle_nvn.c) takes it off the frame time, so the frame that spans the pause
 // menu is not reported as a 6-26 s hitch (docs/dos2/HITCH_AUDIT.md, touch1.log / l1.log).
 uint64_t dm_guest_frozen_ns(void) { return now_ns() - wall_guest_ns(); }
+
+// ---------- [NR-24] DM_NR_GATE_TICK: the guest's system tick without the full gate (docs/dos2/nr/NR-24.md) ----------
+// Off (0, default): every guest read of the system counter is guest_ns() * 12 / 625 through the full gate (entry.S _dm_gate: 800-byte
+// frame, hash lookup, gate_dispatch), as before. 1: the guest tick domain is the host's virtual counter itself, cntvct_el0, mapped to
+// 19.2 MHz (the Switch's CNTFRQ) as ticks = base + (cntvct - c0) [* 19.2 MHz / CNTFRQ when the phone's counter runs at another rate:
+// MediaTek 13 MHz, Exynos 26 MHz, Tensor 24.576 MHz; Snapdragon's is 19.2 MHz and takes no multiply], read three ways that give the
+// same numbers: (1) main's imports of nn::os::GetSystemTick / nnosGetSystemTick (105 call sites in DOS2's main; the SDK function is
+// "mrs x0, cntpct_el0; ret") bind to dm_tick_guest_fn below, a plain C call; (2) the SDK's own 32 "mrs xN, cntpct_el0" sites go
+// through entry.S _dm_gate_fast, which looks the gate up and computes the value with four scratch registers and no frame, and falls
+// back to _dm_gate for every other gate; (3) the full gate and svc GetSystemTick call dm_tick_read(). A freeze of the guest clock
+// (pause menu, background, system keyboard, loading-screen freeze) publishes a frozen block: readers take its value, the pause-menu
+// hold waits as before (guest_clock_read_wait), and the thaw continues from the frozen value, so the guest sees one monotonic clock
+// that stands still while frozen, as guest_ns() does. The host's own guest_ns() / now_ns() stay on CLOCK_MONOTONIC: the two differ
+// only by the kernel's NTP slew (< 0.05 %), guest timeouts are relative. 2: the guest keeps the old values; the tick domain runs beside
+// them and the full gate compares the two (red line past 1 ms, a summary every 10 s). Not with DM_DETCLOCK (the guest clock is then
+// the present count, refused with a log line). Horizon: the Switch's counter is a free-running 19.2 MHz cntpct read by one
+// instruction; the only Horizon-visible properties are monotonic ticks at 19.2 MHz, which both modes keep.
+// Block layout (entry.S reads valid / c0 / base / mul at 0 / 8 / 16 / 24): the current block is published with a release store of
+// dm_tick_cur and never written again while current; a frozen block (valid 0) gets its base after it is published, behind ready.
+typedef struct dm_tick_blk { uint64_t valid, c0, base, mul; _Atomic uint64_t ready; uint64_t pad[3]; } dm_tick_blk;
+_Static_assert(__builtin_offsetof(dm_tick_blk, valid) == 0 && __builtin_offsetof(dm_tick_blk, c0) == 8 && __builtin_offsetof(dm_tick_blk, base) == 16 &&
+               __builtin_offsetof(dm_tick_blk, mul) == 24, "entry.S _dm_gate_fast reads these offsets");
+__attribute__((visibility("hidden"))) dm_tick_blk *_Atomic dm_tick_cur;   // entry.S _dm_gate_fast
+int g_tick_mode;                                                            // 0 / 1 / 2 once dm_tick_init has run
+static dm_tick_blk g_tb[256]; static unsigned g_tb_n;                        // ring of blocks (a freeze or thaw takes the next one)
+#if defined(DM_TICK_TEST)                                                   // tests/t_nr24_tick.c: a counter it drives
+uint64_t dm_test_cnt(void); uint64_t dm_test_frq(void);
+static inline uint64_t tk_cnt(void) { return dm_test_cnt(); }
+static inline uint64_t tk_frq(void) { return dm_test_frq(); }
+static inline uint64_t tk_cnt_then(dm_tick_blk *_Atomic *pp, dm_tick_blk **cur) { uint64_t c = dm_test_cnt(); *cur = atomic_load_explicit(pp, memory_order_acquire); return c; }
+#define TK_HAVE 1
+#elif defined(__aarch64__) && defined(__linux__)
+static inline uint64_t tk_cnt(void) { uint64_t v; __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(v) : : "memory"); return v; }
+static inline uint64_t tk_frq(void) { uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); return f; }
+// The counter, then *pp loaded after it: an address dependency on the counter value orders the load after the read (Linux's
+// arch_counter_enforce_ordering), so a reader whose re-check still sees its block read the counter before any later publish
+static inline uint64_t tk_cnt_then(dm_tick_blk *_Atomic *pp, dm_tick_blk **cur) {
+    uint64_t v, z; dm_tick_blk *p;
+    __asm__ volatile("mrs %0, cntvct_el0\n\teor %1, %0, %0\n\tldr %2, [%3, %1]" : "=&r"(v), "=&r"(z), "=&r"(p) : "r"(pp) : "memory");
+    *cur = p; return v;
+}
+#define TK_HAVE 1
+#else
+#define TK_HAVE 0
+#endif
+#if TK_HAVE
+static inline uint64_t tick_calc(const dm_tick_blk *b, uint64_t c) {
+    uint64_t d = c - b->c0; if ((int64_t)d < 0) d = 0;   // a counter read from before the block's anchor (speculated early): its base
+    if (b->mul) d = (uint64_t)(((unsigned __int128)d * b->mul) >> 32);
+    return b->base + d;
+}
+static dm_tick_blk *tb_next(void) { dm_tick_blk *b = &g_tb[g_tb_n++ & 255]; atomic_store_explicit(&b->ready, 0, memory_order_relaxed); b->valid = b->c0 = b->base = 0; return b; }
+// Under g_gfz_mu, on a real transition (guest_clock_freeze_apply)
+static void tick_freeze(int on) {
+    if (!g_tick_mode) return;
+    dm_tick_blk *old = atomic_load_explicit(&dm_tick_cur, memory_order_relaxed), *nb;
+    if (on) {
+        if (!old->valid) return;
+        nb = tb_next(); nb->mul = old->mul;
+        atomic_store_explicit(&dm_tick_cur, nb, memory_order_release);
+        atomic_thread_fence(memory_order_seq_cst);          // the publish before the counter read below (dmb ish; tk_cnt has an isb)
+        nb->base = tick_calc(old, tk_cnt());               // >= every value a reader of old returns (its counter read came first)
+        atomic_store_explicit(&nb->ready, 1, memory_order_release);
+    } else {
+        if (old->valid) return;
+        nb = tb_next(); nb->mul = old->mul; nb->base = old->base; nb->c0 = tk_cnt(); nb->valid = 1;
+        atomic_store_explicit(&nb->ready, 1, memory_order_relaxed);
+        atomic_store_explicit(&dm_tick_cur, nb, memory_order_release);   // a reader that sampled before c0 clamps to the frozen value
+    }
+}
+uint64_t dm_tick_read(void) {
+    for (;;) {
+        dm_tick_blk *b = atomic_load_explicit(&dm_tick_cur, memory_order_acquire), *b2;
+        if (b->valid) { uint64_t c = tk_cnt_then(&dm_tick_cur, &b2); if (b2 == b) return tick_calc(b, c); continue; }
+        guest_clock_read_wait();   // [front] the pause-menu hold, as the old gate
+        if (atomic_load_explicit(&dm_tick_cur, memory_order_acquire) != b) continue;
+        while (!atomic_load_explicit(&b->ready, memory_order_acquire)) { }
+        return b->base;
+    }
+}
+// The same value without the pause-menu wait (DM_NR_GATE_TICK=2's comparison, host code)
+static uint64_t tick_peek(void) {
+    for (;;) {
+        dm_tick_blk *b = atomic_load_explicit(&dm_tick_cur, memory_order_acquire), *b2;
+        if (b->valid) { uint64_t c = tk_cnt_then(&dm_tick_cur, &b2); if (b2 == b) return tick_calc(b, c); continue; }
+        if (atomic_load_explicit(&b->ready, memory_order_acquire)) return b->base;
+    }
+}
+#else
+static void tick_freeze(int on) { (void)on; }
+uint64_t dm_tick_read(void) { guest_clock_read_wait(); return guest_ns() * 12 / 625; }
+static uint64_t tick_peek(void) { return guest_ns() * 12 / 625; }
+#endif
+static pthread_once_t g_tick_once = PTHREAD_ONCE_INIT;
+static void tick_init_once(void) {
+    const char *e = getenv("DM_NR_GATE_TICK"); int m = e && *e ? atoi(e) : 0;
+    if (m <= 0) return;
+#if TK_HAVE
+    if (detclock_cfg()) { LOG("[nr24] DM_NR_GATE_TICK=%d refused: DM_DETCLOCK drives the guest clock by presents (old gate kept)", m); return; }
+    // the counter's rate as the kernel states it, checked against CLOCK_MONOTONIC_RAW over 5 ms (a firmware that programs CNTFRQ wrong)
+    uint64_t f = tk_frq(); struct timespec a, b, sl = {0, 5000000};
+    clock_gettime(CLOCK_MONOTONIC_RAW, &a); uint64_t c1 = tk_cnt(); nanosleep(&sl, NULL); uint64_t c2 = tk_cnt(); clock_gettime(CLOCK_MONOTONIC_RAW, &b);
+    double dt = (double)(b.tv_sec - a.tv_sec) * 1e9 + (double)(b.tv_nsec - a.tv_nsec), rate = dt > 0 ? (double)(c2 - c1) * 1e9 / dt : 0;
+    if (!f || rate <= 0 || rate < (double)f * 0.99 || rate > (double)f * 1.01) {
+        LOG("【红】[nr24] DM_NR_GATE_TICK=%d refused: CNTFRQ %llu Hz but the counter ran at %.0f Hz against CLOCK_MONOTONIC_RAW (old gate kept)", m, (unsigned long long)f, rate); return; }
+    const uint64_t mul = f == 19200000ull ? 0 : (uint64_t)((((unsigned __int128)19200000ull << 32) + f / 2) / f);
+    pthread_mutex_lock(&g_gfz_mu);
+    dm_tick_blk *nb = tb_next(); nb->mul = mul;
+    if (atomic_load(&g_gfz)) nb->base = atomic_load(&g_gfrozen) * 12 / 625;
+    else { nb->c0 = tk_cnt(); nb->base = guest_ns() * 12 / 625; nb->valid = 1; }
+    atomic_store_explicit(&nb->ready, 1, memory_order_relaxed);
+    atomic_store_explicit(&dm_tick_cur, nb, memory_order_release);
+    g_tick_mode = m >= 2 ? 2 : 1;
+    pthread_mutex_unlock(&g_gfz_mu);
+    LOG("[nr24] DM_NR_GATE_TICK=%d: guest ticks = cntvct (CNTFRQ %llu Hz, measured %.0f Hz) %s; %s", g_tick_mode, (unsigned long long)f, rate,
+        mul ? "scaled to 19.2 MHz" : "1:1 (19.2 MHz)", g_tick_mode == 1 ? "main's GetSystemTick bound to the host, the SDK's clock gates take the short entry"
+                                                                         : "the guest keeps the old values, the full gate compares (red past 1 ms)");
+#else
+    LOG("[nr24] DM_NR_GATE_TICK=%d: not on this platform (needs arm64 Linux), old gate kept", m);
+#endif
+}
+int dm_tick_init(void) { pthread_once(&g_tick_once, tick_init_once); return g_tick_mode; }
+// main's imports of the SDK's GetSystemTick (loader.c relocate, DM_NR_GATE_TICK=1, main only; the SDK keeps its own)
+static _Atomic uint64_t g_tick_fn_n;   // calls, only while dm_gate_prof is set (DM_NR_CPU=1)
+extern void (*dm_gate_prof)(int kind, int svc, uint64_t ticks);   // hle.c
+static uint64_t dm_tick_guest_fn(void) {
+    if (__builtin_expect(dm_gate_prof != 0, 0)) atomic_fetch_add_explicit(&g_tick_fn_n, 1, memory_order_relaxed);
+    return dm_tick_read();
+}
+uint64_t dm_tick_fn_calls(void) { return atomic_load_explicit(&g_tick_fn_n, memory_order_relaxed); }
+void *dm_tick_bind(const char *mod, const char *name) {
+    if (dm_tick_init() != 1 || strcmp(mod, "main")) return NULL;
+    if (strcmp(name, "_ZN2nn2os13GetSystemTickEv") && strcmp(name, "nnosGetSystemTick")) return NULL;
+    static int logged[2]; int k = name[0] == 'n'; if (!logged[k]++) LOG("[nr24] DM_NR_GATE_TICK=1: main's %s -> host dm_tick_guest_fn", name);
+    return (void *)dm_tick_guest_fn;
+}
+// DM_NR_GATE_TICK=2: the full gate's old value against the tick domain (hle.c gate_dispatch)
+static _Atomic uint64_t g_tc_n, g_tc_max, g_tc_red, g_tc_t0;
+void dm_tick_compare(uint64_t old) {
+    const uint64_t nw = tick_peek(), d = nw > old ? nw - old : old - nw, us = d * 625 / 12 / 1000;
+    atomic_fetch_add(&g_tc_n, 1);
+    uint64_t mx = atomic_load(&g_tc_max); while (us > mx && !atomic_compare_exchange_weak(&g_tc_max, &mx, us)) { }
+    if (us > 1000 && atomic_fetch_add(&g_tc_red, 1) < 16) LOG("【红】[nr24] DM_NR_GATE_TICK=2: guest tick %llu (old) vs %llu (cntvct domain): %llu us apart", (unsigned long long)old, (unsigned long long)nw, (unsigned long long)us);
+    const uint64_t now = now_ns(), t0 = atomic_load(&g_tc_t0);
+    if (!t0) { atomic_store(&g_tc_t0, now); return; }
+    if (now - t0 > 10000000000ull && atomic_compare_exchange_strong(&g_tc_t0, &(uint64_t){t0}, now))
+        LOG("[nr24] DM_NR_GATE_TICK=2: %llu reads compared, largest gap %llu us, %llu past 1 ms", (unsigned long long)atomic_exchange(&g_tc_n, 0),
+            (unsigned long long)atomic_exchange(&g_tc_max, 0), (unsigned long long)atomic_load(&g_tc_red));
+}
 // 熵源：缺省真随机（arc4random）；DM_DETCLOCK 开时改为固定种子的 splitmix64 流（回放画面逐字节可比用，营地蓝火粒子两遍不同）。
 // 两处出口（libc getentropy、svc GetInfo RandomEntropy）共用一条流；调用次数在日志里报（首次与每 1000 次）
 // Entropy source: true random by default (arc4random); with DM_DETCLOCK on it becomes a fixed-seed splitmix64 stream (so that replay pictures are byte-for-byte comparable, the camp blue fire particles differed between two passes).

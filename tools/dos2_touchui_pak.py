@@ -22,6 +22,8 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
                geometry, option rows / sliders, creation step tabs, skills panel press; --no-taps3 = without)
                + tools/dos2_taps4_touch.py over partyInventory_d inventorySkillPanel_d statsPanel_d craftPanel_d trade_d (tabs by tap, skill select / use,
                the skills panel's item half, inventory multi-select tap = toggle; --no-taps4 = without); journal_csp_d (0x8c) = journal_csp.swf + the row),
+               + tools/dos2_taps5_touch.py over saveLoad_d bottomBar_d partyInventory_d inventorySkillPanel_d equipmentPanel_d (save / load rows,
+               hot bar tooltip by long press, end turn by hold, item menu by long press, equipment taps; --no-taps5 = without),
                + tools/dos2_hudrect_touch.py over bottomBar_d / minimap_d / playerInfo_d (ExternalInterface dmHudRects: the HUD elements' real
                stage bounds for the floating sticks; --no-hudrect = without), and overhead_d = overhead.swf + that pass (the "(X) Actions..." hint
                over the selected target as rect "hint3": a world tap there = X; --no-ohint = without);
@@ -38,7 +40,7 @@ import glob, os, struct, sys, zlib
 from pathlib import Path
 import lz4.block
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lspk, dos2_column_touch, dos2_minimap_touch, dos2_mainmenu_touch, dos2_hint_touch, dos2_cc_touch, dos2_list_touch, dos2_hud_touch, dos2_panel_touch, dos2_taps_touch, dos2_taps3_touch, dos2_taps4_touch, dos2_hudrect_touch
+import lspk, dos2_column_touch, dos2_minimap_touch, dos2_mainmenu_touch, dos2_hint_touch, dos2_cc_touch, dos2_list_touch, dos2_hud_touch, dos2_panel_touch, dos2_taps_touch, dos2_taps3_touch, dos2_taps4_touch, dos2_taps5_touch, dos2_hudrect_touch
 
 GUI = 'Public/Game/GUI/'
 MENU = ['msgBox', 'gameMenu', 'saveLoad', 'optionsSettings', 'optionsInput', 'loadingScreen', 'userProfile', 'characterCreation',
@@ -182,6 +184,13 @@ def main():
                     if n not in made: continue
                     if dos2_taps4_touch.check(n, made[n]): sys.exit('%s: taps4 checks failed, package not written' % n)
                     made[n] = dos2_taps4_touch.patch(n, made[n])[0]
+            # fifth pass (tools/dos2_taps5_touch.py, branch dos2-touch6): save / load rows + hint bar, hot bar tooltip by long press, end turn by hold,
+            # button infos by tap, item menu by long press (party inventory, skills panel), equipment doll / inventory taps; --no-taps5 = without
+            if '--no-taps5' not in a:
+                for n in dos2_taps5_touch.POST:
+                    if n not in made: continue
+                    if dos2_taps5_touch.check(n, made[n]): sys.exit('%s: taps5 checks failed, package not written' % n)
+                    made[n] = dos2_taps5_touch.patch(n, made[n])[0]
             # HUD element rects for the floating sticks (tools/dos2_hudrect_touch.py: ExternalInterface dmHudRects with the real stage bounds of the hot bar,
             # the column buttons, minimap, portraits; the host maps them to window px for D3PadView); --no-hudrect = without (the pad falls back to fixed fractions)
             if '--no-hudrect' not in a:

@@ -6,6 +6,7 @@
 #include <new>
 #include <string>
 #include <vector>
+extern "C" __attribute__((weak)) void dm_vk_pass_end_sysmem(VkCommandBuffer cmd);   // [DOS2] NR-GMEM (dm/android/vk_driver.c; absent in host builds)
 
 namespace {
 struct Failure { VkResult result; std::string message; };
@@ -341,7 +342,7 @@ extern "C" int xbg_vk_draw_2d(xbg_vk_renderer *r,const xbg_draw2d *d) {
         vkCmdBeginRenderPass(r->command,&begin,VK_SUBPASS_CONTENTS_INLINE);vkCmdBindPipeline(r->command,VK_PIPELINE_BIND_POINT_GRAPHICS,r->pipeline);
         vkCmdBindDescriptorSets(r->command,VK_PIPELINE_BIND_POINT_GRAPHICS,r->layout,0,1,&set,0,nullptr);VkDeviceSize offset=0;vkCmdBindVertexBuffers(r->command,0,1,&r->transient[4].buffer,&offset);
         if(d->index_count) {vkCmdBindIndexBuffer(r->command,r->transient[5].buffer,0,VK_INDEX_TYPE_UINT16);vkCmdDrawIndexed(r->command,d->index_count,1,0,0,0);}
-        else vkCmdDraw(r->command,d->vertex_count,1,0,0);vkCmdEndRenderPass(r->command);
+        else vkCmdDraw(r->command,d->vertex_count,1,0,0);if(dm_vk_pass_end_sysmem)dm_vk_pass_end_sysmem(r->command);vkCmdEndRenderPass(r->command);   // [DOS2] NR-GMEM: stays in sysmem
         VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={d->width,d->height,1};
         vkCmdCopyImageToBuffer(r->command,r->target.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,r->readback.buffer,1,&copy);
         VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;

@@ -15,6 +15,9 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <errno.h>
+#if defined(__linux__)
+#include <sys/prctl.h>   // [safe-mode] PR_GET_NAME: the crashing thread's name
+#endif
 
 static _Atomic uint64_t g_watch_last_ns;
 static _Atomic uint64_t g_watch_count;
@@ -163,6 +166,10 @@ static int fault_loop(const void *addr, uint64_t pc) {
 // Download/<data folder>/logs/crash.txt, D3: Download/Diablo3Mobile/logs from them at the next start).
 static void (*g_report_hook)(int phase, int sig, uint64_t addr, uint64_t pc);
 void crash_set_report_hook(void (*fn)(int phase, int sig, uint64_t addr, uint64_t pc)) { g_report_hook = fn; }
+// [DOS2][safe-mode] xbg_game.cpp / xbg_safe_mode.inc (docs/dos2/nr/SAFE-MODE.md; DOOM 2016 B&F 2.57): on Mali / PowerVR, is this crash a graphics
+// failure (graphics / recording / driver thread, pc or lr in a GPU driver library, zero-copy memory, DEVICE_LOST / GPU-hang abort)? Then
+// <files>/gfx-safe-mode counts it for the next start. Weak: builds without the engine have none. rec (DOOM's dm-record packet) is always null here.
+extern void xbg_crash_classify(int sig, const char *thread, const char *rec, uint64_t addr, const char *pc_lib, const char *lr_lib) __attribute__((weak));
 // [DOS2] A signal another process sent (kill / tgkill / sigqueue: si_code <= 0, sender pid not ours) is no fault: tools/run_dos2.sh
 // DUMP_THREADS=1 and tools/run.sh send SIGSEGV to get the thread dump, and that used to leave a crash.txt that read like a real crash.
 // The CRASH line and the crash marker (jni_android.c: "external=<pid>", CrashLog.java: "external signal, not a crash") say so.
@@ -188,6 +195,22 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     off("addr", (uint64_t)si->si_addr); off("pc", UC_PC(uc)); off("lr", UC_LR(uc));
     fprintf(stderr, " sp=%#llx\n", UC_SP(uc));
     if (g_report_hook) g_report_hook(0, sig, (uint64_t)(uintptr_t)si->si_addr, UC_PC(uc));
+    {   // [DOS2][safe-mode] (DOOM 2016 crash.c, its B&F 2.47 / 2.57) which thread died, and on Mali / PowerVR whether the next start turns on a
+        // step of GPU safe mode. Signal-safe: prctl / dladdr / string compares and open / write in xbg_safe_mode_record. A signal another process
+        // sent (a run script's thread dump) is not counted.
+        char tn[32] = "?";
+#if defined(__linux__)
+        prctl(PR_GET_NAME, tn, 0, 0, 0); tn[sizeof tn - 1] = 0;
+#else
+        pthread_getname_np(pthread_self(), tn, sizeof tn);
+#endif
+        fprintf(stderr, "[dm] crash thread %s tid=%d\n", tn, fault_tid());
+        if (xbg_crash_classify && g_ext_pid <= 0) {   // the libraries of pc and lr (a jump through a bad pointer from driver code), not guest modules
+            const char *lib[2] = {0, 0}; Dl_info li; uint64_t at[2] = {UC_PC(uc), UC_LR(uc)};
+            for (int k = 0; k < 2; k++) if (!module_of((void *)(uintptr_t)at[k]) && dladdr((void *)(uintptr_t)at[k], &li) && li.dli_fname) lib[k] = li.dli_fname;
+            xbg_crash_classify(sig, tn, 0, (uint64_t)(uintptr_t)si->si_addr, lib[0], lib[1]);
+        }
+    }
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, UC_X(uc, i), i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
     dm_backtrace(UC_FP(uc));

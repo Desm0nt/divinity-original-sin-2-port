@@ -22,6 +22,7 @@
 // Lines "[nb] mx ..." / "[nb] mx prof ..." every 10 s.
 #include "../../nb/nb_mx.h"
 #include <atomic>
+#include <time.h>
 // The pure headers xbg_game.cpp and its .inc files include further down are read here, ahead of every context define: their own
 // identifiers (a parameter named tex_gen, a field named state) must not meet the macros. Each is guarded, so the later includes are empty.
 #include "../../nb/nb_ir.h"
@@ -33,11 +34,17 @@
 #include "../../nb/nb_order.h"
 #include "../../nb/nb_own.h"
 #include "../../nb/nb_fused.h"
+#include "../../nb/nb_onchip.h"   // NR-ONCHIP (xbg_nr_onchip.inc)
 #include "../../nb/nb_post.h"
 #include "../../nb/nb_post_aa.h"
 #include "../../nb/nb_ui.h"
 #include "../../nb/nb_uiarea.h"
+#include "../../nr/nr_buf.h"   // [DOS2] NR-06 (xbg_nr_buf.inc)
+#include "../../nr/nr_desc.h"   // [DOS2] NR-08 (xbg_nr_desc.inc)
+#include "../../nr/nr_draw.h"   // [DOS2] NR-09 (xbg_nr_draw.inc)
+#include "../../nr/nr_sort.h"   // [DOS2] NR-21 (xbg_nr_sort.inc)
 #include "xbg_store_hist.h"
+#include "xbg_cpuprof.h"   // [NR-16] (xbg_cpuprof.inc, included after the context defines)
 namespace {
 namespace nbx {
 // One slot per context variable (NB-20a class C moved into the context). New entries go before K_COUNT; the variable's declaration in
@@ -62,7 +69,9 @@ int mode = 0, prof = 0, min_draws = 8;
 bool window = false, told_bad = false;
 nbxq::Worker worker;
 nbxq::Ctx *wctx = nullptr;
-struct Stats { uint64_t subs, direct_ab, direct_nested, direct_thread, move_ns, run_ns; } st{};
+struct Stats { uint64_t subs, direct_ab, direct_nested, direct_thread, move_ns, run_ns, run_cpu_ns; } st{};
+uint64_t cpu_total_ns = 0;   // [NR-16] the worker's CPU time in its jobs, never reset (xbg_cpuprof.inc takes deltas)
+bool cpu_on = false;          // [NR-16] DM_NR_CPU=1: the worker's CPU time is taken (two thread-clock reads a submission)
 uint64_t report_ns = 0;
 
 void worker_start(void *) {
@@ -80,30 +89,40 @@ bool ensure_worker() {
 }
 void init() {
     auto num = [](const char *name, long def, long lo, long hi) { const char *e = getenv(name); long v = e && *e ? atol(e) : def; return v < lo ? lo : v > hi ? hi : v; };
-    mode = int(num("DM_NB_MX", 0, 0, 1)); prof = int(num("DM_NB_MX_PROF", 0, 0, 1)); min_draws = int(num("DM_NB_MX_MIN", 8, 1, 4096));
+    mode = int(num("DM_NB_MX", 0, 0, 1)); prof = int(num("DM_NB_MX_PROF", 0, 0, 1)); min_draws = int(num("DM_NB_MX_MIN", 8, 1, 4096)); cpu_on = num("DM_NR_CPU", 0, 0, 1) > 0;
     if (mode) xbg_logf("[nb] DM_NB_MX=%d: submissions are translated by the worker dm-nbx0 with the context moved to it and back (%d variables, %zu bytes; NB-20b ctx)",
         mode, registry.n, nbxq::ctx_bytes(registry));
 }
+// [NR-16] " (CPU x.xx)" after the worker's wall time with DM_NR_CPU=1, nothing otherwise (the line as before)
+const char *cpu_note(double ms) { static char b[32]; if (!cpu_on) return ""; snprintf(b, sizeof b, " (CPU %.2f)", ms); return b; }
 void tick(uint64_t now) {
     if (!report_ns) { report_ns = now; return; }
     if (now - report_ns < 10000000000ull) return;
     const double n = st.subs ? double(st.subs) : 1.;
     xbg_logf("[nb] mx (DM_NB_MX=%d, last %.0f s): submissions on the worker %llu, on the translation thread %llu (a/b off %llu, nested %llu, no worker %llu); "
-             "per submission: context moved both ways in %.3f ms (%d variables, %zu bytes), worker ran %.2f ms, the translation thread waited %.2f ms",
+             "per submission: context moved both ways in %.3f ms (%d variables, %zu bytes), worker ran %.2f ms%s, the translation thread waited %.2f ms",
         mode, double(now - report_ns) * 1e-9, (unsigned long long)st.subs, (unsigned long long)(st.direct_ab + st.direct_nested + st.direct_thread),
         (unsigned long long)st.direct_ab, (unsigned long long)st.direct_nested, (unsigned long long)st.direct_thread,
-        double(st.move_ns) * 1e-6 / n, registry.n, nbxq::ctx_bytes(registry), double(st.run_ns) * 1e-6 / n, double(worker.wait_ns) * 1e-6 / n);
+        double(st.move_ns) * 1e-6 / n, registry.n, nbxq::ctx_bytes(registry), double(st.run_ns) * 1e-6 / n, cpu_note(double(st.run_cpu_ns) * 1e-6 / n), double(worker.wait_ns) * 1e-6 / n);
     st = Stats{}; worker.wait_ns = 0; report_ns = now;
 }
-struct Job { int n; const uint64_t *h; uint64_t *budget; void (*run)(int, const uint64_t *, uint64_t &); uint64_t ns; };
-void job_run(void *a) { Job &j = *static_cast<Job *>(a); const uint64_t t0 = nbxq::now_ns(); j.run(j.n, j.h, *j.budget); j.ns = nbxq::now_ns() - t0; }
+struct Job { int n; const uint64_t *h; uint64_t *budget; void (*run)(int, const uint64_t *, uint64_t &); uint64_t ns, cpu_ns; };
+inline uint64_t thread_cpu_ns() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    struct timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+#else
+    return 0;   // host tests on a CRT without thread CPU clocks
+#endif
+}
+// [NR-16] the worker's own CPU time next to the wall time of the job ("worker ran X ms (CPU Y)"): wall - CPU = it waited (GPU fences)
+void job_run(void *a) { Job &j = *static_cast<Job *>(a); const uint64_t t0 = nbxq::now_ns(), c0 = cpu_on ? thread_cpu_ns() : 0; j.run(j.n, j.h, *j.budget); j.ns = nbxq::now_ns() - t0; j.cpu_ns = cpu_on ? thread_cpu_ns() - c0 : 0; }
 // xbg_submit_now(): true = the handles were executed (by the worker); false = the caller executes them itself.
 bool submit(int n, const uint64_t *h, uint64_t &budget, bool ab_is_off, void (*run)(int, const uint64_t *, uint64_t &)) {
     if (mode != 1) return false;
     if (window) { ++st.direct_nested; return false; }
     if (ab_is_off) { ++st.direct_ab; tick(nbxq::now_ns()); return false; }
     if (!ensure_worker()) { ++st.direct_thread; return false; }
-    Job j{n, h, &budget, run, 0};
+    Job j{n, h, &budget, run, 0, 0};
     const uint64_t t0 = nbxq::now_ns();
     nbxq::ctx_load(registry, *wctx);
     const uint64_t t1 = nbxq::now_ns();
@@ -113,7 +132,7 @@ bool submit(int n, const uint64_t *h, uint64_t &budget, bool ab_is_off, void (*r
     const uint64_t t2 = nbxq::now_ns();
     nbxq::ctx_store(registry, *wctx);
     const uint64_t t3 = nbxq::now_ns();
-    ++st.subs; st.move_ns += (t1 - t0) + (t3 - t2); st.run_ns += j.ns;
+    ++st.subs; st.move_ns += (t1 - t0) + (t3 - t2); st.run_ns += j.ns; st.run_cpu_ns += j.cpu_ns; cpu_total_ns += j.cpu_ns;
     tick(t3);
     return true;
 }

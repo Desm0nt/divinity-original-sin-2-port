@@ -14,7 +14,10 @@ dm/gfx/nr/nr_reg.c.
   4. Small tables the DM_NR=2 checks embed: sampler min filter (0x1f585e8), and the image format pairs of CreateTextureFromImage are
      listed for the eye.
   5. Engine opcode 55 (resource transition): its handler returns packet length 0x20 on every path that returns.
-  6. Optional (--so work/build-android/libdm.so): no hook in the built library tail-calls the trampoline or stores into its incoming
+  6. NR-02 (DM_NR_KEY, dm/host/hle_dos2_nr_key.inc): the hook of the texture flush 0x924730 (in item 1 with the others); every
+     state-cache store / read the draw key relies on, instruction by instruction; the .inc's offsets equal the checked ones; every call
+     of 0x924730 in main is in k_nk_site, and the first NVN call after each site is the draw (or dispatch / nothing) its kind says.
+  7. Optional (--so work/build-android/libdm.so): no hook in the built library tail-calls the trampoline or stores into its incoming
      argument area (that would write into the game's caller frame).
 Exit code 1 on any failure.
 Usage: dos2_nr_check.py [--main work/exefs-update/main.raw] [--so work/build-android/libdm.so]
@@ -33,15 +36,104 @@ ARG_REGS = ['x%d' % i for i in range(8)]
 
 
 def sites():
-    s = (ROOT / 'dm/host/hle_dos2_nr.c').read_text(encoding='utf-8')
-    body = s[s.index('k_nr_site[] = {'):]
-    body = re.sub(r' */\*.*?\*/', '', body[:body.index('\n};')])   # the instruction comments hold commas
+    """The hook tables: k_nr_site of hle_dos2_nr.c (NR-01) and k_nr_key_site of hle_dos2_nr_key.inc (NR-02, DM_NR_KEY)."""
     out = []
-    for m in re.finditer(r'\{(0x[0-9a-f]+), \{(0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}, "([^"]+)", \(void \*\)(\w+), &(\w+)\}', body):
-        out.append((int(m.group(1), 16), [int(m.group(k), 16) for k in range(2, 6)], m.group(6), m.group(7)))
-    rows = body.count('(void *)nr_h_')
-    if len(out) != rows or not out: sys.exit('k_nr_site: parsed %d of %d rows' % (len(out), rows))
+    for f, table in (('dm/host/hle_dos2_nr.c', 'k_nr_site[] = {'), ('dm/host/hle_dos2_nr_key.inc', 'k_nr_key_site[] = {')):
+        s = (ROOT / f).read_text(encoding='utf-8')
+        body = s[s.index(table):]
+        body = re.sub(r' */\*.*?\*/', '', body[:body.index('\n};')])   # the instruction comments hold commas
+        got = [(int(m.group(1), 16), [int(m.group(k), 16) for k in range(2, 6)], m.group(6), m.group(7))
+               for m in re.finditer(r'\{(0x[0-9a-f]+), \{(0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\}, "([^"]+)", \(void \*\)(\w+), &(\w+)\}', body)]
+        rows = body.count('(void *)nr_h_')
+        if len(got) != rows or not got: sys.exit('%s %s: parsed %d of %d rows' % (f, table, len(got), rows))
+        out += got
     return out
+
+
+# ---- NR-02 (DM_NR_KEY): the state cache fields the draw key reads, the call sites of the texture flush, the pool id ----
+TEX_FLUSH = 0x924730
+KEY_INC = 'dm/host/hle_dos2_nr_key.inc'
+# (address, instruction, what it proves): stores of the state cache by the engine's own bind code, reads of the flush, pool id stores.
+KEY_INS = [
+    (0x9283c0, 'str x8, [x0, #0x17d8]', 'SetShader 0x9283a0 stores the shader handle at r+0x17d8'),
+    (0x928408, 'str x20, [x0, #0x17e0]', '... and its record at r+0x17e0'),
+    (0x928418, 'ldr x1, [x20, #8]', '... record +8 = the program bound for stage bits 1 (vertex)'),
+    (0x928444, 'ldr x1, [x20, #0x10]', '... record +0x10 = the program bound for stage bits 2 (fragment)'),
+    (0x928548, 'str x9, [x19, #0x16f8]', 'SetBlend 0x9284e0 stores the blend handle at r+0x16f8'),
+    (0x92854c, 'str w2, [x19, #0x1700]', '... and its mask word at r+0x1700'),
+    (0x93ecf4, 'str x9, [x20, #0x1708]', 'code 21 stores the depth-stencil handle at r+0x1708'),
+    (0x93ecf8, 'str w21, [x20, #0x1710]', '... and the stencil reference at r+0x1710 (dynamic, not in the key)'),
+    (0x93e9a4, 'str x8, [x20, #0x16f0]', 'code 21 stores the raster (polygon state) handle at r+0x16f0'),
+    (0x93f498, 'str x9, [x8, #0x16f0]', 'code 7 stores it too'),
+    (0x93e908, 'str x8, [x20, #0x1740]', 'code 21 stores the vertex format handle at r+0x1740'),
+    (0x93eb58, 'str x8, [x20, #0x1740]', 'code 10 stores it too'),
+    (0x93e724, 'mov w21, #0x1714', 'code 21: x21 = r+0x1714 ...'),
+    (0x93e7c4, 'add x21, x20, x21', '...'),
+    (0x93f218, 'strb w8, [x21]', '... the engine primitive byte at r+0x1714'),
+    (0x93f2c0, 'str w8, [x20, #0x1718]', '... and its NVN primitive at r+0x1718'),
+    (0x927b3c, 'str x8, [x19, #0x17e8]', 'SetRenderTargets 0x9279a0 stores colour target 0 at r+0x17e8'),
+    (0x927d08, 'str x20, [x19, #0x1828]', '... and the depth target at r+0x1828'),
+    (0x93f150, 'str s8, [x20, #0x1868]', 'code 21 stores the alpha reference at r+0x1868'),
+    (0x9285a4, 'fcmp s0, #0.0', 'SetBlend: alpha test by the sign of r+0x1868 ...'),
+    (0x9285a8, 'b.ge #0x9287ec', '... on when >= 0'),
+    (0x92475c, 'mov w8, #0x15dc', 'the flush: vertex texture dirty range min at r+0x15dc ...'),
+    (0x924760, 'mov w9, #0x15dd', '... max at r+0x15dd'),
+    (0x924778, 'cmp w8, w26', '... min <= max = dirty'),
+    (0x92477c, 'b.le #0x9248fc', '...'),
+    (0x92474c, 'mov w8, #0x1664', 'fragment texture dirty range at r+0x1664 / +0x1665'),
+    (0x924780, 'mov w8, #0x20', 'clean = 32 ...'),
+    (0x924788, 'mov w8, #0xff', '... and -1'),
+    (0x924794, 'strh w24, [x19, #0x1444]', 'the flush resets the vertex sampler range r+0x1444'),
+    (0x924864, 'strh w24, [x19, #0x14cc]', '... and the fragment one r+0x14cc'),
+    (0x924918, 'ldr w1, [x8, #0x1558]', 'vertex texture ids at r+0x1558 + 4 slot'),
+    (0x924970, 'ldr w2, [x8, #0x13c0]', 'vertex sampler ids at r+0x13c0 + 4 slot'),
+    (0x9247b0, 'ldr w1, [x8, #0x15e0]', 'fragment texture ids at r+0x15e0 + 4 slot'),
+    (0x9247cc, 'ldr w2, [x8, #0x1448]', 'fragment sampler ids at r+0x1448 + 4 slot'),
+    (0x9243ec, 'ldr w8, [x11, #0xc0]', 'the slot writer 0x9243d0 takes the id at NVN texture object + 0xc0'),
+    (0x9244fc, 'mov w13, #0x1558', '... writes vertex texture ids'),
+    (0x92441c, 'mov w13, #0x15e0', '... fragment texture ids'),
+    (0x92445c, 'mov w13, #0x1448', '... fragment sampler ids'),
+    (0x924468, 'mov w12, #0x14cd', '... and widens the fragment sampler range'),
+    (0x91e9a0, 'str w22, [x2, #0xc0]', 'CreateTexture stores the pool id at NVN texture object + 0xc0'),
+    (0x91eb24, 'str w23, [x8, #0xc0]', '... the view ids after it (+0xc4 + 4 i)'),
+    (0x91e9e8, 'mov w8, #6', '... 6 views for a cube, else the layer count'),
+    (0x91f63c, 'str w21, [x8, #0xc0]', 'CreateTextureFromImage stores the pool id at +0xc0'),
+    (0x93c6ac, 'str w23, [x8, #0xc0]', 'window textures: pool id at +0xc0'),
+    (0x93c960, 'str w20, [x8, #0xc0]', '...'),
+]
+KEY_R = {'NK_R_RASTER': 0x16f0, 'NK_R_BLEND': 0x16f8, 'NK_R_BLEND_ARG': 0x1700, 'NK_R_DEPTH': 0x1708, 'NK_R_PRIM': 0x1714, 'NK_R_VFORMAT': 0x1740,
+         'NK_R_SHADER': 0x17d8, 'NK_R_SHADER_REC': 0x17e0, 'NK_R_COLOR': 0x17e8, 'NK_R_DEPTH_RT': 0x1828, 'NK_R_ALPHA_REF': 0x1868,
+         'NK_R_TEX_VS': 0x1558, 'NK_R_TEX_FS': 0x15e0, 'NK_R_SMP_VS': 0x13c0, 'NK_R_SMP_FS': 0x1448}
+DRAW_KINDS = {'NR_DS_LIST_IDX': ('DrawElements',), 'NR_DS_IDX_INST': ('DrawElementsInstanced',), 'NR_DS_FULL': ('DrawElements', 'DrawArrays'),
+              'NR_DS_LIST_ARRAYS': ('DrawArrays',), 'NR_DS_DIRECT_IDX': ('DrawElements',), 'NR_DS_DIRECT_ARRAYS': ('DrawArrays',)}
+
+
+def key_sites():
+    s = (ROOT / KEY_INC).read_text(encoding='utf-8')
+    body = s[s.index('k_nk_site[] = {'):]
+    body = body[:body.index('\n};')]
+    return [(int(a, 16), k) for a, k in re.findall(r'\{(0x[0-9a-f]+), (NR_DS_\w+)\}', body)]
+
+
+def calls_to(m, target):
+    """Every bl / b in main's text whose target is `target`."""
+    import numpy as np
+    w = m.w.astype(np.int64)
+    imm = w & 0x3ffffff
+    imm = np.where(imm & 0x2000000, imm - 0x4000000, imm)
+    tgt = np.arange(m.N, dtype=np.int64) * 4 + imm * 4
+    hit = ((w & 0x7c000000) == 0x14000000) & (tgt == target)   # b (0x14) and bl (0x94)
+    return [int(i) * 4 for i in np.nonzero(hit)[0]]
+
+
+def first_nvn_after(m, use, pc, limit=48):
+    """The first NVN slot read after pc on the straight path (following b), or None."""
+    for _ in range(limit):
+        if pc in use: return use[pc]
+        k, t = nb.branch(m.u32(pc), pc)
+        if k == 'ret': return None
+        pc = t if k == 'b' else pc + 4
+    return None
 
 
 def formats():
@@ -205,7 +297,7 @@ def main():
     bad = 0
 
     hooks = sites()
-    print('== %d hook sites of dm/host/hle_dos2_nr.c: prologue words, PC-relative, boundary, inbound branches, x8 / vector argument reads' % len(hooks))
+    print('== %d hook sites of dm/host/hle_dos2_nr.c + hle_dos2_nr_key.inc: prologue words, PC-relative, boundary, inbound branches, x8 / vector argument reads' % len(hooks))
     for addr, words, name, fn in hooks:
         got = [m.u32(addr + 4 * k) for k in range(4)]
         ins = [m.dis(addr + 4 * k) for k in range(4)]
@@ -293,6 +385,41 @@ def main():
     ok = 'op != 55' in src and 'p + 8, 8' in src and 'p + 0x10, 8' in src and 'p[1]' in src
     if not ok: bad += 1
     print('%-4s the handler reads state +1, handle +8, name +0x10 of opcode 55 only' % ('ok' if ok else 'FAIL'))
+
+    print('\n== NR-02 (DM_NR_KEY): the state cache the draw key reads, the call sites of the texture flush 0x%x, the pool id' % TEX_FLUSH)
+    for addr, want, what in KEY_INS:
+        i = m.dis(addr); got = '%s %s' % (i.mnemonic, i.op_str) if i else '?'
+        ok = got == want
+        if not ok: bad += 1
+        print('%-4s 0x%07x %-30s %s%s' % ('ok' if ok else 'FAIL', addr, want, what, '' if ok else ' - main has `%s`' % got))
+    inc = (ROOT / KEY_INC).read_text(encoding='utf-8')
+    nbad = 0
+    for name, v in KEY_R.items():
+        mm = re.search(r'\b%s = (0x[0-9a-f]+)' % name, inc)
+        if not (mm and int(mm.group(1), 16) == v): nbad += 1; print('FAIL %s: %s, the checked field is %#x' % (name, mm.group(1) if mm else 'missing', v))
+    if 'k_nk_dirty[4] = {0x15dc, 0x1664, 0x1444, 0x14cc}' not in inc: nbad += 1; print('FAIL k_nk_dirty differs from the checked dirty ranges')
+    bad += nbad
+    print('%-4s the .inc reads the same %d state-cache offsets and the 4 dirty ranges (NK_R_*, k_nk_dirty)' % ('ok' if not nbad else 'FAIL', len(KEY_R)))
+    want = sorted(calls_to(m, TEX_FLUSH)); table = key_sites()
+    have = sorted(x for x, _ in table)
+    ok = want == have and len(set(have)) == len(have)
+    if not ok: bad += 1
+    print('%-4s every call of 0x%x in main is in k_nk_site: %d calls, %d rows%s' % ('ok' if ok else 'FAIL', TEX_FLUSH, len(want), len(have),
+          '' if ok else ' - missing %s, extra %s' % (['0x%x' % x for x in sorted(set(want) - set(have))], ['0x%x' % x for x in sorted(set(have) - set(want))])))
+    _, use, _ = nb.nvn_slots(m)
+    for addr, kind in table:
+        nxt = first_nvn_after(m, use, addr + 4)
+        short = nxt[len('nvnCommandBuffer'):] if nxt and nxt.startswith('nvnCommandBuffer') else nxt
+        if kind in DRAW_KINDS: ok = short in DRAW_KINDS[kind]
+        elif kind == 'NR_DS_COMPUTE': ok = short == 'DispatchCompute'
+        elif kind == 'NR_DS_FLUSH': ok = nxt is None or 'Draw' not in nxt
+        else: ok = False
+        if not ok: bad += 1
+        print('%-4s 0x%07x %-20s next NVN call on the path: %s' % ('ok' if ok else 'FAIL', addr, kind, nxt))
+    h33 = nb.ERC_BASE + 4 * struct.unpack_from('<H', m.d, nb.ERC_TABLE + 2 * 33)[0]
+    ok = any(x == 0x93fa28 and k == 'NR_DS_FLUSH' for x, k in table) and h33 <= 0x93fa28 < h33 + 16
+    if not ok: bad += 1
+    print('%-4s 0x93fa28 (flush only) is in the code-33 handler 0x%x' % ('ok' if ok else 'FAIL', h33))
 
     if a.so:
         print('\n== %s: the hooks never tail-call and never store into the caller frame' % a.so)

@@ -48,14 +48,17 @@
 
 enum { NB_PSA_NONE = 0, NB_PSA_FXAA, NB_PSA_COPY };
 enum { NB_PAW_ALIAS = 0, NB_PAW_NOSTEP, NB_PAW_OTHER_FXAA, NB_PAW_HOST, NB_PAW_SHAPE, NB_PAW_INEXACT, NB_PAW_INPUT, NB_PAW_KEEPS, NB_PAW_READER,
-       NB_PAW_S_WRITTEN, NB_PAW_SIZE, NB_PAW_BAD, NB_PAW_CARRY, NB_PAW_KINDS };
-typedef struct nb_post_aa_state { struct { uint64_t image; uint8_t bad; } t[8]; int n; } nb_post_aa_state;   // zero = empty
+       NB_PAW_S_WRITTEN, NB_PAW_SIZE, NB_PAW_BAD, NB_PAW_CARRY, NB_PAW_OPREAD, NB_PAW_KINDS };
+// NR-33A: t[].now = an operation reads the image in this submission after a real write of it (the AA pass is not elided in this
+// submission, the read gets the real image; not bad); outline = DM_NB_POST_AA_OUTLINE=1: EoCOutlineCombine is a carry class too.
+typedef struct nb_post_aa_state { struct { uint64_t image; uint8_t bad, now; } t[8]; int n; uint8_t outline; } nb_post_aa_state;   // zero = empty
 typedef struct nb_post_aa_out {
     int f1a, f1a_fxaa, f1a_copy, f1a_copy_kept, f1a_nostep;   // F1A hosts; with the FXAA pass elided / the copy elided / the copy left / no AA pass
     int plain;                                                // F1 pairs left as F1 (the console's FXAA runs)
     int readers, op_reads;                                    // passes flagged NB_NP_AA; operations reading a tracked image (now bad)
     int why[NB_PAW_KINDS];
     int carried;                                              // carry passes (EoCFog) between Sight and an elided AA step
+    int op_fresh;                                             // NR-33A: operations reading a tracked image after its real write in this submission
     int unrelated_fxaa;                                       // FXAA passes after an F1 host that read nothing derived from its target (ignored)
     int16_t d_host, d_first, d_other; uint8_t d_why;          // the last pair left plain: H, the first reader of S (-1), the other FXAA pass (-1), NB_PAW_*
     int16_t step[NB_MAX_NODES];                               // by node: H of the step it is (-1)
@@ -65,11 +68,14 @@ static inline int nb_post_aa_class(uint64_t fs) {
     switch ((uint32_t)(fs >> 32)) { case 0x691768aau: return NB_PSA_FXAA; case 0x7b321019u: return NB_PSA_COPY; default: return NB_PSA_NONE; }
 }
 static inline int nb_post_aa_carry(uint64_t fs) { return (uint32_t)(fs >> 32) == 0xe94ea226u; }   // EoCFog
+// NR-33A: with outline (DM_NB_POST_AA_OUTLINE=1) also EoCOutlineCombine (01047259): the Fort Joy tail is Sight -> outline -> fog -> FXAA
+// (phone 18.11, frame 5240); the outline is then drawn over the anti-aliased image (its edge is not smoothed: owner's look check).
+static inline int nb_post_aa_carry2(uint64_t fs, int outline) { return nb_post_aa_carry(fs) || (outline && (uint32_t)(fs >> 32) == 0x01047259u); }
 static inline const char *nb_post_aa_why_name(int w) {
     static const char *const n[NB_PAW_KINDS] = { "AA pass elided", "no AA pass after Sight", "another FXAA pass reads what Sight's target feeds", "host pass shape",
         "AA pass shape", "AA pass reads not exact", "AA pass samples more than Sight's target", "AA pass keeps old texels",
         "a reader of its target cannot be redirected", "Sight's target is written again", "sizes differ", "its target was read by an operation",
-        "a fog step between Sight and the AA pass cannot carry F1A's output" };
+        "a fog step between Sight and the AA pass cannot carry F1A's output", "an operation reads its target in this submission (the AA pass runs)" };
     return w >= 0 && w < NB_PAW_KINDS ? n[w] : "?";
 }
 static inline int nbpa_has(const uint64_t *v, int n, uint64_t x) { for (int i = 0; i < n; i++) if (v[i] == x) return 1; return 0; }
@@ -125,7 +131,7 @@ static inline int nbpa_step(const nb_frame *f, const nb_plan_out *pl, const nb_p
         uint32_t w, h, ow, oh;
         if (!r->size(r->ctx, S, &w, &h) || !r->size(r->ctx, O2, &ow, &oh) || w != ow || h != oh) return NB_PAW_SIZE;
     }
-    { const int t = nbpa_tracked(st, O2, 0); if (t >= 0 && st->t[t].bad) return NB_PAW_BAD; }
+    { const int t = nbpa_tracked(st, O2, 0); if (t >= 0 && st->t[t].bad) return NB_PAW_BAD; if (t >= 0 && st->t[t].now) return NB_PAW_OPREAD; }
     for (int q = k + 1; q < f->nnode; q++) {
         const nb_node *m = &f->node[q];
         if (m->kind == NB_NODE_PASS) {
@@ -188,11 +194,26 @@ static inline int nb_post_aa_plan(const nb_frame *f, nb_plan_out *pl, const nb_p
     memset(o, 0, sizeof *o);
     for (int i = 0; i < f->nnode; i++) o->step[i] = -1;
     o->d_host = o->d_first = o->d_other = -1;
-    // operations that read a tracked image cannot be redirected: bad from now on (before the pairs: a bad image is not aliased again)
+    // operations that read a tracked image cannot be redirected. NR-33A: an operation after a real write of the image in this
+    // submission (an executed, not elided pass drawing into it - the AA pass itself, which is then not elided here - or an operation
+    // writing it) reads the real image: the AA pass simply runs in this submission (t.now, NB_PAW_OPREAD) and the fusion resumes in the
+    // next one (the phone 18.11: one save-game thumbnail copy of the FXAA target turned route A off for the rest of the session). An
+    // operation before any write would read the stale image: bad from now on, as before (a bad image is not aliased again).
+    for (int t = 0; t < st->n; t++) st->t[t].now = 0;
     for (int q = 0; q < f->nnode; q++) {
         const nb_node *m = &f->node[q];
         if (m->kind == NB_NODE_PASS) continue;
-        for (int t = 0; t < st->n; t++) if (!st->t[t].bad && nbpa_ir_reads(f, m, st->t[t].image)) { st->t[t].bad = 1; o->op_reads++; }
+        for (int t = 0; t < st->n; t++) {
+            if (st->t[t].bad || !nbpa_ir_reads(f, m, st->t[t].image)) continue;
+            int written = 0;
+            for (int p = 0; p < q && !written; p++) {
+                const nb_node *w = &f->node[p];
+                if (w->kind == NB_NODE_PASS && (!(pl->node[p].flags & NB_NP_EXEC) || (pl->node[p].flags & NB_NP_ELIDE))) continue;
+                written = nbpa_writes(f, w, st->t[t].image);
+            }
+            if (written) { st->t[t].now = 1; o->op_fresh++; }
+            else { st->t[t].bad = 1; o->op_reads++; }
+        }
     }
     for (int i = 0; i < f->nnode; i++) {
         if (po->fx[i] != NB_FXK_F1 || !(pl->node[i].flags & NB_NP_FUSE)) continue;
@@ -212,7 +233,7 @@ static inline int nb_post_aa_plan(const nb_frame *f, nb_plan_out *pl, const nb_p
             if (q == f->nnode) { if (ncarry) k = -1; break; }
             k = q;
             if (wr) { carry_bad = 2; break; }   // the carried image is overwritten before its reader
-            if (f->node[q].kind != NB_NODE_PASS || !nb_post_aa_carry(f->node[q].fs)) break;
+            if (f->node[q].kind != NB_NODE_PASS || !nb_post_aa_carry2(f->node[q].fs, st->outline)) break;
             if (ncarry == NBPA_CARRY || !nbpa_carry_ok(f, pl, r, st, q, cur)) { carry_bad = 1; break; }
             carry[ncarry++] = q; cur = f->node[q].att[0].image; pos = q; k = -1;
         }

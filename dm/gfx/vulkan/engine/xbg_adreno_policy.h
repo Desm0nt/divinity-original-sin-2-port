@@ -35,6 +35,23 @@ inline bool xbg_adreno_rewrites_fault(uint32_t vendor_id,const char *device_name
     return model>=740 && model<800;
 }
 
+// [DOOM #39 / #47 -> DOS2, KB SH-20] Adreno 8xx (Snapdragon 8 Elite / 8s Gen 4 / 8 Elite Gen 5): DOOM 2016 saw green round flashes there on
+// every driver; the only engine paths that differ from the Adreno 750 we test on are the two rewrites above (on for 8xx). The 8xx policy
+// runs 8xx like 740-799 (both rewrites default off; marker files still win). DM_GFX_ADRENO8_POLICY: 1 / auto = on for Adreno 8xx, 0 = off,
+// force = on for any Adreno. DOOM 2016 defaults it on (unset = auto); DOS2 passes "0" when unset (today's behaviour) until a DOS2 player on
+// an 8xx shows a reason (xbg_game.cpp, the rewrite switches).
+inline bool xbg_adreno_8xx(uint32_t vendor_id,const char *device_name){
+    if(vendor_id!=0x5143)return false;
+    const int model=xbg_adreno_model(device_name);
+    return model>=800 && model<900;
+}
+inline bool xbg_adreno8_policy(uint32_t vendor_id,const char *device_name,const char *environment){
+    if(vendor_id!=0x5143)return false;
+    if(environment && !strcmp(environment,"force"))return true;
+    if(environment && !strcmp(environment,"0"))return false;
+    return xbg_adreno_8xx(vendor_id,device_name);
+}
+
 // 与其它 gfx 开关相同的优先顺序：标记文件优先（只有明确的 0 关闭），其次是机型判断，最后才看环境变量。安卓端
 // jni_android.c 对所有机型都设 DM_GFX_*_=1，所以机型判断必须排在环境变量前面，否则这两个缺省会失效。
 // The same precedence as the other gfx switches: an existing marker wins (only an explicit 0 turns it off), then the device

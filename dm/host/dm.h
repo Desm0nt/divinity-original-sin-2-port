@@ -78,6 +78,12 @@ void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);
 void guest_clock_read_wait(void);   // [front] waits while the pause menu holds the game (hle_os.c, hle_hold.c)   // 按原因冻结（1 后台，2 系统键盘）；见 hle_os.c | Freeze by reason (1 background, 2 system keyboard); see hle_os.c
+// [NR-24] DM_NR_GATE_TICK (hle_os.c): the guest tick domain on cntvct; mode 0 = off (old gate), 1 = on, 2 = old values + comparison
+extern int g_tick_mode;
+int dm_tick_init(void);               // reads DM_NR_GATE_TICK once (loader / first guest thread), returns the mode
+uint64_t dm_tick_read(void);          // the guest tick in mode 1/2 (waits while the pause menu holds the game, as the old gate)
+void dm_tick_compare(uint64_t old);   // mode 2: the old value against the tick domain
+void *dm_tick_bind(const char *mod, const char *name);   // loader.c: main's GetSystemTick imports in mode 1, else NULL
 void dm_guest_frame_tick(void);        // 每次出图调（hle_nvn.c）：DM_DETCLOCK 开时把客体时钟推进一个固定步长 | Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
 int dm_nvn_ruler_truth(void);         // 视觉尺子真值阶段（DM_NVN_RULER=1 的前两张截图）为 1 | 1 during the ground-truth phase of the visual ruler (the first two screenshots with DM_NVN_RULER=1)
 uint64_t dm_nvn_frame_count(void);

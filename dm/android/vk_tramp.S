@@ -373,16 +373,28 @@ vkCmdFillBuffer:
 1:  mov x17, #30
     b dm_vk_slow
     .size vkCmdFillBuffer, .-vkCmdFillBuffer
-    .globl vkCmdPipelineBarrier
-    .hidden vkCmdPipelineBarrier
-    .type vkCmdPipelineBarrier, %function
-vkCmdPipelineBarrier:
+    .globl vkCmdNextSubpass
+    .hidden vkCmdNextSubpass
+    .type vkCmdNextSubpass, %function
+vkCmdNextSubpass:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
     ldr x17, [x16, #248]
     cbz x17, 1f
     br x17
 1:  mov x17, #31
+    b dm_vk_slow
+    .size vkCmdNextSubpass, .-vkCmdNextSubpass
+    .globl vkCmdPipelineBarrier
+    .hidden vkCmdPipelineBarrier
+    .type vkCmdPipelineBarrier, %function
+vkCmdPipelineBarrier:
+    adrp x16, dm_vk_table
+    add x16, x16, :lo12:dm_vk_table
+    ldr x17, [x16, #256]
+    cbz x17, 1f
+    br x17
+1:  mov x17, #32
     b dm_vk_slow
     .size vkCmdPipelineBarrier, .-vkCmdPipelineBarrier
     .globl vkCmdPushConstants
@@ -391,10 +403,10 @@ vkCmdPipelineBarrier:
 vkCmdPushConstants:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #256]
+    ldr x17, [x16, #264]
     cbz x17, 1f
     br x17
-1:  mov x17, #32
+1:  mov x17, #33
     b dm_vk_slow
     .size vkCmdPushConstants, .-vkCmdPushConstants
     .globl vkCmdResetQueryPool
@@ -403,10 +415,10 @@ vkCmdPushConstants:
 vkCmdResetQueryPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #264]
+    ldr x17, [x16, #272]
     cbz x17, 1f
     br x17
-1:  mov x17, #33
+1:  mov x17, #34
     b dm_vk_slow
     .size vkCmdResetQueryPool, .-vkCmdResetQueryPool
     .globl vkCmdResolveImage
@@ -415,10 +427,10 @@ vkCmdResetQueryPool:
 vkCmdResolveImage:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #272]
+    ldr x17, [x16, #280]
     cbz x17, 1f
     br x17
-1:  mov x17, #34
+1:  mov x17, #35
     b dm_vk_slow
     .size vkCmdResolveImage, .-vkCmdResolveImage
     .globl vkCmdSetScissor
@@ -427,10 +439,10 @@ vkCmdResolveImage:
 vkCmdSetScissor:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #280]
+    ldr x17, [x16, #288]
     cbz x17, 1f
     br x17
-1:  mov x17, #35
+1:  mov x17, #36
     b dm_vk_slow
     .size vkCmdSetScissor, .-vkCmdSetScissor
     .globl vkCmdSetViewport
@@ -439,10 +451,10 @@ vkCmdSetScissor:
 vkCmdSetViewport:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #288]
+    ldr x17, [x16, #296]
     cbz x17, 1f
     br x17
-1:  mov x17, #36
+1:  mov x17, #37
     b dm_vk_slow
     .size vkCmdSetViewport, .-vkCmdSetViewport
     .globl vkCmdWriteTimestamp
@@ -451,10 +463,10 @@ vkCmdSetViewport:
 vkCmdWriteTimestamp:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #296]
+    ldr x17, [x16, #304]
     cbz x17, 1f
     br x17
-1:  mov x17, #37
+1:  mov x17, #38
     b dm_vk_slow
     .size vkCmdWriteTimestamp, .-vkCmdWriteTimestamp
     .globl vkCreateAndroidSurfaceKHR
@@ -463,10 +475,10 @@ vkCmdWriteTimestamp:
 vkCreateAndroidSurfaceKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #304]
+    ldr x17, [x16, #312]
     cbz x17, 1f
     br x17
-1:  mov x17, #38
+1:  mov x17, #39
     b dm_vk_slow
     .size vkCreateAndroidSurfaceKHR, .-vkCreateAndroidSurfaceKHR
     .globl vkCreateBuffer
@@ -475,10 +487,10 @@ vkCreateAndroidSurfaceKHR:
 vkCreateBuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #312]
+    ldr x17, [x16, #320]
     cbz x17, 1f
     br x17
-1:  mov x17, #39
+1:  mov x17, #40
     b dm_vk_slow
     .size vkCreateBuffer, .-vkCreateBuffer
     .globl vkCreateBufferView
@@ -487,10 +499,10 @@ vkCreateBuffer:
 vkCreateBufferView:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #320]
+    ldr x17, [x16, #328]
     cbz x17, 1f
     br x17
-1:  mov x17, #40
+1:  mov x17, #41
     b dm_vk_slow
     .size vkCreateBufferView, .-vkCreateBufferView
     .globl vkCreateCommandPool
@@ -499,10 +511,10 @@ vkCreateBufferView:
 vkCreateCommandPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #328]
+    ldr x17, [x16, #336]
     cbz x17, 1f
     br x17
-1:  mov x17, #41
+1:  mov x17, #42
     b dm_vk_slow
     .size vkCreateCommandPool, .-vkCreateCommandPool
     .globl vkCreateComputePipelines
@@ -511,10 +523,10 @@ vkCreateCommandPool:
 vkCreateComputePipelines:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #336]
+    ldr x17, [x16, #344]
     cbz x17, 1f
     br x17
-1:  mov x17, #42
+1:  mov x17, #43
     b dm_vk_slow
     .size vkCreateComputePipelines, .-vkCreateComputePipelines
     .globl vkCreateDescriptorPool
@@ -523,10 +535,10 @@ vkCreateComputePipelines:
 vkCreateDescriptorPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #344]
+    ldr x17, [x16, #352]
     cbz x17, 1f
     br x17
-1:  mov x17, #43
+1:  mov x17, #44
     b dm_vk_slow
     .size vkCreateDescriptorPool, .-vkCreateDescriptorPool
     .globl vkCreateDescriptorSetLayout
@@ -535,10 +547,10 @@ vkCreateDescriptorPool:
 vkCreateDescriptorSetLayout:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #352]
+    ldr x17, [x16, #360]
     cbz x17, 1f
     br x17
-1:  mov x17, #44
+1:  mov x17, #45
     b dm_vk_slow
     .size vkCreateDescriptorSetLayout, .-vkCreateDescriptorSetLayout
     .globl vkCreateDescriptorUpdateTemplate
@@ -547,10 +559,10 @@ vkCreateDescriptorSetLayout:
 vkCreateDescriptorUpdateTemplate:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #360]
+    ldr x17, [x16, #368]
     cbz x17, 1f
     br x17
-1:  mov x17, #45
+1:  mov x17, #46
     b dm_vk_slow
     .size vkCreateDescriptorUpdateTemplate, .-vkCreateDescriptorUpdateTemplate
     .globl vkCreateDevice
@@ -559,10 +571,10 @@ vkCreateDescriptorUpdateTemplate:
 vkCreateDevice:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #368]
+    ldr x17, [x16, #376]
     cbz x17, 1f
     br x17
-1:  mov x17, #46
+1:  mov x17, #47
     b dm_vk_slow
     .size vkCreateDevice, .-vkCreateDevice
     .globl vkCreateFence
@@ -571,10 +583,10 @@ vkCreateDevice:
 vkCreateFence:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #376]
+    ldr x17, [x16, #384]
     cbz x17, 1f
     br x17
-1:  mov x17, #47
+1:  mov x17, #48
     b dm_vk_slow
     .size vkCreateFence, .-vkCreateFence
     .globl vkCreateFramebuffer
@@ -583,10 +595,10 @@ vkCreateFence:
 vkCreateFramebuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #384]
+    ldr x17, [x16, #392]
     cbz x17, 1f
     br x17
-1:  mov x17, #48
+1:  mov x17, #49
     b dm_vk_slow
     .size vkCreateFramebuffer, .-vkCreateFramebuffer
     .globl vkCreateGraphicsPipelines
@@ -595,10 +607,10 @@ vkCreateFramebuffer:
 vkCreateGraphicsPipelines:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #392]
+    ldr x17, [x16, #400]
     cbz x17, 1f
     br x17
-1:  mov x17, #49
+1:  mov x17, #50
     b dm_vk_slow
     .size vkCreateGraphicsPipelines, .-vkCreateGraphicsPipelines
     .globl vkCreateImage
@@ -607,10 +619,10 @@ vkCreateGraphicsPipelines:
 vkCreateImage:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #400]
+    ldr x17, [x16, #408]
     cbz x17, 1f
     br x17
-1:  mov x17, #50
+1:  mov x17, #51
     b dm_vk_slow
     .size vkCreateImage, .-vkCreateImage
     .globl vkCreateImageView
@@ -619,10 +631,10 @@ vkCreateImage:
 vkCreateImageView:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #408]
+    ldr x17, [x16, #416]
     cbz x17, 1f
     br x17
-1:  mov x17, #51
+1:  mov x17, #52
     b dm_vk_slow
     .size vkCreateImageView, .-vkCreateImageView
     .globl vkCreateInstance
@@ -631,10 +643,10 @@ vkCreateImageView:
 vkCreateInstance:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #416]
+    ldr x17, [x16, #424]
     cbz x17, 1f
     br x17
-1:  mov x17, #52
+1:  mov x17, #53
     b dm_vk_slow
     .size vkCreateInstance, .-vkCreateInstance
     .globl vkCreatePipelineCache
@@ -643,10 +655,10 @@ vkCreateInstance:
 vkCreatePipelineCache:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #424]
+    ldr x17, [x16, #432]
     cbz x17, 1f
     br x17
-1:  mov x17, #53
+1:  mov x17, #54
     b dm_vk_slow
     .size vkCreatePipelineCache, .-vkCreatePipelineCache
     .globl vkCreatePipelineLayout
@@ -655,10 +667,10 @@ vkCreatePipelineCache:
 vkCreatePipelineLayout:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #432]
+    ldr x17, [x16, #440]
     cbz x17, 1f
     br x17
-1:  mov x17, #54
+1:  mov x17, #55
     b dm_vk_slow
     .size vkCreatePipelineLayout, .-vkCreatePipelineLayout
     .globl vkCreateQueryPool
@@ -667,10 +679,10 @@ vkCreatePipelineLayout:
 vkCreateQueryPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #440]
+    ldr x17, [x16, #448]
     cbz x17, 1f
     br x17
-1:  mov x17, #55
+1:  mov x17, #56
     b dm_vk_slow
     .size vkCreateQueryPool, .-vkCreateQueryPool
     .globl vkCreateRenderPass
@@ -679,10 +691,10 @@ vkCreateQueryPool:
 vkCreateRenderPass:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #448]
+    ldr x17, [x16, #456]
     cbz x17, 1f
     br x17
-1:  mov x17, #56
+1:  mov x17, #57
     b dm_vk_slow
     .size vkCreateRenderPass, .-vkCreateRenderPass
     .globl vkCreateSampler
@@ -691,10 +703,10 @@ vkCreateRenderPass:
 vkCreateSampler:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #456]
+    ldr x17, [x16, #464]
     cbz x17, 1f
     br x17
-1:  mov x17, #57
+1:  mov x17, #58
     b dm_vk_slow
     .size vkCreateSampler, .-vkCreateSampler
     .globl vkCreateSemaphore
@@ -703,10 +715,10 @@ vkCreateSampler:
 vkCreateSemaphore:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #464]
+    ldr x17, [x16, #472]
     cbz x17, 1f
     br x17
-1:  mov x17, #58
+1:  mov x17, #59
     b dm_vk_slow
     .size vkCreateSemaphore, .-vkCreateSemaphore
     .globl vkCreateShaderModule
@@ -715,10 +727,10 @@ vkCreateSemaphore:
 vkCreateShaderModule:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #472]
+    ldr x17, [x16, #480]
     cbz x17, 1f
     br x17
-1:  mov x17, #59
+1:  mov x17, #60
     b dm_vk_slow
     .size vkCreateShaderModule, .-vkCreateShaderModule
     .globl vkCreateSwapchainKHR
@@ -727,10 +739,10 @@ vkCreateShaderModule:
 vkCreateSwapchainKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #480]
+    ldr x17, [x16, #488]
     cbz x17, 1f
     br x17
-1:  mov x17, #60
+1:  mov x17, #61
     b dm_vk_slow
     .size vkCreateSwapchainKHR, .-vkCreateSwapchainKHR
     .globl vkDestroyBuffer
@@ -739,10 +751,10 @@ vkCreateSwapchainKHR:
 vkDestroyBuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #488]
+    ldr x17, [x16, #496]
     cbz x17, 1f
     br x17
-1:  mov x17, #61
+1:  mov x17, #62
     b dm_vk_slow
     .size vkDestroyBuffer, .-vkDestroyBuffer
     .globl vkDestroyBufferView
@@ -751,10 +763,10 @@ vkDestroyBuffer:
 vkDestroyBufferView:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #496]
+    ldr x17, [x16, #504]
     cbz x17, 1f
     br x17
-1:  mov x17, #62
+1:  mov x17, #63
     b dm_vk_slow
     .size vkDestroyBufferView, .-vkDestroyBufferView
     .globl vkDestroyCommandPool
@@ -763,10 +775,10 @@ vkDestroyBufferView:
 vkDestroyCommandPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #504]
+    ldr x17, [x16, #512]
     cbz x17, 1f
     br x17
-1:  mov x17, #63
+1:  mov x17, #64
     b dm_vk_slow
     .size vkDestroyCommandPool, .-vkDestroyCommandPool
     .globl vkDestroyDescriptorPool
@@ -775,10 +787,10 @@ vkDestroyCommandPool:
 vkDestroyDescriptorPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #512]
+    ldr x17, [x16, #520]
     cbz x17, 1f
     br x17
-1:  mov x17, #64
+1:  mov x17, #65
     b dm_vk_slow
     .size vkDestroyDescriptorPool, .-vkDestroyDescriptorPool
     .globl vkDestroyDescriptorSetLayout
@@ -787,10 +799,10 @@ vkDestroyDescriptorPool:
 vkDestroyDescriptorSetLayout:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #520]
+    ldr x17, [x16, #528]
     cbz x17, 1f
     br x17
-1:  mov x17, #65
+1:  mov x17, #66
     b dm_vk_slow
     .size vkDestroyDescriptorSetLayout, .-vkDestroyDescriptorSetLayout
     .globl vkDestroyDescriptorUpdateTemplate
@@ -799,10 +811,10 @@ vkDestroyDescriptorSetLayout:
 vkDestroyDescriptorUpdateTemplate:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #528]
+    ldr x17, [x16, #536]
     cbz x17, 1f
     br x17
-1:  mov x17, #66
+1:  mov x17, #67
     b dm_vk_slow
     .size vkDestroyDescriptorUpdateTemplate, .-vkDestroyDescriptorUpdateTemplate
     .globl vkDestroyDevice
@@ -811,10 +823,10 @@ vkDestroyDescriptorUpdateTemplate:
 vkDestroyDevice:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #536]
+    ldr x17, [x16, #544]
     cbz x17, 1f
     br x17
-1:  mov x17, #67
+1:  mov x17, #68
     b dm_vk_slow
     .size vkDestroyDevice, .-vkDestroyDevice
     .globl vkDestroyFence
@@ -823,10 +835,10 @@ vkDestroyDevice:
 vkDestroyFence:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #544]
+    ldr x17, [x16, #552]
     cbz x17, 1f
     br x17
-1:  mov x17, #68
+1:  mov x17, #69
     b dm_vk_slow
     .size vkDestroyFence, .-vkDestroyFence
     .globl vkDestroyFramebuffer
@@ -835,10 +847,10 @@ vkDestroyFence:
 vkDestroyFramebuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #552]
+    ldr x17, [x16, #560]
     cbz x17, 1f
     br x17
-1:  mov x17, #69
+1:  mov x17, #70
     b dm_vk_slow
     .size vkDestroyFramebuffer, .-vkDestroyFramebuffer
     .globl vkDestroyImage
@@ -847,10 +859,10 @@ vkDestroyFramebuffer:
 vkDestroyImage:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #560]
+    ldr x17, [x16, #568]
     cbz x17, 1f
     br x17
-1:  mov x17, #70
+1:  mov x17, #71
     b dm_vk_slow
     .size vkDestroyImage, .-vkDestroyImage
     .globl vkDestroyImageView
@@ -859,10 +871,10 @@ vkDestroyImage:
 vkDestroyImageView:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #568]
+    ldr x17, [x16, #576]
     cbz x17, 1f
     br x17
-1:  mov x17, #71
+1:  mov x17, #72
     b dm_vk_slow
     .size vkDestroyImageView, .-vkDestroyImageView
     .globl vkDestroyInstance
@@ -871,10 +883,10 @@ vkDestroyImageView:
 vkDestroyInstance:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #576]
+    ldr x17, [x16, #584]
     cbz x17, 1f
     br x17
-1:  mov x17, #72
+1:  mov x17, #73
     b dm_vk_slow
     .size vkDestroyInstance, .-vkDestroyInstance
     .globl vkDestroyPipeline
@@ -883,10 +895,10 @@ vkDestroyInstance:
 vkDestroyPipeline:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #584]
+    ldr x17, [x16, #592]
     cbz x17, 1f
     br x17
-1:  mov x17, #73
+1:  mov x17, #74
     b dm_vk_slow
     .size vkDestroyPipeline, .-vkDestroyPipeline
     .globl vkDestroyPipelineCache
@@ -895,10 +907,10 @@ vkDestroyPipeline:
 vkDestroyPipelineCache:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #592]
+    ldr x17, [x16, #600]
     cbz x17, 1f
     br x17
-1:  mov x17, #74
+1:  mov x17, #75
     b dm_vk_slow
     .size vkDestroyPipelineCache, .-vkDestroyPipelineCache
     .globl vkDestroyPipelineLayout
@@ -907,10 +919,10 @@ vkDestroyPipelineCache:
 vkDestroyPipelineLayout:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #600]
+    ldr x17, [x16, #608]
     cbz x17, 1f
     br x17
-1:  mov x17, #75
+1:  mov x17, #76
     b dm_vk_slow
     .size vkDestroyPipelineLayout, .-vkDestroyPipelineLayout
     .globl vkDestroyQueryPool
@@ -919,10 +931,10 @@ vkDestroyPipelineLayout:
 vkDestroyQueryPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #608]
+    ldr x17, [x16, #616]
     cbz x17, 1f
     br x17
-1:  mov x17, #76
+1:  mov x17, #77
     b dm_vk_slow
     .size vkDestroyQueryPool, .-vkDestroyQueryPool
     .globl vkDestroyRenderPass
@@ -931,10 +943,10 @@ vkDestroyQueryPool:
 vkDestroyRenderPass:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #616]
+    ldr x17, [x16, #624]
     cbz x17, 1f
     br x17
-1:  mov x17, #77
+1:  mov x17, #78
     b dm_vk_slow
     .size vkDestroyRenderPass, .-vkDestroyRenderPass
     .globl vkDestroySampler
@@ -943,10 +955,10 @@ vkDestroyRenderPass:
 vkDestroySampler:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #624]
+    ldr x17, [x16, #632]
     cbz x17, 1f
     br x17
-1:  mov x17, #78
+1:  mov x17, #79
     b dm_vk_slow
     .size vkDestroySampler, .-vkDestroySampler
     .globl vkDestroySemaphore
@@ -955,10 +967,10 @@ vkDestroySampler:
 vkDestroySemaphore:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #632]
+    ldr x17, [x16, #640]
     cbz x17, 1f
     br x17
-1:  mov x17, #79
+1:  mov x17, #80
     b dm_vk_slow
     .size vkDestroySemaphore, .-vkDestroySemaphore
     .globl vkDestroyShaderModule
@@ -967,10 +979,10 @@ vkDestroySemaphore:
 vkDestroyShaderModule:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #640]
+    ldr x17, [x16, #648]
     cbz x17, 1f
     br x17
-1:  mov x17, #80
+1:  mov x17, #81
     b dm_vk_slow
     .size vkDestroyShaderModule, .-vkDestroyShaderModule
     .globl vkDestroySurfaceKHR
@@ -979,10 +991,10 @@ vkDestroyShaderModule:
 vkDestroySurfaceKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #648]
+    ldr x17, [x16, #656]
     cbz x17, 1f
     br x17
-1:  mov x17, #81
+1:  mov x17, #82
     b dm_vk_slow
     .size vkDestroySurfaceKHR, .-vkDestroySurfaceKHR
     .globl vkDestroySwapchainKHR
@@ -991,10 +1003,10 @@ vkDestroySurfaceKHR:
 vkDestroySwapchainKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #656]
+    ldr x17, [x16, #664]
     cbz x17, 1f
     br x17
-1:  mov x17, #82
+1:  mov x17, #83
     b dm_vk_slow
     .size vkDestroySwapchainKHR, .-vkDestroySwapchainKHR
     .globl vkEndCommandBuffer
@@ -1003,10 +1015,10 @@ vkDestroySwapchainKHR:
 vkEndCommandBuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #664]
+    ldr x17, [x16, #672]
     cbz x17, 1f
     br x17
-1:  mov x17, #83
+1:  mov x17, #84
     b dm_vk_slow
     .size vkEndCommandBuffer, .-vkEndCommandBuffer
     .globl vkEnumerateDeviceExtensionProperties
@@ -1015,10 +1027,10 @@ vkEndCommandBuffer:
 vkEnumerateDeviceExtensionProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #672]
+    ldr x17, [x16, #680]
     cbz x17, 1f
     br x17
-1:  mov x17, #84
+1:  mov x17, #85
     b dm_vk_slow
     .size vkEnumerateDeviceExtensionProperties, .-vkEnumerateDeviceExtensionProperties
     .globl vkEnumeratePhysicalDevices
@@ -1027,10 +1039,10 @@ vkEnumerateDeviceExtensionProperties:
 vkEnumeratePhysicalDevices:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #680]
+    ldr x17, [x16, #688]
     cbz x17, 1f
     br x17
-1:  mov x17, #85
+1:  mov x17, #86
     b dm_vk_slow
     .size vkEnumeratePhysicalDevices, .-vkEnumeratePhysicalDevices
     .globl vkFlushMappedMemoryRanges
@@ -1039,10 +1051,10 @@ vkEnumeratePhysicalDevices:
 vkFlushMappedMemoryRanges:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #688]
+    ldr x17, [x16, #696]
     cbz x17, 1f
     br x17
-1:  mov x17, #86
+1:  mov x17, #87
     b dm_vk_slow
     .size vkFlushMappedMemoryRanges, .-vkFlushMappedMemoryRanges
     .globl vkFreeMemory
@@ -1051,10 +1063,10 @@ vkFlushMappedMemoryRanges:
 vkFreeMemory:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #696]
+    ldr x17, [x16, #704]
     cbz x17, 1f
     br x17
-1:  mov x17, #87
+1:  mov x17, #88
     b dm_vk_slow
     .size vkFreeMemory, .-vkFreeMemory
     .globl vkGetBufferMemoryRequirements
@@ -1063,10 +1075,10 @@ vkFreeMemory:
 vkGetBufferMemoryRequirements:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #704]
+    ldr x17, [x16, #712]
     cbz x17, 1f
     br x17
-1:  mov x17, #88
+1:  mov x17, #89
     b dm_vk_slow
     .size vkGetBufferMemoryRequirements, .-vkGetBufferMemoryRequirements
     .globl vkGetDeviceProcAddr
@@ -1075,10 +1087,10 @@ vkGetBufferMemoryRequirements:
 vkGetDeviceProcAddr:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #712]
+    ldr x17, [x16, #720]
     cbz x17, 1f
     br x17
-1:  mov x17, #89
+1:  mov x17, #90
     b dm_vk_slow
     .size vkGetDeviceProcAddr, .-vkGetDeviceProcAddr
     .globl vkGetDeviceQueue
@@ -1087,10 +1099,10 @@ vkGetDeviceProcAddr:
 vkGetDeviceQueue:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #720]
+    ldr x17, [x16, #728]
     cbz x17, 1f
     br x17
-1:  mov x17, #90
+1:  mov x17, #91
     b dm_vk_slow
     .size vkGetDeviceQueue, .-vkGetDeviceQueue
     .globl vkGetFenceStatus
@@ -1099,10 +1111,10 @@ vkGetDeviceQueue:
 vkGetFenceStatus:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #728]
+    ldr x17, [x16, #736]
     cbz x17, 1f
     br x17
-1:  mov x17, #91
+1:  mov x17, #92
     b dm_vk_slow
     .size vkGetFenceStatus, .-vkGetFenceStatus
     .globl vkGetImageMemoryRequirements
@@ -1111,10 +1123,10 @@ vkGetFenceStatus:
 vkGetImageMemoryRequirements:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #736]
+    ldr x17, [x16, #744]
     cbz x17, 1f
     br x17
-1:  mov x17, #92
+1:  mov x17, #93
     b dm_vk_slow
     .size vkGetImageMemoryRequirements, .-vkGetImageMemoryRequirements
     .globl vkGetInstanceProcAddr
@@ -1123,10 +1135,10 @@ vkGetImageMemoryRequirements:
 vkGetInstanceProcAddr:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #744]
+    ldr x17, [x16, #752]
     cbz x17, 1f
     br x17
-1:  mov x17, #93
+1:  mov x17, #94
     b dm_vk_slow
     .size vkGetInstanceProcAddr, .-vkGetInstanceProcAddr
     .globl vkGetPhysicalDeviceFeatures
@@ -1135,10 +1147,10 @@ vkGetInstanceProcAddr:
 vkGetPhysicalDeviceFeatures:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #752]
+    ldr x17, [x16, #760]
     cbz x17, 1f
     br x17
-1:  mov x17, #94
+1:  mov x17, #95
     b dm_vk_slow
     .size vkGetPhysicalDeviceFeatures, .-vkGetPhysicalDeviceFeatures
     .globl vkGetPhysicalDeviceFeatures2
@@ -1147,10 +1159,10 @@ vkGetPhysicalDeviceFeatures:
 vkGetPhysicalDeviceFeatures2:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #760]
+    ldr x17, [x16, #768]
     cbz x17, 1f
     br x17
-1:  mov x17, #95
+1:  mov x17, #96
     b dm_vk_slow
     .size vkGetPhysicalDeviceFeatures2, .-vkGetPhysicalDeviceFeatures2
     .globl vkGetPhysicalDeviceFormatProperties
@@ -1159,10 +1171,10 @@ vkGetPhysicalDeviceFeatures2:
 vkGetPhysicalDeviceFormatProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #768]
+    ldr x17, [x16, #776]
     cbz x17, 1f
     br x17
-1:  mov x17, #96
+1:  mov x17, #97
     b dm_vk_slow
     .size vkGetPhysicalDeviceFormatProperties, .-vkGetPhysicalDeviceFormatProperties
     .globl vkGetPhysicalDeviceFormatProperties2
@@ -1171,10 +1183,10 @@ vkGetPhysicalDeviceFormatProperties:
 vkGetPhysicalDeviceFormatProperties2:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #776]
+    ldr x17, [x16, #784]
     cbz x17, 1f
     br x17
-1:  mov x17, #97
+1:  mov x17, #98
     b dm_vk_slow
     .size vkGetPhysicalDeviceFormatProperties2, .-vkGetPhysicalDeviceFormatProperties2
     .globl vkGetPhysicalDeviceImageFormatProperties
@@ -1183,10 +1195,10 @@ vkGetPhysicalDeviceFormatProperties2:
 vkGetPhysicalDeviceImageFormatProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #784]
+    ldr x17, [x16, #792]
     cbz x17, 1f
     br x17
-1:  mov x17, #98
+1:  mov x17, #99
     b dm_vk_slow
     .size vkGetPhysicalDeviceImageFormatProperties, .-vkGetPhysicalDeviceImageFormatProperties
     .globl vkGetPhysicalDeviceMemoryProperties
@@ -1195,10 +1207,10 @@ vkGetPhysicalDeviceImageFormatProperties:
 vkGetPhysicalDeviceMemoryProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #792]
+    ldr x17, [x16, #800]
     cbz x17, 1f
     br x17
-1:  mov x17, #99
+1:  mov x17, #100
     b dm_vk_slow
     .size vkGetPhysicalDeviceMemoryProperties, .-vkGetPhysicalDeviceMemoryProperties
     .globl vkGetPhysicalDeviceProperties
@@ -1207,10 +1219,10 @@ vkGetPhysicalDeviceMemoryProperties:
 vkGetPhysicalDeviceProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #800]
+    ldr x17, [x16, #808]
     cbz x17, 1f
     br x17
-1:  mov x17, #100
+1:  mov x17, #101
     b dm_vk_slow
     .size vkGetPhysicalDeviceProperties, .-vkGetPhysicalDeviceProperties
     .globl vkGetPhysicalDeviceProperties2
@@ -1219,10 +1231,10 @@ vkGetPhysicalDeviceProperties:
 vkGetPhysicalDeviceProperties2:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #808]
+    ldr x17, [x16, #816]
     cbz x17, 1f
     br x17
-1:  mov x17, #101
+1:  mov x17, #102
     b dm_vk_slow
     .size vkGetPhysicalDeviceProperties2, .-vkGetPhysicalDeviceProperties2
     .globl vkGetPhysicalDeviceQueueFamilyProperties
@@ -1231,10 +1243,10 @@ vkGetPhysicalDeviceProperties2:
 vkGetPhysicalDeviceQueueFamilyProperties:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #816]
+    ldr x17, [x16, #824]
     cbz x17, 1f
     br x17
-1:  mov x17, #102
+1:  mov x17, #103
     b dm_vk_slow
     .size vkGetPhysicalDeviceQueueFamilyProperties, .-vkGetPhysicalDeviceQueueFamilyProperties
     .globl vkGetPhysicalDeviceSurfaceCapabilitiesKHR
@@ -1243,10 +1255,10 @@ vkGetPhysicalDeviceQueueFamilyProperties:
 vkGetPhysicalDeviceSurfaceCapabilitiesKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #824]
+    ldr x17, [x16, #832]
     cbz x17, 1f
     br x17
-1:  mov x17, #103
+1:  mov x17, #104
     b dm_vk_slow
     .size vkGetPhysicalDeviceSurfaceCapabilitiesKHR, .-vkGetPhysicalDeviceSurfaceCapabilitiesKHR
     .globl vkGetPhysicalDeviceSurfaceFormatsKHR
@@ -1255,10 +1267,10 @@ vkGetPhysicalDeviceSurfaceCapabilitiesKHR:
 vkGetPhysicalDeviceSurfaceFormatsKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #832]
+    ldr x17, [x16, #840]
     cbz x17, 1f
     br x17
-1:  mov x17, #104
+1:  mov x17, #105
     b dm_vk_slow
     .size vkGetPhysicalDeviceSurfaceFormatsKHR, .-vkGetPhysicalDeviceSurfaceFormatsKHR
     .globl vkGetPhysicalDeviceSurfaceSupportKHR
@@ -1267,10 +1279,10 @@ vkGetPhysicalDeviceSurfaceFormatsKHR:
 vkGetPhysicalDeviceSurfaceSupportKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #840]
+    ldr x17, [x16, #848]
     cbz x17, 1f
     br x17
-1:  mov x17, #105
+1:  mov x17, #106
     b dm_vk_slow
     .size vkGetPhysicalDeviceSurfaceSupportKHR, .-vkGetPhysicalDeviceSurfaceSupportKHR
     .globl vkGetPipelineCacheData
@@ -1279,10 +1291,10 @@ vkGetPhysicalDeviceSurfaceSupportKHR:
 vkGetPipelineCacheData:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #848]
+    ldr x17, [x16, #856]
     cbz x17, 1f
     br x17
-1:  mov x17, #106
+1:  mov x17, #107
     b dm_vk_slow
     .size vkGetPipelineCacheData, .-vkGetPipelineCacheData
     .globl vkGetQueryPoolResults
@@ -1291,10 +1303,10 @@ vkGetPipelineCacheData:
 vkGetQueryPoolResults:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #856]
+    ldr x17, [x16, #864]
     cbz x17, 1f
     br x17
-1:  mov x17, #107
+1:  mov x17, #108
     b dm_vk_slow
     .size vkGetQueryPoolResults, .-vkGetQueryPoolResults
     .globl vkGetSwapchainImagesKHR
@@ -1303,10 +1315,10 @@ vkGetQueryPoolResults:
 vkGetSwapchainImagesKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #864]
+    ldr x17, [x16, #872]
     cbz x17, 1f
     br x17
-1:  mov x17, #108
+1:  mov x17, #109
     b dm_vk_slow
     .size vkGetSwapchainImagesKHR, .-vkGetSwapchainImagesKHR
     .globl vkInvalidateMappedMemoryRanges
@@ -1315,10 +1327,10 @@ vkGetSwapchainImagesKHR:
 vkInvalidateMappedMemoryRanges:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #872]
+    ldr x17, [x16, #880]
     cbz x17, 1f
     br x17
-1:  mov x17, #109
+1:  mov x17, #110
     b dm_vk_slow
     .size vkInvalidateMappedMemoryRanges, .-vkInvalidateMappedMemoryRanges
     .globl vkMapMemory
@@ -1327,10 +1339,10 @@ vkInvalidateMappedMemoryRanges:
 vkMapMemory:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #880]
+    ldr x17, [x16, #888]
     cbz x17, 1f
     br x17
-1:  mov x17, #110
+1:  mov x17, #111
     b dm_vk_slow
     .size vkMapMemory, .-vkMapMemory
     .globl vkQueuePresentKHR
@@ -1339,10 +1351,10 @@ vkMapMemory:
 vkQueuePresentKHR:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #888]
+    ldr x17, [x16, #896]
     cbz x17, 1f
     br x17
-1:  mov x17, #111
+1:  mov x17, #112
     b dm_vk_slow
     .size vkQueuePresentKHR, .-vkQueuePresentKHR
     .globl vkQueueSubmit
@@ -1351,10 +1363,10 @@ vkQueuePresentKHR:
 vkQueueSubmit:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #896]
+    ldr x17, [x16, #904]
     cbz x17, 1f
     br x17
-1:  mov x17, #112
+1:  mov x17, #113
     b dm_vk_slow
     .size vkQueueSubmit, .-vkQueueSubmit
     .globl vkQueueWaitIdle
@@ -1363,10 +1375,10 @@ vkQueueSubmit:
 vkQueueWaitIdle:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #904]
+    ldr x17, [x16, #912]
     cbz x17, 1f
     br x17
-1:  mov x17, #113
+1:  mov x17, #114
     b dm_vk_slow
     .size vkQueueWaitIdle, .-vkQueueWaitIdle
     .globl vkResetCommandBuffer
@@ -1375,10 +1387,10 @@ vkQueueWaitIdle:
 vkResetCommandBuffer:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #912]
+    ldr x17, [x16, #920]
     cbz x17, 1f
     br x17
-1:  mov x17, #114
+1:  mov x17, #115
     b dm_vk_slow
     .size vkResetCommandBuffer, .-vkResetCommandBuffer
     .globl vkResetCommandPool
@@ -1387,10 +1399,10 @@ vkResetCommandBuffer:
 vkResetCommandPool:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #920]
+    ldr x17, [x16, #928]
     cbz x17, 1f
     br x17
-1:  mov x17, #115
+1:  mov x17, #116
     b dm_vk_slow
     .size vkResetCommandPool, .-vkResetCommandPool
     .globl vkResetFences
@@ -1399,10 +1411,10 @@ vkResetCommandPool:
 vkResetFences:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #928]
+    ldr x17, [x16, #936]
     cbz x17, 1f
     br x17
-1:  mov x17, #116
+1:  mov x17, #117
     b dm_vk_slow
     .size vkResetFences, .-vkResetFences
     .globl vkUnmapMemory
@@ -1411,10 +1423,10 @@ vkResetFences:
 vkUnmapMemory:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #936]
+    ldr x17, [x16, #944]
     cbz x17, 1f
     br x17
-1:  mov x17, #117
+1:  mov x17, #118
     b dm_vk_slow
     .size vkUnmapMemory, .-vkUnmapMemory
     .globl vkUpdateDescriptorSetWithTemplate
@@ -1423,10 +1435,10 @@ vkUnmapMemory:
 vkUpdateDescriptorSetWithTemplate:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #944]
+    ldr x17, [x16, #952]
     cbz x17, 1f
     br x17
-1:  mov x17, #118
+1:  mov x17, #119
     b dm_vk_slow
     .size vkUpdateDescriptorSetWithTemplate, .-vkUpdateDescriptorSetWithTemplate
     .globl vkUpdateDescriptorSets
@@ -1435,10 +1447,10 @@ vkUpdateDescriptorSetWithTemplate:
 vkUpdateDescriptorSets:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #952]
+    ldr x17, [x16, #960]
     cbz x17, 1f
     br x17
-1:  mov x17, #119
+1:  mov x17, #120
     b dm_vk_slow
     .size vkUpdateDescriptorSets, .-vkUpdateDescriptorSets
     .globl vkWaitForFences
@@ -1447,10 +1459,10 @@ vkUpdateDescriptorSets:
 vkWaitForFences:
     adrp x16, dm_vk_table
     add x16, x16, :lo12:dm_vk_table
-    ldr x17, [x16, #960]
+    ldr x17, [x16, #968]
     cbz x17, 1f
     br x17
-1:  mov x17, #120
+1:  mov x17, #121
     b dm_vk_slow
     .size vkWaitForFences, .-vkWaitForFences
     .globl dm_vk_slow

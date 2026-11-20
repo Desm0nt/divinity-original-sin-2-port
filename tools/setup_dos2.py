@@ -13,7 +13,8 @@
       patch (dm/verify/equiv.py) -> RomFS (base + BKTR update, 47 files, ~11.4 GB) -> shader jobs from the game's packages and its
       program (tools/dos2_shader_jobs.py), offline translation to Vulkan (dm/gfx/tools/dmsh_vk_xc2.py) and one shader pack
       (dm/gfx/tools/xgs_pack.py) -> the fused post-processing shaders dm/shaders/native-post.xgspack (tools/dos2_post_fuse.py,
-      from five bundles of that pack; SPIR-V tools of the Android NDK r29, fetched into tools/.runtime/spirv-tools when missing)
+      from five bundles of that pack; SPIR-V tools of the Android NDK r29, fetched into tools/.runtime/spirv-tools when missing) and the
+      engine shaders by name dm/shaders/native-nr.xgspack (tools/dos2_nr_sh_pack.py: this port's own GLSL rewrites in your bundles' heads)
       -> the touch interface package romfs/Data/TouchUI.pak (tools/dos2_touchui_pak.py) -> the ASTC
       texture pack for phones without BC textures (tools/dos2_astc_cache.py) -> the phone folder
       <work>/DivinityOriginalSin2Mobile/{romfs, dm/out, dm/shaders, astc, drivers}. Every step is skipped when its output is
@@ -89,7 +90,7 @@ STAGES = [('Finding and checking your game files', 'a few seconds'),
           ('Checking the patch (per-site equivalence)', '2-10 min'),
           ('Extracting the game data (RomFS, ~11.4 GB)', '5-15 min, longer with NSZ / XCZ'),
           ('Translating the shaders (12 329 shaders)', '5-20 min; the first run also downloads build packages from NuGet'),
-          ('Fusing the post-processing shaders (native-post.xgspack)', '1-2 min; the first time also a ~7 MB download of the SPIR-V tools'),
+          ('Fusing the post-processing shaders (native-post.xgspack, native-nr.xgspack)', '1-2 min; the first time also a ~7 MB download of the SPIR-V tools'),
           ('Making the touch interface package (TouchUI.pak)', 'under a minute'),
           ('Preparing textures for phones without BC (ASTC pack, ~1.5 GB)', '5-20 min')]
 
@@ -192,6 +193,14 @@ class Layout:
         self.touchui_stamp = self.work / 'touchui.json'
         self.postpack = self.shaders / 'native-post.xgspack'
         self.postwork, self.postpack_stamp = self.work / 'native-post', self.work / 'native-post.json'
+        self.nrpack = self.shaders / 'native-nr.xgspack'   # NR-04 DM_NR_SH: the engine shaders by name (tools/dos2_nr_sh_pack.py)
+        self.nrwork, self.nrpack_stamp = self.work / 'native-nr', self.work / 'native-nr.json'
+        # NR-33B DM_NR_MAT: gate records of the material depth shaders (tools/dos2_nr_mat.py)
+        self.matpack = self.shaders / 'native-nr33b.xgspack'
+        self.matwork, self.matpack_stamp = self.work / 'native-nr33b', self.work / 'native-nr33b.json'
+        # NR-33C DM_NR_SH_SURF: the surface materials with a wave-coherent early out (tools/dos2_nr_surf.py)
+        self.surfpack = self.shaders / 'native-nr33c.xgspack'
+        self.surfwork, self.surfpack_stamp = self.work / 'native-nr33c', self.work / 'native-nr33c.json'
 
     def exefs_ok(self):
         return build_id(self.exefs / 'main') == BUILD_ID and build_id(self.exefs / 'sdk') == SDK_BUILD_ID and (self.exefs / 'main.raw').is_file()
@@ -243,6 +252,36 @@ class Layout:
         try: return rec.get('inputs') == postpack_inputs(self)[1]
         except (Fail, ImportError): return False   # no shader pack yet / numpy missing (setup check)
 
+    def nrpack_ok(self):
+        """native-nr.xgspack is there and was made by this checkout's tools and GLSL from the bundles now in shaders.xgspack."""
+        try: rec = json.loads(self.nrpack_stamp.read_text())
+        except (OSError, ValueError): return False
+        if not self.nrpack.is_file() or rec.get('sha256') != sha256_file(self.nrpack) or rec.get('tools') != nrpack_tools_hash(): return False
+        try: return rec.get('inputs') == nrpack_inputs(self)
+        except (Fail, ImportError): return False
+
+    # ---- NR-33B (DM_NR_MAT) block
+    def matpack_ok(self):
+        """the NR-33B gate records were made by this checkout's tools from the bundles now in shaders.xgspack (a pack without records is fine)."""
+        try: rec = json.loads(self.matpack_stamp.read_text())
+        except (OSError, ValueError): return False
+        if rec.get('tools') != matpack_tools_hash(): return False
+        if rec.get('records') and (not self.matpack.is_file() or rec.get('sha256') != sha256_file(self.matpack)): return False
+        try: return rec.get('inputs') == matpack_inputs(self)
+        except (Fail, ImportError): return False
+    # ---- end of the NR-33B block
+
+    # ---- NR-33C (DM_NR_SH_SURF) block
+    def surfpack_ok(self):
+        """the NR-33C surface variants were made by this checkout's tools from the bundles now in shaders.xgspack."""
+        try: rec = json.loads(self.surfpack_stamp.read_text())
+        except (OSError, ValueError): return False
+        if rec.get('tools') != surfpack_tools_hash(): return False
+        if rec.get('bundles') and (not self.surfpack.is_file() or rec.get('sha256') != sha256_file(self.surfpack)): return False
+        try: return rec.get('inputs') == surfpack_inputs(self)
+        except (Fail, ImportError): return False
+    # ---- end of the NR-33C block
+
     def astc_ok(self):
         try: man = json.loads((self.astc / 'manifest.json').read_text(encoding='utf-8'))
         except (OSError, ValueError): return False
@@ -273,11 +312,79 @@ def postpack_tools_hash():
     return h.hexdigest()
 
 
+NR_TOOLS = ('tools/dos2_nr_sh_pack.py', 'tools/dos2_pcf_mobile.py', 'tools/dos2_post_mobile.py', 'tools/dos2_light_mobile.py', 'tools/dos2_onchip_shaders.py', 'tools/dos2_lightfuse.py',
+            'tools/dos2_native_shaders.py', 'tools/spv_interp.py', 'dm/gfx/tools/xgs_pack.py')
+
+
+def nrpack_tools_hash():
+    """SHA-256 over the NR-04 pack tool, its checks, the GLSL rewrites and the pinned SPIR-V tools (a release with new rewrites rebuilds it)."""
+    h = hashlib.sha256(NDK_REL.encode() + b'\0')
+    for p in [ROOT / n for n in NR_TOOLS] + sorted((TOOLS / 'dos2_post').glob('*_mobile.frag')) + [TOOLS / 'dos2_post' / 'common.glsl', TOOLS / 'dos2_post' / 'lightfuse_sky.glsl'] + \
+            sorted((TOOLS / 'dos2_pcf').glob('*.frag')):
+        if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
+    return h.hexdigest()
+
+
+def nrpack_inputs(L):
+    """sha256 of the translated bundles the NR-04 pack takes its heads from (tools/dos2_nr_sh_pack.py ENTRIES), read from shaders.xgspack."""
+    from dos2_nr_sh_pack import ENTRIES
+    return pack_inputs(L, sorted({e[1] for e in ENTRIES}), 'engine shaders')[1]
+
+
+# ---- NR-33B (DM_NR_MAT) block: gate records of the material depth shaders
+MAT_TOOLS = ('tools/dos2_nr_mat.py', 'tools/spv_interp.py', 'dm/gfx/tools/xgs_pack.py')
+MATPACK_N = 24     # tools/dos2_nr_mat.py --n: seeded random interpreter runs per record (the same for every player, ~10 s in all)
+
+
+def matpack_tools_hash():
+    h = hashlib.sha256(b'nr33b\0')
+    for p in [ROOT / n for n in MAT_TOOLS]:
+        if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
+    return h.hexdigest()
+
+
+def matpack_inputs(L):
+    """sha256 of programs.tsv + the fragment bundles of every *_DEP_NX material in it, read from shaders.xgspack."""
+    prog = L.jobs / 'programs.tsv'
+    try: rows = [r.split('\t') for r in prog.read_text(encoding='utf-8').splitlines()[1:]]
+    except OSError: raise Fail(f'{prog}: missing (stage 7 writes it)')
+    keys = sorted({r[3] for r in rows if len(r) >= 4 and r[0].endswith('_DEP_NX.bshd') and r[3] != '-'})
+    return hashlib.sha256(prog.read_bytes() + pack_inputs(L, keys, 'material depth shaders')[1].encode()).hexdigest()
+# ---- end of the NR-33B block
+
+
+# ---- NR-33C (DM_NR_SH_SURF) block: the surface materials with a wave-coherent early out
+SURF_TOOLS = ('tools/dos2_nr_surf.py', 'tools/spv_interp.py', 'tools/dos2_nr_sh_pack.py', 'dm/gfx/tools/xgs_pack.py')
+SURFPACK_N = 16    # tools/dos2_nr_surf.py --n: seeded random interpreter cases per variant (the same for every player)
+
+
+def surfpack_tools_hash():
+    h = hashlib.sha256(b'nr33c\0')
+    for p in [ROOT / n for n in SURF_TOOLS]:
+        if p.is_file(): h.update(p.name.encode() + b'\0' + p.read_bytes())
+    return h.hexdigest()
+
+
+def surfpack_inputs(L):
+    """sha256 of programs.tsv + the fragment bundles of every surface program tools/dos2_nr_surf.py takes, read from shaders.xgspack."""
+    prog = L.jobs / 'programs.tsv'
+    if not prog.is_file(): raise Fail(f'{prog}: missing (stage 7 writes it)')
+    sys.path.insert(0, str(TOOLS))
+    import dos2_nr_surf
+    keys = sorted({k for _, k in dos2_nr_surf.programs(prog)})
+    return hashlib.sha256(prog.read_bytes() + pack_inputs(L, keys, 'surface shaders')[1].encode()).hexdigest()
+# ---- end of the NR-33C block
+
+
 def postpack_inputs(L):
     """({key: bundle bytes}, sha256) of the translated bundles the fused shaders are made from (tools/dos2_post_fuse.py K), read from
     dm/shaders/shaders.xgspack: the same bytes the phone checks the fused bundles' host heads against."""
     from dos2_post_fuse import K
-    want = sorted(set(K.values()))
+    return pack_inputs(L, sorted(set(K.values())), 'post-processing shaders')
+
+
+def pack_inputs(L, want, what):
+    """({key: bundle bytes}, sha256) of the translated bundles want, read from dm/shaders/shaders.xgspack."""
     try:
         with open(L.pack, 'rb') as f:
             magic, ver, n, _ = struct.unpack('<4I', f.read(16))
@@ -290,9 +397,9 @@ def postpack_inputs(L):
                     f.seek(o); got[k] = f.read(size)
                     if len(got[k]) != size or zlib.crc32(got[k]) != crc: raise OSError(f'bundle {k} damaged')
     except (OSError, struct.error) as e:
-        raise Fail(f'{L.pack}: cannot read the post-processing shaders ({e}); delete it and run setup again')
+        raise Fail(f'{L.pack}: cannot read the {what} ({e}); delete it and run setup again')
     miss = [k for k in want if k not in got]
-    if miss: raise Fail(f'{L.pack} lacks the post-processing shaders {", ".join(miss)}; delete it and run setup again')
+    if miss: raise Fail(f'{L.pack} lacks the {what} {", ".join(miss)}; delete it and run setup again')
     h = hashlib.sha256()
     for k in want: h.update(k.encode() + b'\0' + hashlib.sha256(got[k]).digest())
     return got, h.hexdigest()
@@ -804,6 +911,7 @@ SPV_FILES = {   # host -> [(path in the archive below android-ndk-r29/, sha256)]
         ('toolchains/llvm/prebuilt/darwin-x86_64/lib/libc++.dylib', 'd5654866a07d79e7310062977f1ed856864b9e31c6ebfb01cb2ca996da905b8d')]}
 SPV_TOOLS = ('glslc', 'spirv-as', 'spirv-dis', 'spirv-opt', 'spirv-val')
 POSTPACK_N = 20     # tools/dos2_post_fuse.py --n: random cases per equivalence check (its default 60 takes ~3x longer; the pack is the same)
+NRPACK_N = 40       # tools/dos2_nr_sh_pack.py --n: seeded, so every player's run checks the same 40 cases per shader (all equal, ~3 s)
 
 
 def spv_host():
@@ -958,6 +1066,109 @@ def step_postpack(L, yes=False):
     eq = L.postwork / 'equivalence.txt'
     print(f'  {len(want)} fused shaders ({", ".join(w.split(".")[0] for w in want)}), {L.postpack.stat().st_size // 1024} KB -> '
           f'{L.postpack.relative_to(L.phone).as_posix()} (checks: {eq.relative_to(L.work).as_posix()})')
+
+
+def step_nrpack(L, yes=False):
+    """dm/shaders/native-nr.xgspack (NR-04, DM_NR_SH; xbg_game.cpp namespace nrsh): the engine's full-screen lighting / post / shadow-resolve
+    fragment shaders as this port's own GLSL rewrites (tools/dos2_post, tools/dos2_pcf) in the heads of your translated bundles, keyed by
+    the engine's shader name - tools/dos2_nr_sh_pack.py compiles, validates and checks each (interface; the proven classes also bit for bit
+    against the translated shader in its SPIR-V interpreter). Without the pack the translated shaders are drawn, as before."""
+    if L.nrpack_ok(): print('  engine shaders by name: already done'); return
+    d = spv_tools(fetch=True, yes=yes)
+    if not d: raise Fail(f'no prebuilt SPIR-V tools for this machine ({sys.platform}); set DOS2_SHADER_TOOLS (Vulkan SDK / shaderc)')
+    if not spv_runs(d): raise Fail(f'the SPIR-V tools in {d} do not start on this machine')
+    inputs = nrpack_inputs(L)
+    if L.nrwork.exists(): shutil.rmtree(L.nrwork)
+    L.nrwork.mkdir(parents=True)
+    print(f'  engine shaders by name (tools/dos2_nr_sh_pack.py; SPIR-V tools: {d})', flush=True)
+    r = subprocess.run([sys.executable, str(TOOLS / 'dos2_nr_sh_pack.py'), '--pack', str(L.pack), '--out', str(L.nrwork), '--n', str(NRPACK_N),
+                        '--programs', str(L.jobs / 'programs.tsv')],   # names <-> keys of your packages (made at stage 7; skipped if absent)
+                       env=spv_env(d, dict(os.environ, PYTHONUTF8='1')), capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if r.returncode:
+        print(r.stdout[-4000:] + r.stderr[-4000:])
+        raise Fail('tools/dos2_nr_sh_pack.py failed (see above)')
+    pack = L.nrwork / 'native-nr.xgspack'
+    import dos2_nr_sh_pack as NRP
+    ENTRIES, OC_VARIANTS = NRP.ENTRIES, NRP.OC_VARIANTS
+    OC_OPTIONAL = getattr(NRP, 'OC_OPTIONAL', {})   # NR-FRAME S2F variants (5.): the pack may hold them or not
+    LF_VARIANTS = getattr(NRP, 'LF_VARIANTS', {})   # NR-LIGHTFUSE: f.ClusteredLightingWithSSAO
+    want = sorted([f'{v}.{e[0] if len(e[0]) + 2 < 32 else e[1]}' for e in ENTRIES for v in e[3]]   # NR-33A: as dos2_nr_sh_pack.py (a name too long for a key -> the fragment key)
+                  + [f'{v}.{e[0]}' for e in ENTRIES for v, _ in OC_VARIANTS.get(e[0], [])])   # NR-ONCHIP input-attachment variants (2. / 3.)
+    optional = sorted([f'{v}.{e[0]}' for e in ENTRIES for v, _ in OC_OPTIONAL.get(e[0], [])]
+                      + [f'{v}.{e[0]}' for e in ENTRIES for v in LF_VARIANTS.get(e[0], '')])   # NR-LIGHTFUSE f. / g.: optional (the host falls back)
+    try:
+        data = pack.read_bytes(); magic, ver, n, _ = struct.unpack_from('<4I', data, 0)
+        have = sorted(struct.unpack_from('<32s', data, 16 + 56 * i)[0].rstrip(b'\0').decode() for i in range(n)) if magic == 0x50534758 and ver == 1 else []
+    except (OSError, struct.error, UnicodeDecodeError):
+        have = []
+    if sorted(k for k in have if k not in optional) != want: raise Fail(f'{pack}: holds {have}, expected {want} (+ optional {optional})')
+    want = have   # the stamp records what the pack holds: the required bundles + the optional ones this build made
+    L.shaders.mkdir(parents=True, exist_ok=True)
+    tmp = L.nrpack.with_name(L.nrpack.name + '.tmp'); shutil.copyfile(pack, tmp); os.replace(tmp, L.nrpack)
+    L.nrpack_stamp.write_text(json.dumps(dict(sha256=sha256_file(L.nrpack), tools=nrpack_tools_hash(), inputs=inputs, spirv_tools=str(d),
+                                              bundles=want), indent=1))
+    print(f'  {len(want)} engine shader bundles, {L.nrpack.stat().st_size // 1024} KB -> {L.nrpack.relative_to(L.phone).as_posix()} '
+          f'(checks: {(L.nrwork / "equivalence.txt").relative_to(L.work).as_posix()})')
+
+
+# ---- NR-33B (DM_NR_MAT) block
+def step_matpack(L):
+    """dm/shaders/native-nr33b.xgspack (NR-33B, DM_NR_MAT; xbg_nr_mat.inc): per material depth fragment shader of your pack, the paths
+    that kill nothing and are decided only by uniform comparisons, with the alpha they leave (tools/dos2_nr_mat.py proves them on the
+    SPIR-V and checks each on the interpreter). The phone then draws such depth-only draws without a fragment shader. Without the pack
+    only the shaders with no kill at all are swapped (no game code is in the APK)."""
+    if L.matpack_ok(): print('  material depth gates: already done'); return
+    inputs = matpack_inputs(L)
+    if L.matwork.exists(): shutil.rmtree(L.matwork)
+    L.matwork.mkdir(parents=True)
+    print('  material depth gates (tools/dos2_nr_mat.py)', flush=True)
+    r = subprocess.run([sys.executable, str(TOOLS / 'dos2_nr_mat.py'), '--pack', str(L.pack), '--programs', str(L.jobs / 'programs.tsv'),
+                        '--out', str(L.matwork), '--n', str(MATPACK_N)], env=dict(os.environ, PYTHONUTF8='1'), capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    if r.returncode:
+        print(r.stdout[-4000:] + r.stderr[-4000:])
+        raise Fail('tools/dos2_nr_mat.py failed (see above)')
+    pack = L.matwork / 'native-nr33b.xgspack'
+    n = 0
+    if pack.is_file():
+        data = pack.read_bytes(); magic, ver, n, _ = struct.unpack_from('<4I', data, 0)
+        if magic != 0x50534758 or ver != 1: raise Fail(f'{pack}: not an xgspack v1')
+        L.shaders.mkdir(parents=True, exist_ok=True)
+        tmp = L.matpack.with_name(L.matpack.name + '.tmp'); shutil.copyfile(pack, tmp); os.replace(tmp, L.matpack)
+    elif L.matpack.is_file(): L.matpack.unlink()
+    L.matpack_stamp.write_text(json.dumps(dict(sha256=sha256_file(L.matpack) if n else '', tools=matpack_tools_hash(), inputs=inputs, records=n), indent=1))
+    print(f'  {n} gate records -> {L.matpack.relative_to(L.phone).as_posix()} (report: {(L.matwork / "report.txt").relative_to(L.work).as_posix()})')
+# ---- end of the NR-33B block
+
+
+# ---- NR-33C (DM_NR_SH_SURF) block
+def step_surfpack(L):
+    """dm/shaders/native-nr33c.xgspack (NR-33C, DM_NR_SH_SURF; xbg_nr_surf.inc): the fragment shaders of the surface materials (puddles,
+    blood, oil, poison, fire, cloud shadows, rain) of your pack, each with a wave-coherent early out after its kills / once its alpha is
+    known (tools/dos2_nr_surf.py transforms your own SPIR-V by structure and proves every variant: spirv-val + interpreter). Without the
+    pack the game's shaders are drawn (no game code is in the APK)."""
+    if L.surfpack_ok(): print('  surface early-out variants: already done'); return
+    inputs = surfpack_inputs(L)
+    if L.surfwork.exists(): shutil.rmtree(L.surfwork)
+    L.surfwork.mkdir(parents=True)
+    print('  surface early-out variants (tools/dos2_nr_surf.py)', flush=True)
+    r = subprocess.run([sys.executable, str(TOOLS / 'dos2_nr_surf.py'), '--pack', str(L.pack), '--programs', str(L.jobs / 'programs.tsv'),
+                        '--out', str(L.surfwork), '--n', str(SURFPACK_N)], env=dict(os.environ, PYTHONUTF8='1'), capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    if r.returncode:
+        print(r.stdout[-4000:] + r.stderr[-4000:])
+        raise Fail('tools/dos2_nr_surf.py failed (see above)')
+    pack = L.surfwork / 'native-nr33c.xgspack'
+    n = 0
+    if pack.is_file():
+        data = pack.read_bytes(); magic, ver, n, _ = struct.unpack_from('<4I', data, 0)
+        if magic != 0x50534758 or ver != 1: raise Fail(f'{pack}: not an xgspack v1')
+        L.shaders.mkdir(parents=True, exist_ok=True)
+        tmp = L.surfpack.with_name(L.surfpack.name + '.tmp'); shutil.copyfile(pack, tmp); os.replace(tmp, L.surfpack)
+    elif L.surfpack.is_file(): L.surfpack.unlink()
+    L.surfpack_stamp.write_text(json.dumps(dict(sha256=sha256_file(L.surfpack) if n else '', tools=surfpack_tools_hash(), inputs=inputs, bundles=n), indent=1))
+    print(f'  {n} bundles -> {L.surfpack.relative_to(L.phone).as_posix()} (report: {(L.surfwork / "nr_surf.tsv").relative_to(L.work).as_posix()})')
+# ---- end of the NR-33C block
 
 
 def step_touchui(L):
@@ -1168,6 +1379,9 @@ def check(L, files):
     item(L.romfs_ok(), 'romfs: extracted and verified', RUN_SETUP)
     item(L.shaders_ok(), f'dm/shaders: {L.shader_count()} SPIR-V bundles in shaders.xgspack', RUN_SETUP)
     item(L.shaders_ok() and L.postpack_ok(), 'dm/shaders/native-post.xgspack: fused post-processing shaders', RUN_SETUP)
+    item(L.shaders_ok() and L.nrpack_ok(), 'dm/shaders/native-nr.xgspack: engine shaders by name (NR-04)', RUN_SETUP)
+    item(L.shaders_ok() and L.matpack_ok(), 'dm/shaders/native-nr33b.xgspack: material depth gates (NR-33B)', RUN_SETUP)   # NR-33B
+    item(L.shaders_ok() and L.surfpack_ok(), 'dm/shaders/native-nr33c.xgspack: surface early-out variants (NR-33C)', RUN_SETUP)   # NR-33C
     mode = L.touchui_mode()
     item(mode is not None, f'romfs/Data/TouchUI.pak: {"made" if mode else "not made yet"}', RUN_SETUP)
     print(f"  {'OK ' if L.astc_ok() else '.. '} astc/dos2-astc.pack (phones without BC){'' if L.astc_ok() else ': not made yet'}")
@@ -1225,7 +1439,7 @@ def prepare(a, L):
     elif shaders_needed: print('  .NET 10 SDK: not found; setup will offer to install it (tools/.runtime/dotnet)')
     else: print('  .NET 10 SDK: not needed (shaders done or skipped)')
     print(f"  SPIRV-Tools: {spirv_tool('spirv-val') or 'not found (optional)'}")
-    if post_wanted and not L.postpack_ok():
+    if post_wanted and not (L.postpack_ok() and L.nrpack_ok()):
         print(f"  SPIR-V tools for the post-processing fusion: {spv_tools() or f'downloaded at stage 8 (Android NDK {NDK_REL}, ~7 MB, into {SPV_DIR})'}")
     verify = 'verify' in steps and not a.skip_verify
     plan = [('ExeFS', L.exefs_ok() or 'exefs' not in steps), ('patch', L.out_ok() or 'patch' not in steps),
@@ -1233,6 +1447,9 @@ def prepare(a, L):
             ('RomFS' + (' (compressed input is expanded first)' if base.compressed or upd.compressed else ''),
              L.romfs_ok() or 'romfs' not in steps), ('shaders', not shaders_needed),
             ('post-processing fusion', not post_wanted or L.postpack_ok()),
+            ('engine shaders by name', not post_wanted or L.nrpack_ok()),
+            ('material depth gates', not post_wanted or L.matpack_ok()),   # NR-33B
+            ('surface early-out variants', not post_wanted or L.surfpack_ok()),   # NR-33C
             ('touch UI', 'touchui' not in steps or L.touchui_mode() == 'full'),
             ('ASTC textures', not astc_wanted or L.astc_ok())]
     print('  plan: ' + ', '.join(f"{n} {'(done/skipped)' if d else ''}".strip() for n, d in plan))
@@ -1264,6 +1481,21 @@ def prepare(a, L):
             post_err = str(e)
             print(f'  NOT MADE: {e}\n  The game runs without it (the post-processing passes are drawn one by one, a little slower); '
                   'run setup again to retry.')
+        try:
+            step_nrpack(L, a.yes); print(f'  done in {took(t0)}')
+        except Fail as e:                        # optional too: without it the translated shaders are drawn
+            post_err = (post_err + '; ' if post_err else '') + str(e)
+            print(f'  NOT MADE: {e}\n  The game runs without it (the translated engine shaders are drawn); run setup again to retry.')
+        try:                                     # NR-33B, optional as well
+            step_matpack(L); print(f'  done in {took(t0)}')
+        except Fail as e:
+            post_err = (post_err + '; ' if post_err else '') + str(e)
+            print(f'  NOT MADE: {e}\n  The game runs without it (only depth shaders without a kill are swapped); run setup again to retry.')
+        try:                                     # NR-33C, optional as well
+            step_surfpack(L); print(f'  done in {took(t0)}')
+        except Fail as e:
+            post_err = (post_err + '; ' if post_err else '') + str(e)
+            print(f'  NOT MADE: {e}\n  The game runs without it (the surface shaders are drawn as translated); run setup again to retry.')
     else: print('  skipped' + (' (--skip-post / --steps)' if not post_wanted else ' (no shader pack yet)'))
     t0 = stage(9)
     if 'touchui' in steps and L.romfs_ok(): step_touchui(L); print(f'  done in {took(t0)}')
@@ -1271,7 +1503,7 @@ def prepare(a, L):
     t0 = stage(10)
     if astc_wanted and L.romfs_ok(): step_astc(L); print(f'  done in {took(t0)}')
     else: print('  skipped' + (' (--skip-astc / --steps)' if not astc_wanted else ' (no RomFS yet)'))
-    if post_err: say(f'note: dm/shaders/native-post.xgspack was not made ({post_err}); run setup again to retry')
+    if post_err: say(f'note: dm/shaders/native-post.xgspack / native-nr.xgspack not made ({post_err}); run setup again to retry')
     if not L.complete():
         say(f'finished the requested steps; the folder is not complete yet: {L.phone}'); return 0
     make_drivers_folder(L)
@@ -1306,8 +1538,8 @@ def main(argv=None):
     ap.add_argument('--keep-nsp', action='store_true')
     ap.add_argument('--skip-shaders', action='store_true')
     ap.add_argument('--skip-verify', action='store_true', help='do not run the patch equivalence check (dm/verify/equiv.py)')
-    ap.add_argument('--skip-post', action='store_true', help='no fused post-processing shaders (dm/shaders/native-post.xgspack); '
-                    'the game then draws those passes one by one')
+    ap.add_argument('--skip-post', action='store_true', help='no fused post-processing shaders (dm/shaders/native-post.xgspack) and no '
+                    'engine shaders by name (native-nr.xgspack); the game then draws those passes one by one, with the translated shaders')
     ap.add_argument('--skip-astc', action='store_true', help='no ASTC texture pack (phones with BC textures, i.e. Adreno, do not use it)')
     ap.add_argument('--ipa', default=None, help=argparse.SUPPRESS)   # accepted and ignored: the touch interface no longer reads the iPad edition
     ap.add_argument('--no-dlc', action='store_true', help=argparse.SUPPRESS)

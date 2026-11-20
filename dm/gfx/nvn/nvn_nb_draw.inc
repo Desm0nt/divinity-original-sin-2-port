@@ -21,7 +21,7 @@ static uint64_t g_nbds[NBDS_KINDS];   // render thread mostly; atomics because a
 static void nbds_add(int k, uint64_t n) { __atomic_fetch_add(&g_nbds[k], n, __ATOMIC_RELAXED); }
 void nvn_nb_draw_stats(uint64_t out[NBDS_KINDS]);
 void nvn_nb_draw_stats(uint64_t out[NBDS_KINDS]) { for (int i = 0; i < NBDS_KINDS; i++) out[i] = __atomic_exchange_n(&g_nbds[i], 0, __ATOMIC_RELAXED); }
-static void nbd_reset(void) { memset(&t_nbd.s.h, 0, sizeof t_nbd.s.h); }
+static void nbd_reset(void) { memset(&t_nbd.s.h, 0, sizeof t_nbd.s.h); NRD_WF_RESET(); }   // NRD_WF_RESET: [DOS2] NR-09R, the flags of the binds that left
 static uint64_t g_nbd_check;               // NB-10: DM_NB_OPS_CHECK opcode mask (set by the front end before nvn_nb_draw_enable)
 static __thread int t_nbd_chk, t_nbd_mirror;   // this bracket is checked; the next record is the mirror of a modelled call
 void nvn_nb_draw_check(uint64_t mask);
@@ -101,6 +101,16 @@ static int nbd_take_ren(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) 
     if (t_nbd_chk) { t_nbd_mirror = 1; return 0; }
     return 1;
 }
+// NR-09 (DM_NR_DRAW, armed by the front end hle_dos2_nr.c before guest code runs): the record of a draw whose engine identity the NR-02
+// hook took right before this NVN draw (dm_nr_draw_ident, same thread) becomes an OP_X_NR_DRAW: NBD_F_NR + the nrd_tail after the binds.
+// No identity (the hook is off / did not run for this draw) -> the plain OP_X_NB_DRAW, as before. g_nrd_on == 0: one load, nothing else.
+static int g_nrd_on;
+static uint64_t g_nrds[2];   // records with the tail / without an identity (atomics)
+int dm_nr_draw_ident(uint32_t *key, uint32_t *texset, unsigned *why, unsigned *site) __attribute__((weak));
+void nvn_nr_draw_enable(int on);
+void nvn_nr_draw_enable(int on) { g_nrd_on = on && dm_nr_draw_ident; }
+void nvn_nr_draw_stats(uint64_t out[2]);
+void nvn_nr_draw_stats(uint64_t out[2]) { for (int i = 0; i < 2; i++) out[i] = __atomic_exchange_n(&g_nrds[i], 0, __ATOMIC_RELAXED); }
 // The draw: the shadow + the draw arguments as one OP_X_NB_DRAW. Always 1 (the record is written).
 static int nbd_draw(NVNcommandBuffer *c, int kind, int prim, int itype, int count, int bv, int bi, int inst, uint64_t ib, int first) {
     nbd_cb(c);
@@ -108,11 +118,17 @@ static int nbd_draw(NVNcommandBuffer *c, int kind, int prim, int itype, int coun
     h->engine_op = (uint8_t)t_nbd.op; h->draw = (uint8_t)kind; h->texgen = __atomic_load_n(&g_nbd_texgen, __ATOMIC_RELAXED);
     h->prim = prim; h->itype = itype; h->count = count; h->base_vertex = bv; h->base_instance = bi; h->instances = inst; h->ibuf = ib; h->first = first;
     if (t_nbd_chk) h->flags |= NBD_F_CHECK;
-    const uint32_t size = nbd_size(&t_nbd.s);
+    uint32_t nr_key = 0, nr_ts = 0; unsigned nr_why = 0, nr_site = 0xff;   // [DOS2] NR-09 DM_NR_DRAW
+    const int nr = __builtin_expect(g_nrd_on, 0) && dm_nr_draw_ident(&nr_key, &nr_ts, &nr_why, &nr_site);
+    if (nr) h->flags |= NBD_F_NR;
+    const uint32_t size = nbd_size(&t_nbd.s) + (nr ? (uint32_t)sizeof(nrd_tail) : 0u);
     const int e = t_nbd.emitting; t_nbd.emitting = 1;
     uint8_t *p = (uint8_t *)rec(c, OP_X_NB_DRAW, size);
     t_nbd.emitting = e;
     nbd_pack(&t_nbd.s, p, size);
+    if (nr) nrd_tail_put(p, size, nr_key, nr_ts, nr_why, nr_site);
+    NRD_EXT_PUT(nr, p, size);   // [DOS2] NR-09R DM_NR_DIRECT: the tail's spare word (nothing without the switch)
+    if (__builtin_expect(g_nrd_on, 0)) __atomic_fetch_add(&g_nrds[nr ? 0 : 1], 1, __ATOMIC_RELAXED);
     nbds_add(NBDS_DRAWS, 1); nbds_add(NBDS_BINDS, h->nbind); nbds_add(NBDS_BYTES, (size + 8 + 7) & ~7u);
     nbd_reset(); t_nbd.drew = 1;
     if (t_nbd_chk) { t_nbd_mirror = 1; return 0; }   // NB-10 check: the caller writes the old draw record right after this one

@@ -38,17 +38,80 @@ CBUF(82, c16)
 CBUF(88, c1)
 CBUF(94, c4)
 CBUF(100, c15)
+// NR-ONCHIP (docs/dos2/nr/NR-ONCHIP.md): with OC != 0 (only tools/dos2_onchip_shaders.py defines it; the pack build never does) texture
+// n of the list below with bit n of OC set is an input attachment (input_attachment_index n) of a merged render pass: 0 tG0, 1 tNormal,
+// 2 tDepth, 3 tEmissive, 4 tBase, 5 tAniso, 6 tAmbient, 7 tShadow (tExposure, 1x1, stays a texture). Such a variant exists only for
+// render scale 1 (the host's value): every fetch is at the fragment's own pixel, which is what subpassLoad reads.
+#ifndef OC
+#define OC 0
+#endif
+#if (OC >> 0) & 1
+layout(input_attachment_index = 0, set = 0, binding = 10) uniform subpassInput tG0;
+#define F_G0(p) subpassLoad(tG0)
+#else
 layout(set = 0, binding = 10) uniform sampler2D tG0;
+#define F_G0(p) texelFetch(tG0, p, 0)
+#endif
+#if (OC >> 1) & 1
+layout(input_attachment_index = 1, set = 0, binding = 16) uniform subpassInput tNormal;
+#define F_NORMAL(p) subpassLoad(tNormal)
+#else
 layout(set = 0, binding = 16) uniform sampler2D tNormal;
+#define F_NORMAL(p) texelFetch(tNormal, p, 0)
+#endif
+#if (OC >> 2) & 1
+layout(input_attachment_index = 2, set = 0, binding = 22) uniform subpassInput tDepth;
+#define F_DEPTH(p) subpassLoad(tDepth)
+#else
 layout(set = 0, binding = 22) uniform sampler2D tDepth;
+#define F_DEPTH(p) texelFetch(tDepth, p, 0)
+#endif
+#if (OC >> 3) & 1
+layout(input_attachment_index = 3, set = 0, binding = 28) uniform subpassInput tEmissive;
+#define F_EMISSIVE(p) subpassLoad(tEmissive)
+#else
 layout(set = 0, binding = 28) uniform sampler2D tEmissive;
+#define F_EMISSIVE(p) texelFetch(tEmissive, p, 0)
+#endif
+#if (OC >> 4) & 1
+layout(input_attachment_index = 4, set = 0, binding = 34) uniform subpassInput tBase;
+#define F_BASE(p) subpassLoad(tBase)
+#else
 layout(set = 0, binding = 34) uniform sampler2D tBase;
+#define F_BASE(p) texelFetch(tBase, p, 0)
+#endif
+#if (OC >> 5) & 1
+layout(input_attachment_index = 5, set = 0, binding = 40) uniform subpassInput tAniso;
+#define F_ANISO(p) subpassLoad(tAniso)
+#else
 layout(set = 0, binding = 40) uniform sampler2D tAniso;
+#define F_ANISO(p) texelFetch(tAniso, p, 0)
+#endif
 layout(set = 0, binding = 46) uniform sampler2D tExposure;
+#if (OC >> 6) & 1
+layout(input_attachment_index = 6, set = 0, binding = 52) uniform subpassInput tAmbient;
+#define F_AMBIENT(p) subpassLoad(tAmbient)
+#else
 layout(set = 0, binding = 52) uniform sampler2D tAmbient;
+#define F_AMBIENT(p) texelFetch(tAmbient, p, 0)
+#endif
+#if (OC >> 7) & 1
+layout(input_attachment_index = 7, set = 0, binding = 58) uniform subpassInput tShadow;
+#define F_SHADOW(p) subpassLoad(tShadow)
+#else
 layout(set = 0, binding = 58) uniform sampler2D tShadow;
+#define F_SHADOW(p) texelFetch(tShadow, p, 0)
+#endif
 layout(location = 2) noperspective in vec4 Ray;
 layout(location = 0) out vec4 outColor;
+// NR-LIGHTFUSE (-DLIGHTFUSE, pack variant f, docs/dos2/nr/NR-LIGHTFUSE.md): DeferredSky computed here (lightfuse_sky.glsl); without
+// LIGHTFUSE this file compiles to the NR-04 SPIR-V byte for byte. LF_DF(x) = what the blender made of Sky's Df and Light's output x.
+#ifdef LIGHTFUSE
+#include "lightfuse_sky.glsl"
+#define LF_DF(x) (lfDf + (x))
+#else
+#define LF_DF(x) (x)
+#endif
 
 const float FMAX = 3.40282347e+38;
 // the translation's reciprocal: x == 0 ? FLT_MAX : (x != 1 ? 1 / x : x); 1 / 1 == 1 exactly, so the middle test is dropped
@@ -68,11 +131,17 @@ float blinn(float pw, float nx, float ny, float nz, vec3 h, float ih, float eps)
 void main()
 {
     ivec2 c, pE, pA, pD, pM, pC, pT, pX, pH, pS;
+#if OC
+    {   // render scale 1 only (see the declarations)
+#else
     [[dont_flatten]] if (sb._m5[0] == 1.0 && sb._m5[1] == 1.0 && sb._m5[2] == 1.0 && sb._m5[3] == 1.0 && sb._m5[4] == 1.0 &&
                          sb._m5[5] == 1.0 && sb._m5[6] == 1.0 && sb._m5[7] == 1.0 && sb._m5[8] == 1.0 && sb._m5[9] == 1.0) {
+#endif
         c = ivec2(gl_FragCoord.xy);
         pE = c; pA = c; pD = c; pM = c; pC = c; pT = c; pH = c; pS = c; pX = ivec2(0);
-    } else {
+    }
+#if !OC
+    else {
         float s0 = sb._m5[0];
         c = ivec2(int(trunc(gl_FragCoord.x / s0)), int(trunc(gl_FragCoord.y / s0)));
         pE = rs_fix2(c, sb._m5[1]); pA = rs_fix2(c, sb._m5[2]); pD = rs_fix2(c, sb._m5[3]); pM = rs_fix2(c, sb._m5[4]);
@@ -80,9 +149,10 @@ void main()
         float s7 = sb._m5[7];
         pX = s7 < 0.0 ? ivec2(int(mod(gl_FragCoord.x, -s7)), int(mod(gl_FragCoord.y, -s7))) : ivec2(0);
     }
-    vec4 g0 = texelFetch(tG0, pE, 0);
-    float d = texelFetch(tDepth, pD, 0).x;
-    vec3 em = texelFetch(tEmissive, pM, 0).xyz;
+#endif
+    vec4 g0 = F_G0(pE);
+    float d = F_DEPTH(pD).x;
+    vec3 em = F_EMISSIVE(pM).xyz;
     int flags = int(uint(max(roundEven(g0.w * 255.0), 0.0)));
     uint fx = uint(flags & 1);
     int model = int(uint(flags & 6) >> 1);
@@ -91,15 +161,28 @@ void main()
     vec3 U = emis ? em : vec3(0.0);
     float e = texelFetch(tExposure, pX, 0).x;
     float ce = e == 0.0 ? 0.00999999978 : e;
+#ifdef LIGHTFUSE
+    vec3 lfSp, lfD;
+    lf_sky(Ray, lfSp, lfD);
+    vec3 lfDf = q11(lfD);
+#endif
     [[dont_flatten]] if (model == 1 || d == 1.0) {
-        outColor = vec4(fma(max(vec3(0.0), E), vec3(ce), U), 0.0);
+#ifdef LIGHTFUSE
+        LF_OUT(vec4(LF_DF(fma(max(vec3(0.0), E), vec3(ce), U)), 0.0));
+#else
+        outColor = vec4(LF_DF(fma(max(vec3(0.0), E), vec3(ce), U)), 0.0);
+#endif
         return;
     }
-    vec2 n = texelFetch(tNormal, pA, 0).xy;
-    vec3 base = texelFetch(tBase, pC, 0).xyz;
-    vec3 amb = texelFetch(tAmbient, pH, 0).xyz;
+    vec2 n = F_NORMAL(pA).xy;
+    vec3 base = F_BASE(pC).xyz;
+#ifdef LIGHTFUSE
+    vec3 amb = q11(lfSp);
+#else
+    vec3 amb = F_AMBIENT(pH).xyz;
+#endif
     float sh = 1.0;
-    [[dont_flatten]] if (0.0 < c4._m0[0].w) sh = texelFetch(tShadow, pS, 0).x;
+    [[dont_flatten]] if (0.0 < c4._m0[0].w) sh = F_SHADOW(pS).x;
     vec4 k1 = c1._m0[0], k2 = c1._m0[1];
     float ex = fma(n.x, k1.x, -1.77769995), ey = fma(n.y, k1.x, -1.77769995);
     float s = 2.0 / (fma(ey, ey, ex * ex) + 1.0);
@@ -203,7 +286,7 @@ void main()
             }
         }
     } else {
-        vec4 t10 = texelFetch(tAniso, pT, 0);
+        vec4 t10 = F_ANISO(pT);
         float fl = floor(t10.y * 15.9375);
         vec4 k3 = c1._m0[2];
         float ox = max(min(fma(fma(t10.x, 4080.0, fl), k3.x, -1.0), 1.0), -1.0);
@@ -296,5 +379,9 @@ void main()
             }
         }
     }
-    outColor = vec4(amb + fma(max(vec3(0.0), (spec + diff) + E), vec3(ce), U), 1.0);
+#ifdef LIGHTFUSE
+    LF_OUT(vec4(LF_DF(amb + fma(max(vec3(0.0), (spec + diff) + E), vec3(ce), U)), 1.0));
+#else
+    outColor = vec4(LF_DF(amb + fma(max(vec3(0.0), (spec + diff) + E), vec3(ce), U)), 1.0);
+#endif
 }

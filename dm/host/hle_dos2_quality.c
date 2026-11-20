@@ -77,10 +77,15 @@
 //   build has no offscreen lists at all). The half-res targets are still allocated by Init (memory only).
 //   DM_DOS2_PARTICLES_FULL=1   0x104cd4c strb w8 -> strb wzr (the flag stays 0 in every level); the monitor thread logs the flag and
 //                              clears it if it ever reads non-zero. Default 0 (the console's chain) until phone-verified.
+// [DOS2] N6 hacks (dm/gfx/nr/nr_hacks.h, docs/dos2/nr/NR-HACKS.md; DM_HACK_TIER or each DM_HACK_*; an explicit DM_DOS2_* knob wins):
+//   DM_HACK_SCALE=<p>   the 3D at p % per side: DRS off -> min = ceiling = p with the 100 ms target (fixed); DRS on -> ceiling min(max, p)
+//   DM_HACK_NOBLOOM=1   Bloom 0 (monitor thread)       DM_HACK_NOAA=1 -> DM_DOS2_AA=0 (not with FSR at a lower scale)
+//   DM_HACK_SHADOWS=1   -> DM_DOS2_SHADOWS=2 (512 x 3). FSR / far cascade / texture bias / shadow resolve: the backend (xbg_nr_hacks.inc).
 // dm_dos2_drs_set_ceiling(pct): the run-time ceiling; the effective one = min(DM_DOS2_DRS max, it).
 // All code sites are checked word for word: another build changes nothing. The monitor thread only reads the DRS object (log, ladder floor).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
+#include "../gfx/nr/nr_drift.h"   // [DOS2] NR-DRIFT DM_DOS2_DRS_SETTLE (pure C, tests/nr_drift_test.c)
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -89,6 +94,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "../gfx/nr/nr_hacks.h"   // [DOS2] N6 DM_HACK_* (docs/dos2/nr/NR-HACKS.md)
 
 enum { DQ_SETSIZE = 0xb21880, DQ_GATE = 0xc05db0, DQ_FIXED = 0xa6d400, DQ_DRS_PTR = 0x2bbb198, DQ_DRS_VT = 0x299b938,
        DQ_RENDERER_PTR = 0x2bbdc68, DQ_GPU_MS = 0x18f0, DQ_GS_PTR = 0x2bc0278, DQ_GS_VT = 0x29946e8,
@@ -121,9 +127,11 @@ static const uint32_t k_aa_rd = 0xb9406508;   // ldr w8,[x8,#0x64] at each FXAA-
 static module_t *g_main;
 static int g_user_pct = 100;           // DM_DOS2_DRS max
 static _Atomic int g_ceil_pct = 100;   // run-time ceiling (the ladder's), 50..100, 100 = no ceiling
-static int g_drs_log, g_tgt_mode, g_thermal, g_cave;   // g_tgt_mode: 0 the game's, 1 the host's frame budget, 2 fixed
+static int g_drs_log, g_tgt_mode, g_thermal, g_cave;
+static uint32_t g_spike;            // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: the cave's mode bits (NRD_SPIKE_*), 0 = not installed   // g_tgt_mode: 0 the game's, 1 the host's frame budget, 2 fixed
 static int g_pt_full;                  // DM_DOS2_PARTICLES_FULL=1 and the store patch is in
 static int g_aa_off;                   // DM_DOS2_AA=0 and the store patch is in
+static int g_nobloom;                  // [DOS2] N6 DM_HACK_NOBLOOM=1: GraphicSettings +0x68 kept at 0 by the monitor thread
 static volatile float *g_q;            // our data page: [0] target ms, [1] step-up threshold ms, [2] ceiling factor (1 = none)
 extern _Atomic uint64_t g_nvn_present_period_ns;
 float dm_thermal_headroom(void) __attribute__((weak));
@@ -166,6 +174,7 @@ static volatile uint8_t *dq_gs(void) {   // GraphicSettings, checked by its vtab
     return g;
 }
 __attribute__((weak)) double xbg_recent_gpu_ms(void);   // the Vulkan backend's GPU ms a frame over its last report window (-1: none yet)
+__attribute__((weak)) double xbg_recent_draws(void);    // [DOS2] NR-DRIFT: its draws a frame over the same window (-1: none yet)
 static float dq_gpu_ms(void) {
     uint8_t *r = *(uint8_t *volatile *)(g_main->base + DQ_RENDERER_PTR);
     return r ? *(volatile float *)(r + DQ_GPU_MS) : NAN;
@@ -175,7 +184,17 @@ void dm_dos2_drs_set_ceiling(int pct);   // the run-time ceiling (the thermal la
 void dm_dos2_drs_set_ceiling(int pct) { atomic_store(&g_ceil_pct, pct < 50 ? 50 : pct > 100 ? 100 : pct); }
 static int dq_eff_pct(void) { int p = atomic_load(&g_ceil_pct); return g_user_pct < p ? g_user_pct : p; }
 
-static void dq_set_target(float ms) { g_q[1] = ms * 30.0f / 31.5f; g_q[0] = ms; }
+// [DOS2] NR-DRIFT: the target the controller should use (g_tq) and what it reads (g_q[0..1]); they differ only while DM_DOS2_DRS_SETTLE
+// holds the target at 100 ms around a load screen (the game's own "DRS off" path: it never steps down).
+static float g_tq[2] = {31.5f, 30.0f};
+static int g_hold;                     // 1 = DM_DOS2_DRS_SETTLE=1 holds the published target at 100 ms now
+static nrd_settle_t g_settle;          // DM_DOS2_DRS_SETTLE state (mode 0 = off: nrd_settle_step does nothing)
+static void dq_publish(void) {
+    if (!g_q) return;
+    const float t = g_hold ? 100.0f : g_tq[0], h = g_hold ? 100.0f * 30.0f / 31.5f : g_tq[1];
+    g_q[1] = h; g_q[0] = t;
+}
+static void dq_set_target(float ms) { g_tq[1] = ms * 30.0f / 31.5f; g_tq[0] = ms; dq_publish(); }
 
 // Thermal ladder (1 Hz): stage 1 DRS ceiling 85 %, 2 + 75 % and ShadowQuality 2, 3 + 65 % and Bloom off
 static void dq_ladder(const dq_drs_t *d) {
@@ -242,6 +261,16 @@ static void dq_aa_watch(void) {
     if (v != last) { last = v; LOG("[quality] AntiAliasing = %d: %s", v, v ? "FXAA" : "no FXAA (pass gone, or a PPDefault copy when nothing follows it)"); }
 }
 
+// [DOS2] N6 DM_HACK_NOBLOOM=1: Bloom (GraphicSettings +0x68) is read every frame by the post step's enable (0xab4680 / 0xab50b0), so 0 only
+// skips the bloom chain (the thermal ladder's stage 3 does the same). Written as soon as the object is up and whenever it reads 1 again.
+static void dq_bloom_watch(void) {
+    static int told;
+    volatile uint8_t *gs = dq_gs();
+    if (!gs || !gs[GS_BLOOM]) return;
+    gs[GS_BLOOM] = 0;
+    if (told++ < 4) LOG("[quality] DM_HACK_NOBLOOM=1: Bloom (GraphicSettings +%#x) 1 -> 0: no bloom chain (%d)", GS_BLOOM, told);
+}
+
 static void *dq_monitor(void *arg) {
     (void)arg;
     int seen = 0, tick = 0, pct_logged = 100; uint64_t next_log = 0; float tgt_logged = 0;
@@ -255,15 +284,17 @@ static void *dq_monitor(void *arg) {
             uint64_t p = atomic_load(&g_nvn_present_period_ns);
             if (p) {
                 float ms = (float)(p / 1e6 * 0.95); if (ms < 4) ms = 4; if (ms > 100) ms = 100;
-                if (fabsf(ms - g_q[0]) > 0.01f) dq_set_target(ms);
+                if (fabsf(ms - g_tq[0]) > 0.01f) dq_set_target(ms);
                 if (fabsf(ms - tgt_logged) > 0.2f) {
                     tgt_logged = ms;
-                    LOG("[quality] DRS target %.2f ms GPU (present period %.2f ms x 0.95), step up under %.2f ms", (double)ms, p / 1e6, (double)g_q[1]);
+                    LOG("[quality] DRS target %.2f ms GPU (present period %.2f ms x 0.95), step up under %.2f ms%s", (double)ms, p / 1e6, (double)g_tq[1],
+                        g_hold ? " (held at 100 ms by DM_DOS2_DRS_SETTLE until the load settles)" : "");
                 }
             }
         }
         if (g_pt_full) dq_pt_watch();
         if (g_aa_off) dq_aa_watch();
+        if (g_nobloom) dq_bloom_watch();
         const dq_drs_t *d = dq_drs(); if (!d) continue;
         if (!seen) {
             seen = 1;
@@ -293,9 +324,25 @@ static void *dq_monitor(void *arg) {
               gs_next = t + 10000000000ull;
               if (gs_n) LOG("[quality] GPU frame time (10 s): the game reads %.2f ms (min %.2f, max %.2f, %d samples), the backend measured %.2f ms; DRS current %.0fx%.0f = "
                             "%.1f %% of %dx%d, target %.2f ms, step up under %.2f ms%s", gs_sum / gs_n, gs_min, gs_max, gs_n, hs_n ? hs_sum / hs_n : -1.0, d->cur_w, d->cur_h,
-                            d->max_h ? 100.0 * d->cur_h / d->max_h : 0.0, d->max_w, d->max_h, g_q ? (double)g_q[0] : 31.5, g_q ? (double)g_q[1] : 30.0, d->off ? ", off" : "");
+                            d->max_h ? 100.0 * d->cur_h / d->max_h : 0.0, d->max_w, d->max_h, g_q ? (double)g_q[0] : 31.5, g_q ? (double)g_q[1] : 30.0,
+                            d->off ? ", off" : g_hold ? ", settle hold" : "");
+              if (g_spike) { const uint32_t *pw = (const uint32_t *)g_q;   // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE counters (totals)
+                  LOG("[quality] DRS spike filter (DM_DOS2_DRS_SPIKE=%d, min of %d): evaluations over target so far %u, of them one-off (the filter %s) %u",
+                      (g_spike & NRD_SPIKE_APPLY) ? 1 : 2, (g_spike & NRD_SPIKE_MIN3) ? 3 : 2, pw[NRD_PG_OVER],
+                      (g_spike & NRD_SPIKE_APPLY) ? "kept the size" : "would keep the size", pw[NRD_PG_SUPP]); }
               gs_sum = hs_sum = 0; gs_n = hs_n = 0; gs_min = 1e30; gs_max = 0;
           } }
+        if (g_settle.mode) {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SETTLE: hold the target at 100 ms around a load screen
+            const double dr = xbg_recent_draws ? xbg_recent_draws() : -1;
+            const int loading = d->off || dr < (double)NRD_LOAD_DRAWS;   // < 0 = no window yet (boot): a load too
+            const float pct = d->max_h ? 100.0f * d->cur_h / (float)d->max_h : -1.0f;
+            int ev = 0; const int hold = nrd_settle_step(&g_settle, loading, now_ns(), pct, &ev);
+            if (hold != g_hold && g_tgt_mode) { g_hold = hold; dq_publish(); }
+            if (ev == 2) LOG("[quality] DRS settle (DM_DOS2_DRS_SETTLE=%d, %.1f s after a load screen): window %u closed, DRS %.1f %% at its start, lowest %.1f %% "
+                             "inside it, %.1f %% now; target %.2f ms%s; windows with a drop so far %u of %u", g_settle.mode, g_settle.hold_ns / 1e9,
+                             g_settle.released, (double)g_settle.start_pct, (double)g_settle.min_pct_inside, (double)pct, (double)g_tq[0],
+                             g_settle.mode == NRD_SETTLE_APPLY ? " again" : " (count only: never held)", g_settle.drops_inside, g_settle.released);
+        }
         if (g_thermal && ++tick % 4 == 0) dq_ladder(d);
         int pct = dq_eff_pct();
         if (g_cave) {
@@ -312,6 +359,60 @@ static void *dq_monitor(void *arg) {
         }
     }
     return NULL;
+}
+
+// [DOS2] N6 DM_HACK_LOD=<p> (docs/dos2/nr/NR-HACKS.md §2.4): every LOD distance (and the last one, the cull distance) at p % for the 12
+// visitors that pick a model's LOD (0xa85180 / 0xa99da4: two scene visitors; 0x1423224 .. 0x1423da8: ten unrolled object kinds). Each computes
+// the squared camera distance d2 = dx^2 + dy^2 + dz^2 (the last `fadd s0, s0, s1`), then walks its LOD table [obj + 0x1f8] from the far end:
+// `fcmp s0, lod * |lod|; b.gt` (beyond LOD i -> LOD i + 1, beyond the last -> not drawn), and starts from min(ModelDetail, LODs - 1). s0 is
+// read by nothing else after the loop (checked on every path up to the next write / return / call), s1 is reloaded right after.
+// Patch: that fadd -> `b cave_i`; cave_i = fadd s0,s0,s1 ; fmov s1,#k ; fmul s0,s0,s1 ; b back. k = the nearest FMOV immediate to
+// (100 / p)^2 (80 % -> 1.5625 exactly; 90 -> 1.25 = 89.4 %; 70 -> 2.0 = 70.7 %; 67 -> 2.25 = 66.7 %; 50 -> 4.0). The tables are untouched.
+enum { DQ_LOD_N = 12 };
+static const uint32_t k_lod_at[DQ_LOD_N] = {0xa8519c, 0xa99dc0, 0x1423234, 0x142334c, 0x14234d8, 0x14235e4, 0x14236f0, 0x142396c, 0x1423a7c,
+                                            0x1423b8c, 0x1423c9c, 0x1423db8};
+static int dq_lod_word_ok(const uint8_t *at) {
+    uint32_t w[3]; memcpy(w, at - 4, 12);
+    return w[1] == 0x1e212800u /* fadd s0,s0,s1 */ && (w[0] == 0xf940fe8au /* ldr x10,[x20,#0x1f8] */ || w[0] == 0x1e220841u /* fmul s1,s2,s2 */) &&
+           (w[2] == 0xbc697941u /* ldr s1,[x10,x9,lsl #2] */ || w[2] == 0xd100052au /* sub x10,x9,#1 */);
+}
+static int dq_lod_install(module_t *m, int pct) {
+    for (int i = 0; i < DQ_LOD_N; i++)
+        if (m->text_end < k_lod_at[i] + 8 || !dq_lod_word_ok(m->base + k_lod_at[i])) {
+            LOG("【红】[quality] DM_HACK_LOD=%d: main+%#x differs: LOD distances untouched", pct, k_lod_at[i]); return -1; }
+    float got; const unsigned i8 = dq_imm8_near(10000.0f / (float)(pct * pct), &got);
+    // a cave page within branch reach (+-128 MB) of every site: right after the module first, then hints 16 MB apart on both sides
+    uintptr_t base = ((uintptr_t)m->base + m->size + 0x3FFF) & ~(uintptr_t)0x3FFF; uint32_t *c = NULL;
+    for (int t = 0; t < 32 && !c; t++) {
+        intptr_t step = (intptr_t)(t + 1) / 2 * (intptr_t)0x1000000;
+        uintptr_t h = t == 0 ? base : (t & 1) ? base + (uintptr_t)step : base - (uintptr_t)step;
+        void *pg = mmap((void *)h, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (pg == MAP_FAILED) continue;
+        int ok = 1;
+        for (int i = 0; i < DQ_LOD_N && ok; i++) {
+            int64_t d = (int64_t)(uintptr_t)pg - (int64_t)(uintptr_t)(m->base + k_lod_at[i]);
+            ok = d > -(int64_t)0x7f00000 && d < (int64_t)0x7f00000;
+        }
+        if (ok) c = pg; else munmap(pg, 0x4000);
+    }
+    if (!c) { LOG("【红】[quality] DM_HACK_LOD=%d: no page within branch reach of main: LOD distances untouched", pct); return -1; }
+    for (int i = 0; i < DQ_LOD_N; i++) {
+        uint32_t *q = c + 4 * i; const uint8_t *site = m->base + k_lod_at[i];
+        const int64_t back = ((int64_t)(uintptr_t)(site + 4) - (int64_t)(uintptr_t)(q + 3)) >> 2;
+        q[0] = 0x1e212800u;                       // fadd s0,s0,s1
+        q[1] = 0x1e201001u | i8 << 13;            // fmov s1,#k
+        q[2] = 0x1e210800u;                       // fmul s0,s0,s1
+        q[3] = 0x14000000u | ((uint32_t)back & 0x3ffffffu);   // b site + 4
+    }
+    if (mprotect(c, 0x4000, PROT_READ | PROT_EXEC)) { LOG("【红】[quality] DM_HACK_LOD: mprotect RX failed"); munmap(c, 0x4000); return -1; }
+    __builtin___clear_cache((char *)c, (char *)(c + 4 * DQ_LOD_N));
+    for (int i = 0; i < DQ_LOD_N; i++) {
+        const int64_t to = ((int64_t)(uintptr_t)(c + 4 * i) - (int64_t)(uintptr_t)(m->base + k_lod_at[i])) >> 2;
+        if (dq_poke1(m, k_lod_at[i], 0x14000000u | ((uint32_t)to & 0x3ffffffu))) { LOG("【红】[quality] DM_HACK_LOD: mprotect RW failed at site %d (the earlier ones stay)", i); return -1; }
+    }
+    LOG("[quality] DM_HACK_LOD=%d: LOD and cull distances x %.3f (squared distance x %.4f, FMOV #%#x) in %d LOD visitors (cave %p)", pct,
+        1.0 / sqrt((double)got), (double)got, i8, DQ_LOD_N, (void *)c);
+    return 0;
 }
 
 // The data page within adrp range of the controller (just past the module, else anywhere in range; NULL = none)
@@ -352,6 +453,28 @@ static int dq_cave_install(module_t *m) {
     return 0;
 }
 
+// [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: the GPU-ms load of the controller (main+0xc05dcc + the 3 instructions after it) -> the cave of
+// nr_drift.h (min of this sample and the 1-2 before it; counts in our data page), back to 0xc05ddc.
+static int dq_spike_install(module_t *m, uint32_t mode) {
+    if (memcmp(m->base + NRD_SPIKE_SITE, nrd_spike_orig, sizeof nrd_spike_orig)) { LOG("【红】[quality] main+%#x differs: no DRS spike filter", NRD_SPIKE_SITE); return -1; }
+    uint32_t *c = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (c == MAP_FAILED) { LOG("【红】[quality] mmap failed: no DRS spike filter"); return -1; }
+    nrd_spike_init((uint32_t *)g_q, mode);
+    uint64_t q = (uint64_t)(uintptr_t)g_q, back = (uint64_t)(uintptr_t)(m->base + NRD_SPIKE_BACK);
+    memcpy(c, nrd_spike_cave, sizeof nrd_spike_cave);   // code words; the two literals follow
+    c[NRD_SPIKE_LIT_PAGE] = (uint32_t)q; c[NRD_SPIKE_LIT_PAGE + 1] = (uint32_t)(q >> 32);
+    c[NRD_SPIKE_LIT_BACK] = (uint32_t)back; c[NRD_SPIKE_LIT_BACK + 1] = (uint32_t)(back >> 32);
+    if (mprotect(c, 0x4000, PROT_READ | PROT_EXEC)) { LOG("【红】[quality] mprotect RX failed: no DRS spike filter"); munmap(c, 0x4000); return -1; }
+    __builtin___clear_cache((char *)c, (char *)(c + NRD_SPIKE_CAVE_WORDS));
+    uint64_t to = (uint64_t)(uintptr_t)c;
+    const uint32_t j[4] = {0x58000050 /* ldr x16,#8 */, 0xd61f0200 /* br x16 */, (uint32_t)to, (uint32_t)(to >> 32)};
+    if (dq_poke(m, NRD_SPIKE_SITE, j, 4)) { LOG("【红】[quality] mprotect RW failed: no DRS spike filter"); return -1; }
+    LOG("[quality] DM_DOS2_DRS_SPIKE=%s (NR-DRIFT): code cave at %p (main+%#x ldr s16 GPU ms .. +%#x -> jump): the controller reads the minimum of this "
+        "sample and the %d one(s) before it%s; counts in the 10-s line", (mode & NRD_SPIKE_APPLY) ? "1" : "2", (void *)c, NRD_SPIKE_SITE,
+        NRD_SPIKE_SITE + 12, (mode & NRD_SPIKE_MIN3) ? 2 : 1, (mode & NRD_SPIKE_APPLY) ? "" : " - count only, it still reads the raw value");
+    return 0;
+}
+
 void dm_dos2_quality_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
 void dm_dos2_quality_install(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_main = &g_mod[i];
@@ -369,8 +492,21 @@ void dm_dos2_quality_install(void) {
     LOG("[quality] game DRS: min 75 %% of the window (main+%#x), max 100 %%, steps 1.25 %% up / 2.5 %% down, target 31.5 ms GPU",
         DQ_SETSIZE + 0x10);
 
+    // [DOS2] N6 hacks (nr_hacks.h): explicit DM_HACK_* or the tier; a DM_DOS2_* knob set in the environment wins over its hack
+    char hf[NRH_N] = {0}; int hv[NRH_N];
+    for (int k = 0; k < NRH_N; k++) hv[k] = nrh_value(k, &hf[k]);
+    { char b[256]; int o = 0; const char *t = getenv("DM_HACK_TIER");
+      for (int k = 0; k < NRH_N && o < (int)sizeof b - 24; k++) if (hv[k]) o += snprintf(b + o, sizeof b - o, " %s=%d%s", nrh_names[k], hv[k], hf[k] == 't' ? "(tier)" : "");
+      if (o || (t && *t)) LOG("[quality] DM_HACK_TIER=%s (%d):%s%s (TEXBIAS in 1/100 mip; N6 docs/dos2/nr/NR-HACKS.md)", t && *t ? t : "unset", nrh_tier_of(t), o ? b : " nothing",
+                              o ? "" : " - today's picture"); }
+    const int fsr_scale = (hv[NRH_FSR] == 1 || hv[NRH_FSR] == 3) && hv[NRH_SCALE] > 0;   // the FXAA step is the EASU stretch: it must stay
+    g_nobloom = hv[NRH_NOBLOOM] == 1;
+    if (g_nobloom) LOG("[quality] DM_HACK_NOBLOOM=1: bloom off (GraphicSettings +%#x = 0 from the monitor thread)", GS_BLOOM);
+    if (hv[NRH_LOD] > 0) dq_lod_install(m, hv[NRH_LOD]);   // [DOS2] N6 LOD / cull distances (12 code caves)
+
     // Shadows at boot
     const char *se = getenv("DM_DOS2_SHADOWS");
+    if ((!se || !*se) && hv[NRH_SHADOWS] == 1) { se = "2"; LOG("[quality] DM_HACK_SHADOWS=1: ShadowQuality 2 (512 x 3) as DM_DOS2_SHADOWS=2"); }
     if (se && *se && ok_fixed) {
         int v = atoi(se);
         static const char *nm[3] = {"1024 x 2 (PC default)", "768 x 3 (the console's)", "512 x 3"};
@@ -382,6 +518,12 @@ void dm_dos2_quality_install(void) {
 
     // Anti-aliasing at boot
     const char *ae = getenv("DM_DOS2_AA");
+    if ((!ae || !*ae) && hv[NRH_NOAA] == 1) {
+        if (fsr_scale) LOG("[quality] DM_HACK_NOAA=1 ignored: DM_HACK_FSR=1 with DM_HACK_SCALE=%d - the FXAA step is the EASU stretch", hv[NRH_SCALE]);
+        else { ae = "0"; LOG("[quality] DM_HACK_NOAA=1: as DM_DOS2_AA=0"); }
+    }
+    if (ae && *ae == '0' && fsr_scale) LOG("【红】[quality] DM_DOS2_AA=0 with DM_HACK_FSR=1 / SCALE=%d: at a lower scale the FXAA step does not draw when Vignette follows, "
+                                         "so EASU only runs on frames without Vignette", hv[NRH_SCALE]);
     if (ae && *ae && ok_fixed) {
         int ok_rd = m->text_end >= DQ_AA_SH + 4 && !memcmp(m->base + DQ_AA_EN, &k_aa_rd, 4) && !memcmp(m->base + DQ_AA_EX, &k_aa_rd, 4) &&
                     !memcmp(m->base + DQ_AA_SH, &k_aa_rd, 4);
@@ -427,14 +569,34 @@ void dm_dos2_quality_install(void) {
         if (mn >= 100) mode = 1; else { if (mn < 50) mn = 50; if (mn > mx) mn = mx; mode = mn >= 100 ? 1 : 2; }
     } else LOG("[quality] DM_DOS2_DRS=%s not understood (0 / off / <min>:<max> in %%): the game's DRS", e);
     const char *th = getenv("DM_DOS2_THERMAL"); g_thermal = th && *th == '1';
+    // [DOS2] N6 DM_HACK_SCALE=<p>: the 3D at p % of the window per side through the game's DRS object (its ceiling, nothing else new).
+    // DRS off (the gear's Docked default) -> fixed: min = max = p and the 100 ms target (never steps down; the first "step up" lands on the
+    // ceiling, about 1 s after a size change). DRS on (<min>:<max> or the game's) -> its ceiling becomes min(max, p), its floor min(min, p).
+    int hack_fixed = 0;
+    if (hv[NRH_SCALE] > 0) {
+        const unsigned hp = (unsigned)hv[NRH_SCALE];
+        if (mode == 1) LOG("【红】[quality] DM_HACK_SCALE=%u: DM_DOS2_DRS=%s skips the controller - no render scale", hp, e);
+        else {
+            if (mode == 3) { mn = mx = hp; hack_fixed = 1; }
+            else if (mode == 0) { mn = hp < 75 ? hp : 75; mx = hp; }
+            else { if (mx > hp) mx = hp; if (mn > hp) mn = hp; }
+            mode = 2;
+            LOG("[quality] DM_HACK_SCALE=%u: 3D at %u %% of the window per side (%.0f %% of the pixels)%s, DRS min %u %% ceiling %u %%", hp, hp, hp * hp / 100.0,
+                hack_fixed ? ", fixed (DRS off: target 100 ms)" : ", DRS on below it", mn, mx);
+        }
+    }
 
     if (mode == 1) {
         if (dq_poke1(m, DQ_GATE + 4, 0x14000000u | ((0xc05ef8 - (DQ_GATE + 4)) >> 2) /* b 0xc05ef8 */)) LOG("【红】[quality] mprotect RW failed: DRS stays");
         else LOG("[quality] DM_DOS2_DRS=%s: DRS off (main+%#x cbnz -> b): the full window every frame", e, DQ_GATE + 4);
     } else if (mode == 2) {
         float got; unsigned i8 = dq_imm8_near(mn / 100.0f, &got);
+        if (hv[NRH_SCALE] > 0 && got > mn / 100.0f + 1e-6f) {   // [DOS2] N6: the floor never above the hack's scale (the largest immediate under it)
+            float best = 0; for (unsigned i = 0; i < 256; i++) { float v = dq_imm8(i); if (v > 0 && v <= mn / 100.0f + 1e-6f && v > best) { best = v; i8 = i; } }
+            got = best;
+        }
         if (i8 != 0x68 && dq_poke1(m, DQ_SETSIZE + 0x10, 0x1e201002u | i8 << 13 /* fmov s2,#min */)) LOG("【红】[quality] mprotect RW failed: DRS min stays 75 %%");
-        else LOG("[quality] DM_DOS2_DRS=%s: DRS min %.2f %% of the window (main+%#x fmov), ceiling %u %%", e, got * 100.0, DQ_SETSIZE + 0x10, mx);
+        else LOG("[quality] DM_DOS2_DRS=%s: DRS min %.2f %% of the window (main+%#x fmov), ceiling %u %%", e && *e ? e : "unset", got * 100.0, DQ_SETSIZE + 0x10, mx);
         g_user_pct = (int)mx;
     } else if (mode == 3) LOG("[quality] DM_DOS2_DRS=%s: DRS off = the game's controller with a 100 ms GPU target (never lowers the resolution; "
                               "steps up to the full window)", e);
@@ -444,10 +606,11 @@ void dm_dos2_quality_install(void) {
         int64_t dp = 0; void *pg = dq_data_page(m, &dp);
         if (!pg) pg = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0), dp = INT64_MAX;   // the cave needs no range
         if (pg == MAP_FAILED || !pg) { LOG("【红】[quality] mmap failed: DRS target / ceiling stay the game's"); pg = NULL; }
-        if (pg) { g_q = pg; g_q[0] = 31.5f; g_q[1] = 30.0f; g_q[2] = dq_eff_pct() / 100.0f; }
+        if (pg) { g_q = pg; g_tq[0] = g_q[0] = 31.5f; g_tq[1] = g_q[1] = 30.0f; g_q[2] = dq_eff_pct() / 100.0f; }
         // the GPU target: our own copy
         const char *te = getenv("DM_DOS2_DRS_TARGET_MS"); double fixed = te && *te ? atof(te) : -1;
         if (mode == 3) { fixed = 100; te = "100 (DRS off)"; }
+        if (hack_fixed) { fixed = 100; te = "100 (DM_HACK_SCALE fixed)"; }
         g_tgt_mode = !pg ? 0 : fixed == 0 ? 0 : fixed > 0 ? 2 : 1;
         if (g_tgt_mode && (memcmp(m->base + DQ_TGT_ADRP - 4, k_tgt, sizeof k_tgt) || memcmp(m->base + DQ_THR_FMOV - 4, k_thr, sizeof k_thr))) {
             LOG("【红】[quality] main+%#x / +%#x differ: the game's DRS target 31.5 ms stays", DQ_TGT_ADRP, DQ_THR_FMOV); g_tgt_mode = 0; }
@@ -464,9 +627,29 @@ void dm_dos2_quality_install(void) {
         } else LOG("[quality] the game's DRS target 31.5 ms (built for 30 fps)%s", fixed == 0 ? ": DM_DOS2_DRS_TARGET_MS=0" : "");
         // the ceiling cave, when a ceiling can be asked for
         if (pg && (g_user_pct < 100 || g_thermal)) g_cave = !dq_cave_install(m);
+        {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: 0 / unset = today; 1 = apply, 2 = count only; ":2" = min of 2 samples (default ":3")
+            const char *sp = getenv("DM_DOS2_DRS_SPIKE"); int sm = sp && *sp ? atoi(sp) : 0; const char *co = sp ? strchr(sp, ':') : NULL;
+            uint32_t bits = sm == 1 ? NRD_SPIKE_APPLY | NRD_SPIKE_COUNT : sm == 2 ? NRD_SPIKE_COUNT : 0;
+            if (bits && !(co && atoi(co + 1) == 2)) bits |= NRD_SPIKE_MIN3;
+            if (bits && !pg) LOG("[quality] DM_DOS2_DRS_SPIKE=%s: no data page: off", sp);
+            else if (bits && !dq_spike_install(m, bits)) g_spike = bits;
+            else if (!bits) LOG("[quality] DM_DOS2_DRS_SPIKE=0: one slow frame may drop the DRS to its model's size at once (NR-DRIFT)");
+        }
         if (g_thermal) LOG("[quality] DM_DOS2_THERMAL=1: thermal ladder on (1 Hz; headroom 0.7 / 0.8 / 0.9 -> DRS ceiling 85 / 75 / 65 %%, "
                            "+ ShadowQuality 2 at 0.8, + Bloom off at 0.9)%s", g_cave ? "" : "; no DRS ceiling (cave not in)");
     } else if (g_thermal) LOG("[quality] DM_DOS2_THERMAL=1 with DRS off: ladder without the DRS ceiling");
+    {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SETTLE: 0 / unset = today; 1 = hold the target at 100 ms while a load screen is up and 6 s after it
+        // ("1:<s>" = <s> s, 1..60); 2 = count only (log what the controller did inside those windows). Needs our target copy.
+        const char *se = getenv("DM_DOS2_DRS_SETTLE"); int sm = se && *se ? atoi(se) : 0; double ss = 6;
+        const char *colon = se ? strchr(se, ':') : NULL; if (colon) { ss = atof(colon + 1); if (ss < 1) ss = 1; if (ss > 60) ss = 60; }
+        if (sm != NRD_SETTLE_APPLY && sm != NRD_SETTLE_COUNT) sm = NRD_SETTLE_OFF;
+        if (sm && !g_tgt_mode) { LOG("[quality] DM_DOS2_DRS_SETTLE=%s: no target copy (DRS skip / the game's target / the patch failed): off", se); sm = 0; }
+        nrd_settle_init(&g_settle, sm, (uint64_t)(ss * 1e9));
+        if (sm) LOG("[quality] DM_DOS2_DRS_SETTLE=%d (NR-DRIFT): %s the DRS target at 100 ms while a load screen is up (backend < %d draws a frame, "
+                    "or the DRS object's off byte) and %.1f s after it; one line per window", sm, sm == NRD_SETTLE_APPLY ? "hold" : "count only, would hold",
+                    NRD_LOAD_DRAWS, ss);
+        else LOG("[quality] DM_DOS2_DRS_SETTLE=0: load-time GPU spikes may drop the DRS to its minimum (NR-DRIFT: ~20 s climb back after a load)");
+    }
     const char *mon = getenv("DM_DOS2_DRS_MON");
     if (mon && *mon == '0') {
         if (g_tgt_mode == 1 || g_thermal || g_cave) LOG("[quality] DM_DOS2_DRS_MON=0: no monitor thread: no target updates, no ladder");
@@ -485,7 +668,18 @@ int dm_dos2_drs_live(int on, int fps) {
     if (!on) { g_tgt_mode = 2; dq_set_target(100.0f); }
     else if (fps > 0) { g_tgt_mode = 2; dq_set_target(1000.0f / (float)fps * 0.95f); }
     else g_tgt_mode = 1;   // the monitor thread follows the present period again
-    LOG("[quality] live DRS %s: target %.2f ms%s", on ? "on" : "off", (double)g_q[0], on && fps <= 0 ? " (the host's frame budget from now on)" : "");
+    LOG("[quality] live DRS %s: target %.2f ms%s%s", on ? "on" : "off", (double)g_tq[0], on && fps <= 0 ? " (the host's frame budget from now on)" : "",
+        g_hold ? " (published after the DM_DOS2_DRS_SETTLE hold)" : "");
     return 1;
+}
+// [DOS2] NR-DRIFT: the DRS height now in % of the window (-1 = no DRS object yet) and whether DM_DOS2_DRS_SETTLE holds the target
+// (the backend's "[nr] growth" line). Read-only.
+int dm_dos2_drs_info(float *pct, int *hold, float *target_ms);
+int dm_dos2_drs_info(float *pct, int *hold, float *target_ms) {
+    const dq_drs_t *d = g_main ? dq_drs() : NULL;
+    if (pct) *pct = d && d->max_h ? 100.0f * d->cur_h / (float)d->max_h : -1.0f;
+    if (hold) *hold = g_hold;
+    if (target_ms) *target_ms = g_q ? g_q[0] : 31.5f;
+    return d != NULL;
 }
 #endif

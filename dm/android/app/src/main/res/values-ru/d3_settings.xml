@@ -113,11 +113,7 @@
     <string name="tl2_mods_failed">Пропущены моды (не удалось преобразовать): %s</string>
     <string name="d3_mp_lan">Локальная беспроводная игра по Wi-Fi</string>
     <string name="tl2_mp_lan_note">Локальная сетевая игра работает между телефонами в одной сети Wi-Fi или на одной точке доступа. Пока не создана или не ищется локальная игра, ничего не открывается.</string>
-    <string name="dos2_res_900">Высокое разрешение 900p (медленнее; по умолчанию 720p с более широким обзором)</string>
     <string name="dos2_thermal">Термо-режим (снижать качество при нагреве)</string>
-    <string name="dos2_res">Разрешение рендера (высота; ширина по форме экрана)</string>
-    <string name="dos2_res_1080">1080p (родное экрана)</string>
-    <string name="dos2_drs">Динамическое разрешение (снижает разрешение 3D, когда GPU не успевает)</string>
     <string name="dos2_column">Колонка кнопок (справа: панели, карта)</string>
     <string name="dos2_column_shown">показывать</string>
     <string name="dos2_column_folded">свёрнута</string>
@@ -127,7 +123,9 @@
     <string name="dos2_column_pad_fold">сворачивать</string>
     <string name="dos2_column_pad_keep">оставлять как есть</string>
     <string name="dos2_touch">Касание как мышь (эксперимент): тап = клик, удержание = правый клик, щипок = зум</string>
-    <string name="dos2_drs_target">Цель динамического разрешения, fps</string>
+    <string name="dos2_drs_target">Целевая частота кадров</string>
+    <string name="dos2_drs_min">Ниже какого разрешения 3D не опускаться (по стороне; держит цель, но не ниже этого порога)</string>
+    <string name="dos2_mode_handheld">В руках: %1$s (легче для видеочипа)</string>
     <string name="dos2_fps_uncapped">Без ограничения</string>
     <string name="dos2_fps_note">По умолчанию 60. 30 экономит батарею и меньше греет. 90 и 120 показываются, только если у экрана есть такой режим; выше 60 и «Без ограничения» — экспериментально: больше нагрев и расход, скорость игры не меняется. Экраны загрузки и видео остаются в 60.</string>
     <!-- [front] свои кнопки игрока (PadEditor «Добавить…» / «Имя…», PadEdit.java; хозяин 15.11.2026) -->
@@ -150,4 +148,50 @@
     <string name="dos2_lstick_hint">Без него: тап по полу — идти, щипок — зум, два пальца влево / вправо — поворот камеры</string>
     <string name="dos2_rstick">Правый стик (камера)</string>
     <string name="dos2_rstick_off">Выключен: камера — свайп одним или двумя пальцами, зум — щипок</string>
+    <!-- [DOS2] N6 «Хаки» (Tl2Gear.dos2Hacks; натив dm/gfx/nr/nr_hacks.h, docs/dos2/nr/NR-HACKS.md) -->
+    <string name="dos2_hacks">Качество графики</string>
+    <string name="dos2_hacks_intro">Упрощения графики ради скорости, как снижение настроек на ПК. «Выкл.» — картинка такая, как её рисует игра. Разрешение 3D и чёткое увеличение FSR — на главной странице (раздел «Экран и разрешение»). Применяется со следующего запуска.</string>
+    <string name="dos2_hacks_tier">Уровень упрощений</string>
+    <string name="dos2_hacks_off">Выкл.</string>
+    <string name="dos2_hacks_light">Лёгкий</string>
+    <string name="dos2_hacks_medium">Средний</string>
+    <string name="dos2_hacks_max">Максимум</string>
+    <string name="dos2_hacks_custom">Свой</string>
+    <string name="dos2_hacks_tier_note">Лёгкий: почти незаметно (детализация моделей чуть ближе, облегчённый фильтр краёв теней). Средний: плюс простые модели вдали, карты теней меньше, текстуры вдали чуть мягче, фильтрация под углом 4x, не больше 4 ламп на одно место. Максимум: плюс без свечения и дальних теней, текстуры вдали мягче, фильтрация под углом 2x, не больше 2 ламп на одно место. Любая правка строк ниже делает уровень «Свой».</string>
+    <string name="dos2_hack_nobloom">Без свечения вокруг ярких источников (заметно)</string>
+    <string name="dos2_hack_noaa">Без сглаживания краёв на 100 % (лесенки на краях; при пониженном разрешении 3D его заменяет увеличение)</string>
+    <string name="dos2_hack_shadows">Карты теней меньше: 512 вместо 768 (тени мягче)</string>
+    <string name="dos2_hack_shpcf">Фильтр краёв теней</string>
+    <string name="dos2_hack_shpcf_game">по умолчанию (аппаратный)</string>
+    <string name="dos2_hack_shpcf_mobile">облегчённый</string>
+    <string name="dos2_hack_shpcf_dref">аппаратный</string>
+    <string name="dos2_hack_shfar">Без дальних теней (дальний каскад теней не рисуется; заметно)</string>
+    <string name="dos2_hack_texbias">Детали текстур вдали</string>
+    <string name="dos2_hack_texbias_0">как в игре</string>
+    <string name="dos2_hack_texbias_1">чуть мягче</string>
+    <string name="dos2_hack_texbias_2">мягче</string>
+    <string name="dos2_hack_aniso">Фильтрация текстур под углом</string>
+    <string name="dos2_hack_aniso_game">как в игре</string>
+    <string name="dos2_hack_lod">Детализация моделей и дальность прорисовки (ниже — простые модели раньше, дальние объекты исчезают раньше)</string>
+    <string name="dos2_hack_lights">Ламп и факелов на одно место, не больше («все» — как в игре)</string>
+    <string name="dos2_hack_lights_all">все</string>
+    <!-- [DOS2] 19.11 grouped dialog and the 3D resolution row (Tl2Gear.dos2Sections / Res3d / dos2Fsr) -->
+    <string name="dos2_group_lang">Язык</string>
+    <string name="dos2_group_screen">Экран и разрешение</string>
+    <string name="dos2_group_fps">Частота кадров</string>
+    <string name="dos2_group_quality">Графика</string>
+    <string name="dos2_group_driver">Драйвер и безопасный режим</string>
+    <string name="dos2_group_controls">Управление</string>
+    <string name="dos2_group_other">Прочее</string>
+    <string name="dos2_mode">Режим Switch (окно игры; в этом размере рисуется интерфейс)</string>
+    <string name="dos2_mode_note">«В доке» и «В руках» — два режима Switch. Здесь показан размер окна, в котором рисуется интерфейс; «В доке» — родное разрешение экрана. У 3D-мира своё разрешение ниже, отдельно для каждого режима.</string>
+    <string name="dos2_res3d_for_docked">Разрешение 3D в режиме «В доке»</string>
+    <string name="dos2_res3d_for_handheld">Разрешение 3D в режиме «В руках»</string>
+    <string name="dos2_res3d_drs">Динамическое: игра сама подбирает его под частоту кадров</string>
+    <string name="dos2_res3d_fixed">%1$d %% (%2$dp)</string>
+    <string name="dos2_res3d_note">Меняется только разрешение 3D-мира: интерфейс и текст всегда рисуются в полном размере окна и остаются чёткими. Чем меньше процент, тем больше кадров и меньше нагрев, но 3D мягче. У каждого режима Switch свой выбор; здесь показан режим, выбранный выше. Переход между постоянным и динамическим разрешением — со следующего запуска.</string>
+    <string name="dos2_res3d_drs_title">Динамическое разрешение</string>
+    <string name="dos2_res3d_drs_text">Вместо постоянного разрешения будет использоваться динамическое: игра сама снижает разрешение 3D, когда телефон не успевает держать целевую частоту кадров, и поднимает его обратно, когда успевает, но не ниже порога, выбранного ниже (сейчас %1$d %%). Интерфейс всегда остаётся чётким. Применится со следующего запуска.</string>
+    <string name="dos2_res3d_drs_ok">Понятно</string>
+    <string name="dos2_fsr">Чёткое увеличение FSR 1 вместо размытого растягивания (работает, только когда 3D ниже 100 %, постоянное или динамическое; лучше вместе с «Резкостью»)</string>
 </resources>

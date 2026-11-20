@@ -103,6 +103,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     private FrontMenu front;
     private SaveTransfer saves;
     static native void nativeContext(Object context);
+    static native void nativeMemInfo(long totalMem, long threshold);   // [DOS2] NR-29 DM_NR_MEM: ActivityManager.MemoryInfo before nativeStart (jni_android.c -> hle_dos2_nr_mem.c)
+    static native void nativeTrimMemory(int level);   // [DOS2] NR-29: onTrimMemory level -> the NR caches freed by tier, cheapest to rebuild first
     static native void nativeRotation(int rotation);
     static native boolean nativePadKey(int device, int keyCode, boolean down);
     static native void nativePadAxes(int device, float x, float y, float z, float rz, float lt, float rt, float hatX, float hatY);
@@ -110,6 +112,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static native String nativeDriverStatus();          // [D3] "<requested>\t<active>\t<reason>\t<details>" (vk_driver.c), "" before the driver loads
     static native void nativeLog(String text);          // [DOOM] a "[java] ..." breadcrumb line into boot.log (jni_android.c)
     static native String nativeLogPath();               // [DOOM] this run's boot.log ("" before nativeStart)
+    // [DOS2][safe-mode] docs/dos2/nr/SAFE-MODE.md (jni_android.c, xbg_safe_mode.inc; DOOM 2016 B&F 2.57): the boot decision and the next in-process
+    // fallback message
+    static native String nativeSafeModeStatus();
+    static native String nativeSafeModeEvent();
     // [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs (CrashLog.java): breadcrumbs from before the native log exists
     // wait in pendingCrumbs
     private static volatile boolean nativeLogReady;
@@ -131,6 +137,16 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     private DisplayManager displays;
     private InputManager inputs;
 
+    // .nomedia in the player's data folder: the app reads it by direct paths (all-files access), which .nomedia does not affect; only the
+    // gallery stops listing the game's textures / portraits.  Once when missing, silent on failure (no access yet: next start).
+    static void hideFromGallery() {
+        try {
+            File base = new File(android.os.Environment.getExternalStorageDirectory(), "Download/" + FRONT_DATA_DIR);
+            File f = new File(base, ".nomedia");
+            if (base.isDirectory() && !f.exists()) f.createNewFile();
+        } catch (Exception e) { }
+    }
+
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         // 调试包：am start … --ez dmArtDump true 只把触屏控件底图写到 files/dm/artdump/ 就退出（dm/android/tools/art_compare.sh 用）
@@ -141,8 +157,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         }
         current = new WeakReference<>(this);
         drivers = new VkDrivers(this);   // [front] the shared gear's driver choice (GearHost.drivers)
+        if (DOS2) hideFromGallery();   // [DOS2] Download/<FRONT_DATA_DIR>/.nomedia: the gallery must not index the game's pictures (owner 19.11)
+        if (DOS2) updates = new UpdateNotice(new Updates());   // [DOS2] as in D3 (DOOM 2.41): started at the first frames (drivers.gameStarted callback)
         moveUiLang();
         if (DOOM) checkLastRun();   // [DOOM] crash report of the last run, before anything of this one is written
+        if (DOS2) { safe = new SafeMode(this); safe.atStart(getIntent()); }   // [DOS2][safe-mode] a graphics failure of an earlier run (its notice comes after nativeStart)
         displays = getSystemService(DisplayManager.class);
         if (displays != null) displays.registerDisplayListener(this, null);
         inputs = getSystemService(InputManager.class);
@@ -223,6 +242,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [D3] the mode row: the Switch operation mode, live (nativeSetOpmode -> hle_oe.c dm_set_opmode, notifications 30 / 31; the widescreen patch
     // covers both window sizes, hle_d3.c), and kept in the gear dialog's "handheld" pref (DM_OPMODE at the next start, as before); docked = the default
     @Override public int modeKind() { return FrontMenu.MODE_OPMODE; }
+    @Override public boolean updates() { return updates != null; }   // [DOS2] the pause menu's "Check for updates"
+    @Override public void checkUpdates() { if (updates != null) updates.checkNow(); }
     @Override public boolean docked() {
         try { if (libraryLoaded && started) return nativeOpmode() != 0; } catch (UnsatisfiedLinkError e) { /* the library has no nativeOpmode */ }
         return !doomPrefs().getBoolean("handheld", false);
@@ -231,11 +252,42 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         try { nativeSetOpmode(on ? 1 : 0); } catch (UnsatisfiedLinkError e) { android.util.Log.e("dm", "nativeSetOpmode missing: " + e.getMessage()); return false; }
         doomPrefs().edit().putBoolean("handheld", !on).apply(); startedHandheld = !on;
         android.util.Log.i("dm", "[java] Switch mode -> " + (on ? "docked" : "handheld"));
+        if (DOS2) Tl2Gear.dos2DrsLive(this, !on, "pause menu mode switch");   // [DOS2] the new mode's dynamic resolution (Handheld = on by default), live
         return true;
     }
 
     // ---- [D3] (from the DOOM 2016 port, its BUGS_AND_FIXES 2.22) crash logs and breadcrumbs (CrashLog.java)
     // A "[java] ..." line in boot.log (and logcat); kept until the native log exists (nativeStart opens it).
+    // ---- [DOS2] "a new version is out" (UpdateNotice.java from DOOM 2016 2.41 / frontend-common, wired as in Diablo III): GitHub's releases/latest
+    // of Desm0nt/divinity-original-sin-2-port (stable releases only), once per start after the first frames, a one-time dialog with the release
+    // notes (## English / ## Русский); "Check for updates" in the pause menu asks now. No game-files check (requiredGameFiles 0). Texts: GearText
+    // (upd_* / gf_*). Switches: DM_UPDATE_CHECK=0 / always, DM_UPDATE_AS=<version>; prefs "front" upd_*.
+    private UpdateNotice updates;
+    UpdateNotice updateNotice() { return updates; }   // Tl2Gear: the gear's Updates section (null = not this build)
+    static final String UPDATE_REPO = "Desm0nt/divinity-original-sin-2-port";
+    private final class Updates implements UpdateNotice.Host {
+        @Override public Activity activity() { return DmActivity.this; }
+        @Override public String appName() { return "Divinity Original Sin 2 Mobile"; }
+        @Override public String repoSlug() { return UPDATE_REPO; }
+        @Override public String currentVersion() { return BuildConfig.VERSION_NAME; }
+        @Override public int requiredGameFiles() { return 0; }
+        @Override public File gameFilesStamp() { return null; }
+        @Override public int gameFilesBaseline() { return 0; }
+        @Override public String gameFilesFeatures(int have, int need) { return ""; }
+        @Override public SharedPreferences prefs() { return getSharedPreferences(Ui.PREFS, MODE_PRIVATE); }
+        @Override public String text(String key, Object... args) { return GearText.s(DmActivity.this, key, args); }
+        @Override public void crumb(String line) { DmActivity.this.crumb(line); }
+        @Override public void immersive() { immersiveBars(); }
+        @Override public boolean canShowNotice() {
+            return resumed && started && !isFinishing() && hasWindowFocus() && inputDialog == null
+                && (front == null || !front.isOpen()) && (d3Pad == null || !d3Pad.editing());
+        }
+        @Override public boolean holdGame(boolean on) {
+            if (on) { if (front != null && front.isOpen()) return false; if (d3Pad != null) d3Pad.releaseAll(); }
+            hold(on); return true;
+        }
+    }
+
     @Override public void crumb(String s) {
         if (nativeLogReady) { try { nativeLog(s); return; } catch (Throwable t) { /* an older library */ } }
         android.util.Log.i("dm", "[java] " + s);
@@ -311,7 +363,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         // 5 / 10 / 15 running moderate / low / critical, 20 UI hidden, 40+ background (the constants below 20 are deprecated in API 34)
-        if (DOOM && level >= 5) crumb("trim memory level " + level + (started ? "" : " (game not started)"));
+        if ((DOOM || DOS2) && level >= 5) crumb("trim memory level " + level + (started ? "" : " (game not started)"));
+        // [DOS2] NR-29 DM_NR_MEM: the native side frees the NR caches (prepared textures, encoder queue, static buffer copies, warm-up
+        // SPIR-V / pipelines) by tier; Android 14+ sends only UI_HIDDEN / BACKGROUND here, the native side also polls MemAvailable
+        if (DOS2 && libraryLoaded) { try { nativeTrimMemory(level); } catch (UnsatisfiedLinkError e) { /* an older library */ } }
     }
 
     @SuppressWarnings("deprecation")
@@ -480,6 +535,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] (D3 issue #30, frontend-common other-ports.md 16.11 (2)) "Install from file" takes several zips: onActivityResult hands the whole Intent
     @Override public boolean driverMultiPick() { return true; }
     @Override public File logsDir() { return CrashLog.dir(this); }   // Download/DivinityOriginalSin2Mobile/logs when writable (CrashLog.dir)
+    // [DOS2][safe-mode] GPU safe mode for Mali / PowerVR (frontend-common SafeMode / DmGuard, GearPages.safeMode in Tl2Gear; docs/dos2/nr/SAFE-MODE.md)
+    private SafeMode safe;
+    @Override public SafeMode safeMode() { return safe; }
+    @Override public String safeModeStatus() { if (!libraryLoaded) return null; try { return nativeSafeModeStatus(); } catch (UnsatisfiedLinkError e) { return null; } }
+    @Override public String safeModeEvent() { if (!libraryLoaded) return null; try { return nativeSafeModeEvent(); } catch (UnsatisfiedLinkError e) { return null; } }
     void showDoomSettings() { new GearSettings(this).show(); }   // the pad's ⚙ when there is no pause menu (D3PadView.openSettings)
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
@@ -508,12 +568,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static final String STRETCH_LOADING_KEY = TL2 ? "tl2_stretch_loading" : "d3_stretch_loading";
     static final boolean STRETCH_LOADING_DEFAULT = !TL2;
     static int[] d3RenderSize(boolean wide, boolean handheld, int sw, int sh) {
-        if (DOS2) {   // [DOS2] docked 1600x900, handheld 1280x720; widescreen = the screen's shape (hle_dos2_wide.c DM_DOS2_WIDE=<W>x<H>, dos2WideSize)
-            int[] d = wide ? dos2WideSize(sw, sh) : dos2Base == 900 ? null : new int[] {1280, 720};
-            if (d == null) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
-            if (d[1] <= 720 && d[0] <= 2560) return d;   // [DOS2] 720p: handheld = docked (hle_dos2_wide.c)
-            return handheld ? new int[] {(d[0] * 4 / 5 + 8) / 16 * 16, (d[1] * 4 / 5 + 8) / 16 * 16} : d;
-        }
+        if (DOS2) return dos2Size(dos2Base, wide, handheld, sw, sh);
         if (TL2) {   // [TL2] docked 1920x1080, handheld 1280x720; widescreen W x 1080 (1080 x screen aspect, rounded to 16, max 3840), handheld W*2/3 x 720
             int w = 1920;
             if (wide && sw > 0 && sh > 0 && (long) sw * 9 > (long) sh * 16) w = (int) Math.min(3840, Math.round(1080.0 * sw / sh / 16) * 16);
@@ -531,13 +586,23 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] the docked window for the screen's shape, the same rule as hle_dos2_wide.c's auto size: wider than 16:9 = W x 900 (W = 900 x
     // aspect rounded to 16, max 3200), narrower = 1600 x H (H = 1600 / aspect rounded to 16, max 1600: the game letterboxes itself to 16:9
     // inside it, never squashed); null = 16:9 / unknown (the Switch's 1600x900)
-    // [DOS2] render height: 720 by default (owner 14.11: the Switch's DRS runs 495-720p; widen the frame instead of raising the
-    // resolution), 900 = the gear option "900p" (dos2_res_900, Tl2Gear.dos2Res); the width follows the screen's shape (Hor+)
+    // [DOS2] the window height (the width follows the screen's shape, Hor+): until 19.11 the gear's 720 / 900 / 1080 row; since 19.11 always
+    // the screen's own height (Tl2Gear.dos2NativeRes), the 3D resolution is its own row (Tl2Gear.dos2Res3d: DM_HACK_SCALE / DRS)
     static int dos2Base = 720;
-    static int[] dos2WideSize(int sw, int sh) {
+    // [DOS2] the window (W x H) for a base height, a picture shape and a Switch mode, as hle_dos2_wide.c builds it from the DM_DOS2_WIDE that
+    // Tl2Gear.aspectEnv sets: widescreen = dos2WideSize; 16:9 bars / stretched = 1280x720 rescaled to the base height (900: the Switch's
+    // 1600x900 / 1280x720). Handheld = docked at 720p, else 4/5 of it.
+    static int[] dos2Size(int base, boolean wide, boolean handheld, int sw, int sh) {
+        int[] d = wide ? dos2WideSize(base, sw, sh) : base == 900 ? null : new int[] {base * 16 / 9, base};
+        if (d == null) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
+        if (d[1] <= 720 && d[0] <= 2560) return d;   // [DOS2] 720p: handheld = docked (hle_dos2_wide.c)
+        return handheld ? new int[] {(d[0] * 4 / 5 + 8) / 16 * 16, (d[1] * 4 / 5 + 8) / 16 * 16} : d;
+    }
+    static int[] dos2WideSize(int sw, int sh) { return dos2WideSize(dos2Base, sw, sh); }
+    static int[] dos2WideSize(int b, int sw, int sh) {
         if (sw <= 0 || sh <= 0) return null;
         double a = (double) Math.max(sw, sh) / Math.min(sw, sh);
-        int b = dos2Base, bw = b * 16 / 9;   // 720 -> 1280, 900 -> 1600
+        int bw = b * 16 / 9;   // 720 -> 1280, 900 -> 1600
         if (Math.abs(a - 16.0 / 9.0) < 0.01) return b == 900 ? null : new int[] {bw, b};
         if (a > 16.0 / 9.0) return new int[] {(int) Math.max(bw + 16, Math.min(3200, Math.round(b * a / 16) * 16)), b};
         return new int[] {bw, (int) Math.max(b + 16, Math.min(bw, Math.round(bw / a / 16) * 16))};
@@ -667,10 +732,18 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         if (!data.isDirectory() && earlier.isDirectory()) data = earlier;
         String src = DOOM ? new File(downloads, DATA_DIR).getAbsolutePath() : data.getAbsolutePath();   // [DOOM] Download/DOOM Mobile/{romfs,dm}
         if (DOOM) CrashLog.session(this, "fg");   // [DOOM] the game runs from here: a leftover marker at the next start = it did not end cleanly
+        if (DOS2) {   // [DOS2] NR-29: the RAM class of the NR caches' budget (before the host starts; the native side falls back to /proc/meminfo)
+            try {
+                android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                if (am != null) { am.getMemoryInfo(mi); nativeMemInfo(mi.totalMem, mi.threshold); }
+            } catch (UnsatisfiedLinkError | RuntimeException e) { /* an older library / no service: MemTotal */ }
+        }
+        if (DOS2) dos2PipeSeed();   // [DOS2] NR-31: the APK's portable pipeline warm-up seed into files/ before the engine starts
         int result = nativeStart(getFilesDir().getAbsolutePath(), ext.getAbsolutePath(), src, Locale.getDefault().toLanguageTag());
         if (DOOM) { nativeLogReady = true; flushCrumbs(); crumb("nativeStart " + result); }
         if (D3) padSurfaceEnv();   // [DOS2] dm/env is read by nativeStart, so its pad switches apply from here
-        if (DOS2) { dos2TouchUiEnv(); if (result >= 0) { dos2ColumnApply(); Tl2Gear.dos2FpsApply(this); } }   // [DOS2] ... and the frame rate target's display mode + boot line   // [DOS2] the column's state with the pad known by now
+        if (DOS2) { dos2TouchUiEnv(); if (result >= 0) { dos2ColumnApply(); Tl2Gear.dos2FpsApply(this); Tl2Gear.dos2SustainedApply(this); } }   // [DOS2] ... and the frame rate target's display mode + boot line   // [DOS2] the column's state with the pad known by now
         if (result < 0) {
             int resource = switch (result) {
                 // [D3] its own texts (from the DOOM 2016 port, d89997e): the shared ones name d2r's Download/S2X/D2R Mobile and d2rm_android.py
@@ -685,8 +758,10 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             showStartError(resource == 0 ? getString(R.string.dmAndroidStartFailed, result) : (D3 ? d3Ui() : this).getString(resource)); return;
         }
         started = true;
+        GameStateHint.install(this, resumed);   // [game-state] GameManager.setGameState from the native loading / scene state (API 33)
         if (touchOverlay != null) touchOverlay.setInputEnabled(true);
-        drivers.gameStarted(view);   // [front] VkDrivers: the notice from this launch's driver check, then the crash guard / fallback watch
+        drivers.gameStarted(view, () -> { if (safe != null) safe.firstFrames(); if (updates != null) updates.start(); });   // [front] VkDrivers: the notice from this launch's driver check, then the crash guard / fallback watch; [safe-mode] the run reached its first frames; [DOS2] the update check after them
+        if (safe != null) safe.gameStarted(view);   // [DOS2][safe-mode] the native decision, the notice after a graphics crash, the crash guard, live messages
         nativeFocus(3);
     }
 
@@ -758,11 +833,14 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             if (resumed) immersiveBars();
         });
         dialog.setOnShowListener(d -> {
+            // text input (TL2 issue #15, ported 18.11): Latin keyboards (Gboard, SwiftKey, ...) keep the word under the cursor as a composing span for as long as the
+            // cursor stays at its end, even with NO_SUGGESTIONS, so "composing" used to block OK with "finish choosing characters" until the
+            // player moved the cursor. Composing no longer disables OK: the rule check runs on the visible text, and OK ends the composition
+            // itself (below) before it reads the text.
             Runnable check = () -> {
-                boolean composing = BaseInputConnection.getComposingSpanStart(input.getText()) >= 0;
                 int error = nameRule ? TextInputRules.nameError(input.getText().toString()) : 0;
-                input.setError(composing ? getString(R.string.dmNamePickIme) : error == 1 ? getString(R.string.dmNameTooShort) : error == 2 ? getString(R.string.dmNameEdge) : null);
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!composing && error == 0);
+                input.setError(error == 1 ? getString(R.string.dmNameTooShort) : error == 2 ? getString(R.string.dmNameEdge) : null);
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(error == 0);
             };
             Runnable settle = () -> {
                 Editable text = input.getText();
@@ -801,6 +879,15 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 public void afterTextChanged(Editable text) { settle.run(); }
             });
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                Editable text = input.getText();
+                if (BaseInputConnection.getComposingSpanStart(text) >= 0) {   // OK ends a running composition: keep the text, drop the span
+                    BaseInputConnection.removeComposingSpans(text);
+                    android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                    if (imm != null) imm.restartInput(input);
+                    String normalized = TextInputRules.normalize(text.toString(), maxChars, nameRule, numericMax);
+                    if (!normalized.contentEquals(text)) { input.setText(normalized); input.setSelection(input.length()); }
+                    if (nameRule && TextInputRules.nameError(input.getText().toString()) != 0) { check.run(); return; }
+                }
                 finished[0] = true;
                 nativeTextResult(id, true, input.getText().toString());
                 dialog.dismiss();
@@ -897,6 +984,29 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] DM_DOS2_TOUCHUI=1 (dm/env, in the environment after nativeStart; hle_dos2_touchui.c, the iPad touch menus): touches off the pad's
     // controls go to the game as the mouse, as with the gear's "touch as mouse" (the native side turns DM_DOS2_TOUCH on itself); the pad's
     // buttons and sticks keep sending pad input. No gear row yet.
+    // [DOS2] NR-31 DM_NR_SEED (docs/dos2/nr/NR-31.md): the APK asset dos2-pipe-seed.bin (shader keys + fixed-function state of the pipelines
+    // one phone built; tools/dos2_pipe_seed.py) goes to files/dos2-pipe-seed.bin, where the engine re-targets it to this GPU (xbg_nr_seed.inc).
+    // Copied when missing or of another length / header (the header carries the seed id); an APK without the asset removes an old copy.
+    private void dos2PipeSeed() {
+        File out = new File(getFilesDir(), "dos2-pipe-seed.bin");
+        byte[] head = new byte[32];
+        try (java.io.InputStream in = getAssets().open("dos2-pipe-seed.bin")) {
+            int n = 0, r; while (n < head.length && (r = in.read(head, n, head.length - n)) > 0) n += r;
+            if (out.isFile()) {
+                byte[] have = new byte[32];
+                try (java.io.FileInputStream f = new java.io.FileInputStream(out)) { int k = 0, q; while (k < have.length && (q = f.read(have, k, have.length - k)) > 0) k += q; }
+                if (java.util.Arrays.equals(head, have)) return;
+            }
+            File tmp = new File(getFilesDir(), "dos2-pipe-seed.bin.tmp");
+            try (java.io.InputStream in2 = getAssets().open("dos2-pipe-seed.bin"); java.io.FileOutputStream os = new java.io.FileOutputStream(tmp)) {
+                byte[] b = new byte[65536]; int k; while ((k = in2.read(b)) > 0) os.write(b, 0, k);
+            }
+            if (!tmp.renameTo(out)) tmp.delete();
+        } catch (IOException e) {
+            if (out.isFile()) out.delete();   // no seed in this APK
+        }
+    }
+
     private void dos2TouchUiEnv() {
         try {
             String v = Os.getenv("DM_DOS2_TOUCHUI"); v = v == null ? "" : v.trim();
@@ -937,13 +1047,13 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     @Override public void onDisplayAdded(int id) { updateRefresh(); }
     @Override public void onDisplayRemoved(int id) { updateRefresh(); }
     @Override public void onDisplayChanged(int id) { updateRefresh(); }
-    @Override protected void onResume() { super.onResume(); resumed = true; immersiveBars(); startHost(); updateRefresh(); if (d3Pad != null) d3Pad.setHostResumed(true); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); } }
+    @Override protected void onResume() { super.onResume(); resumed = true; immersiveBars(); startHost(); updateRefresh(); if (d3Pad != null) d3Pad.setHostResumed(true); if (started) { nativeFocus(3); if (touchOverlay != null && bootFailure == 0) touchOverlay.setInputEnabled(true); if (safe != null) safe.onResume(); } }   // [safe-mode] the guard again after the system stopped it
     @Override protected void onPause() { resumed = false; if (d3Pad != null) d3Pad.setHostResumed(false); if (inputDialog != null) inputDialog.dismiss(); releaseTouches(); if (touchOverlay != null) touchOverlay.setInputEnabled(false); if (started) nativeFocus(0); super.onPause(); }
     @Override protected void onStart() { super.onStart(); if (started) { nativeFocus(2); if (DOOM && bootFailure == 0) CrashLog.session(this, "fg"); } }   // [DOOM] session state for CrashLog
     @Override protected void onStop() { if (started) { nativeFocus(1); if (DOOM && bootFailure == 0) CrashLog.session(this, "bg"); }
         if (DOOM && libraryLoaded) { android.content.Context app = getApplicationContext(); new Thread(() -> CrashLog.mirrorBootLogs(app), "dm-logcopy").start(); }   // [DOOM] boot.log next to crash.txt
         com.xiaoboluo.d2r.widget.HeroWidgetProvider.requestUpdate(this); super.onStop(); }
-    @Override protected void onDestroy() { if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
+    @Override protected void onDestroy() { if (updates != null) updates.dismiss(); if (DOOM && isFinishing()) { crumb("activity finishing"); CrashLog.sessionEnd(this); } if (displays != null) displays.unregisterDisplayListener(this); if (inputs != null) inputs.unregisterInputDeviceListener(this); if (inputDialog != null) inputDialog.dismiss(); if (current.get() == this) current.clear(); super.onDestroy(); }
     @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersiveBars(); else releaseTouches(); }
 
     @Override public void surfaceCreated(SurfaceHolder h) {}

@@ -70,7 +70,7 @@ static inline int nb_ua_uses_ds(int depth_test, int stencil_test, int bounds_tes
 
 // ---- history of pass starts
 #define NB_UA_HIST 512   // power of two
-typedef struct { uint64_t key; nb_ua_rect uni; uint8_t ds, used; uint32_t frame; } nb_ua_hent;
+typedef struct { uint64_t key; nb_ua_rect uni; uint8_t ds, used; uint32_t frame, frame_ds; } nb_ua_hent;   // frame_ds: NR-UIX, the last frame a pass of the key used its DS
 typedef struct { nb_ua_hent e[NB_UA_HIST]; uint32_t n; } nb_ua_hist;
 static inline void nb_ua_hist_reset(nb_ua_hist *h) { memset(h, 0, sizeof *h); }
 static inline nb_ua_hent *nb_ua_hist_find(nb_ua_hist *h, uint64_t key) {

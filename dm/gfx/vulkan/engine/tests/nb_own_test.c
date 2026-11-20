@@ -371,8 +371,25 @@ static void test_hand(void) {
     CHECK(nbw_hand_present(&h, 1, 13, 0) == 0 && !h.open && h.st[NBW_H_ONE] == 2);                // check mode: counted, queued by the caller
 }
 
+// NR-15 (docs/dos2/nr/NR-15.md): the DOS2 defaults without DM_NB_RELOC and DM_NB_ORDER. No pass has a key (nbw_key is never called) and
+// the tap passes no order tail (nvn_nb_own_build: nord = 0 while g_nbo_on is 0): the job is still valid, in the identity order, without
+// NBW_F_KEYS / NBW_F_ORDER, and a submission executed as recorded compares equal - the frame job and its hand-off need neither switch.
+static void test_nr15_no_keys_no_order(void) {
+    const char *kinds = "PPoPPPooPPPPoP";   // passes and operations as in a DOS2 part
+    const int np = make(kinds, 0, -1, -1);
+    const int ns = nbw_build(&g_j, &g_f, g_src, FRAME_AT, REC_A, REC_A, 91, 0, 1, 0, NULL, 0);
+    CHECK(ns == np && nbw_valid(&g_j) == NBW_V_OK);
+    CHECK(g_j.flags == (NBW_F_FINAL | NBW_F_PLANNED));   // no KEYS, no ORDER, no MERGED
+    for (int k = 0; k < ns; k++) CHECK(g_j.seg[k].key == 0 && g_j.order[k] == k);
+    uint16_t stream[NBW_MAX_SEG];
+    for (int i = 0; i < np; i++) stream[i] = (uint16_t)i;
+    CHECK(run_model(&g_j, stream, MUT_NONE, 0) == 0);
+    CHECK(run_model(&g_j, stream, MUT_SKIP, 2) & NBW_D_PASS_MISSING);   // the compare still works without keys
+    CHECK(run_model(&g_j, stream, MUT_ADDR, 3) == NBW_D_PASS_ADDR);
+}
 int main(void) {
     test_job();
+    test_nr15_no_keys_no_order();
     test_compare();
     test_hand();
     printf("compare: %u jobs x %d mutations of the executed stream, each caught\n", g_cmp_runs, MUT_N - 1);

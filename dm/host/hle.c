@@ -56,7 +56,17 @@ void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 // ---------- Host gate dispatch ----------
 // The rewriter replaces every svc #n / mrs cntpct with a call to dm_gate; here we remember, by gate block return point (absolute address), what it originally was.
 // Lookup: open-addressing hash, one hit (it used to do module_of + a linear compare over 110 entries on every gate call, keyed by in-module offset, which would collide across modules).
-enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS };
+enum { G_SVC, G_CNTPCT, G_CNTVCT, G_OBS, G_PROBE };   // [NR-16] G_PROBE: hle_cpuprof.c's own gate (a timed round trip through dm_gate, no game site)
+// [NR-16] DM_NR_CPU=1: hle_cpuprof.c sets this to count every gate by kind (0 svc, 1 clock, 2 obs, 3 probe) and time each SVC (ticks of
+// cntvct around svc_dispatch); null (always with DM_NR_CPU unset) = one load and a not-taken branch per gate.
+void (*dm_gate_prof)(int kind, int svc, uint64_t ticks);
+static inline uint64_t gate_ticks(void) {
+#if defined(__aarch64__)
+    uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v;
+#else
+    return 0;
+#endif
+}
 // 观测门（改写器 OBS 表离线插入）：编号 → 只读回调；未挂回调时门进出一次即返回
 // Observation gates (inserted offline from the rewriter's OBS table): number → read-only callback; with no callback attached the gate returns after one pass in and out
 static void (*g_obs_fn[OBS_MAX])(const uint64_t *regs); static int g_obs_have[OBS_MAX];
@@ -66,35 +76,57 @@ static uint8_t g_svc_have[256];   // 产物里登记过的 svc 号（剪口引�
 int gate_svc_present(int num) { return num >= 0 && num < 256 && g_svc_have[num]; }
 typedef struct { uint64_t ret; int kind, arg; uint64_t orig; } gate_t;
 #define GATE_BITS 12                     // 4096 槽，门数 ≤ 1024，装载因子 ≤ 1/4 | 4096 slots, gate count ≤ 1024, load factor ≤ 1/4
-static gate_t g_gate[1u << GATE_BITS];
+// [NR-24] entry.S _dm_gate_fast walks this table itself (same hash, entries of 24 bytes: ret at 0, kind at 8, arg at 12; GATE_BITS 12)
+_Static_assert(sizeof(gate_t) == 24 && __builtin_offsetof(gate_t, kind) == 8 && __builtin_offsetof(gate_t, arg) == 12 && G_CNTPCT == 1 && G_CNTVCT == 2,
+               "entry.S _dm_gate_fast reads the gate table with these offsets and kinds");
+__attribute__((visibility("hidden"))) gate_t dm_gate_tab[1u << GATE_BITS];
+
 static int g_ngate;
 static inline unsigned gate_h(uint64_t a) { return (unsigned)(((a >> 2) * 0x9E3779B97F4A7C15ull) >> (64 - GATE_BITS)); }
 
 void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
-    int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : -1;
+    int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : !strcmp(kind, "probe") ? G_PROBE : -1;
     if (k < 0) die("未知门类 %s", kind);
     if (k == G_OBS) { if (arg <= 0 || arg >= OBS_MAX) die("观测门编号越界 %d", arg); g_obs_have[arg] = 1; }
     if (k == G_SVC && arg >= 0 && arg < 256) g_svc_have[arg] = 1;
     if (++g_ngate > (1 << GATE_BITS) / 4) die("gate overflow");
     unsigned i = gate_h(ret_abs);
-    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("门重复登记 %#llx", ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
-    g_gate[i] = (gate_t){ret_abs, k, arg, orig};
+    while (dm_gate_tab[i].ret) { if (dm_gate_tab[i].ret == ret_abs) die("门重复登记 %#llx", ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
+    dm_gate_tab[i] = (gate_t){ret_abs, k, arg, orig};
 }
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
 
+// [NR-24] The gate entry a guest thread's KGATE slot holds (thread.c guest_thread_init): _dm_gate_fast (entry.S) with DM_NR_GATE_TICK=1,
+// which answers clock gates itself and hands every other gate to _dm_gate unchanged; else _dm_gate, as before
+extern void dm_gate(void), dm_gate_fast(void);
+void *dm_gate_entry(void) { return dm_tick_init() == 1 ? (void *)dm_gate_fast : (void *)dm_gate; }
+// [NR-24] fast clock reads by destination register, counted only while dm_gate_prof is set (DM_NR_CPU=1; plain adds from every thread,
+// a count lost now and then is fine for a rate)
+__attribute__((visibility("hidden"))) uint64_t dm_tick_fast_n[32];
+uint64_t dm_tick_fast_count(void) { uint64_t s = 0; for (int i = 0; i < 32; i++) s += __atomic_load_n(&dm_tick_fast_n[i], __ATOMIC_RELAXED); return s; }
+
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
     for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
-        const gate_t *g = &g_gate[i];
+        const gate_t *g = &dm_gate_tab[i];
         if (g->ret == ret_addr) switch (g->kind) {
             case G_CNTPCT: case G_CNTVCT: {
+                if (__builtin_expect(dm_gate_prof != 0, 0)) dm_gate_prof(1, 0, 0);   // [NR-16] DM_NR_CPU
+                if (g_tick_mode == 1) { const uint64_t t = dm_tick_read(); regs[g->arg] = t; return t; }   // [NR-24] DM_NR_GATE_TICK=1: a gate the short entry passed on (frozen clock, odd register)
                 guest_clock_read_wait();   // [front] waits while the pause menu holds the game
                 uint64_t t = guest_ns() * 12 / 625;    // 19.2 MHz 系统计数器；原指令 mrs xN, cntpct_el0，arg = N | 19.2 MHz system counter; original instruction mrs xN, cntpct_el0, arg = N
+                if (__builtin_expect(g_tick_mode == 2, 0)) dm_tick_compare(t);   // [NR-24] DM_NR_GATE_TICK=2: old value, compared
                 regs[g->arg] = t;
                 return t;
             }
-            case G_OBS: if (g_obs_fn[g->arg]) g_obs_fn[g->arg](regs); return 0;   // 只读寄存器；dm_gate 回写的 x0–x8 即原值 | Registers are read-only; the x0–x8 that dm_gate writes back are the original values
-            default: return svc_dispatch(g->arg, regs, g->orig);
+            case G_OBS: if (__builtin_expect(dm_gate_prof != 0, 0)) dm_gate_prof(2, 0, 0);   // [NR-16] DM_NR_CPU
+                if (g_obs_fn[g->arg]) g_obs_fn[g->arg](regs); return 0;   // 只读寄存器；dm_gate 回写的 x0–x8 即原值 | Registers are read-only; the x0–x8 that dm_gate writes back are the original values
+            case G_PROBE: if (dm_gate_prof) dm_gate_prof(3, 0, 0); return 0;   // [NR-16] the calibration gate: nothing to do
+            default:
+                if (__builtin_expect(dm_gate_prof != 0, 0)) {   // [NR-16] DM_NR_CPU: count and time the SVC (thread exit does not return: not timed)
+                    const uint64_t t0 = gate_ticks(); const uint64_t r = svc_dispatch(g->arg, regs, g->orig); dm_gate_prof(0, g->arg, gate_ticks() - t0); return r;
+                }
+                return svc_dispatch(g->arg, regs, g->orig);
         }
         if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }

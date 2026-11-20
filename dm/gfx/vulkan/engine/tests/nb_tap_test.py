@@ -179,8 +179,10 @@ dsc2 = dsc[dsc.find('if(hit!=desc_memo.end()){DescMemo &m=hit->second;'):]
 if not (0 <= dsc2.find('hitfast::before(ti,hfk,hfp))continue;') < dsc2.find('Image &im=get_image(ti.first,true);') < dsc2.find('hitfast::after(ti,im,hfk,hfp);')):
     bad.append('xbg_game.cpp descriptors(): NB-12 hit-fast hooks not around the hit-path get_image / prepare_read')
 us = eng[eng.find('Buffer uniform_snapshot(uint64_t address,size_t copy){'):]
-if not us.split('\n')[1].lstrip().startswith('if(nbubo::mode>0 && !nbubo::busy)'):
-    bad.append('xbg_game.cpp uniform_snapshot: NB-12 nbubo::fast is not its first step')
+_us = [l.lstrip() for l in us.split('\n')[1:3]]
+_nb12 = ('if(nbubo::mode>0 && !nbubo::busy)', 'if(nbubo::mode>0 && !nbubo::busy && !nrlean::ubo_off())')   # nr-all: NR-13 DM_NR_LEAN gates the NB-12 line
+if not (_us[0].startswith(_nb12) or (_us[0].startswith('if(nrbuf::ring_mode>0 && !nrbuf::busy)') and _us[1].startswith(_nb12))):
+    bad.append('xbg_game.cpp uniform_snapshot: NB-12 nbubo::fast is not its first step (only the NR-06 DM_NR_BUF ring line may come before it)')
 if not (0 <= ap.find('nbd_apply(') < ap.find('nbubo::note(h,b)') < ap.find('do_draw(h);')):
     bad.append('xbg_nb.inc nbdraw::apply: NB-12 ring note not between nbd_apply and the draw')
 if 'nb_ring_note(&ring,x.a,x.b,snapshot_epoch)' not in hitinc or 'nb_ring_find(&ring,address,copy,snapshot_epoch)' not in hitinc:
@@ -255,6 +257,8 @@ for f in sorted((root / 'gfx/vulkan/engine').glob('xbg_*')):
         if f.name == 'xbg_game.cpp' and exk <= at < exe: continue   # execute(): checked above
         if 'state=State{}' in code and 'nbpipe::reset();' in code: continue
         if f.name == 'xbg_game.cpp' and re.search(r'struct Guard\{|g\.on=true;g\.saved=state\.ds;', code): continue   # pre-pass override (draw-local, not keyed)
+        if f.name == 'xbg_game.cpp' and re.search(r'Guard::~Guard\(\)\{if\(on\)\{state\.ds=saved;', code): continue   # NR-30: the override's end (restores the game's bytes)
+        if f.name == 'xbg_nr_draw.inc' and re.search(r'inline bool groups_pp\(\)\{.*state\.ds=prepass::live->saved;const bool ok=groups\(\);state\.ds=cur;', code): continue   # NR-30: ids read from the game's bytes
         bad.append('%s:%d: a pipeline-state group written outside execute() (NB-13b DM_NB_PIPE would key a stale id)' % (f.name, i + 1))
 fb = eng[eng.find('if(draw_fast && pipe_memo && (pipe_memo_valid || pipe_pod_on())'):eng.find('static std::vector<VkVertexInputAttributeDescription> attributes;')]
 if not (0 <= fb.find('state.restart_eff=re;}') < fb.find('nbpipe::look(') < fb.find('if(!fast_hit){pipe_memo_fill(')) or 'ppg.on,draw_fast,bindings,zero_binding)' not in fb:
@@ -277,7 +281,7 @@ sy = ib.get('nbt_sync') or ''
 fr_i, pa_i = sy.find('g_nbt.frec = fr;'), sy.find('g_nbt.em_open = open;')
 if not (0 <= fr_i < sy.find('if (g_nbk_on) nbk_frame();') < pa_i < sy.find('if (g_nbk_on) nbk_pass(open);')):
     bad.append('nvn_nb_tap.inc nbt_sync: NB-14 hooks not right after the FRAME / PASS records or not gated on g_nbk_on')
-if not re.search(r'OP_X_NB_KEY,[^\n]*\n\s*OP_X_END_', obj): bad.append('nvn_obj.h: OP_X_NB_KEY is not the last op (an op value before OP_X_END_ moved)')
+if not re.search(r'OP_X_NB_KEY,[^\n]*\n\s*OP_X_NR_STATE,[^\n]*\n\s*OP_X_END_', obj): bad.append('nvn_obj.h: OP_X_NB_KEY then OP_X_NR_STATE (NR-09S3) are not the last ops (an op value before OP_X_END_ moved)')
 kb = bodies(kinc)
 pk = kb.get('nbk_pass') or ''
 if not (0 <= pk.find('nbk_walk(') < pk.find('nbk_pack(') < pk.find('nbt_rec(OP_X_NB_KEY, n)') < pk.find('memcpy(p, g_nbk_out, n); nbk_commit(&g_nbk, p, def_off);')):

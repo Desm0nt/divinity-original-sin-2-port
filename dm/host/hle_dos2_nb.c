@@ -64,9 +64,45 @@
 #include <unistd.h>
 #include "../gfx/nvn/nvn_nb_tap.h"
 #include "../gfx/nb/nb_slotmask.h"   // NB-07
+#include "../gfx/nr/nr_lean.h"       // NR-13 / NR-26: DM_NR_LEAN
 nb_sm_table *xbg_nb_slotmask_table(void) __attribute__((weak));   // xbg_nb.inc nbsm (the Vulkan backend)
 static int g_nb_slotmask;            // DM_NB_SLOTMASK (default 1; 0 = every bound slot is a read, the pre-NB-07 IR, for A/B)
 #include "../gfx/nb/nb_post.h"   // NB-18b-4a: DM_NB_POST (hle_dos2_nb_post.c)
+#include "../gfx/nb/nb_onchip.h"   // NR-ONCHIP: DM_NR_ONCHIP chain marks (docs/dos2/nr/NR-ONCHIP.md §8)
+// NR-ONCHIP: the backend publishes DM_NR_ONCHIP as it resolved it (env, else the family default) at init; while it is > 0 every planned part
+// gets nb_onchip_plan (Sky -> Light / PCF -> Sky -> Light marks in the PASS headers), one line "[nr] onchip plan ..." every 10 s.
+static int g_nr_oc, g_nr_oc_fog;   // g_nr_oc_fog: S2F (the Fog tail, NR-FRAME.md §10) as the backend resolved it (dm_nr_onchip_publish_fog)
+static nb_oc_out g_oco;
+static struct { uint64_t parts, s2, s3, s2f, bad, why[NB_OCW_KINDS], sp_larger, table_differ; int ex_why; uint32_t ex[6]; } g_oc;
+// The tap keeps the per-pass attachment sizes only while this is on (nvn_nb_tap_pass_sizes): the size rule uses the sizes each pass was
+// bound with. nvn_nb_tap_image (last size per storage) is only the diagnostic "table_differ" now (it refused every chain on the phone).
+void dm_nr_onchip_publish(int mode) { __atomic_store_n(&g_nr_oc, mode, __ATOMIC_RELAXED); nvn_nb_tap_pass_sizes(mode > 0); }
+void dm_nr_onchip_publish_fog(int on) { __atomic_store_n(&g_nr_oc_fog, on, __ATOMIC_RELAXED); }   // the backend understands tail marks: plan them
+static int nr_oc_size(void *ctx, uint64_t image, uint32_t *w, uint32_t *h) { (void)ctx; int fmt; return nvn_nb_tap_image(image, w, h, &fmt); }
+static int nr_oc_att_size(void *ctx, int node, int att, uint32_t *w, uint32_t *h) { (void)ctx; return nvn_nb_tap_pass_size(node, att, w, h); }
+static void nr_oc_plan(const nb_frame *f, nb_plan_out *po) {
+    const nb_oc_rules r = { nr_oc_size, NULL, __atomic_load_n(&g_nr_oc_fog, __ATOMIC_RELAXED) > 0 ? 7u : 0u, nr_oc_att_size };   // bit 2 = S2F only when the backend asks
+    g_oc.parts++;
+    if (nb_onchip_plan(f, po, &r, &g_oco) < 0) { g_oc.bad++; return; }
+    g_oc.s2 += (uint64_t)g_oco.s2; g_oc.s3 += (uint64_t)g_oco.s3; g_oc.s2f += (uint64_t)g_oco.s2f;
+    for (int i = 0; i < NB_OCW_KINDS; i++) g_oc.why[i] += (uint64_t)g_oco.why[i];
+    g_oc.sp_larger += (uint64_t)g_oco.sp_larger; g_oc.table_differ += (uint64_t)g_oco.table_differ;
+    if (g_oco.ex_why && !g_oc.ex_why) { g_oc.ex_why = g_oco.ex_why; memcpy(g_oc.ex, g_oco.ex, sizeof g_oc.ex); }
+}
+static void nr_oc_report(double fr) {
+    const int m = __atomic_load_n(&g_nr_oc, __ATOMIC_RELAXED);
+    if (m <= 0 || !g_oc.parts) return;
+    char b[700]; int k = 0; b[0] = 0;
+    for (int i = NB_OCW_LIGHT_SHAPE; i < NB_OCW_KINDS && k < (int)sizeof b - 120; i++)
+        if (g_oc.why[i] && i != NB_OCW_S2F) k += snprintf(b + k, sizeof b - (size_t)k, "%s%s %llu", k ? ", " : "", nb_oc_why_name(i), (unsigned long long)g_oc.why[i]);
+    char e[160]; e[0] = 0;   // the first size refusal: the sizes each pass was bound with (0x0 = not known)
+    if (g_oc.ex_why) snprintf(e, sizeof e, "; first size refusal: Sky Sp %ux%u, Sky Df %ux%u, Light Df %ux%u", g_oc.ex[0], g_oc.ex[1], g_oc.ex[2], g_oc.ex[3], g_oc.ex[4], g_oc.ex[5]);
+    LOG("[nr] onchip plan DM_NR_ONCHIP=%d: %llu parts planned (bad %llu); chains marked a frame S2F %.2f (Fog tail %s), S3 %.2f, S2 %.2f (by per-pass sizes; Sp larger than Df "
+        "%llu; the old last-size-per-storage table would have refused %llu of them); not marked / downgraded: %s%s",
+        m, (unsigned long long)g_oc.parts, (unsigned long long)g_oc.bad, g_oc.s2f / fr, __atomic_load_n(&g_nr_oc_fog, __ATOMIC_RELAXED) > 0 ? "on" : "off", g_oc.s3 / fr, g_oc.s2 / fr, (unsigned long long)g_oc.sp_larger,
+        (unsigned long long)g_oc.table_differ, k ? b : "none", e);
+    memset(&g_oc, 0, sizeof g_oc);
+}
 
 enum { NB_ECL = 0xa49c30, NB_BEGIN = 0x9215f0, NB_END = 0x93ccd0 };
 static const uint32_t k_nb_ecl[4] = {0xd10243ff /* sub sp,sp,#0x90 */, 0xf90023f9 /* str x25,[sp,#0x40] */, 0xa9055ff8, 0xa90657f6};
@@ -140,6 +176,15 @@ static void nb_ir_dump(const nb_frame *f, const nb_plan_out *po) {
         if (k < ns || ns >= 256) continue;
         seen[ns++] = im; uint32_t w = 0, h = 0; int fmt = 0;
         if (nvn_nb_tap_image(im, &w, &h, &fmt)) fprintf(o, "# image 0x%llx %ux%u fmt=0x%x\n", (unsigned long long)im, w, h, fmt);
+    }
+    // NR-ONCHIP (DM_NR_ONCHIP > 0): the size of each attachment as bound when its pass opened. "# image" above is the LAST size of the
+    // storage (an alias of another size later in the part overwrites it). "# passsize <node> <att index>=WxH ...", comment lines too.
+    for (int i = 0; i < f->nnode; i++) {
+        if (f->node[i].kind != NB_NODE_PASS || !f->node[i].natt) continue;
+        char t[200]; int k = 0; uint32_t w = 0, h = 0;
+        for (int a = 0; a < f->node[i].natt && k < (int)sizeof t - 32; a++)
+            if (nvn_nb_tap_pass_size(i, a, &w, &h)) k += snprintf(t + k, sizeof t - (size_t)k, " %d=%ux%u", a, w, h);
+        if (k) fprintf(o, "# passsize %d%s\n", i, t);
     }
     fclose(o);
     LOG("[nb] dump: %s (frame %u part %u, %d nodes)", path, f->frame_no, g_ir_part, f->nnode);
@@ -217,6 +262,7 @@ static void nb_ir_plan(void) {
     const nb_rules rules = {NB_RULES_EXACT, 0, 0};
     const int rc = g_ir_rc = nb_plan(f, &g_irp, &rules, &g_irpo);
     if (!rc && g_dm_nb_post) dm_nb_post_plan(f, &g_irpo);   // NB-18b-4a: NB_NP_ELIDE / NB_NP_FUSE before the headers are patched
+    if (!rc && __atomic_load_n(&g_nr_oc, __ATOMIC_RELAXED) > 0) nr_oc_plan(f, &g_irpo);   // NR-ONCHIP: chain marks before the headers are patched
     int tracked = 0;
     const nb_merge_out *mo = g_nbo && !rc ? nb_order_plan(f, &tracked) : NULL;   // NB-17b: after the post plan, before the headers are patched
     const uint32_t bytes = nvn_nb_tap_patch(f, rc ? NULL : &g_irpo, g_ir_part);
@@ -292,6 +338,13 @@ static void nb_ir_report(void) {
         g_ir.note[NBN_UBO] / fr, g_ir.note[NBN_SSBO] / fr, g_ir.note[NBN_COUNTER] / fr, (unsigned long long)g_ir.note[NBN_UNREG],
         (unsigned long long)g_ir.note[NBN_OTHER_CB], (unsigned long long)g_ir.note[NBN_OTHER_SUBMIT], (unsigned long long)other_thread,
         g_ir.nb_bytes / fr / 1024., g_ir.nb_bytes_max / 1024.);
+    if (g_irf.rs_mode) {   // [NR-CPU] NR-TAPSET
+        LOG("[nr] tapset (DM_NR_TAPSET=%d, last report): %.1f reads a frame through the set, %.1f of them already held; passes over %d refs (scan) %llu%s; set vs scan differ %llu%s",
+            g_irf.rs_mode, (double)g_irf.rs_lookups / fr, (double)g_irf.rs_hits / fr, NB_RS_MAX, (unsigned long long)g_irf.rs_big, g_irf.rs_mode == 2 ? " (=2: the scan decided)" : "",
+            (unsigned long long)g_irf.rs_bad, "");
+        if (g_irf.rs_bad) LOG("【红】[nr] tapset: the set and the scan of the pass's refs answered differently %llu times", (unsigned long long)g_irf.rs_bad);
+        g_irf.rs_lookups = g_irf.rs_hits = g_irf.rs_big = g_irf.rs_bad = 0;
+    }
     {   // NB-07: reads by the backend's slot masks (DM_NB_SLOTMASK); table = programs the backend published (xbg_nb.inc nbsm)
         const nb_sm_table *t = xbg_nb_slotmask_table ? xbg_nb_slotmask_table() : NULL;
         const uint64_t k = g_ir.note[NBN_SM_KNOWN], u = g_ir.note[NBN_SM_UNKNOWN];
@@ -300,6 +353,7 @@ static void nb_ir_report(void) {
             g_ir.note[NBN_SM_SKIP] / fr, t ? __atomic_load_n(&t->n, __ATOMIC_RELAXED) : 0u, t ? __atomic_load_n(&t->full, __ATOMIC_RELAXED) : 0u);
     }
     dm_nb_post_report(fr);   // NB-18b-4a
+    nr_oc_report(fr);        // NR-ONCHIP
     memset(&g_ir, 0, sizeof g_ir);
     if (g_nb_dump) g_dump_due = 1;
 }
@@ -362,9 +416,55 @@ static void nb_foreign_report(double fr) {
     LOG("[nb] foreign sites (first caller in main outside packets / in callbacks 1/2, records/draws a frame): %u sites%s; %s",
         nsite, v->site_full ? " (table full: some dropped)" : "", n ? b : "none");
 }
+// ---- NR-13 / NR-26: DM_NR_LEAN, the front part (NRL_STATE; rules in dm/gfx/nr/nr_lean.h, docs/dos2/nr/NR-13.md) ----
+// 1 + NRL_STATE eligible (no consumer of the NB-13a blocks: DM_NB_RELOC / DM_NB_ORDER off): the state bits of DM_NB_OPS are not taken -
+// nvn_nb_state_enable is never called, the state packets write plain NVN state records (the NB-09 / NB-10 stream). With DM_NR_LEAN_AB=N
+// the capture is enabled and paused / resumed at EndFrame in the ABBA phases (nvn_nb_state_pause), and the recording time
+// BeginFrame -> EndFrame is kept per phase. 2: everything as at 0, the line says what 1 would not capture. The backend part (NRL_UBO)
+// follows the phase through xbg_nr_lean_phase.
+static nr_lean_cfg g_nrl;
+static int g_nrl_state, g_nrl_state_why;   // NRL_STATE armed (mode 1 and eligible) / nr_lean_state_why
+static int g_nrl_on;                        // lean is on in the frame being recorded (mode 1: always, or the A/B phase)
+static uint64_t g_nrl_frame;
+static struct { uint64_t frames[2], rec_ns[2], toggles, refused, cap_calls, cap_bytes, out_bytes; } g_nrlw;
+void xbg_nr_lean_phase(int on) __attribute__((weak));   // dm/gfx/vulkan/engine/xbg_nr_lean.inc
+int nvn_nb_state_pause(int off);                        // dm/gfx/nvn/nvn_nb_state.inc
+// EndFrame (render thread): this frame's recording time goes to its phase; the next frame's phase is set.
+static int g_nrl_want;
+static void nrl_phase(void) {   // EndFrame, and BeginFrame when EndFrame could not (render thread)
+    if (g_nrl_want == g_nrl_on) return;
+    if (g_nrl_state && !nvn_nb_state_pause(g_nrl_want)) { g_nrlw.refused++; return; }   // a packet is open / another thread owns the shadow: next hook
+    g_nrl_on = g_nrl_want; g_nrlw.toggles++;
+    if (xbg_nr_lean_phase) xbg_nr_lean_phase(g_nrl_on);
+}
+static void nrl_frame(uint64_t rec_ns) {
+    g_nrlw.frames[g_nrl_on]++; g_nrlw.rec_ns[g_nrl_on] += rec_ns;
+    if (!g_nrl.ab) return;
+    g_nrl_want = nr_lean_ab_on(++g_nrl_frame, g_nrl.ab);
+    nrl_phase();
+}
+static void nrl_report(double fr) {
+    if (!g_nrl.mode) return;
+    const double f0 = g_nrlw.frames[0] ? (double)g_nrlw.frames[0] : 1., f1 = g_nrlw.frames[1] ? (double)g_nrlw.frames[1] : 1.;
+    char ab[320]; ab[0] = 0;
+    if (g_nrl.ab) snprintf(ab, sizeof ab, "; A/B (DM_NR_LEAN_AB=%u, off N / on 2N / off N): recording BeginFrame -> EndFrame %.3f ms a frame lean "
+                           "(%llu frames) vs %.3f ms full (%llu frames), %llu phase changes (%llu put off: a packet was open)", g_nrl.ab,
+                           g_nrlw.rec_ns[1] / f1 / 1e6, (unsigned long long)g_nrlw.frames[1], g_nrlw.rec_ns[0] / f0 / 1e6, (unsigned long long)g_nrlw.frames[0],
+                           (unsigned long long)g_nrlw.toggles, (unsigned long long)g_nrlw.refused);
+    else { const uint64_t n = g_nrlw.frames[0] + g_nrlw.frames[1];
+        snprintf(ab, sizeof ab, "; recording BeginFrame -> EndFrame %.3f ms a frame", n ? (double)(g_nrlw.rec_ns[0] + g_nrlw.rec_ns[1]) / (double)n / 1e6 : 0.); }
+    LOG("[nr] lean (front, DM_NR_LEAN=%d parts %#x): state capture NB-13a %s (%s); %s %.1f state calls a frame (%.0f bytes as NVN records -> %.0f bytes "
+        "of OP_X_NB_STATE; as plain records: %+.0f bytes of command memory a frame and no shadow / dictionary work on this thread)%s",
+        g_nrl.mode, g_nrl.parts, g_nrl_state ? (g_nrl.ab ? "paused in the lean phases" : "not taken: plain NVN state records") : g_nrl.mode == 2 ? "taken as before" : "taken (part off or not eligible)",
+        nr_lean_state_name(g_nrl_state_why), g_nrl_state && g_nrl.ab ? "captured in the full phases:" : g_nrl.mode == 2 ? "1 would not capture" : "captured",
+        g_nrlw.cap_calls / fr, g_nrlw.cap_bytes / fr, g_nrlw.out_bytes / fr, ((double)g_nrlw.cap_bytes - (double)g_nrlw.out_bytes) / fr, ab);
+    memset(g_nrlw.frames, 0, sizeof g_nrlw.frames); memset(g_nrlw.rec_ns, 0, sizeof g_nrlw.rec_ns);
+    g_nrlw.toggles = g_nrlw.refused = g_nrlw.cap_calls = g_nrlw.cap_bytes = g_nrlw.out_bytes = 0;
+}
 static void nb_state_report(double fr) {
     if (!g_nbs_ops) return;
     uint64_t v[NBSS_N]; nvn_nb_state_stats(v);
+    g_nrlw.cap_calls += v[3]; g_nrlw.cap_bytes += v[4]; g_nrlw.out_bytes += v[6];   // NR-13: for the "[nr] lean" line
     // order = nvn_nb_state.inc NBSS_*: brackets, taken, other thread, captured, captured bytes, records, bytes, def, ref, noid, same, raw,
     // xraw, unknown, fallback, epochs
     LOG("[nb] state (DM_NB_OPS state bits %#llx): %.1f taken packets a frame (%llu on another thread, not taken); %.1f state calls captured "
@@ -432,6 +532,7 @@ static void nb_report(uint64_t now) {
     g_nb.t0 = now;
     nb_draw_report(s, f);   // NB-09 (before nb_ir_report resets nothing of it: own counters)
     nb_state_report(f);     // NB-13a
+    nrl_report(f);          // NR-13 DM_NR_LEAN (after the state line: it takes its counters)
     nb_foreign_report(f);   // NB-15
     nb_key_report(f);       // NB-14
     nb_order_report(f);     // NB-17a
@@ -465,6 +566,7 @@ static uint64_t nb_ecl_hook(uint64_t list, uint64_t flags, uint64_t a2, uint64_t
 }
 static uint64_t nb_begin_hook(uint64_t r, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     nb_tid(NB_TID_BEGIN); t_nb_rt = 1;
+    if (g_nrl.ab && !g_nb.begins) nrl_phase();   // NR-13 DM_NR_LEAN_AB: a phase change EndFrame had to put off (before the time below)
     if (!g_nb.begins) g_nb.t_begin = nb_now();   // the recording time counts from the first BeginFrame of the frame
     if (g_nbw && !g_nb.begins) g_nbwc.nodes_gap += (uint64_t)g_irf.nnode;   // NB-21: IR nodes recorded since the last EndFrame returned
     g_nb.begins++; g_nb.in_frame = 1;
@@ -476,6 +578,7 @@ static uint64_t nb_end_hook(uint64_t w, uint64_t a1, uint64_t a2, uint64_t a3, u
     g_nb.frames++;
     g_nb.w_lists += g_nb.lists; g_nb.w_packets += g_nb.packets; g_nb.w_begins += g_nb.begins;
     if (g_nb.begins && now > g_nb.t_begin) g_nb.w_rec_ns += now - g_nb.t_begin;
+    if (g_nrl.mode && g_nb.begins && now > g_nb.t_begin) nrl_frame(now - g_nb.t_begin);   // NR-13 DM_NR_LEAN: per-phase recording time, next phase
     if (g_nb.lists > g_nb.lists_max) g_nb.lists_max = g_nb.lists;
     if (g_nb.packets > g_nb.packets_max) g_nb.packets_max = g_nb.packets;
     g_nb.lists = g_nb.packets = g_nb.begins = 0; g_nb.in_frame = 0;
@@ -513,6 +616,8 @@ void dm_dos2_nb_install(void) {
     if (dn_hook(m, NB_END, k_nb_frame, (void *)nb_end_hook, &o)) { LOG("【红】[nb] EndFrame: mmap / mprotect failed: no frame line"); return; }
     g_end_orig = (nb_fn)o;
     nb_frame_reset(&g_irf, g_ir_frame); nb_persist_reset(&g_irp);
+    { const char *d = getenv("DM_NR_TAPSET"); const int v = d && *d ? atoi(d) : 0; g_irf.rs_mode = (uint8_t)(v == 1 || v == 2 ? v : 0);   // [NR-CPU] NR-TAPSET
+      if (v) LOG("[nr] DM_NR_TAPSET=%d (NR-CPU): %s", g_irf.rs_mode, g_irf.rs_mode == 1 ? "the IR's per-pass read test through a hash set of the pass's refs (no scan)" : g_irf.rs_mode == 2 ? "the set and the scan both, the scan decides, differences counted" : "only 0 / 1 / 2: off"); }
     { const char *d = getenv("DM_NB_DUMP"); g_nb_dump = d && atoi(d) == 1; }
     { const char *d = getenv("DM_NB_SLOTMASK"); g_nb_slotmask = !(d && *d && atoi(d) == 0); nvn_nb_tap_slotmask(g_nb_slotmask); }   // NB-07
     dm_nb_post_install();   // NB-18b-4a: DM_NB_POST (before the tap is live)
@@ -523,7 +628,23 @@ void dm_dos2_nb_install(void) {
         const uint64_t want = (o && *o ? strtoull(o, NULL, 0) : 0) | chk, draw = want & (1ull << 36 | 1ull << 37), st = want & NB_STATE_OPS;
         if (want & ~draw & ~st) LOG("[nb] DM_NB_OPS=%#llx: opcodes %#llx are not taken by NB yet (36 / 37 NB-09, state bits %#llx NB-13a): left "
                                     "on the NVN path", (unsigned long long)want, (unsigned long long)(want & ~draw & ~st), (unsigned long long)NB_STATE_OPS);
-        if (st) {   // NB-13a: the ExecuteRenderCommand handler above brackets every packet from here on
+        {   // NR-13 / NR-26 DM_NR_LEAN: NRL_STATE (before the state bits are taken; the backend reads the same switches)
+            const char *r = getenv("DM_NB_RELOC"), *od = getenv("DM_NB_ORDER");
+            const unsigned bad = nr_lean_parse(getenv("DM_NR_LEAN"), getenv("DM_NR_LEAN_PARTS"), getenv("DM_NR_LEAN_AB"), &g_nrl);
+            if (bad) LOG("【红】[nr] DM_NR_LEAN%s%s%s: out of range (DM_NR_LEAN 0 / 1 / 2, DM_NR_LEAN_PARTS a mask of %#x, DM_NR_LEAN_AB 0..100000) - that one is ignored",
+                         bad & NRL_BAD_MODE ? " (mode)" : "", bad & NRL_BAD_PARTS ? " _PARTS" : "", bad & NRL_BAD_AB ? " _AB" : "", NRL_ALL);
+            g_nrl_state_why = nr_lean_state_why(st != 0, r && atoi(r) != 0, od && atoi(od) != 0);
+            g_nrl_state = g_nrl.mode == 1 && (g_nrl.parts & NRL_STATE) && g_nrl_state_why == NRL_ST_OK;
+            g_nrl_on = g_nrl.mode == 1 && !g_nrl.ab;   // the A/B starts in an "off" phase (nr_lean_ab_on(0, n) == 0)
+            if (g_nrl.mode) LOG("[nr] DM_NR_LEAN=%d parts %#x (NR-13 / NR-26): state capture NB-13a %s (%s)%s", g_nrl.mode, g_nrl.parts,
+                g_nrl_state ? (g_nrl.ab ? "paused in the lean phases of the A/B" : "NOT taken - the state packets write plain NVN state records, every draw sees the state they set in call order") :
+                g_nrl.mode == 2 ? "taken as before, counted" : "taken as before", nr_lean_state_name(g_nrl_state_why),
+                g_nrl.ab ? "; DM_NR_LEAN_AB: lean alternates off N / on 2N / off N frames, the lines '[nr] lean' give both phases" : "");
+        }
+        if (st && g_nrl_state && !g_nrl.ab) {
+            LOG("[nb] DM_NB_OPS state bits %#llx: not taken (DM_NR_LEAN=1, NR-13): the state calls of these engine opcodes stay plain NVN state "
+                "records; nothing reads the NB-13a block ids (DM_NB_RELOC / DM_NB_ORDER are off)", (unsigned long long)st);
+        } else if (st) {   // NB-13a: the ExecuteRenderCommand handler above brackets every packet from here on
             nvn_nb_state_enable(); g_nbs_ops = st;
             LOG("[nb] DM_NB_OPS state bits %#llx: the state calls of these engine opcodes go to the state shadow and are written as deduplicated "
                 "OP_X_NB_STATE blocks before the next other record; plain state records elsewhere mark their sub-state unknown (NB-13a); "

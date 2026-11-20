@@ -40,7 +40,10 @@ enum { BUSY_WAIT_MS = 2000 };
 // 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 #define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（暗黑实测峰值见内存读数行的「内存池」；塞尔达约 300 个，踩过）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
-typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; _Atomic uint64_t *bgen; size_t bcap; } range_t;
+typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; _Atomic uint64_t *bgen; size_t bcap; uint64_t inc; _Atomic uint64_t ep; } range_t;   // inc: [DOS2] NR-SHCACHE, the registration number of this pool (nvn_dirty_version)
+// ep: [DOS2] NR-ZERO DM_NR_SHC_MEMO, this slot's change epoch (never reset): +1 before any page of the range can leave PROT (unprotect_run,
+// before its mprotect) and when the slot is registered / removed, so "ep unchanged" = every page that was PROT still is, with the same
+// generation, in the same registration (nvn_dirty_version_tok / nvn_dirty_tok_ok).
 // [perf6] (from the DOOM 2016 port, 8ca23ae) DM_DIRTY_BLOCKS=1 (default 1; 0 = off): bgen[b] = newest page generation in block b
 // (64 pages = 256 KB), kept with a CAS max wherever a page generation is raised, so nvn_dirty_since skips clean blocks instead of
 // loading every page's generation (DOOM: -1.2 us per draw on the descriptor path). Same answers: a block summary is never lower than
@@ -118,6 +121,7 @@ static void take_run(range_t *r, uintptr_t *a, uintptr_t *b, uintptr_t lo, uintp
 // Pages [a, b) are BUSY (taken from PROT by the caller): make them writable, stamp them written, state NONE. 0 or errno (then the
 // pages are untouched: still read-only and BUSY, the caller decides). Signal-safe.
 static int unprotect_run(range_t *r, uintptr_t a, uintptr_t b) {
+    atomic_fetch_add(&r->ep, 1);   // [DOS2] NR-ZERO: before the pages can be written (a token taken before this is stale from here on)
     int err = mp(r->base + (a << g_shift), (b - a) << g_shift, PROT_READ | PROT_WRITE);
     if (err) return err;
     uint64_t g = atomic_fetch_add(&g_now, 1) + 1;
@@ -213,7 +217,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
         g_blk = kb > 0 ? ((uintptr_t)kb << 10) / g_pg : 1; if (g_blk < 1) g_blk = 1;
         if (g_blk & (g_blk - 1)) { uintptr_t b = 1; while (b * 2 <= g_blk) b *= 2; g_blk = b; }
         LOG("[vma] dirty tracker: a write fault unprotects %lu KiB blocks (DM_DIRTY_UNPROT_KB, page %lu KiB)", (unsigned long)((g_blk * g_pg) >> 10), (unsigned long)(g_pg >> 10)); }
-    atomic_fetch_add(&g_adds_total, 1);
+    const uint64_t inc = atomic_fetch_add(&g_adds_total, 1) + 1;
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
     int slot = -1;
@@ -244,7 +248,8 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     _Atomic uint64_t *bgen = r->bgen; size_t nb = (np >> BLK_SHIFT) + 1;   // [perf6] DM_DIRTY_BLOCKS
     if (blocks_on()) { if (r->bcap < nb) { bgen = calloc(nb, sizeof *bgen); if (!bgen) die("dirty block table allocation failed (%zu)", nb); r->bcap = nb; } else memset((void *)bgen, 0, nb * sizeof *bgen); }
     else bgen = NULL;
-    r->base = base; r->end = end; r->state = state; r->gen = gen; r->bgen = bgen;
+    atomic_fetch_add(&r->ep, 1);   // [DOS2] NR-ZERO: a reused slot - no token of its old registration stays valid
+    r->base = base; r->end = end; r->state = state; r->gen = gen; r->bgen = bgen; r->inc = inc;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
@@ -254,7 +259,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
 void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
     range_t *r = find((uintptr_t)mem);
-    if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
+    if (r) { atomic_fetch_add(&r->ep, 1); prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }   // ep: [DOS2] NR-ZERO
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {
@@ -346,6 +351,91 @@ int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     }
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
+}
+// [DOS2] NR-SHCACHE (docs/dos2/nr/NR-SHCACHE.md section 12): a version of the bytes of [addr, addr+len) for a cache that must see every
+// CPU write to them. 1 = every covered page is write-protected now (state PROT): *gen = the newest write generation of those pages, *inc =
+// the registration number of their pool. Why it is a version: a PROT page cannot change; a write faults, which raises the page's generation
+// above every earlier one (unprotect_run) and leaves it writable (NONE); it becomes PROT again only by a later protect, so "PROT with
+// generation g" always stands for the one content the page had at the first protect after the write that set g. A pool registered again at
+// the same address starts at generation 0: inc tells it apart. 0 = a page is writable or BUSY, or the range is not tracked (no version:
+// the caller protects it and asks again next time). Lock-free, any thread (atomic loads only).
+int nvn_dirty_version(const void *addr, size_t len, uint64_t *gen, uint64_t *inc) {
+    *gen = 0; *inc = 0;
+    if (!len) return 1;
+    range_t *r = find((uintptr_t)addr);
+    if (!r || (uintptr_t)addr + len > r->end) return 0;
+    uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift; uint64_t g = 0;
+    for (uintptr_t i = p; i <= q; i++) {
+        if (atomic_load(&r->state[i]) != PG_PROT) return 0;
+        const uint64_t x = atomic_load(&r->gen[i]); if (x > g) g = x;
+    }
+    *gen = g; *inc = r->inc; return 1;
+}
+// [DOS2] NR-TRAFFIC round 2 (docs/dos2/nr/NR-TRAFFIC.md §9, port-common/dirty-order): the order in which a reader of tracked memory takes
+// its stamp and protects. A reader copies (uploads, hashes) bytes and later asks nvn_dirty_since(stamp) whether they changed. That answer is
+// right only if every store that can land after the copy raises a page generation above the stamp. Two orders broke that:
+//  - protect AFTER the read (old end of a texture upload): a store between the read and the protect hits a writable page, raises nothing;
+//  - protect, THEN stamp (old check branch, untracked -> tracked): a store that faults between the two gets a generation <= the stamp, and
+//    the store itself re-executes after the handler (possibly after the read) on a page left writable -> no later fault.
+//  - and in both: a page another thread holds BUSY (mid-unprotect) is skipped by nvn_dirty_protect and can end writable with a generation
+//    the stamp already covers.
+// nvn_dirty_stamp_protect: stamp FIRST, then protect, again until every covered page is read-only (state PROT; at most 8 rounds with a
+// yield), then the caller reads. A fault after the stamp always gets a newer generation; once every page has been read-only at some instant
+// after the stamp, every later store faults. *whole = 0 when the pages never all became read-only (GEN_STICKY pages after a failed protect
+// under VMA pressure, or a page busy 8 rounds in a row): the caller must not trust "nothing written since" for this copy.
+// DM_DIRTY_PROTECT_ORDER: 1 (default) this order; 0 = each caller's old order (A/B only). nvn_dirty_safe_order() reads it once.
+static _Atomic uint64_t g_ord_calls, g_ord_retries, g_ord_notwhole;
+int nvn_dirty_safe_order(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_DIRTY_PROTECT_ORDER"); v = e && *e ? atoi(e) != 0 : 1;
+        LOG("[vma] dirty tracker: DM_DIRTY_PROTECT_ORDER=%d (%s)", v, v ? "stamp, protect until every page is read-only, then read" : "old order of each caller (protect after read / protect then stamp)"); }
+    return v;
+}
+static int all_prot(range_t *r, uintptr_t p, uintptr_t q, int *sticky) {
+    int ok = 1;
+    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->state[i]) != PG_PROT) { ok = 0; if (atomic_load(&r->gen[i]) == GEN_STICKY) { *sticky = 1; return 0; } }
+    return ok;
+}
+uint64_t nvn_dirty_stamp_protect(const void *addr, size_t len, int *whole) {
+    if (whole) *whole = 1;
+    const uint64_t stamp = atomic_load(&g_now);
+    if (!len || !nvn_dirty_tracked(addr, len)) return stamp;
+    atomic_fetch_add(&g_ord_calls, 1);
+    for (int k = 0;; k++) {
+        nvn_dirty_protect(addr, len);
+        range_t *r = find((uintptr_t)addr);
+        if (!r || (uintptr_t)addr + len > r->end) { if (whole) *whole = 0; atomic_fetch_add(&g_ord_notwhole, 1); break; }
+        uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift; int sticky = 0;
+        if (all_prot(r, p, q, &sticky)) break;
+        if (sticky || k == 7) { if (whole) *whole = 0; atomic_fetch_add(&g_ord_notwhole, 1); break; }
+        atomic_fetch_add(&g_ord_retries, 1); sched_yield();
+    }
+    return stamp;
+}
+void nvn_dirty_order_stats(uint64_t *calls, uint64_t *retries, uint64_t *notwhole) { *calls = atomic_load(&g_ord_calls); *retries = atomic_load(&g_ord_retries); *notwhole = atomic_load(&g_ord_notwhole); }
+// [DOS2] NR-ZERO DM_NR_SHC_MEMO: nvn_dirty_version + a token of the answer. The slot's epoch is read BEFORE the pages, so a page that starts
+// to leave PROT during the scan either shows BUSY / NONE here (0, no token) or bumps the epoch after it was read (the token is stale at
+// once). 1 + *tok: the answer stays (*gen, *inc) for as long as nvn_dirty_tok_ok(*tok) - the pages cannot have been written meanwhile:
+// every way out of PROT (write fault, host write ahead, relieve, pool removal / re-registration) bumps ep before the page is writable.
+int nvn_dirty_version_tok(const void *addr, size_t len, uint64_t *gen, uint64_t *inc, uint64_t *tok) {
+    *gen = 0; *inc = 0; *tok = 0;
+    if (!len) return 1;
+    range_t *r = find((uintptr_t)addr);
+    if (!r || (uintptr_t)addr + len > r->end) return 0;
+    const uint64_t ep = atomic_load(&r->ep);
+    uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift; uint64_t g = 0;
+    for (uintptr_t i = p; i <= q; i++) {
+        if (atomic_load(&r->state[i]) != PG_PROT) return 0;
+        const uint64_t x = atomic_load(&r->gen[i]); if (x > g) g = x;
+    }
+    if (!atomic_load_explicit(&r->live, memory_order_acquire) || atomic_load(&r->ep) != ep) return 0;   // removed / changed under the scan
+    *gen = g; *inc = r->inc; *tok = ((uint64_t)(r - g_r) << 52) | (ep & ((1ull << 52) - 1)); return 1;
+}
+int nvn_dirty_tok_ok(uint64_t tok) {
+    const uint64_t slot = tok >> 52;
+    if (slot >= (uint64_t)atomic_load(&g_nr)) return 0;
+    const range_t *r = &g_r[slot];
+    return atomic_load_explicit(&r->live, memory_order_acquire) && (atomic_load(&((range_t *)r)->ep) & ((1ull << 52) - 1)) == (tok & ((1ull << 52) - 1));
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;

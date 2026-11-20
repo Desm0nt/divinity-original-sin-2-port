@@ -22,6 +22,7 @@ static void mock_vkCmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBegin
     put(l, sc);
 }
 static void mock_vkCmdEndRenderPass(VkCommandBuffer c) { head(c, 2); }
+static void mock_vkCmdNextSubpass(VkCommandBuffer c, VkSubpassContents sc) { Log &l = head(c, 40); put(l, sc); }   // NR-ONCHIP
 static void mock_vkCmdBindPipeline(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipeline p) { Log &l = head(c, 3); put(l, bp); put(l, p); }
 static void mock_vkCmdBindDescriptorSets(VkCommandBuffer c, VkPipelineBindPoint bp, VkPipelineLayout lay, uint32_t first, uint32_t n, const VkDescriptorSet *s, uint32_t nd, const uint32_t *d) {
     Log &l = head(c, 4); put(l, bp); put(l, lay); put(l, first); put(l, n); for (uint32_t i = 0; i < n; i++) put(l, s[i]); put(l, nd); for (uint32_t i = 0; i < nd; i++) put(l, d[i]);

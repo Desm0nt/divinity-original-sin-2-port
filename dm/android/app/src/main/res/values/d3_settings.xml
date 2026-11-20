@@ -115,11 +115,7 @@
     <string name="tl2_mods_failed">Mods skipped (could not be converted): %s</string>
     <string name="d3_mp_lan">Local wireless play over Wi-Fi</string>
     <string name="tl2_mp_lan_note">Local multiplayer works between phones on the same Wi-Fi or hotspot. Nothing is opened until you host or look for a local game.</string>
-    <string name="dos2_res_900">High resolution 900p (slower; default 720p with a wider view)</string>
     <string name="dos2_thermal">Thermal mode (lower the quality when the phone heats up)</string>
-    <string name="dos2_res">Render resolution (height; the width follows the screen)</string>
-    <string name="dos2_res_1080">1080p (screen native)</string>
-    <string name="dos2_drs">Dynamic resolution (lowers the 3D resolution when the GPU is busy)</string>
     <string name="dos2_column">Button column (right edge: panels, map)</string>
     <string name="dos2_column_shown">shown</string>
     <string name="dos2_column_folded">folded</string>
@@ -129,7 +125,10 @@
     <string name="dos2_column_pad_fold">folded</string>
     <string name="dos2_column_pad_keep">left as is</string>
     <string name="dos2_touch">Touch as mouse (experiment): tap = click, hold = right click, pinch = zoom</string>
-    <string name="dos2_drs_target">Dynamic resolution target, fps</string>
+    <string name="dos2_drs_target">Target frame rate, fps</string>
+    <string name="dos2_drs_min">Lowest 3D resolution it may drop to (per side; it holds the target but never goes below this)</string>
+    <!-- [DOS2] dynamic resolution tied to the Switch mode (owner 17.11, Tl2Gear.dos2Drs, docs/dos2/nr/DRS-MODE.md) -->
+    <string name="dos2_mode_handheld">Handheld: %1$s (lighter on the GPU)</string>
     <string name="dos2_fps_uncapped">No limit</string>
     <string name="dos2_fps_note">60 is the default. 30 saves battery and heat. 90 and 120 are shown only when the screen has such a mode; above 60 and «No limit» are experimental: more heat and battery, and the game keeps its normal speed. Loading screens and videos stay at 60.</string>
     <!-- [front] players' own controls (PadEditor Add… / Rename…, PadEdit.java; owner 15.11.2026) -->
@@ -152,4 +151,50 @@
     <string name="dos2_lstick_hint">Without it: tap the floor to walk, pinch to zoom, two fingers left / right turn the camera</string>
     <string name="dos2_rstick">Right stick (camera)</string>
     <string name="dos2_rstick_off">Off: swipe with one finger or two fingers to turn, pinch to zoom</string>
+    <!-- [DOS2] N6 "Hacks" page (Tl2Gear.dos2Hacks; native dm/gfx/nr/nr_hacks.h, docs/dos2/nr/NR-HACKS.md) -->
+    <string name="dos2_hacks">Graphics quality</string>
+    <string name="dos2_hacks_intro">Simplified graphics for more FPS, like lowering the settings on a PC. Off = the picture as the game draws it. The 3D resolution and FSR upscaling are on the main page (Screen and resolution). Applies on the next launch.</string>
+    <string name="dos2_hacks_tier">Simplification level</string>
+    <string name="dos2_hacks_off">Off</string>
+    <string name="dos2_hacks_light">Light</string>
+    <string name="dos2_hacks_medium">Medium</string>
+    <string name="dos2_hacks_max">Maximum</string>
+    <string name="dos2_hacks_custom">Custom</string>
+    <string name="dos2_hacks_tier_note">Light: hard to notice (slightly shorter model detail distance, a lighter shadow edge filter). Medium: plus simpler distant models, smaller shadow maps, slightly softer distant textures, 4x angle filtering, at most 4 lamps on one spot. Maximum: plus no glow, no distant shadows, softer distant textures, 2x angle filtering, at most 2 lamps on one spot. Changing any row below makes it Custom.</string>
+    <string name="dos2_hack_nobloom">No glow around bright lights (noticeable)</string>
+    <string name="dos2_hack_noaa">No edge smoothing at 100 % (jagged edges; with a lower 3D resolution the upscaling replaces it)</string>
+    <string name="dos2_hack_shadows">Smaller shadow maps 512 instead of 768 (softer shadows)</string>
+    <string name="dos2_hack_shpcf">Shadow edge filter</string>
+    <string name="dos2_hack_shpcf_game">default (hardware)</string>
+    <string name="dos2_hack_shpcf_mobile">lighter</string>
+    <string name="dos2_hack_shpcf_dref">hardware</string>
+    <string name="dos2_hack_shfar">No distant shadows (the far shadow cascade is not drawn; noticeable)</string>
+    <string name="dos2_hack_texbias">Distant texture detail</string>
+    <string name="dos2_hack_texbias_0">as the game</string>
+    <string name="dos2_hack_texbias_1">a bit softer</string>
+    <string name="dos2_hack_texbias_2">softer</string>
+    <string name="dos2_hack_aniso">Texture filtering at an angle</string>
+    <string name="dos2_hack_aniso_game">as the game</string>
+    <string name="dos2_hack_lod">Model detail and draw distance (lower = simpler models sooner, distant objects vanish sooner)</string>
+    <string name="dos2_hack_lights">Lamps and torches lighting one spot at most (all = as the game)</string>
+    <string name="dos2_hack_lights_all">all</string>
+    <!-- [DOS2] 19.11 grouped dialog and the 3D resolution row (Tl2Gear.dos2Sections / Res3d / dos2Fsr) -->
+    <string name="dos2_group_lang">Language</string>
+    <string name="dos2_group_screen">Screen and resolution</string>
+    <string name="dos2_group_fps">Frame rate</string>
+    <string name="dos2_group_quality">Graphics</string>
+    <string name="dos2_group_driver">Driver and safe mode</string>
+    <string name="dos2_group_controls">Controls</string>
+    <string name="dos2_group_other">Other</string>
+    <string name="dos2_mode">Switch mode (the game window; the interface is drawn at this size)</string>
+    <string name="dos2_mode_note">Docked and Handheld are the two Switch modes. The window shown here is the size the interface is drawn at; Docked uses the screen\'s own resolution. The 3D world has its own resolution below, for each mode.</string>
+    <string name="dos2_res3d_for_docked">3D resolution in Docked mode</string>
+    <string name="dos2_res3d_for_handheld">3D resolution in Handheld mode</string>
+    <string name="dos2_res3d_drs">Dynamic (DRS): the game picks it to hold the frame rate</string>
+    <string name="dos2_res3d_fixed">%1$d %% (%2$dp)</string>
+    <string name="dos2_res3d_note">Only the 3D world is scaled: the interface and text always stay at the full window size and stay sharp. A lower percentage gives more FPS and less heat, but a softer 3D picture. Each Switch mode keeps its own choice; this shows the mode picked above. Switching between a fixed value and Dynamic applies on the next launch.</string>
+    <string name="dos2_res3d_drs_title">Dynamic resolution</string>
+    <string name="dos2_res3d_drs_text">Instead of a fixed resolution, the dynamic one will be used: the game lowers the 3D resolution by itself whenever the phone cannot hold the target frame rate, and raises it again when it can, but never below the lowest resolution chosen below (now %1$d %%). The interface always stays sharp. Applies on the next launch.</string>
+    <string name="dos2_res3d_drs_ok">OK</string>
+    <string name="dos2_fsr">Sharp upscaling FSR 1 instead of a blurry stretch (works only while the 3D is below 100 %, fixed or dynamic; best with Sharpening on)</string>
 </resources>

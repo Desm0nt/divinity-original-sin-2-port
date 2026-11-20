@@ -4,8 +4,13 @@
 // CPU-side elapsed time, not GPU timestamps or thread CPU utilization.
 // Caller serializes a recorder; scopes must close before reporting/resetting.
 struct XbgCpuTiming {
+    // [DOS2] NR-CPU (docs/dos2/nr/NR-CPU.md): NbState .. MtEnd are timed only with DM_NR_CPU=1 (NRCPU_SCOPE in xbg_game.cpp) and printed
+    // only when they were timed, so without the switch every line is as before. They split what was "other" (NbState, NbDraw, MtEnd) and
+    // "draw" (NrDesc, NrLane).
     enum Kind { Other, Draw, Dispatch, Descriptor, Pass, Buffer, Pipeline,
-        Submit, Fence, Present, Cleanup, Hash, Image, Log, Program, CpuWrite, Snapshot, Count };
+        Submit, Fence, Present, Cleanup, Hash, Image, Log, Program, CpuWrite, Snapshot,
+        NbState, NbDraw, NrDesc, NrLane, MtEnd, NrZ3, Count };   // NrZ3: [NR-ZERO Z3] a draw answered by nrz3 (lookup to the end of the shared tail)
+    static constexpr int FirstOptional = NbState;
     struct Counter { uint64_t calls=0, exclusive_ns=0, inclusive_ns=0, max_ns=0; } counters[Count];
     struct Scope;
     uint64_t (*clock)();

@@ -28,9 +28,13 @@ import java.util.List;
 //                   [DOS2] gamepad (the Switch pad, default) first, then tl2 / tl2_side
 //   touch           Tl2Touch: diagonal correction, second-set modifier, the optional extras (pad tl2_iso / tl2_mod / tl2_tap / tl2_hold_walk /
 //                   tl2_hero_y / tl2_aim)
+//   safe mode       [DOS2] GearPages.safeMode: GPU safe mode off / auto / on (pref safe_mode, DM_SAFE_MODE; Mali / PowerVR only; docs/dos2/nr/SAFE-MODE.md)
 //   start env       no row: DM_TL2_POINTER=1 (always on), the DOOM cvars unset, the non-Adreno text diagnostics
 // A Diablo III build of this tree (DM_GAME=d3) gets D3's rows instead of the TL2 ones where they differ (touch / gamepad, D3 skill icons,
 // hide sticks, walking to the finger, menu swipes).
+// [DOS2] Divinity: Original Sin 2 has its own list (dos2Sections, owner 19.11): groups under headings (language / screen and resolution /
+// frame rate / graphics quality / driver and safety / controls / other); the window is always the screen's own height and the 3D
+// resolution is one row per Switch mode (Res3d: a fixed % or dynamic resolution).
 final class Tl2Gear {
     private Tl2Gear() {}
     static final boolean TL2 = DmActivity.TL2;
@@ -38,32 +42,82 @@ final class Tl2Gear {
 
     // The dialog, top to bottom (and the start environment in the same order)
     static List<GearSettings.Section> sections(DmActivity a, GearSettings g) {
+        if (DmActivity.DOS2) return dos2Sections(a, g);
         Mode mode = new Mode(a);
         List<GearSettings.Section> l = new ArrayList<>();
         l.add(startEnv(a));
         l.add(GearPages.menuLanguage());
         l.add(GearPages.gameLanguage(DmActivity.D3_LANG_CODES, DmActivity.D3_LANG_LABELS, true));
         l.add(note(R.string.d3_game_lang_note));
-        if (DmActivity.DOS2) l.add(dos2Res());   // [DOS2] before the mode section: its labels show the size
         l.add(mode);
         l.add(GearPages.pictureShape(new String[] {g.str(R.string.d3_aspect_bars), g.str(R.string.d3_aspect_stretch), g.str(R.string.d3_aspect_wide)},
             DmActivity.D3_ASPECT_DEFAULT, g.str(R.string.d3_aspect_wide_note), a::applyAspectLayout, (s, v) -> aspectEnv(a, v), mode::relabel));
-        if (!DmActivity.DOS2) l.add(stretchLoading());   // [DOS2] no loading-screen option: its widescreen has no pillarboxed loading art (hle_dos2_wide.c)
+        l.add(stretchLoading());
         // TL2 mods: their own row in the pause menu (DmActivity.portRows -> Tl2Gear.showMods), not a gear section
         l.add(GearPages.sharpen());
-        if (DmActivity.DOS2) { l.add(dos2Fps()); l.add(note(R.string.dos2_fps_note)); }   // [DOS2] 30 / 60 / 90 / 120 / uncapped (DM_DOS2_FPS)
-        else { l.add(GearPages.fpsLimit(FPS_LIMITS, 60)); l.add(note(R.string.d3_fps_note)); }
-        if (DmActivity.DOS2) { l.add(dos2Drs()); l.add(dos2Thermal()); l.add(dos2Touch()); l.add(dos2Column()); l.add(dos2LStick()); l.add(dos2RStick()); }   // [DOS2] hle_dos2_quality.c: DRS on/off + target fps; thermal ladder
+        l.add(GearPages.fpsLimit(FPS_LIMITS, 60)); l.add(note(R.string.d3_fps_note));
         if (a.drivers() != null) { l.add(GearPages.driver(a.drivers())); l.add(note(R.string.d3_driver_note)); }
         l.add(GearPages.rumble());
-        if (!DmActivity.DOS2) l.add(localPlay());   // [DOS2] TL2's LAN play (its Pia over ldn) is not wired / tested for DOS2: no row
+        l.add(localPlay());
         l.add(GearPages.fpsCounter());
-        if (!DmActivity.DOS2) l.add(new Layout());   // [DOS2] one layout (the Switch pad, edited in its own editor): no TL2 / D3 layout list
+        l.add(new Layout());
         l.add(GearPages.padControls());
         l.add(GearPages.deadzone());
-        if (!DmActivity.DOS2) l.add(TL2 ? new TouchRows() : new D3Touch());   // [DOS2] no TL2 touch rows (tap world, zoom, ...)
+        l.add(TL2 ? new TouchRows() : new D3Touch());
         l.add(GearPages.gearButton());
+        if (a.updateNotice() != null) l.add(GearPages.updates(a.updateNotice()));
         return l;
+    }
+    // [DOS2] the Divinity: Original Sin 2 dialog (owner 19.11: grouped by topic). Not here: TL2's loading-screen stretch (DOS2's widescreen has
+    // no pillarboxed loading art, hle_dos2_wide.c), LAN play (TL2's Pia over ldn is not wired / tested for DOS2), the layout list (one layout:
+    // the Switch pad, edited in its own editor), TL2 / D3 touch rows. The start env runs in this order too: dos2Window (DM_DOS2_RES,
+    // DmActivity.dos2Base) before the picture shape (aspectEnv reads dos2Base).
+    static List<GearSettings.Section> dos2Sections(DmActivity a, GearSettings g) {
+        Mode mode = new Mode(a); Res3d res = new Res3d(a, mode);
+        List<GearSettings.Section> l = new ArrayList<>();
+        l.add(startEnv(a));
+        l.add(group(R.string.dos2_group_lang));
+        l.add(GearPages.menuLanguage());
+        l.add(GearPages.gameLanguage(DmActivity.D3_LANG_CODES, DmActivity.D3_LANG_LABELS, true));
+        l.add(note(R.string.d3_game_lang_note));
+        l.add(group(R.string.dos2_group_screen));
+        l.add(dos2Window());   // no row: the window height = the screen's own (before the rows that show the window size)
+        l.add(mode);
+        l.add(GearPages.pictureShape(new String[] {g.str(R.string.d3_aspect_bars), g.str(R.string.d3_aspect_stretch), g.str(R.string.d3_aspect_wide)},
+            DmActivity.D3_ASPECT_DEFAULT, g.str(R.string.d3_aspect_wide_note), a::applyAspectLayout, (s, v) -> aspectEnv(a, v), v -> { mode.relabel(v); res.relabel(v); }));
+        l.add(res);   // 3D resolution per Switch mode: a fixed % (DM_HACK_SCALE) or dynamic (DM_DOS2_DRS + its target / floor rows)
+        l.add(GearPages.sharpen());
+        l.add(dos2Fsr());   // FSR 1 upscaling of a 3D below 100 % (DM_HACK_FSR; on the hacks page until 19.11)
+        l.add(group(R.string.dos2_group_fps));
+        l.add(dos2Fps()); l.add(note(R.string.dos2_fps_note));   // 30 / 60 / 90 / 120 / uncapped (DM_DOS2_FPS)
+        l.add(dos2Thermal());   // hle_dos2_quality.c thermal ladder
+        l.add(group(R.string.dos2_group_quality));
+        l.add(GearSettings.page(g.str(R.string.dos2_hacks), dos2Hacks()));   // N6 simplifications page (DM_HACK_*, docs/dos2/nr/NR-HACKS.md)
+        SafeMode sm = a.safeMode();
+        if (a.drivers() != null || (sm != null && sm.eligible())) l.add(group(R.string.dos2_group_driver));
+        if (a.drivers() != null) { l.add(GearPages.driver(a.drivers())); l.add(note(R.string.d3_driver_note)); }
+        l.add(GearPages.safeMode(a));   // [DOS2][safe-mode] off / auto / on, shown on Mali / PowerVR only (SafeMode.eligible); DM_SAFE_MODE
+        l.add(group(R.string.dos2_group_controls));
+        l.add(dos2Touch()); l.add(dos2Column()); l.add(dos2LStick()); l.add(dos2RStick());
+        l.add(GearPages.padControls());
+        l.add(GearPages.deadzone());
+        l.add(GearPages.rumble());
+        l.add(GearPages.gearButton());
+        l.add(group(R.string.dos2_group_other));
+        l.add(GearPages.fpsCounter());
+        if (a.updateNotice() != null) l.add(GearPages.updates(a.updateNotice()));   // as in TL2 v0.1.7: the app version + "Check for new versions at start"
+        return l;
+    }
+    // ---- [DOS2] a group heading (no row): bold, larger, a thin line above it
+    static GearSettings.Section group(int res) {
+        return new GearSettings.Section() {
+            public void build(GearSettings g, LinearLayout box) {
+                android.view.View line = new android.view.View(g.a); line.setBackgroundColor(0x40808080);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, 2); lp.topMargin = 40; box.addView(line, lp);
+                TextView t = g.heading(box, g.str(res)); t.setPadding(0, 16, 0, 4);
+                t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD); t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 18);
+            }
+        };
     }
 
     // ---- [mp] local wireless play over the LAN (hle_ldn.c; pref "mp_lan", on by default -> DM_LDN): the game's own local multiplayer (Pia over
@@ -108,21 +162,24 @@ final class Tl2Gear {
     // ---- the Switch operation mode = the game's render size (hle_oe.c GetOperationMode / GetPerformanceMode): docked 1920x1080 (D3 1600x900),
     // handheld 1280x720; the labels show the size the next launch renders at for the picked picture shape (widescreen: the screen's aspect).
     // Next launch here (DM_OPMODE); the pause menu's mode row switches it live (DmActivity.setDocked, the same pref).
+    // [DOS2] the labels show the window (the interface is drawn at it); each mode has its own 3D resolution row (Res3d follows the pick).
     static final class Mode implements GearSettings.Section {
-        final DmActivity a; RadioGroup r; GearSettings g;
+        final DmActivity a; RadioGroup r; GearSettings g; Runnable changed;   // changed: the DRS row's refresh when the pick changes
         Mode(DmActivity a) { this.a = a; }
+        boolean pickedHandheld() { return r != null ? GearSettings.picked(r) == 1 : g != null && g.gamePrefs().getBoolean("handheld", false); }
         public void build(GearSettings g, LinearLayout box) {
             this.g = g; SharedPreferences p = g.gamePrefs();
-            g.heading(box, g.when(g.str(R.string.d3_mode), false));
+            g.heading(box, g.when(g.str(DmActivity.DOS2 ? R.string.dos2_mode : R.string.d3_mode), false));
             r = g.radios(box, new String[] {"", ""}, p.getBoolean("handheld", false) ? 1 : 0, false);
+            r.setOnCheckedChangeListener((grp, id) -> { if (changed != null) changed.run(); });
             relabel(p.getInt("aspect", DmActivity.D3_ASPECT_DEFAULT));
-            g.note(box, g.str(R.string.d3_mode_note));
+            g.note(box, g.str(DmActivity.DOS2 ? R.string.dos2_mode_note : R.string.d3_mode_note));
         }
         void relabel(int aspect) {
             if (r == null || g == null) return;
             int[] sc = a.screenSize(), dk = DmActivity.d3RenderSize(aspect == 2, false, sc[0], sc[1]), hh = DmActivity.d3RenderSize(aspect == 2, true, sc[0], sc[1]);
             ((RadioButton) r.getChildAt(0)).setText(g.str(R.string.d3_mode_docked, dk[0] + "×" + dk[1]));
-            ((RadioButton) r.getChildAt(1)).setText(g.str(R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
+            ((RadioButton) r.getChildAt(1)).setText(g.str(DmActivity.DOS2 ? R.string.dos2_mode_handheld : R.string.d3_mode_handheld, hh[0] + "×" + hh[1]));
         }
         public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pad) { game.putBoolean("handheld", GearSettings.picked(r) == 1); }
         public void env(GearSettings g) throws ErrnoException {
@@ -144,33 +201,26 @@ final class Tl2Gear {
         } else if (v == 2) Os.setenv("DM_D3_WIDE", "1", true); else Os.unsetenv("DM_D3_WIDE");
     }
     // ---- widescreen loading screens: TL2 pillarboxed 16:9 by default, stretched when asked (hle_tl2_wide.c); D3 the other way round (ls_present_crop)
-    // ---- [DOS2] render height: 720p by default (the Switch's DRS range is 495-720p; the widescreen widens the frame instead), 900p as an option
-    // (next launch; heavier on the GPU). DmActivity.dos2Base feeds the docked / handheld labels and DM_DOS2_WIDE (aspectEnv)
-    static final int[] DOS2_RES = {720, 900, 1080};
-    static int dos2ResPref(GearSettings g) {   // "dos2_res" 720 / 900 / 1080; the old checkbox "dos2_res_900" is still read
-        // owner 15.11 (Mi 13): the default is the screen's own height (1080 on a 2400x1080 phone; 900 / 720 on lower screens) - a player
-        // lowers it if needed; DRS stays off by default (dos2Drs)
-        SharedPreferences p = g.gamePrefs(); int r = p.getInt("dos2_res", p.getBoolean("dos2_res_900", false) ? 900 : dos2NativeRes(g));
-        return r == 900 || r == 1080 ? r : 720;
-    }
-    static int dos2NativeRes(GearSettings g) {   // the largest of 720 / 900 / 1080 that the screen's short side holds (current display mode)
+    // ---- [DOS2] the window height (no row since 19.11): always the screen's own (dos2NativeRes) -> DM_DOS2_RES and DmActivity.dos2Base (the
+    // mode labels, DM_DOS2_WIDE in aspectEnv). Until 19.11 a row 720 / 900 / 1080 (pref "dos2_res", the older checkbox "dos2_res_900") set
+    // the whole window, interface included; now the interface stays at the screen's resolution and Res3d scales only the 3D. The old pref is
+    // still read by Res3d to carry a player's lower window over as a 3D %.
+    static int dos2NativeRes(android.content.Context c) {   // the largest of 720 / 900 / 1080 that the screen's short side holds (current display mode)
         try {
             android.util.DisplayMetrics m = new android.util.DisplayMetrics();
-            ((android.view.WindowManager) g.a.getSystemService(android.content.Context.WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(m);
+            ((android.view.WindowManager) c.getSystemService(android.content.Context.WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(m);
             int s = Math.min(m.widthPixels, m.heightPixels);
             return s >= 1080 ? 1080 : s >= 900 ? 900 : 720;
         } catch (RuntimeException e) { return 720; }
     }
-    static GearSettings.Section dos2Res() {
+    static int dos2OldRes(android.content.Context c, SharedPreferences p) {   // the pre-19.11 window height: "dos2_res", else "dos2_res_900", else native
+        int r = p.getInt("dos2_res", p.getBoolean("dos2_res_900", false) ? 900 : dos2NativeRes(c));
+        return r == 900 || r == 1080 ? r : 720;
+    }
+    static GearSettings.Section dos2Window() {
         return new GearSettings.Section() {
-            android.widget.RadioGroup r;
-            public void build(GearSettings g, LinearLayout box) {
-                int v = dos2ResPref(g); DmActivity.dos2Base = v;
-                g.note(box, g.when(g.str(R.string.dos2_res), false));
-                r = g.radios(box, new String[] {"720p", "900p", g.str(R.string.dos2_res_1080)}, v == 1080 ? 2 : v == 900 ? 1 : 0, true);
-            }
-            public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pad) { game.putInt("dos2_res", DOS2_RES[GearSettings.picked(r)]); }
-            public void env(GearSettings g) throws ErrnoException { DmActivity.dos2Base = dos2ResPref(g); Os.setenv("DM_DOS2_RES", Integer.toString(DmActivity.dos2Base), true); }
+            public void build(GearSettings g, LinearLayout box) { DmActivity.dos2Base = dos2NativeRes(g.a); }
+            public void env(GearSettings g) throws ErrnoException { DmActivity.dos2Base = dos2NativeRes(g.a); Os.setenv("DM_DOS2_RES", Integer.toString(DmActivity.dos2Base), true); }
         };
     }
     // ---- [DOS2] frame rate limit (next launch; docs/dos2/DOS2_PORT.md "Лимит кадров 90 / 120 / без ограничения"). Pref "fps_limit" as the
@@ -209,6 +259,16 @@ final class Tl2Gear {
     // After nativeStart (dm/env is in the environment by then): the effective target, one boot.log line with it and the display modes the phone
     // offers, and for 90 / 120 / uncapped the window's display mode (the lowest mode at a multiple of the target, the same resolution first;
     // uncapped: the fastest mode at the current resolution). 30 / 60 request nothing (as before: the surface's 120 Hz vote and the system decide).
+    // [DOS2] owner 18.11: memory-bound passes slow ~1.5x within ~30 s of play (DDR / bus clock drop suspected). DM_SUSTAINED=1 asks Android for
+    // sustained performance mode (Window.setSustainedPerformanceMode: a clock level the device can hold, no bursts); off by default until a phone
+    // run shows it helps. The boot line says whether the device supports it (HyperOS may ignore it).
+    static void dos2SustainedApply(DmActivity a) {
+        String e = Os.getenv("DM_SUSTAINED"); if (e == null || !e.trim().equals("1")) return;
+        android.os.PowerManager pm = (android.os.PowerManager) a.getSystemService(android.content.Context.POWER_SERVICE);
+        boolean sup = pm != null && pm.isSustainedPerformanceModeSupported();
+        if (sup) a.getWindow().setSustainedPerformanceMode(true);
+        a.crumb("sustained performance mode (DM_SUSTAINED=1): " + (sup ? "requested" : "not supported by this device"));
+    }
     static void dos2FpsApply(DmActivity a) {
         String e = Os.getenv("DM_DOS2_FPS"), cap = Os.getenv("DM_PRESENT_MAX_HZ");
         int t = -1; if (e != null) for (int f : DOS2_FPS) if (e.trim().equals(String.valueOf(f))) t = f;
@@ -222,40 +282,266 @@ final class Tl2Gear {
                 && (pick == null || m.getRefreshRate() > pick.getRefreshRate())) pick = m;
         }
         if (t > 60) pick = GearDisplay.modeFor(a, t);
-        String req = t > 60 || t == 0 ? (pick == null ? "none (no mode at a multiple: paced as is)" : pick.getModeId() + " @ " + pick.getRefreshRate() + " Hz") : "none (30 / 60)";
-        if (pick != null && (t > 60 || t == 0)) {
+        // [DOS2] owner 18.11: with a 30 / 45 / 60 limit also ask for the FASTEST mode at a multiple of the limit (120 Hz on the Mi 14, not the
+        // 60 Hz HyperOS falls to for a 60 fps window): a frame that misses its slot is then shown on the next 8.3 ms vsync (25 ms = 40 fps)
+        // instead of the next 16.7 ms one (33 ms = 30 fps). Pacing stays at the limit. DM_DOS2_HIGHHZ=0 turns it off (request nothing, as before).
+        String hh = Os.getenv("DM_DOS2_HIGHHZ"); boolean high = hh == null || !hh.trim().equals("0");
+        if (high && t > 0 && t <= 60 && d != null && cur != null) for (android.view.Display.Mode m : d.getSupportedModes()) {
+            if (m.getPhysicalWidth() != cur.getPhysicalWidth() || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+            double k = m.getRefreshRate() / t; if (Math.abs(k - Math.rint(k)) > 0.02 || Math.rint(k) < 1) continue;
+            if (pick == null || m.getRefreshRate() > pick.getRefreshRate()) pick = m;
+        }
+        boolean asks = t > 60 || t == 0 || (high && t > 0 && t <= 60);
+        String req = asks ? (pick == null ? "none (no mode at a multiple: paced as is)" : pick.getModeId() + " @ " + pick.getRefreshRate() + " Hz") : "none (30 / 60, DM_DOS2_HIGHHZ=0)";
+        if (pick != null && asks) {
             WindowManager.LayoutParams lp = a.getWindow().getAttributes(); lp.preferredDisplayModeId = pick.getModeId(); a.getWindow().setAttributes(lp);
         }
         a.crumb("fps target " + (t == 0 ? "uncapped" : String.valueOf(t)) + " (" + from + "): display modes" + (d == null ? " unknown" : modes.toString())
             + ", current " + (cur == null ? "?" : cur.getModeId() + " @ " + cur.getRefreshRate() + " Hz") + ", requested " + req);
     }
-    // ---- [DOS2] dynamic resolution (next launch; hle_dos2_quality.c): off by default (the phone has the headroom the Switch lacked:
-    // DM_DOS2_DRS=off = always the full window); on = the game's DRS with its target from the chosen frame rate (DM_DOS2_DRS_TARGET_MS =
-    // 1000 / fps x 0.95, as DOOM 2016's DRS target)
-    static final int[] DOS2_DRS_FPS = {30, 45, 60};
-    static GearSettings.Section dos2Drs() {
+    // ---- [DOS2] 3D resolution per Switch mode (owner 19.11; docs/dos2/nr/DRS-MODE.md, docs/dos2/nr/NR-HACKS.md; hle_dos2_quality.c). One
+    // row per mode: "Dynamic" or a fixed 100 / 83 / 75 / 67 / 50 % of the window per side; the labels show the lines of that mode's window.
+    // Only the 3D is scaled (the game's DRS object); the interface stays at the window = the screen's resolution (dos2Window).
+    //   fixed p : DM_DOS2_DRS=off + DM_HACK_SCALE=<p> (100 = the full window; native: min = max = p, 100 ms target)    next launch
+    //   dynamic : DM_DOS2_DRS=<floor>:100 + DM_DOS2_DRS_TARGET_MS (1000 / fps x 0.95) + DM_HACK_SCALE=100 (so a hack tier never adds a
+    //             scale); target fps {30, 45, 60, 75, 90, 120} live (dos2DrsLive -> nativeSetDos2Drs), floor {85, 75, 60, 50} % next launch
+    // Prefs: dos2_res3d_dk / _hh = 0 dynamic, else the %; dos2_drs_fps_dk / _hh (0 = the default target: the frame-rate limit when it is a
+    // target, else 60), dos2_drs_min_dk / _hh (default 75). dos2_drs_dk / _hh are still written (1 dynamic / 0 fixed) for older builds.
+    // No dos2_res3d_* yet (saved before 19.11): the mode's old DRS pick (dos2_drs_dk / _hh -1 = the mode's default: Handheld on, Docked off;
+    // the pre-17.11 dos2_drs "on" = on in both) -> dynamic; else the % whose window lines are closest to the old window (dos2OldRes: 720 on a
+    // 1080 screen -> 67 %, 900 -> 83 %, 1080 or no pref = the screen's own -> 100 %). An old hack tier's SCALE is not carried over.
+    // When it applies: the start env for the mode the game starts in; on Save and on the pause menu's live mode switch (DmActivity.setDocked
+    // -> dos2DrsLive) the running game gets the mode's target (dynamic) or the 100 ms target (fixed: steps up to its ceiling). dm/env still wins.
+    static final int[] RES3D = {0, 100, 83, 75, 67, 50};           // 0 = dynamic; else % of the window per side
+    static final int[] DOS2_DRS_FPS = {30, 45, 60, 75, 90, 120};   // owner 19.11: targets
+    static final int[] DOS2_DRS_MINS = {85, 75, 60, 50};           // owner 19.11: the lowest 3D size allowed, % of the window per side
+    static final int DOS2_DRS_FLOOR = 75;   // % of the window: the game's own minimum (SetSize fmov #0.75)
+    static int dos2RunFps = -1;             // the frame-rate limit the running game started with (0 = no limit); -1 before the start env
+    static int dos2DrsDefaultFps(int limit) { for (int f : DOS2_DRS_FPS) if (f == limit) return limit; return 60; }   // the limit when it is a target, else 60
+    static String dos2DrsMinKey(boolean hh) { return hh ? "dos2_drs_min_hh" : "dos2_drs_min_dk"; }
+    static int dos2DrsMin(SharedPreferences p, boolean hh) { int v = p.getInt(dos2DrsMinKey(hh), DOS2_DRS_FLOOR); return v >= 50 && v < 100 ? v : DOS2_DRS_FLOOR; }
+    static String dos2DrsKey(boolean hh) { return hh ? "dos2_drs_hh" : "dos2_drs_dk"; }
+    static String dos2DrsFpsKey(boolean hh) { return hh ? "dos2_drs_fps_hh" : "dos2_drs_fps_dk"; }
+    static String res3dKey(boolean hh) { return hh ? "dos2_res3d_hh" : "dos2_res3d_dk"; }
+    // The window height of one mode for a base height and a picture shape (DmActivity.dos2Size: what hle_dos2_wide.c builds)
+    static int dos2WindowH(android.app.Activity a, int base, int aspect, boolean hh) {
+        int[] sc = GearDisplay.screenSize(a); return DmActivity.dos2Size(base, aspect == 2, hh, sc[0], sc[1])[1];
+    }
+    // The 3D resolution of one mode: 0 = dynamic, else the % (from the pre-19.11 prefs while the player has not saved this row)
+    static int dos2Res3d(android.app.Activity a, SharedPreferences p, boolean hh) {
+        if (p.contains(res3dKey(hh))) { int v = p.getInt(res3dKey(hh), -1); if (GearSettings.indexOf(RES3D, v, -1) >= 0) return v; }
+        boolean oldOn = p.getBoolean("dos2_drs", false);   // the single row before 17.11
+        int o = p.contains(dos2DrsKey(hh)) ? p.getInt(dos2DrsKey(hh), -1) : oldOn ? 1 : -1;
+        if (o < 0 ? hh : o == 1) return 0;
+        int aspect = p.getInt("aspect", DmActivity.D3_ASPECT_DEFAULT);
+        double was = dos2WindowH(a, dos2OldRes(a, p), aspect, hh), now = dos2WindowH(a, dos2NativeRes(a), aspect, hh);
+        int best = 1; for (int i = 2; i < RES3D.length; i++) if (Math.abs(RES3D[i] * now - 100 * was) < Math.abs(RES3D[best] * now - 100 * was)) best = i;
+        return RES3D[best];
+    }
+    // The effective {dynamic 0/1, target fps, floor %} of one mode for a frame-rate limit
+    static int[] dos2DrsFor(android.app.Activity a, SharedPreferences p, boolean hh, int limit) {
+        boolean oldOn = p.getBoolean("dos2_drs", false);
+        int f = p.contains(dos2DrsFpsKey(hh)) ? p.getInt(dos2DrsFpsKey(hh), 0) : oldOn ? p.getInt("dos2_drs_fps", 60) : 0;
+        return new int[] {dos2Res3d(a, p, hh) == 0 ? 1 : 0, f > 0 ? f : dos2DrsDefaultFps(limit), dos2DrsMin(p, hh)};
+    }
+    static String dos2DrsText(int[] d, int res, boolean hh) {
+        return (hh ? "handheld" : "docked") + ": 3D " + (d[0] == 1 ? "dynamic, floor " + d[2] + " %, target " + d[1] + " fps" : "fixed " + res + " % of the window");
+    }
+    // Live: the DRS of mode hh for the running game (its start limit); false = not applied (no library / no target copy: next launch then)
+    static boolean dos2DrsLive(DmActivity a, boolean hh, String why) {
+        SharedPreferences p = a.gamePrefs();
+        int[] d = dos2DrsFor(a, p, hh, dos2RunFps >= 0 ? dos2RunFps : dos2FpsPref(a, p));
+        boolean ok = false;
+        try { ok = DmActivity.nativeSetDos2Drs(d[0] == 1, d[1]); } catch (Throwable t) { /* no library yet */ }
+        a.crumb("3D resolution " + dos2DrsText(d, dos2Res3d(a, p, hh), hh) + " (" + why + ")"
+            + (ok ? ", target live (a new fixed % / floor, fixed <-> dynamic: next launch)" : ", not live: next launch"));
+        return ok;
+    }
+    static final class Res3d implements GearSettings.Section {
+        final DmActivity a; final Mode mode; GearSettings g; int lim, aspect; boolean quiet, shownHh;
+        TextView head; RadioGroup res, rfps, rmin; LinearLayout drs; int[] opts;
+        final int[] pick = new int[2], fps = new int[2], mins = new int[2];   // [0] docked, [1] handheld: what the rows hold now
+        Res3d(DmActivity a, Mode mode) { this.a = a; this.mode = mode; }
+        public void build(GearSettings g, LinearLayout box) {
+            this.g = g; SharedPreferences p = g.gamePrefs(); lim = dos2FpsPref(g.a, p); aspect = p.getInt("aspect", DmActivity.D3_ASPECT_DEFAULT);
+            java.util.TreeSet<Integer> o = new java.util.TreeSet<>(); for (int f : DOS2_DRS_FPS) o.add(f);
+            for (int m = 0; m < 2; m++) {
+                int[] d = dos2DrsFor(g.a, p, m == 1, lim); pick[m] = dos2Res3d(g.a, p, m == 1); fps[m] = d[1]; mins[m] = d[2]; o.add(d[1]);
+            }
+            opts = new int[o.size()]; String[] labels = new String[opts.length]; int i = 0;
+            for (int f : o) { opts[i] = f; labels[i++] = String.valueOf(f); }
+            head = g.heading(box, "");
+            String[] blank = new String[RES3D.length]; java.util.Arrays.fill(blank, "");
+            res = g.radios(box, blank, 0, false);
+            drs = g.vbox(box);   // the dynamic resolution's own rows: shown only while "Dynamic" is picked
+            g.note(drs, g.when(g.str(R.string.dos2_drs_target), true));
+            rfps = g.radios(drs, labels, 0, true);
+            g.note(drs, g.when(g.str(R.string.dos2_drs_min), false));   // the floor is patched into the game at start
+            String[] ml = new String[DOS2_DRS_MINS.length]; java.util.Arrays.fill(ml, "");
+            rmin = g.radios(drs, ml, 0, true);
+            g.note(box, g.str(R.string.dos2_res3d_note));
+            show(mode.pickedHandheld());
+            res.setOnCheckedChangeListener((grp, id) -> {
+                if (quiet) return;
+                int m = shownHh ? 1 : 0, v = RES3D[GearSettings.picked(res)]; boolean was = pick[m] == 0; pick[m] = v;
+                drs.setVisibility(v == 0 ? android.view.View.VISIBLE : android.view.View.GONE);
+                if (v == 0 && !was) explainDynamic(mins[m]);   // a tap on "Dynamic" (not the dialog's first show, not a mode switch)
+            });
+            rfps.setOnCheckedChangeListener((grp, id) -> { if (!quiet) fps[shownHh ? 1 : 0] = opts[GearSettings.picked(rfps)]; });
+            rmin.setOnCheckedChangeListener((grp, id) -> { if (!quiet) mins[shownHh ? 1 : 0] = DOS2_DRS_MINS[GearSettings.picked(rmin)]; });
+            mode.changed = () -> show(mode.pickedHandheld());
+        }
+        void explainDynamic(int floor) {
+            new AlertDialog.Builder(g.a).setTitle(g.str(R.string.dos2_res3d_drs_title)).setMessage(g.str(R.string.dos2_res3d_drs_text, floor))
+                .setPositiveButton(g.str(R.string.dos2_res3d_drs_ok), null).show();
+        }
+        void relabel(int aspect) { this.aspect = aspect; if (res != null) labels(); }   // the picture shape picked in the open dialog
+        void labels() {   // "100 % (1080p)": the lines of the shown mode's window at each %
+            int h = dos2WindowH(g.a, dos2NativeRes(g.a), aspect, shownHh);
+            for (int i = 0; i < RES3D.length; i++)
+                ((RadioButton) res.getChildAt(i)).setText(i == 0 ? g.str(R.string.dos2_res3d_drs) : g.str(R.string.dos2_res3d_fixed, RES3D[i], Math.round(h * RES3D[i] / 100f)));
+            for (int k = 0; k < DOS2_DRS_MINS.length; k++)
+                ((RadioButton) rmin.getChildAt(k)).setText(g.str(R.string.dos2_res3d_fixed, DOS2_DRS_MINS[k], Math.round(h * DOS2_DRS_MINS[k] / 100f)));
+        }
+        void show(boolean hh) {   // the rows for one mode (quiet: the listeners keep the other mode's values)
+            quiet = true; shownHh = hh; int m = hh ? 1 : 0;
+            head.setText(g.when(g.str(hh ? R.string.dos2_res3d_for_handheld : R.string.dos2_res3d_for_docked), false));
+            labels();
+            res.check(res.getChildAt(GearSettings.indexOf(RES3D, pick[m], 1)).getId());
+            int at = 0; for (int i = 0; i < opts.length; i++) if (opts[i] == fps[m]) at = i;
+            rfps.check(rfps.getChildAt(at).getId());
+            rmin.check(rmin.getChildAt(GearSettings.indexOf(DOS2_DRS_MINS, mins[m], 1)).getId());
+            drs.setVisibility(pick[m] == 0 ? android.view.View.VISIBLE : android.view.View.GONE);
+            quiet = false;
+        }
+        public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pad) {
+            for (int m = 0; m < 2; m++) {   // a target equal to the default is kept as the default (it follows the frame-rate limit)
+                boolean hh = m == 1;
+                game.putInt(res3dKey(hh), pick[m]);
+                game.putInt(dos2DrsKey(hh), pick[m] == 0 ? 1 : 0);
+                game.putInt(dos2DrsFpsKey(hh), fps[m] == dos2DrsDefaultFps(lim) ? 0 : fps[m]);
+                game.putInt(dos2DrsMinKey(hh), mins[m]);
+            }
+        }
+        // live, no restart (the running game's DRS target is our copy), for the mode it runs in; a failed live call applies at the next launch
+        public void after(GearSettings g) { dos2DrsLive(a, a.startedHandheld, "gear"); }
+        public void env(GearSettings g) throws ErrnoException {
+            SharedPreferences p = g.gamePrefs(); boolean hh = p.getBoolean("handheld", false);
+            dos2RunFps = dos2FpsPref(g.a, p);
+            int v = dos2Res3d(g.a, p, hh); int[] d = dos2DrsFor(g.a, p, hh, dos2RunFps);
+            if (v != 0) {
+                Os.setenv("DM_DOS2_DRS", "off", true); Os.unsetenv("DM_DOS2_DRS_TARGET_MS");
+                Os.setenv("DM_HACK_SCALE", Integer.toString(v), true);   // 100 = off (nr_hacks.h: >= 100 -> 0)
+            } else {
+                Os.setenv("DM_DOS2_DRS", d[2] + ":100", true);
+                Os.setenv("DM_DOS2_DRS_TARGET_MS", String.format(java.util.Locale.ROOT, "%.2f", 1000.0 / d[1] * 0.95), true);
+                Os.setenv("DM_HACK_SCALE", "100", true);   // explicit: a hack tier's SCALE never lowers the DRS ceiling
+            }
+            a.crumb("3D resolution at start, " + dos2DrsText(d, v, hh));
+        }
+    }
+    // ---- [DOS2] FSR 1 EASU upscaling in the stretch pass instead of the console's bilinear stretch (DM_HACK_FSR, nr_hacks.h; next launch).
+    // Only does something while the 3D is below 100 % (a fixed % or dynamic). Pref "dos2_fsr"; before 19.11 the hacks page's FSR row: tiers
+    // 1-3 had it on, Custom its own "hack_fsr". Always exported explicitly (1 / 0), so a hack tier never decides it.
+    static boolean dos2FsrPref(SharedPreferences p) {
+        if (p.contains("dos2_fsr")) return p.getBoolean("dos2_fsr", false);
+        int t = p.getInt("hack_tier", 0);
+        return (t >= 1 && t <= 3) || (t == 4 && p.getInt("hack_fsr", HACK_TIERS[2][1]) == 1);
+    }
+    static GearSettings.Section dos2Fsr() {
         return new GearSettings.Section() {
-            CheckBox c; android.widget.RadioGroup r;
+            CheckBox c;
+            public void build(GearSettings g, LinearLayout box) { c = g.check(box, g.when(g.str(R.string.dos2_fsr), false), dos2FsrPref(g.gamePrefs())); }
+            public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pad) { game.putBoolean("dos2_fsr", c.isChecked()); }
+            public void env(GearSettings g) throws ErrnoException { Os.setenv("DM_HACK_FSR", dos2FsrPref(g.gamePrefs()) ? "1" : "0", true); }
+        };
+    }
+    // ---- [DOS2] N6 speed hacks (next launch; dm/gfx/nr/nr_hacks.h, docs/dos2/nr/NR-HACKS.md). Pref "hack_tier": 0 off (nothing is set, so an
+    // env-file DM_HACK_TIER / DM_HACK_* still works), 1 light / 2 medium / 3 max (the table below = nrh_tier_table, source_structure_test.py
+    // compares them), 4 custom (prefs hack_<name>). A tier sets DM_HACK_TIER only (the native takes the table and its per-GPU rule,
+    // xbg_hack_fsr_tier_default); custom sets its DM_HACK_* explicitly (explicit values win in the native). Round 2: LOD distances, light cap.
+    // Rows: NOBLOOM, NOAA, SHADOWS, SHPCF, SHFAR, TEXBIAS (1/100 mip), ANISO, LOD, LIGHTS. [DOS2] 19.11: the SCALE and FSR columns stay in the
+    // table (= nrh_tier_table) but the page neither shows nor exports them: the main page's Res3d / dos2Fsr always set DM_HACK_SCALE and
+    // DM_HACK_FSR explicitly, which win over the tier.
+    static final String[] HACK_NAMES = {"SCALE", "FSR", "NOBLOOM", "NOAA", "SHADOWS", "SHPCF", "SHFAR", "TEXBIAS", "ANISO", "LOD", "LIGHTS"};
+    static final int[][] HACK_TIERS = {
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {85, 1, 0, 0, 0, 2, 0, 0, 0, 90, 0},
+        {85, 1, 0, 0, 1, 2, 0, 50, 4, 80, 4},
+        {75, 1, 1, 0, 1, 2, 1, 100, 2, 70, 2},
+    };
+    static final int HACK_FIRST = 2;   // the first column the page shows (0 SCALE, 1 FSR: the main page's rows)
+    static final int[] HACK_PCF = {0, 2, 3}, HACK_BIAS = {0, 50, 100}, HACK_ANISO = {0, 4, 2, 1}, HACK_LOD = {0, 90, 80, 70}, HACK_LIGHTS = {0, 4, 2};
+    static boolean dos2HackSame(int[] a, int[] b) { for (int i = HACK_FIRST; i < a.length; i++) if (a[i] != b[i]) return false; return true; }
+    static int[] dos2HackValues(SharedPreferences p) {
+        int t = p.getInt("hack_tier", 0);
+        if (t >= 0 && t <= 3) return HACK_TIERS[t].clone();
+        int[] v = new int[HACK_NAMES.length];
+        for (int i = 0; i < v.length; i++) v[i] = p.getInt("hack_" + HACK_NAMES[i].toLowerCase(java.util.Locale.ROOT), HACK_TIERS[2][i]);
+        return v;
+    }
+    static GearSettings.Section dos2Hacks() {
+        return new GearSettings.Section() {
+            RadioGroup tier, pcf, bias, aniso, lod, lights; CheckBox nobloom, noaa, shadows, shfar; boolean applying;
+            void pick(RadioGroup r, int i) { r.check((Integer) r.getTag() + i); }
+            void show(int[] v) {
+                applying = true;
+                nobloom.setChecked(v[2] == 1); noaa.setChecked(v[3] == 1);
+                shadows.setChecked(v[4] == 1); pick(pcf, GearSettings.indexOf(HACK_PCF, v[5], 0)); shfar.setChecked(v[6] == 1);
+                pick(bias, GearSettings.indexOf(HACK_BIAS, v[7], 0)); pick(aniso, GearSettings.indexOf(HACK_ANISO, v[8], 0));
+                pick(lod, GearSettings.indexOf(HACK_LOD, v[9], 0)); pick(lights, GearSettings.indexOf(HACK_LIGHTS, v[10], 0));
+                applying = false;
+            }
+            int[] read() {
+                return new int[] {0, 0, nobloom.isChecked() ? 1 : 0, noaa.isChecked() ? 1 : 0,
+                    shadows.isChecked() ? 1 : 0, HACK_PCF[GearSettings.picked(pcf)], shfar.isChecked() ? 1 : 0, HACK_BIAS[GearSettings.picked(bias)],
+                    HACK_ANISO[GearSettings.picked(aniso)], HACK_LOD[GearSettings.picked(lod)], HACK_LIGHTS[GearSettings.picked(lights)]};
+            }
+            void custom() { if (!applying) { applying = true; pick(tier, 4); applying = false; } }
             public void build(GearSettings g, LinearLayout box) {
                 SharedPreferences p = g.gamePrefs();
-                c = g.check(box, g.when(g.str(R.string.dos2_drs), true), p.getBoolean("dos2_drs", false));
-                int f = p.getInt("dos2_drs_fps", 60); g.note(box, g.str(R.string.dos2_drs_target));
-                r = g.radios(box, new String[] {"30", "45", "60"}, f == 30 ? 0 : f == 45 ? 1 : 2, true);
+                g.note(box, g.str(R.string.dos2_hacks_intro));
+                g.heading(box, g.when(g.str(R.string.dos2_hacks_tier), false));
+                tier = g.radios(box, new String[] {g.str(R.string.dos2_hacks_off), g.str(R.string.dos2_hacks_light), g.str(R.string.dos2_hacks_medium),
+                    g.str(R.string.dos2_hacks_max), g.str(R.string.dos2_hacks_custom)}, Math.max(0, Math.min(4, p.getInt("hack_tier", 0))), true);
+                g.note(box, g.str(R.string.dos2_hacks_tier_note));
+                nobloom = g.check(box, g.when(g.str(R.string.dos2_hack_nobloom), false), false);
+                noaa = g.check(box, g.when(g.str(R.string.dos2_hack_noaa), false), false);
+                shadows = g.check(box, g.when(g.str(R.string.dos2_hack_shadows), false), false);
+                g.heading(box, g.when(g.str(R.string.dos2_hack_shpcf), false));
+                pcf = g.radios(box, new String[] {g.str(R.string.dos2_hack_shpcf_game), g.str(R.string.dos2_hack_shpcf_mobile), g.str(R.string.dos2_hack_shpcf_dref)}, 0, true);
+                shfar = g.check(box, g.when(g.str(R.string.dos2_hack_shfar), false), false);
+                g.heading(box, g.when(g.str(R.string.dos2_hack_texbias), false));
+                bias = g.radios(box, new String[] {g.str(R.string.dos2_hack_texbias_0), g.str(R.string.dos2_hack_texbias_1), g.str(R.string.dos2_hack_texbias_2)}, 0, true);
+                g.heading(box, g.when(g.str(R.string.dos2_hack_aniso), false));
+                aniso = g.radios(box, new String[] {g.str(R.string.dos2_hack_aniso_game), "4x", "2x", "1x"}, 0, true);
+                g.heading(box, g.when(g.str(R.string.dos2_hack_lod), false));
+                lod = g.radios(box, new String[] {g.str(R.string.dos2_hack_aniso_game), "90 %", "80 %", "70 %"}, 0, true);
+                g.heading(box, g.when(g.str(R.string.dos2_hack_lights), false));
+                lights = g.radios(box, new String[] {g.str(R.string.dos2_hack_lights_all), "4", "2"}, 0, true);
+                show(dos2HackValues(p));
+                tier.setOnCheckedChangeListener((r, id) -> { if (applying) return; int t = GearSettings.picked(tier); if (t <= 3) show(HACK_TIERS[t]); });
+                for (RadioGroup r : new RadioGroup[] {pcf, bias, aniso, lod, lights}) r.setOnCheckedChangeListener((rr, id) -> custom());
+                for (CheckBox c : new CheckBox[] {nobloom, noaa, shadows, shfar}) c.setOnCheckedChangeListener((cc, on) -> custom());
             }
             public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pad) {
-                int fps = DOS2_DRS_FPS[GearSettings.picked(r)];
-                game.putBoolean("dos2_drs", c.isChecked()); game.putInt("dos2_drs_fps", fps);
-                // live, no restart (the game is running: its DRS target is our copy); a failed live call still applies at the next launch
-                try { DmActivity.nativeSetDos2Drs(c.isChecked(), fps); } catch (Throwable t) { }
+                int t = GearSettings.picked(tier); int[] v = read();
+                for (int k = 0; k <= 3; k++) if (t == 4 && dos2HackSame(v, HACK_TIERS[k])) t = k;   // a custom pick equal to a tier is that tier
+                game.putInt("hack_tier", t);
+                if (t == 4) for (int i = HACK_FIRST; i < v.length; i++) game.putInt("hack_" + HACK_NAMES[i].toLowerCase(java.util.Locale.ROOT), v[i]);
             }
             public void env(GearSettings g) throws ErrnoException {
-                SharedPreferences p = g.gamePrefs();
-                if (!p.getBoolean("dos2_drs", false)) { Os.setenv("DM_DOS2_DRS", "off", true); return; }
-                int f = p.getInt("dos2_drs_fps", 60);
-                Os.unsetenv("DM_DOS2_DRS"); Os.setenv("DM_DOS2_DRS_TARGET_MS", String.format(java.util.Locale.ROOT, "%.2f", 1000.0 / f * 0.95), true);
+                SharedPreferences p = g.gamePrefs(); int t = p.getInt("hack_tier", 0);
+                if (t <= 0 || t > 4) return;   // off: nothing set (dm/env may still set DM_HACK_*)
+                Os.setenv("DM_HACK_TIER", t == 4 ? "custom" : String.valueOf(t), true);
+                if (t != 4) return;
+                int[] v = dos2HackValues(p);
+                for (int i = HACK_FIRST; i < v.length; i++)   // not SCALE / FSR: the main page sets those
+                    Os.setenv("DM_HACK_" + HACK_NAMES[i], i == 7 ? String.format(java.util.Locale.ROOT, "%.2f", v[i] / 100.0) : String.valueOf(v[i]), true);
             }
         };
     }
+
     // ---- [DOS2] thermal mode (next launch): hle_dos2_quality.c DM_DOS2_THERMAL=1, the ladder on the AThermal headroom (DRS ceiling, then the
     // shadow quality, then bloom). Off by default; when off nothing is set, so an env-file DM_DOS2_THERMAL still works
     static GearSettings.Section dos2Thermal() {

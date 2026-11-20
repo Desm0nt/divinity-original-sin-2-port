@@ -184,6 +184,13 @@ size_t take(std::vector<XbgAcEntry> &out) {
     if (!g.out_n.load(std::memory_order_relaxed)) return 0;
     std::lock_guard<std::mutex> l(g.omu); const size_t n = g.out.size(); out.insert(out.end(), g.out.begin(), g.out.end()); g.out.clear(); g.out_n = 0; return n;
 }
+uint64_t drop_queue(uint64_t *jobs) {
+    std::deque<XbgAlJob> q; uint64_t b = 0;
+    { std::lock_guard<std::mutex> l(g.mu); q.swap(g.q); b = g.q_bytes; g.q_bytes = 0; }
+    g.dropped_queue += q.size();
+    if (jobs) *jobs = q.size();
+    return b;   // the copies are freed with q, outside the lock
+}
 XbgAlStats stats() {
     XbgAlStats s{g.queued, g.dropped_queue, g.dropped_cap, g.encoded, g.stayed, g.failed, g.retried, g.zeros, g.bytes, g.px, g.ns, 0, g.pack_end};
     { std::lock_guard<std::mutex> l(g.mu); s.queue_bytes = g.q_bytes; }

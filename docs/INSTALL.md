@@ -98,7 +98,7 @@ You may also put the folder from your dump tool inside it as it is (setup looks 
    | 5. Checking the patch | 1–10 min |
    | 6. Extracting the game data (~11.4 GB) | 1–15 min |
    | 7. Translating the shaders (12 329 of them) | 2–20 min |
-   | 8. Fusing the post-processing shaders (`native-post.xgspack`) | 1–2 min (first time: the ~7 MB SPIR-V tools download) |
+   | 8. Fusing the post-processing shaders (`native-post.xgspack`, `native-nr.xgspack`, `native-nr33b.xgspack`, `native-nr33c.xgspack`) | 3–5 min (first time: the ~7 MB SPIR-V tools download) |
    | 9. Making the touch interface package | under a minute |
    | 10. Preparing textures for phones without BC (ASTC) | 5–20 min |
 
@@ -137,6 +137,7 @@ The finished folder is **`work/DivinityOriginalSin2Mobile`** inside the setup fo
   Internal storage/Download/DivinityOriginalSin2Mobile/dm/out/...
   Internal storage/Download/DivinityOriginalSin2Mobile/dm/shaders/shaders.xgspack
   Internal storage/Download/DivinityOriginalSin2Mobile/dm/shaders/native-post.xgspack
+  Internal storage/Download/DivinityOriginalSin2Mobile/dm/shaders/native-nr.xgspack     (and native-nr33b / native-nr33c)
   Internal storage/Download/DivinityOriginalSin2Mobile/astc/...       (only needed without BC: Mali, PowerVR, Xclipse)
   Internal storage/Download/DivinityOriginalSin2Mobile/drivers/       (your own Vulkan drivers, optional)
   ```
@@ -192,6 +193,11 @@ data* option turned on (and keep the ticket).
 
 **"not enough free space"** — free some space, or put the work folder on another disk: `setup.bat --work D:\dos2-work`
 (Windows) or `bash setup.sh --work /mnt/big/dos2-work`.
+
+**I already set up an older version (0.1.x)** — run setup again in the same folder after downloading the new version: it
+skips everything that is still current and makes only what changed (for 0.2.0: the touch interface package and three new
+shader packs, a few minutes). Then copy `romfs/Data/TouchUI.pak` and the whole `dm/shaders` folder to the phone again
+(or the whole `DivinityOriginalSin2Mobile` folder; overwriting the files that did not change is fine).
 
 **I set up an older release with an `.ipa`** — it is not needed any more (setup ignores it). Run setup again after
 updating: it remakes only the touch interface package (stage 9); copy `romfs/Data/TouchUI.pak` to the phone again.

@@ -42,6 +42,16 @@
 //      screen 0x17; other screens out of game (splash, videos, "press A") keep "a tap is A". DM_DBG lists every input event that reaches the UI within that window after
 //      a tap (name, id), so one phone run names the real source.
 //   4. For hle_dos2_touch.c's world gestures: which object took the last left press ([x5] after the call), and whether a menu / panel is up.
+//   5. STAGE-LISTENER MOVIES (branch dos2-touch7, DM_DOS2_TOUCH_STAGE_TYPES, default "3b" = bottomBar_d): touch6 (tools/dos2_taps5_touch.py) hangs
+//      a mouseDown / mouseUp listener on bottomBar_d's stage; a press that hits none of its elements targets the stage, the listener runs and
+//      Iggy answers "handled" anywhere on the 1920x1080 stage (phone run 18.11, log C_base: every world tap / swipe "TAKEN by a UI object (type
+//      0x3b)", the column icons of dmColumn_d below it got "not its event"). For such a movie, in game, a left / right / middle button event it
+//      answered with 1 while [x5] was 0 and no mouse capture was set stays its own only when the UI cursor (the finger) is inside one of the
+//      movie's live HUD rects (hle_dos2_touch.c dm_dos2_touch_stage_press, tools/dos2_hudrect_touch.py: hot bar with the hint row, btn / hold,
+//      grafted buttons, hint4). Outside them the host clears [x5] and the capture the press made ([uimgr+0x10d] byte, [uimgr+0x218] handle,
+//      main+0xaea8ec / 0xaea900) back to what they were: the movie's listener has run (a press anywhere still hides the long-press tooltip),
+//      the walk goes on to the objects below (dmColumn_d) and the input stays the world's (Action1). No live rects of the movie: its answer
+//      stands (the touch6 behaviour). Rule: hle_dos2_touch_gesture.h dt_hr_state / dt_stage_press_keep (dm/host/tests/dos2_touch_gesture_test.c).
 // Switches (all need DM_DOS2_TOUCHUI=1; the hook is one site check away from "off, the old gate"):
 //   DM_DOS2_TOUCH_ROUTE=0          no hook: hle_dos2_touch.c KBM=2 falls back to the window gate of pack 2v (dm_dos2_touchui_gate)
 //   DM_DOS2_TOUCH_ROUTE_GAME=0     the hook routes in menus only; in game the filter byte follows the old gate (closed unless a modal touch window)
@@ -50,6 +60,7 @@
 //   DM_DOS2_TOUCH_ROUTE_MODAL=0    no modal guard (2.)
 //   DM_DOS2_TOUCH_ROUTE_ACCEPT=0   no accept guard (3.); DM_DOS2_TOUCH_ROUTE_ACCEPT_MS=<ms> its window
 //   DM_DOS2_TOUCH_ROUTE_HIDDEN=1   mouse also to allowed objects without the visible flag
+//   DM_DOS2_TOUCH_STAGE_TYPES=<h>  hex type ids of movies with a stage listener (5.), default "3b"; "" or "0" = none (the touch6 behaviour)
 //   DM_DBG=1                       every routing decision once per (type, decision), the events after a tap, who took a left press
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -58,10 +69,12 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include "hle_dos2_touch_gesture.h"   // dt_stage_press_keep, DT_HR_* (5.)
 
 enum { RT_DISPATCH = 0xaea7b0, RT_CALL1 = 0xae8468, RT_CALL2 = 0xae84a8, RT_MODAL = 0xaea820, RT_MODAL2 = 0xaea87c, RT_HANDLED = 0xaea8d0, RT_UPPER = 0xaea830,
        RT_NAMES_LD = 0xd26c18, RT_NAMES = 0xd26c40, RT_NAME_ID = 0xd26c7c, RT_FLASH_IDS = 0xd23810,
        RT_UIMGR = 0x2bbb230, RT_INMGR = 0x2bb8960, RT_MGR_LIST = 0xf8, RT_MGR_LISTN = 0x100, RT_MGR_OBJS = 0x10, RT_MGR_NOBJ = 0x1c,
+       RT_CAPTURE = 0xaea8e8, RT_UIM_CAPT = 0x10d, RT_UIM_CAPT_OBJ = 0x218,
        RT_OBJ_FLAGS = 0x14, RT_OBJ_PLAYER = 0x18, RT_OBJ_TYPE = 0xf0, RT_F_INPUT = 0x2, RT_F_VISIBLE = 0x8, RT_F_MODAL = 0x1e00,
        RT_EV_LEFT = 1, RT_EV_RIGHT = 2, RT_EV_MIDDLE = 3, RT_EV_MOVE = 0x58, RT_EV_SCROLL_UP = 0x67, RT_EV_SCROLL_DOWN = 0x68 };
 static const uint32_t k_rt_dispatch[10] = {0xd101c3ff /* sub sp,sp,#0x70 */, 0xa9016ffc, 0xa90267fa, 0xa9035ff8, 0xa90457f6, 0xa9054ff4, 0xa9067bfd, 0x910183fd,
@@ -73,6 +86,8 @@ static const uint32_t k_rt_modal[7] = {0x5309256f /* ubfx w15,w11,#9,#1: flag 0x
                                        0x3940028b /* ldrb w11,[x20]: handled by an upper object */, 0x3400024b, 0x7101615f /* cmp w10,#0x58 */};
 static const uint32_t k_rt_modal2[4] = {0x2a0c01d9 /* orr w25,w14,w12: takes the whole input */, 0x35000059, 0x37001763 /* tbnz w3,#0: pass 1 leaves the others alone */, 0x350000d9};
 static const uint32_t k_rt_handled[2] = {0x72001c1f /* tst w0,#0xff */, 0x79000280 /* strh w0,[x20]: the object's answer */};
+static const uint32_t k_rt_capture[7] = {0x320003e8 /* mov w8,#1 */, 0x390436a8 /* strb w8,[x21,#0x10d]: mouse captured */, 0xf9400268, 0xf9401508, 0xaa1303e0, 0xd63f0100,
+                                         0xf9010ea0 /* str x0,[x21,#0x218]: by this object's handle */};
 static const uint32_t k_rt_upper[10] = {0x3940028b, 0x3400024b, 0x7101615f, 0x540000e0 /* a move is not passed on */, 0xf9400268, 0xf9405908 /* vt+0xb0 */, 0xaa1303e0, 0xaa0203e1,
                                         0x320003e2 /* mov w2,#1: not yours */, 0xd63f0100};
 static const uint32_t k_rt_names_ld[4] = {0xb9403756 /* ldr w22,[x26,#0x34]: buckets */, 0x9a890109, 0x34000476, 0xf9401f57 /* ldr x23,[x26,#0x38]: bucket array */};
@@ -85,7 +100,8 @@ typedef uint64_t (*rt_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint
 static module_t *g_main;
 static rt_fn g_orig;
 static int g_on, g_dbg, g_game = 1, g_modal = 1, g_accept = 1, g_accept_ms = 600, g_hidden;
-static uint8_t g_allow[256];
+static uint8_t g_allow[256], g_stage[256];   // g_stage: DM_DOS2_TOUCH_STAGE_TYPES (5.)
+static unsigned g_n_stage, g_n_stage_kept, g_n_stage_norect;
 static uint32_t g_accept_id; static int g_names_done;
 // state of the walk / the last tap (game thread only: the input update and the pad poll run on it)
 static int g_modal_seen; static uint32_t g_modal_type;
@@ -188,7 +204,29 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
     if ((fl & RT_F_VISIBLE) && (fl & RT_F_MODAL) && !g_modal_seen) { g_modal_seen = 1; g_modal_type = type; }   // for the objects below this one
     if (mouse || why) rt_say(o, type, fl, why, id);
     if (why) { if (why == 4) g_n_accept++; else if (why == 2) g_n_modal++; else g_n_drop++; return 0; }   // 0 = not handled, the walk goes on
+    // 5. a stage-listener movie: its "handled" for a button says nothing about the point
+    const int stage = (id == RT_EV_LEFT || id == RT_EV_RIGHT || id == RT_EV_MIDDLE) && !(pass & 1) && a5 && type < 256 && g_stage[type] && in_game;
+    uint16_t pre_h = 0; uint8_t pre_c = 0; uint64_t pre_o = 0;
+    if (stage) { pre_h = *(const volatile uint16_t *)(uintptr_t)a5; pre_c = m[RT_UIM_CAPT]; pre_o = *(const volatile uint64_t *)(m + RT_UIM_CAPT_OBJ); }
     const uint64_t v = g_orig(mgr, obj, ev, pass, a4, a5);
+    if (stage && !pre_h && !pre_c && *(const volatile uint16_t *)(uintptr_t)a5) {
+        uint8_t *mw = (uint8_t *)(uintptr_t)mgr;
+        float cx = -1, cy = -1;
+        int dm_dos2_touch_stage_press(const void *player, float *x, float *y);   // hle_dos2_touch.c
+        const int hr = dm_dos2_touch_stage_press(*(const void *const volatile *)(o + RT_OBJ_PLAYER), &cx, &cy);
+        if (!dt_stage_press_keep(1, 1, hr)) {
+            *(volatile uint16_t *)(uintptr_t)a5 = 0;
+            mw[RT_UIM_CAPT] = pre_c; *(volatile uint64_t *)(mw + RT_UIM_CAPT_OBJ) = pre_o;
+            g_n_stage++;
+            static unsigned n; if (g_dbg ? n++ < 200 : n++ < 6) { char mv[48]; LOG("[route] %s %s at %.0f,%.0f: %s (type %#x) answered it with its stage listener, outside its HUD rects: "
+                "NOT taken (the objects below and the world get it)", id == RT_EV_LEFT ? "left" : id == RT_EV_RIGHT ? "right" : "middle", down ? "press" : "release",
+                (double)cx, (double)cy, rt_movie(o, mv, sizeof mv), type); }
+        } else {
+            if (hr == DT_HR_NONE) g_n_stage_norect++; else g_n_stage_kept++;
+            static unsigned n; if (g_dbg && n++ < 200) { char mv[48]; LOG("[route] %s %s at %.0f,%.0f: %s (type %#x) keeps it (%s)", id == RT_EV_LEFT ? "left" : id == RT_EV_RIGHT ? "right" : "middle",
+                down ? "press" : "release", (double)cx, (double)cy, rt_movie(o, mv, sizeof mv), type, hr == DT_HR_IN ? "inside one of its HUD rects" : "no live HUD rects of it: its answer stands"); }
+        }
+    }
     if (mouse) g_n_pass++;
     if (id == RT_EV_LEFT && down && !(pass & 1)) {   // pass 2 of a left press: [x5] = this object's answer (main+0xaea8d4)
         g_seen_seq = g_left_seq;
@@ -230,6 +268,7 @@ int dm_dos2_route_world_ok(uint32_t *type) {
         int menu = (fl & RT_F_MODAL) != 0;
         for (unsigned g = 1; g < sizeof k_groups / sizeof *k_groups && !menu; g++) for (int k = 0; k < 12 && k_groups[g].ids[k]; k++) if (k_groups[g].ids[k] == ty) menu = 1;   // every group but the HUD
         if (ty == 0x46 || ty == 0x8c || ty == 0x49 || ty == 0x3e || ty == 0x53 || ty == 0x44 || ty == 0x43 || ty == 0x89) menu = 1;   // journal, trade, skills, panel select, area interact, examine, reward
+        if (ty == 0x52) menu = 1;   // dos2-touch7: the party wheel (partyManagement_c, ZL / ZR): its fingers are the wheel's (hle_dos2_touch.c radial), no floating stick
         if (menu) { if (type) *type = ty; return 0; }
     }
     return 1;
@@ -247,10 +286,24 @@ int dm_dos2_route_visible(uint32_t want) {
     }
     return 0;
 }
+const void *dm_dos2_route_player(uint32_t want);   // dos2-touch7: the FlashPlayer of a visible UI object of that type (NULL = none / no UI manager)
+const void *dm_dos2_route_player(uint32_t want) {
+    if (!g_main) return NULL;
+    const uint8_t *m = *(const uint8_t *const volatile *)(g_main->base + RT_UIMGR);
+    if (!m) return NULL;
+    const uint8_t *const *objs = *(const uint8_t *const *const volatile *)(m + RT_MGR_OBJS); const uint32_t n = *(const volatile uint32_t *)(m + RT_MGR_NOBJ);
+    if (!objs || n > 0x10000) return NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t *o = objs[i]; if (!o) continue;
+        if (*(const volatile uint32_t *)(o + RT_OBJ_TYPE) == want && (*(const volatile uint32_t *)(o + RT_OBJ_FLAGS) & RT_F_VISIBLE)) return *(const void *const volatile *)(o + RT_OBJ_PLAYER);
+    }
+    return NULL;
+}
 void dm_dos2_route_summary(void);   // hle_dos2_touch.c's DM_DBG summary
 void dm_dos2_route_summary(void) {
-    if (g_on) LOG("[route] mouse events delivered %u, kept away %u (no mouse code / hidden) + %u (under a modal), UIAccept dropped %u; left presses %u, last taken #%u by type %#x",
-                  g_n_pass, g_n_drop, g_n_modal, g_n_accept, g_left_seq, g_taken_seq, g_taken_type);
+    if (g_on) LOG("[route] mouse events delivered %u, kept away %u (no mouse code / hidden) + %u (under a modal), UIAccept dropped %u; left presses %u, last taken #%u by type %#x; "
+                  "stage-listener movies: button events given back %u, kept inside a HUD rect %u, kept with no rects %u",
+                  g_n_pass, g_n_drop, g_n_modal, g_n_accept, g_left_seq, g_taken_seq, g_taken_type, g_n_stage, g_n_stage_kept, g_n_stage_norect);
 }
 void dm_dos2_touchui_route_install(void);   // main.c host_preload, after dm_dos2_touchui_install and before dm_dos2_touch_install
 void dm_dos2_touchui_route_install(void) {
@@ -263,7 +316,7 @@ void dm_dos2_touchui_route_install(void) {
     module_t *m = g_main;
     if (!m) return;
     static const rt_site k_sites[] = {{RT_DISPATCH, 10, k_rt_dispatch}, {RT_CALL1, 9, k_rt_call1}, {RT_CALL2, 9, k_rt_call2}, {RT_MODAL, 7, k_rt_modal}, {RT_MODAL2, 4, k_rt_modal2},
-        {RT_HANDLED, 2, k_rt_handled}, {RT_UPPER, 10, k_rt_upper}, {RT_NAMES_LD, 4, k_rt_names_ld}, {RT_NAMES, 4, k_rt_names}, {RT_NAME_ID, 2, k_rt_name_id}, {RT_FLASH_IDS, 6, k_rt_flash_ids}};
+        {RT_HANDLED, 2, k_rt_handled}, {RT_CAPTURE, 7, k_rt_capture}, {RT_UPPER, 10, k_rt_upper}, {RT_NAMES_LD, 4, k_rt_names_ld}, {RT_NAMES, 4, k_rt_names}, {RT_NAME_ID, 2, k_rt_name_id}, {RT_FLASH_IDS, 6, k_rt_flash_ids}};
     for (unsigned i = 0; i < sizeof k_sites / sizeof *k_sites; i++)
         if ((uint64_t)k_sites[i].off + 4ull * k_sites[i].n > m->text_end || memcmp(m->base + k_sites[i].off, k_sites[i].want, 4ull * k_sites[i].n)) {
             LOG("【红】[route] main+%#x differs: not DOS2 update v786432 main (build 4979b200) at the UI manager's input dispatch: no per-movie mouse routing (the old window gate stays)", k_sites[i].off);
@@ -280,6 +333,16 @@ void dm_dos2_touchui_route_install(void) {
         for (int k = 0; use && k < 12 && k_groups[g].ids[k]; k++) g_allow[k_groups[g].ids[k]] = 1;
     }
     rt_hexlist(getenv("DM_DOS2_TOUCH_ROUTE_ALLOW"), 1); rt_hexlist(getenv("DM_DOS2_TOUCH_ROUTE_DENY"), 0);
+    {   // 5. DM_DOS2_TOUCH_STAGE_TYPES: unset = "3b" (bottomBar_d); "" / "0" = none
+        const char *st = getenv("DM_DOS2_TOUCH_STAGE_TYPES");
+        memset(g_stage, 0, sizeof g_stage);
+        if (!st) g_stage[0x3b] = 1;
+        else {
+            char *dup = strdup(st), *save = NULL;
+            for (char *t = dup ? strtok_r(dup, ",; ", &save) : NULL; t; t = strtok_r(NULL, ",; ", &save)) { char *end; const unsigned long id = strtoul(t, &end, 16); if (end != t && !*end && id && id < 256) g_stage[id] = 1; }
+            free(dup);
+        }
+    }
     uint32_t *t = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (t == MAP_FAILED) { LOG("【红】[route] mmap failed: no per-movie mouse routing"); g_main = NULL; return; }
     const uint64_t rest = (uint64_t)(uintptr_t)(m->base + RT_DISPATCH + 16);
@@ -302,5 +365,11 @@ void dm_dos2_touchui_route_install(void) {
     LOG("[route] DM_DOS2_TOUCH_ROUTE=1: UI input dispatch main+%#x hooked: mouse events go only to visible UI objects of types [%s] (%s), modal guard %s, "
         "tap-is-not-accept guard %s (%d ms)%s", RT_DISPATCH, list, g_game ? "menus and in game" : "menus only: DM_DOS2_TOUCH_ROUTE_GAME=0", g_modal ? "on" : "OFF", g_accept ? "on" : "OFF",
         g_accept_ms, g_hidden ? ", hidden objects too" : "");
+    {
+        char sl[200]; size_t so = 0; sl[0] = 0;
+        for (int i = 1; i < 256 && so + 8 < sizeof sl; i++) if (g_stage[i]) so += (size_t)snprintf(sl + so, sizeof sl - so, "%s%x", so ? " " : "", i);
+        LOG("[route] stage-listener movies (DM_DOS2_TOUCH_STAGE_TYPES): [%s]: in game their \"handled\" for a button counts only inside their own HUD rects, "
+            "outside it the press goes on to the objects below and the world%s", sl, sl[0] ? "" : " - NONE (the touch6 behaviour)");
+    }
 }
 #endif

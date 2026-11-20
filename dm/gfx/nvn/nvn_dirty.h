@@ -11,6 +11,19 @@ int nvn_dirty_tracked(const void *addr, size_t len);
 void nvn_dirty_protect(const void *addr, size_t len);              // 覆盖页设只读 | Set the covered pages read-only
 uint64_t nvn_dirty_now(void);                                      // 当前代号：上传前取，作为该份内容的戳 | Current generation: taken before upload, as the stamp of that content
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // 覆盖页在戳之后被写过 → 1 | Covered pages were written after the stamp -> 1
+// [DOS2] NR-SHCACHE: 1 = every covered page is protected now; *gen = their newest write generation, *inc = the pool's registration number
+// (a content version: it changes with every CPU write); 0 = some page is writable / busy or the range is untracked
+int nvn_dirty_version(const void *addr, size_t len, uint64_t *gen, uint64_t *inc);
+// [DOS2] NR-ZERO DM_NR_SHC_MEMO: the same answer + *tok; while nvn_dirty_tok_ok(*tok) the answer has not changed (no page of the range
+// left PROT, the pool is the same registration) - the caller may reuse (*gen, *inc) without scanning the pages again
+int nvn_dirty_version_tok(const void *addr, size_t len, uint64_t *gen, uint64_t *inc, uint64_t *tok);
+int nvn_dirty_tok_ok(uint64_t tok);
+// [DOS2] NR-TRAFFIC round 2 (port-common/dirty-order): stamp first, then protect until every covered page is read-only, then the caller reads
+// (*whole = 0: never all read-only - do not trust nvn_dirty_since for this copy); DM_DIRTY_PROTECT_ORDER=0 makes nvn_dirty_safe_order() 0
+// so each caller keeps its old order (A/B). Counters: calls, protect rounds repeated (a page was busy), copies never wholly protected.
+uint64_t nvn_dirty_stamp_protect(const void *addr, size_t len, int *whole);
+int nvn_dirty_safe_order(void);
+void nvn_dirty_order_stats(uint64_t *calls, uint64_t *retries, uint64_t *notwhole);
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // 累计：游戏写触发的缺页次数、宿主写前解保护的页数 | Cumulative: number of page faults triggered by game writes, number of pages unprotected before host writes
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // 累计：本模块 mprotect 调用次数、覆盖页数、耗时 | Cumulative: this module's mprotect call count, pages covered, time spent
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total); // 当前存活槽、槽表高水位、登记总次数 | Currently live slots, slot table high-water mark, total number of registrations

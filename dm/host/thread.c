@@ -14,7 +14,7 @@ static pthread_once_t g_keyown_once = PTHREAD_ONCE_INIT;
 static void own_free(void *p) { void **own = p; free(own[0]); free(own[1]); free(own); }
 static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) die("创建线程本地块的释放键失败"); }
 void guest_thread_init(void) {
-    pthread_setspecific(g_keygate, (void *)dm_gate);
+    void *dm_gate_entry(void); pthread_setspecific(g_keygate, dm_gate_entry());   // [NR-24] _dm_gate, or _dm_gate_fast with DM_NR_GATE_TICK=1 (hle.c)
     for (int i = 0; i < 2; i++) if (g_keyres[i]) pthread_setspecific(g_keyres[i], (void *)dm_game_res(i));   // 分辨率参数位：{u32 宽, u32 高} 打包 | resolution parameter slot: {u32 width, u32 height} packed
     if (g_keyaspect || g_keyaspectui) {   // 宽高比上限参数位：max(19/9, 两种模式输出宽 / 高)，float 位模式放低 32 位 | aspect ratio limit parameter slot: max(19/9, output width / height of the two modes), float bit pattern in the low 32 bits
         float a = 19.0f / 9.0f; int wide = 0;

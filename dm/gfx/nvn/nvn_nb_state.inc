@@ -13,7 +13,7 @@
 enum { NBSS_BRACKETS, NBSS_TAKEN, NBSS_OTHER_THREAD, NBSS_CAPTURED, NBSS_CAPTURED_BYTES, NBSS_RECORDS, NBSS_BYTES, NBSS_DEF, NBSS_REF,
        NBSS_NOID, NBSS_SAME, NBSS_RAW, NBSS_XRAW, NBSS_UNKNOWN, NBSS_FALLBACK, NBSS_EPOCHS, NBSS_KINDS };
 _Static_assert(NBSS_KINDS == NBSS_N, "nvn_nb_tap.h NBSS_N");
-static int g_nbs_on, g_nbs_owned;
+static int g_nbs_on, g_nbs_owned, g_nbs_ready;   // g_nbs_ready: nvn_nb_state_enable ran (NR-13: nvn_nb_state_pause turns g_nbs_on off / on)
 static __thread int t_nbs_own, t_nbs_emit, t_nbs_depth; static __thread uint8_t t_nbs_in[16];
 static nbs_state g_nbs;                 // owner thread only
 static cmd_t *g_nbs_cb;                 // the command buffer of the shadow / epoch
@@ -103,10 +103,13 @@ static void nbs_raw(uint32_t op, const uint8_t *pl, uint32_t n) {
     if (t_nbs_emit || !t_nbs_own || !nbs_op_kinds(op)) return;
     g_nbs_raw.active = 1; g_nbs_raw.op = op; g_nbs_raw.n = n; g_nbs_raw.pl = pl; nbss_add(NBSS_RAW, 1);
 }
+static __thread int t_nbs_time; static __thread uint64_t t_nbs_ns;   // [DOS2] NR-CPU: a timed direct draw (nvn_nrd_draw) asks for the state block's share
 static void nbs_before(cmd_t *o) {
     if (t_nbs_emit || !t_nbs_own) return;
+    const uint64_t t0 = __builtin_expect(t_nbs_time, 0) ? now_ns() : 0;
     nbs_settle();
     if (o == g_nbs_cb && (g_nbs.dirty || __atomic_load_n(&g_nbs_xunk, __ATOMIC_RELAXED))) nbs_flush();
+    if (t0) t_nbs_ns += now_ns() - t0;
 }
 static void nbs_end(cmd_t *o) {
     if (t_nbs_emit || !t_nbs_own || o != g_nbs_cb) return;
@@ -117,7 +120,7 @@ void nvn_nb_state_enable(void);
 void nvn_nb_state_begin(int taken);
 void nvn_nb_state_end(void);
 void nvn_nb_state_stats(uint64_t out[NBSS_KINDS]);
-void nvn_nb_state_enable(void) { nbs_init(&g_nbs, 0); nbs_epoch(); g_nbs_on = 1; }
+void nvn_nb_state_enable(void) { nbs_init(&g_nbs, 0); nbs_epoch(); g_nbs_ready = 1; g_nbs_on = 1; }
 void nvn_nb_state_begin(int taken) {
     if (!g_nbs_on) return;
     if (taken) {
@@ -138,12 +141,53 @@ void nvn_nb_state_end(void) {
     if (t_nbs_own) nbs_settle();   // the last call of the packet is filed (it stays pending until the next record)
     t_nbs_depth--;
 }
+// [DOS2] NR-13 DM_NR_LEAN_AB (dm/host/hle_dos2_nb.c, the render thread at EndFrame): the capture off (1) / on again (0) at a frame
+// boundary, so that one run measures both. Off: what the shadow holds goes out first (as at EndRecording), then every hook is a load and a
+// not-taken branch again and the state packets write plain NVN state records. On: nbs_resume (every kind unknown, a new epoch).
+// 1 = done (or already so); 0 = not now (a packet is open on this thread, or the shadow belongs to another thread): ask at the next frame.
+int nvn_nb_state_pause(int off);
+int nvn_nb_state_pause(int off) {
+    if (!g_nbs_ready || t_nbs_depth) return 0;
+    if (__atomic_load_n(&g_nbs_owned, __ATOMIC_ACQUIRE) && !t_nbs_own) return 0;
+    if (off) {
+        if (!g_nbs_on) return 1;
+        if (t_nbs_own) nbs_flush();
+        g_nbs_on = 0;
+    } else {
+        if (g_nbs_on) return 1;
+        g_nbs_pend.active = 0; g_nbs_raw.active = 0; g_nbs_cb = NULL;
+        (void)__atomic_exchange_n(&g_nbs_xunk, 0u, __ATOMIC_RELAXED);
+        { uint32_t e = g_nbs_epoch_next++; if (!e) e = g_nbs_epoch_next++; nbs_resume(&g_nbs, e); nbss_add(NBSS_EPOCHS, 1); }
+        g_nbs_on = 1;
+    }
+    return 1;
+}
+// [DOS2] NR-09S3 (DM_NR_STATE=4, nvn_nr_state3.inc): one OP_X_NR_STATE record carries the state of an opcode-21 packet instead of the
+// state records the shadow would have captured. nbs_ext_before: what the shadow holds goes out first (as before a plain state record, in
+// whichever command buffer it belongs to). nbs_ext_after: the kinds the record wrote are unknown to the shadow (as after a plain record):
+// the next captured call of such a kind is emitted again with only the entries set since. Owner thread only; another thread marks them
+// for the owner (g_nbs_xunk), like a plain record there.
+static void nbs_ext_before(void) {   // = nbs_flush, without its atomic exchange when nothing is marked
+    if (t_nbs_emit || !t_nbs_own) return;
+    nbs_settle();
+    if (g_nbs.dirty || __atomic_load_n(&g_nbs_xunk, __ATOMIC_RELAXED)) nbs_flush();
+}
+static void nbs_ext_after(unsigned kinds) {
+    if (t_nbs_emit || !kinds) return;
+    if (!t_nbs_own) { __atomic_fetch_or(&g_nbs_xunk, kinds, __ATOMIC_RELAXED); nbss_add(NBSS_XRAW, 1); return; }
+    nbs_settle(); nbs_unknown_k(kinds);
+}
 void nvn_nb_state_stats(uint64_t out[NBSS_KINDS]) { for (int i = 0; i < NBSS_KINDS; i++) out[i] = __atomic_exchange_n(&g_nbss[i], 0, __ATOMIC_RELAXED); }
 #define NBS_REC(c, op, payload) do { if (__builtin_expect(g_nbs_on, 0)) { void *nbs_q_ = nbs_rec((c), (op), (payload)); if (nbs_q_) return nbs_q_; } } while (0)
 #define NBS_RAW(op, pl, n) do { if (__builtin_expect(g_nbs_on, 0)) nbs_raw((op), (pl), (n)); } while (0)
 #define NBS_BEFORE(o) do { if (__builtin_expect(g_nbs_on, 0)) nbs_before(o); } while (0)
+#define NBS_STATE_TIMED 1   // [NR-CPU] t_nbs_time / t_nbs_ns exist (nvn_nr_direct.inc)
 #define NBS_END(o) do { if (__builtin_expect(g_nbs_on, 0)) nbs_end(o); } while (0)
+#define NBS_EXT_BEFORE() do { if (__builtin_expect(g_nbs_on, 0)) nbs_ext_before(); } while (0)            // [DOS2] NR-09S3
+#define NBS_EXT_AFTER(k) do { if (__builtin_expect(g_nbs_on, 0)) nbs_ext_after(k); } while (0)            // [DOS2] NR-09S3
 #else
+#define NBS_EXT_BEFORE() ((void)0)
+#define NBS_EXT_AFTER(k) ((void)0)
 #define NBS_REC(c, op, payload) ((void)0)
 #define NBS_RAW(op, pl, n) ((void)0)
 #define NBS_BEFORE(o) ((void)0)

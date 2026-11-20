@@ -9,3 +9,5 @@ gfx/tools/dmsh_xlate/obj/
 gfx/tools/dmsh_xlate/bin/
 third_party/ryujinx/**/obj/
 third_party/ryujinx/**/bin/
+# [DOS2] NR-31b: the portable pipeline warm-up seed (shader keys + fixed-function state, docs/dos2/nr/NR-31b.md) ships in the APK
+!android/dos2/dos2-pipe-seed.bin

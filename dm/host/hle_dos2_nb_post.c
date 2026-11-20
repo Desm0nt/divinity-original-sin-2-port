@@ -53,7 +53,7 @@ const nb_post_prog *dm_nb_post_prog(uint64_t serial) {
 static nb_post_hist g_hist; static nb_post_out g_out;
 static struct { uint64_t parts, fused[NB_FXK_KINDS], why[NB_FXK_KINDS][NB_PW_KINDS], later_cover, assumed, bad, exact_passes, passes_fs; } g_pp;
 static int g_aa; static nb_post_aa_state g_aast; static nb_post_aa_out g_aao;
-static struct { uint64_t f1a, fxaa, copy, copy_kept, nostep, plain, readers, op_reads, bad, unrelated, carried, why[NB_PAW_KINDS]; } g_pa;
+static struct { uint64_t f1a, fxaa, copy, copy_kept, nostep, plain, readers, op_reads, op_fresh, bad, unrelated, carried, why[NB_PAW_KINDS]; } g_pa;
 // NB-18b-9: a pair left plain names its nodes (3 lines per reason): which pass read Sight's target first, which FXAA pass refused it.
 static void nbp_node_str(const nb_frame *f, int q, char *b, size_t cap) {
     if (q < 0 || q >= f->nnode) { snprintf(b, cap, "none"); return; }
@@ -95,6 +95,13 @@ void dm_nb_post_install(void) {
                 "Sight is elided per submission and its readers sample Sight's target; a refused submission runs the recorded chain with the console's FXAA)");
         } else if (a[0] != '0' || a[1]) LOG("[nb] DM_NB_POST_AA=%s not understood (0 / 1): off", a);
     }
+    // NR-33A: DM_NB_POST_AA_OUTLINE=1 (default 0) - EoCOutlineCombine between Sight and FXAA carries F1A's output like EoCFog (Fort Joy:
+    // Sight -> outline -> fog -> FXAA); the outline is then drawn over the anti-aliased image (its edge not smoothed: a look change)
+    const char *ol = getenv("DM_NB_POST_AA_OUTLINE");
+    if (g_aa && ol && ol[0] == '1' && !ol[1]) {
+        g_aast.outline = 1;
+        LOG("[nb] DM_NB_POST_AA_OUTLINE=1: EoCOutlineCombine between Sight and the AA pass carries F1A's output (the outline is drawn over the anti-aliased image)");
+    }
 }
 void dm_nb_post_plan(const nb_frame *f, nb_plan_out *po) {
     if (!g_dm_nb_post) return;
@@ -107,7 +114,7 @@ void dm_nb_post_plan(const nb_frame *f, nb_plan_out *po) {
         if (nb_post_aa_plan(f, po, &g_out, &r, &g_aast, &g_aao) < 0) g_pa.bad++;
         else {
             g_pa.f1a += (uint64_t)g_aao.f1a; g_pa.fxaa += (uint64_t)g_aao.f1a_fxaa; g_pa.copy += (uint64_t)g_aao.f1a_copy; g_pa.copy_kept += (uint64_t)g_aao.f1a_copy_kept;
-            g_pa.nostep += (uint64_t)g_aao.f1a_nostep; g_pa.plain += (uint64_t)g_aao.plain; g_pa.readers += (uint64_t)g_aao.readers; g_pa.op_reads += (uint64_t)g_aao.op_reads;
+            g_pa.nostep += (uint64_t)g_aao.f1a_nostep; g_pa.plain += (uint64_t)g_aao.plain; g_pa.readers += (uint64_t)g_aao.readers; g_pa.op_reads += (uint64_t)g_aao.op_reads; g_pa.op_fresh += (uint64_t)g_aao.op_fresh;
             for (int w = 0; w < NB_PAW_KINDS; w++) g_pa.why[w] += (uint64_t)g_aao.why[w];
             g_pa.unrelated += (uint64_t)g_aao.unrelated_fxaa; g_pa.carried += (uint64_t)g_aao.carried;
             if (g_aao.plain) nbp_aa_diag(f);
@@ -136,10 +143,10 @@ void dm_nb_post_report(double fr) {
         for (int t = 0; t < g_aast.n; t++) bad += g_aast.t[t].bad;
         LOG("[nb] post plan aa DM_NB_POST_AA=1: F1A a frame %.2f (FXAA pass elided %.2f, PPDefault copy elided %.2f / left %.2f, no AA pass after Sight %.2f); "
             "left as F1 + the console's FXAA %.2f; refusals%s; passes told to sample Sight's target %.2f a frame; aliased targets tracked %d "
-            "(read by an operation, never aliased again: %d; such reads now %llu); FXAA passes of other chains after Sight (not fed by its target, ignored) "
-            "%.2f a frame; fog steps between Sight and the elided AA pass (run as recorded, carry F1A's output) %.2f a frame; bad input %llu",
+            "(read by an operation, never aliased again: %d; such reads now %llu; read by an operation after its real write - AA pass run there, fusion goes on: %llu); FXAA passes of other chains after Sight (not fed by its target, ignored) "
+            "%.2f a frame; fog%s steps between Sight and the elided AA pass (run as recorded, carry F1A's output) %.2f a frame; bad input %llu",
             g_pa.f1a / fr, g_pa.fxaa / fr, g_pa.copy / fr, g_pa.copy_kept / fr, g_pa.nostep / fr, g_pa.plain / fr, o ? b : ": none", g_pa.readers / fr,
-            g_aast.n, bad, (unsigned long long)g_pa.op_reads, g_pa.unrelated / fr, g_pa.carried / fr, (unsigned long long)g_pa.bad);
+            g_aast.n, bad, (unsigned long long)g_pa.op_reads, (unsigned long long)g_pa.op_fresh, g_pa.unrelated / fr, g_aast.outline ? " / outline" : "", g_pa.carried / fr, (unsigned long long)g_pa.bad);
         memset(&g_pa, 0, sizeof g_pa);
     }
 }

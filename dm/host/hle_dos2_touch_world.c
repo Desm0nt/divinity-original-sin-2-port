@@ -63,6 +63,13 @@
 //      that helper, the selector's position is that point - the pad's own pipeline then sees "the player moved the cursor there": proximity
 //      selection, preview 10, the ghost, (c) hle_dos2_touch.c presses pad A once the preview is the item-move task again, the selector is held
 //      400 ms more. DM_DOS2_TOUCH_PLACE=2: the point 4 way (PC picking at the finger + A), for A/B only.
+//   6. (owner 18.11, branch dos2-touch6) Inventory "Throw" (and any other aim mode of the same task): a tap on the ground made the character run
+//      there and cancelled the throw; only the stick + A worked - the class of point 4 / 5. The throw's targeting is the attack / skill task
+//      (PC task type 2, main+0xe1de50, vtable main+0x29c9cf0; "Throw Item" = context menu action 0x1b, main+0xfcd3f8). While a controller
+//      previews or runs a task whose type is in DM_DOS2_TOUCH_AIM_TYPES (default "2") it is in the point-5 path: no PC picking window, no mouse
+//      record for a world finger, a tap = the selector at the finger's ground point + pad A (the pad player's "aim there, A"). A prepared skill is
+//      the same task, so its tap goes the pad's way too (the selector's proximity selection picks the character nearest to the point).
+//      DM_DOS2_TOUCH_AIM=0: off (the PC click, as before). The type is a static finding; DM_DBG logs "aim mode ... previews task type N".
 // DM_DBG=1: each change of the object under the finger, each Action1 with its kind, each change of the preview / running task (type numbers).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -115,6 +122,8 @@ static int g_floor = 1, g_keep;                 // DM_DOS2_TOUCH_WORLD_FLOOR / _
 static volatile int g_pc_in; static pthread_t g_pc_thr;   // inside one of our PC calls (the game thread): main+0xe151f0 answers "cursor targeting"
 static const uint8_t *g_click_ic, *g_walk_ic;   // the controller that got the click / whose click-started move task runs
 static int g_place_on = 1;                        // DM_DOS2_TOUCH_PLACE (item placement taps, point 4 above)
+static int g_aim_on = 1; static uint32_t g_aim_mask = 1u << DT_TASK_AIM;   // DM_DOS2_TOUCH_AIM / _AIM_TYPES (point 6: throw / aim taps)
+static volatile int g_place_type = -1;            // the task type of the target mode last seen (10 = item move, else an aim type)
 static volatile uint64_t g_place_ms;              // last Update of a controller running the item-move task (0 = never)
 static const uint8_t *volatile g_place_ic;
 static volatile int g_run_type = -1; static volatile uint64_t g_run_ms;
@@ -248,17 +257,21 @@ static uint64_t tw_update(uint64_t ic, uint64_t tm) {   // main+0xe11f40: previe
     if (ic) {   // point 4: is this controller in the item placement mode (its running task = the item-move task)?
         int rt = tw_task_type(*(const uint8_t *const volatile *)((const uint8_t *)(uintptr_t)ic + TW_IC_TASK));
         // phone 16.11 (touch5.log): Actions... -> Move shows the item-move task as the PREVIEW task (type 10, flags 0x100; running -1),
-        // not as the running one; take either
+        // not as the running one; take either. Point 6 (dos2-touch6): the throw / aim task types the same way (dt_target_task).
         const int pt = tw_task_type(*(const uint8_t *const volatile *)((const uint8_t *)(uintptr_t)ic + TW_IC_PREVIEW));
+        const int tt = dt_target_task(pt, rt, g_place_on, g_aim_on ? g_aim_mask : 0);
         if (dt_is_placing(pt) && !dt_is_placing(rt)) rt = pt;
-        if (rt >= 0) {
+        if (rt >= 0 || tt >= 0) {
             if (g_dbg && rt != g_run_type) { g_run_type = rt; g_run_ms = tw_ms(); } else if (g_dbg) g_run_ms = tw_ms();
-            if (g_place_on && dt_is_placing(rt)) {
+            if (tt >= 0) {
                 placing = 1;
-                if (!g_place_ms || tw_ms() - g_place_ms > 1000 || g_place_ic != (const uint8_t *)(uintptr_t)ic) { static unsigned n;
-                    if (n++ < 20 || g_dbg) LOG("[world] item placement mode: input controller %p runs / previews the item-move task (type %d, cursor ItemMove): a world tap = pad A with the "
-                                               "picking at the finger (DM_DOS2_TOUCH_PLACE=0 off)", (const void *)(uintptr_t)ic, rt); }
-                g_place_ms = tw_ms(); g_place_ic = (const uint8_t *)(uintptr_t)ic;
+                if (!g_place_ms || tw_ms() - g_place_ms > 1000 || g_place_ic != (const uint8_t *)(uintptr_t)ic || g_place_type != tt) { static unsigned n;
+                    if (n++ < 40 || g_dbg) {
+                        if (tt == DT_TASK_ITEMMOVE) LOG("[world] item placement mode: input controller %p runs / previews the item-move task (type %d, cursor ItemMove): a world tap = pad A with the "
+                                                        "picking at the finger (DM_DOS2_TOUCH_PLACE=0 off)", (const void *)(uintptr_t)ic, tt);
+                        else LOG("[world] aim mode (throw / prepared skill): input controller %p previews task type %d, runs %d: a world tap = the pad's selector at the finger's ground "
+                                 "point + pad A, no PC click (DM_DOS2_TOUCH_AIM=0 off, DM_DOS2_TOUCH_AIM_TYPES=%#x)", (const void *)(uintptr_t)ic, pt, rt, g_aim_mask); } }
+                g_place_ms = tw_ms(); g_place_ic = (const uint8_t *)(uintptr_t)ic; g_place_type = tt;
             }
         }
     }
@@ -333,12 +346,18 @@ void dm_dos2_touch_world_left(int kind, int down) {
 }
 int dm_dos2_touch_world_placing(void);   // hle_dos2_touch.c, on a world tap: is the item placement mode on (seen in the last 300 ms)?
 int dm_dos2_touch_world_placing(void) {
-    if (!g_on || !g_place_on) return 0;
+    if (!g_on || (!g_place_on && !g_aim_on)) return 0;
     const uint64_t t = g_place_ms;
     return t && tw_ms() - t < 300;
 }
 int dm_dos2_touch_world_place_mode(void);   // DM_DOS2_TOUCH_PLACE: 0 off, 1 the selector at the finger (point 5, default), 2 PC picking at the finger (point 4)
-int dm_dos2_touch_world_place_mode(void) { return g_on ? g_place_on : 0; }
+int dm_dos2_touch_world_place_mode(void) {   // point 6: an aim mode always takes the selector way (1); the item move keeps DM_DOS2_TOUCH_PLACE
+    if (!g_on) return 0;
+    const int t = g_place_type;
+    return t >= 0 && t != DT_TASK_ITEMMOVE && g_place_ms && tw_ms() - g_place_ms < 1000 ? (g_aim_on ? 1 : 0) : g_place_on ? g_place_on : (g_aim_on ? 1 : 0);
+}
+int dm_dos2_touch_world_place_type(void);   // the target mode's task type (10 item move, 2 throw / skill aim; -1 none seen in the last second)
+int dm_dos2_touch_world_place_type(void) { return g_on && g_place_ms && tw_ms() - g_place_ms < 1000 ? g_place_type : -1; }
 void dm_dos2_touch_world_place_at(void);   // a placement tap: learn the finger's ground point (the UI cursor is at the finger), then hold the selector there
 void dm_dos2_touch_world_place_at(void) { g_pl_probe = 2; g_pl_have = 0; g_pl_until = tw_ms() + 1500; g_n_pl_hold = 0; }
 int dm_dos2_touch_world_place_ready(void);   // 1 = the point is known and the selector has been held there for a few ray set-ups
@@ -381,6 +400,8 @@ void dm_dos2_touch_world_install(void) {
     g_dbg = (v = getenv("DM_DBG")) && atoi(v) > 0;
     g_floor = !((v = getenv("DM_DOS2_TOUCH_WORLD_FLOOR")) && *v == '0'); g_keep = (v = getenv("DM_DOS2_TOUCH_WORLD_KEEP")) && atoi(v) > 0;
     g_place_on = (v = getenv("DM_DOS2_TOUCH_PLACE")) && *v ? (*v == '0' ? 0 : *v == '2' ? 2 : 1) : 1;
+    g_aim_on = !((v = getenv("DM_DOS2_TOUCH_AIM")) && *v == '0');
+    if ((v = getenv("DM_DOS2_TOUCH_AIM_TYPES"))) g_aim_mask = dt_aim_mask(v) & ~(1u << DT_TASK_ITEMMOVE) & ~(1u << TW_TASK_MOVE) & ~(1u << TW_TASK_PAD);   // never the walk / the stick
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_main = &g_mod[i];
     module_t *m = g_main;
     if (!m) return;
@@ -442,5 +463,8 @@ void dm_dos2_touch_world_install(void) {
     LOG("[world] item placement (Actions... -> Move): %s", g_place_on == 1 ? "while a controller runs / previews the item-move task (type 10) a world tap = the pad's selector "
         "[helper+0x108]+0x30 at the finger's ground point, then pad A (DM_DOS2_TOUCH_PLACE=0 off, =2 the PC picking way)" : g_place_on == 2 ? "DM_DOS2_TOUCH_PLACE=2: PC picking at the finger + pad A (A/B)" :
         "OFF (DM_DOS2_TOUCH_PLACE=0): a tap is the PC click, as before");
+    LOG("[world] throw / aim (inventory \"Throw\", a prepared skill): %s (task type mask %#x)", g_aim_on && g_aim_mask ? "while a controller previews / runs such a task a world tap = the pad's "
+        "selector at the finger's ground point, then pad A once the selector has been there a few frames (point 6; DM_DOS2_TOUCH_AIM=0 off: the PC click)" :
+        "OFF (DM_DOS2_TOUCH_AIM=0 or an empty DM_DOS2_TOUCH_AIM_TYPES): a tap is the PC click", g_aim_mask);
 }
 #endif

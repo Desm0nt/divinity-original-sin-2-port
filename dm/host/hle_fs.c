@@ -997,6 +997,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     g_hm[fd] = NULL;
 #ifdef DM_GAME_DOS2   // [DOS2] DM_DOS2_TOUCHUI: is this descriptor Data/TouchUI.pak (hle_dos2_touchui.c logs the first read of each movie)
     { void dm_dos2_touchui_open(const char *path, int fd); dm_dos2_touchui_open(path, fd); }
+    { void dm_dos2_heat_open(const char *path, const char *host, int fd, int writing); dm_dos2_heat_open(path, hp, fd, (mode & (MODE_WRITE | MODE_APPEND)) != 0); }   // [DOS2] NR-HEAT: a level package?
 #endif
     if (fd < 4096) g_fd_romi[fd] = re ? (int32_t)(re - g_ri.e) + 1 : 0;
     if (re) { if (re->has_holes && fd < 4096) g_hm[fd] = hm_load(hp); }   // the index saw whether a .holes table is there: no probe per open
@@ -1037,6 +1038,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     if (!h) { *out = 0; return RES_FAIL; }   // 文件句柄就是 fd，0 是标准输入、不会是游戏打开的文件：打开失败后照用的空句柄 | A file handle is an fd; 0 is standard input and never a file the game opened: it is the null handle the game keeps using after a failed open
 #ifdef DM_GAME_DOS2
     { extern uint8_t g_dm_dos2_touchui_fd[4096]; void dm_dos2_touchui_read(int64_t off, size_t n); if (h < 4096 && g_dm_dos2_touchui_fd[h]) dm_dos2_touchui_read(off, sz); }
+    { extern uint8_t g_dm_dos2_heat_fd[4096]; void dm_dos2_heat_read(int fd, int64_t off, size_t n); if (h < 4096 && g_dm_dos2_heat_fd[h]) dm_dos2_heat_read((int)h, off, sz); }   // [DOS2] NR-HEAT: which level
 #endif
     size_t got = 0; uint64_t t0 = g_flag.bootprof ? now_ns() : 0;
     dm_guest_write_prepare(buf, sz);   // 目标可能是图形层写保护的贴图池页：内核写只读页返回 EFAULT 而不缺页，先解保护并标脏 | The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first

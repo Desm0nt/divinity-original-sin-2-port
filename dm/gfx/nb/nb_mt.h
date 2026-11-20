@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -56,15 +57,24 @@ struct Stats {                     // producer side (translate thread only)
     uint64_t subs = 0, direct[NBMT_FB_KINDS] = {}, cmds = 0, chunks = 0, bytes = 0, big = 0, mallocs = 0, alloc_fail = 0;
     uint64_t sync[NBMT_SY_KINDS] = {}, waits = 0, wait_ns = 0, wait_max_ns = 0, help_chunks = 0, help_cmds = 0, help_ns = 0;
     uint64_t full = 0, full_ns = 0, inline_ns = 0, depth_max = 0, wakes = 0;
+    uint64_t spliced = 0, spliced_cmds = 0;   // [NR-ZERO Z5] chunks handed over by splice(), their packets
 };
 struct WorkerStats {               // written under the queue mutex
     uint64_t chunks = 0, cmds = 0, ns = 0, sleeps = 0;
     uint64_t checked = 0, bad[NBMT_BAD_KINDS] = {}, bad_seq = 0;   // mode 2 (bad_seq: seq of the first bad chunk + 1)
 };
 
+// [DOS2] NR-CPU (docs/dos2/nr/NR-CPU.md): DM_NR_CPU=1 - which vkCmd* the replay spends its time in. Every packet is counted by op, one in
+// 16 is timed (two steady_clock reads around its call). Written by the thread inside the chunk (one at a time), read by the report:
+// relaxed atomics. Off: one not-taken branch a packet.
+enum { NBMT_PROF_OPS = 64 };
+struct Prof { std::atomic<uint64_t> calls[NBMT_PROF_OPS], timed[NBMT_PROF_OPS], ns[NBMT_PROF_OPS]; uint32_t tick = 0;
+    Prof() { for (int i = 0; i < NBMT_PROF_OPS; i++) { calls[i] = 0; timed[i] = 0; ns[i] = 0; } } };
 struct Queue {
     // configuration (set before the first begin, read-only afterwards)
     int mode = 0;
+    bool prof_on = false;                  // [DOS2] NR-CPU DM_NR_CPU=1
+    Prof prof;
     uint32_t chunk_bytes = 64 << 10, flush_cmds = 256, max_queued = 64;
     void (*on_worker_start)() = nullptr;   // thread name / affinity (engine side)
     bool test_corrupt = false;             // host test: flip a byte after the producer's hash
@@ -94,7 +104,12 @@ struct Queue {
         while (at < c->used) {
             const Pkt *p = reinterpret_cast<const Pkt *>(c->data() + at);
             if (check && (p->size < sizeof(Pkt) || (p->size & 7) || p->size > c->used - at || !p->run)) { if (v.bad < 0) v.bad = NBMT_BAD_WALK; break; }
-            p->run(c->cb, p);
+            if (__builtin_expect(prof_on, 0)) {   // [DOS2] NR-CPU
+                const unsigned op = p->op < NBMT_PROF_OPS ? p->op : 0;
+                prof.calls[op].fetch_add(1, std::memory_order_relaxed);
+                if (!(++prof.tick & 15)) { const uint64_t t0 = now_ns(); p->run(c->cb, p); prof.ns[op].fetch_add(now_ns() - t0, std::memory_order_relaxed); prof.timed[op].fetch_add(1, std::memory_order_relaxed); }
+                else p->run(c->cb, p);
+            } else p->run(c->cb, p);
             at += p->size; ++v.cmds;
         }
         if (check) {
@@ -222,6 +237,22 @@ struct Queue {
             producer_waiting = true; cv_idle.wait(l, [this] { return !busy; }); producer_waiting = false;
             const uint64_t ns = now_ns() - t0; ++st.waits; st.wait_ns += ns; if (ns > st.wait_max_ns) st.wait_max_ns = ns;
         }
+    }
+    // [DOS2] NR-ZERO Z5 (docs/dos2/nr/NR-ZERO.md section 14): a chunk of packets written apart from the queue (take()n from it, filled by
+    // a builder - xbg_nb_mt.inc Build) is handed over whole AT THIS POSITION of the stream: everything the producer wrote before it is
+    // replayed before it, everything written after it after it. The producer's current chunk is handed over first, then the chunk by
+    // the same hand-over (sequence number, hash, mode 1 replay, queue full, wake-up) - the replay order is the hand-over order.
+    void splice(Chunk *c) {
+        if (!c) return;
+        flush();
+        c->cb = cb; st.cmds += c->cmds; ++st.spliced; st.spliced_cmds += c->cmds;
+        cur = c; flush();
+    }
+    // A chunk taken for a builder and not handed over (its run was not used): back to the free list.
+    void give_back(Chunk *c) {
+        if (!c) return;
+        std::lock_guard<std::mutex> l(mu);
+        if (c->big) free(c); else { c->used = c->cmds = 0; c->next = free_list; free_list = c; ++free_n; }
     }
     // Everything handed over so far is in the command buffer when this returns; the producer may then use it directly.
     void sync(int why) {
