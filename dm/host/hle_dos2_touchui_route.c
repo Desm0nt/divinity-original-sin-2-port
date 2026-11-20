@@ -134,6 +134,7 @@ static const struct { const char *name; uint16_t ids[12]; } k_groups[] = {
     // (pack 3s: in 3r that comment ran on over the next groups - panels / context menu / dialog got no taps)
     {"ctx", {0x0c, 0x60}}, {"panels", {0x09, 0x25, 0x8e, 0x40, 0x3f, 0x54, 0x4e, 0x55, 0x3e}}, {"dialog", {0x42, 0x65}},
     {"menus", {0x48, 0x57, 0x4b, 0x4c, 0x4a, 0x58, 0x59, 0x5a, 0x5b, 0x67, 0x04, 0x5e}}, {"menus", {0x4d}},
+    {"menus", {0x5f}},   // buttonLayoutNX_c (Options -> Controls; 21.11 its "B Back" took no tap): buttonLayoutNX_d = a stage tap on the "Back" hint (tools/dos2_taps3_touch.py)
     {"panels", {0x46, 0x49, 0x89, 0x43}},   // journal_c, trade_c, reward_c, examine_c: no mouse code of their own, but their `_d` movies carry touch buttons (tools/dos2_panel_touch.py)
     {"panels", {0x8c}},   // journal_csp (the journal the engine really creates, run tw4: "kept away: not in the allow list"): journal_csp_d = button row + sub tabs by tap
 };

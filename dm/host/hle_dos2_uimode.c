@@ -104,6 +104,7 @@ void dm_dos2_uimode_poll(void) {
     { void dm_dos2_touch_gaps_poll(void); dm_dos2_touch_gaps_poll(); }
     // UI mode TOUCH: the loading screen tips that need a keyboard leave the engine's PC pick (hle_dos2_touch_tips.c)
     { void dm_dos2_touch_tips_poll(void); dm_dos2_touch_tips_poll(); }
+    { void dm_dos2_lsb_guard_poll(void); dm_dos2_lsb_guard_poll(); }   // hle_dos2_lsb_guard.c: logs a rejected .lsb file
 }
 
 // JNI (DmActivity.nativeDos2UiMode, the UI thread): mode < 0 = the requested mode now; else the request, answered by the game thread within

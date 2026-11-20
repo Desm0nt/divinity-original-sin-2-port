@@ -109,6 +109,9 @@
 //   DM_DOS2_TOUCH_MM_PER_1080=<mm>   the mm 1080 design px span (Java DmActivity sets it from DisplayMetrics; dm/env wins); unset = the iPad's sizes
 //   DM_DOS2_TOUCH_CELL=<px> | off    testing: the panels' cell (40..160) instead of the physical one; off = not sent (the movies keep 76)
 //   DM_DOS2_TOUCH_WIN_SCALE=0        the windows the game makes (reward, splitter, dialog, tooltip) keep the engine's size
+//   DM_DOS2_TOUCHUI_HUD_TIP=1        the PC tooltip window + the tooltipHelper_kb.swf library registered at the UI start-up + the init guard
+//                                    (d5013e4). DEFAULT 0 since 21.11: that registration crashed the console menus (Options -> Sound / Game,
+//                                    main+0x3c56b4); without it tooltip calls are dropped in the PC UI
 //   DM_DOS2_TOUCHUI_HUD_SHOW=1       the host also sets the visible flag on every object it makes (if the PC classes do not show themselves)
 //   DM_DOS2_TOUCHUI_HUD_STATES / _BLOCK  see above
 //   DM_DOS2_TOUCH_ONE_PANEL=0        the PC's free windows: dmSide(2..7) only sends the button's own toggle, dmSide(8) does nothing (default 1: one
@@ -303,27 +306,118 @@ static void hu_tail(uint8_t *mgr, uint32_t type, char *out, size_t n) {
 // PC's: the short long press (= hover) shows it (the iPad's ShortLongPress). DM_DOS2_TOUCHUI_HUD_TIP=0: not made.
 // Without the object (sites differ, made later, TIP=0) and with the mode byte 0 the tooltip calls themselves are taken by the host (dropped): the
 // game would only crash on them (hle_dos2_touchui.c guards the entry points it can; these names cover the rest). The controller UI keeps them.
-enum { HU_TIP_T = 0x2c, HU_TIP_LAYER = 0x2a, HU_TIP_FLAGS = 0x20020000, HU_TIP_SLOT = 0x88, HU_TIP_GET = 0x110e1fc, HU_TIP_REG = 0x10abbe8 };
+// WHY IT HAD NO ROOT (phone 21.11, CRASH pc=main+0x111e6ec, docs/dos2/TOUCH_MODES_PLAN.md "Подсказки (tooltip) в касании"): GUI/tooltip.swf
+//   imports the Flash library "tooltipHelper_kb.swf" (ImportAssets2; its other import fonts_en.swf is there). The Switch's library loader
+//   0x10cf360 registers fonts_en, LSClasses, uiElements, tooltipHelper, texture_lib, containerInventory_lib, consoleHints_c
+//   (lib->vt[0x68](lib, name, path, [main+0x2bb8a58])) and never tooltipHelper_kb.swf (no such string in main); the iPad's loader does
+//   (0x1012f2db8..0x1012f2de8, right after the console hints, before Fonts/fonts.lsx). So FlashPlayer::Load 0xd278d0 gets NULL from Iggy's
+//   create 0x3ec550 (an import it cannot resolve), returns before [fp+0x108] (the root, FlashPlayer vt+0x118 = 0xd25d60) is set, and the UI
+//   manager still runs the object's init 0xae4980 -> the class's vt+0x70 0x111e690 `root->vt[0xa8]` on NULL. The console UI has no shared
+//   tooltip window at all: 13 movies (12 `_c` panels + containerInventory.swf) import tooltipHelper.swf and draw their
+//   tooltips inside themselves (the PC calls cannot be routed to such an object).
+//   The fix (the player's own files, nothing from the IPA): the host adds the iPad's registration at the same point - a jump at 0x10cf52c
+//   (the Fonts/fonts.lsx step) runs lib->vt[0x68](lib, "tooltipHelper_kb.swf", <root 0xb>/GUI/tooltipHelper_kb.swf built by the game's own
+//   24-char builder 0xbf8f70, the loader's cfg) and then the step itself. tooltipHelper_kb.swf is in the Switch's GUI folder (its imports
+//   fonts_en / uiElements / LSClasses / tooltipHelper are registered before it).
+//   Guards: the object is made only after that registration ran; its handle goes into [+0x88] only once its Flash player has a root and the
+//   init ran (flags bits 0..1 == 2, 0xae49e0); and a stub at the generic init 0xae4980 returns for a type-0x2c object without a root (no init,
+//   load-pending bit cleared so the manager stops loading it, [+0x88] left empty, no more tries): a failed load never crashes, tooltips stay dropped.
+enum { HU_TIP_T = 0x2c, HU_TIP_LAYER = 0x2a, HU_TIP_FLAGS = 0x20020000, HU_TIP_SLOT = 0x88, HU_TIP_GET = 0x110e1fc, HU_TIP_REG = 0x10abbe8,
+       HU_LIB_SITE = 0x10cf52c, HU_LIB_PREV = 0x10cf500, HU_LIB_FREE_RD = 0x10cf5cc, HU_LIB_BUILD = 0xbf8f70, HU_LIB_APPEND = 0xbf8fe8, HU_LIB_LEN = 0xbf9bb0,
+       HU_LIB_FONTS = 0x1e72dc7, HU_LIB_CFG = 0x2bb8a58, HU_LIB_ROOTS = 0xb, HU_FREE = 0x83d3e0,
+       HU_INIT = 0xae4980, HU_INIT_CALL = 0xaedd28, HU_INIT_FL = 0xae49e0, HU_TIP_INIT = 0x111e6a8, HU_FP_ROOT = 0xd25d60, HU_FP_LOAD = 0xd27904, HU_FP_ROOT_ST = 0xd2795c,
+       HU_FP_ROOTOFF = 0x108 };
 static const uint32_t k_hu_tip_get[4] = {0xd0010c48 /* adrp x8,main+0x3298000 */, 0xf940a108 /* ldr x8,[x8,#0x140] */, 0xf940450a /* ldr x10,[x8,#0x88]: the handle */,
                                          0xf260555f /* tst x10,#0x3fffff00000000 */};
 static const uint32_t k_hu_tip_reg[3] = {0xf9411b34 /* ldr x20,[x25,#0x230] */, 0xb940da88 /* ldr w8,[x20,#0xd8] */, 0x52800596 /* mov w22,#0x2c */};
-static int g_tip = 1, g_tip_ok, g_tip_tries; static unsigned g_tip_drop;
+// the library loader: the step replaced by the jump (no PC-relative word is copied: the stub rebuilds x2 itself), the consoleHints_c step before
+// it (the builder call and the vt+0x68 call shape), the free of a long path string, the builder's prologue / append / fixed length 0x18
+static const uint32_t k_hu_lib_site[4] = {0xf0006d02 /* adrp x2,main+0x1e72000 */, 0x91371c42 /* add x2,x2,#0xdc7: "Fonts/fonts.lsx" */, 0x528000a1 /* mov w1,#5 */, 0x910043e0 /* add x0,sp,#0x10 */};
+static const uint32_t k_hu_lib_prev[9] = {0x97eca69c /* bl 0xbf8f70 */, 0xf9400268 /* ldr x8,[x19]: the library manager */, 0xf9452e83 /* ldr x3,[x20,#0xa58]: cfg */, 0xf0006ee1,
+                                          0x910cbc21 /* x1 = "consoleHints_c.swf" */, 0x910043e2 /* x2 = &path */, 0xaa1303e0, 0xf9403508 /* ldr x8,[x8,#0x68] */, 0xd63f0100 /* blr x8 */};
+static const uint32_t k_hu_lib_free[2] = {0xf9400fe0 /* ldr x0,[sp,#0x18]: the long string's buffer */, 0x97ddb784 /* bl 0x83d3e0 */};
+static const uint32_t k_hu_lib_build[4] = {0xa9bd57f6, 0xa9014ff4, 0xa9027bfd, 0x910083fd};
+static const uint32_t k_hu_lib_append[1] = {0x940002e6 /* bl 0xbf9b80: root, '/', the literal */};
+static const uint32_t k_hu_lib_len[1] = {0x321d07e2 /* mov w2,#0x18: 24 characters */};
+// the generic init (its prologue goes into the stub), its caller in the manager's load loop, its "loaded" flag write, the tooltip class's init
+// reading the root, FlashPlayer vt+0x118 = the root, Load: no Iggy player -> return before the root is set
+static const uint32_t k_hu_init[4] = {0xd10143ff /* sub sp,sp,#0x50 */, 0xf9001bf3, 0xa9047bfd, 0x910103fd};
+static const uint32_t k_hu_init_call[2] = {0xaa1403e0, 0x97ffdb15 /* bl 0xae4980 */};
+static const uint32_t k_hu_init_fl[4] = {0xb9401668 /* ldr w8,[x19,#0x14] */, 0x121e7508 /* and w8,w8,#0xfffffffc */, 0x321f0108 /* orr w8,w8,#2 */, 0xb9001668};
+static const uint32_t k_hu_tip_init[4] = {0xf9400c00 /* ldr x0,[x0,#0x18] */, 0xf9400008, 0xf9408d08 /* ldr x8,[x8,#0x118]: the root */, 0xd63f0100};
+static const uint32_t k_hu_fp_root[2] = {0xf9408400 /* ldr x0,[x0,#0x108] */, 0xd65f03c0};
+static const uint32_t k_hu_fp_load[3] = {0x97db1313 /* bl 0x3ec550: Iggy create */, 0xf9001a80 /* str x0,[x20,#0x30] */, 0xb4000500 /* cbz x0: return, no root */};
+static const uint32_t k_hu_fp_root_st[2] = {0xd63f0100, 0xf9008680 /* str x0,[x20,#0x108]: the root */};
+static int g_tip = 0, g_tip_ok, g_tip_tries, g_tip_lib_ok, g_tip_dead, g_tip_wait; static unsigned g_tip_drop;
+static _Atomic int g_tip_lib;             // 1 = tooltipHelper_kb.swf was registered at the UI start-up (the loader ran through the host's jump)
+static uint64_t g_tip_h;                  // the tooltip object made, its handle not yet in [+0x88] (waiting for its root)
 static uint8_t *hu_tip_obj(const uint8_t *ui, uint8_t *mgr) {   // the tooltip object the getter would find, NULL = none
     if (!ui || !mgr) return NULL;
     uint8_t *o = hu_obj(mgr, *(const volatile uint64_t *)(ui + HU_TIP_SLOT));
     return o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_TIP_T ? o : NULL;
 }
-static void hu_tip_make(uint8_t *ui, uint8_t *mgr, const char *why) {   // game thread
-    if (!g_tip || !g_tip_ok || !ui || !mgr || *hu_mode() != 0 || g_tip_tries >= 3 || hu_tip_obj(ui, mgr)) return;
+static void *hu_fp_root(const uint8_t *o) {   // the object's Flash root (FlashPlayer vt+0x118 reads [fp+0x108]); NULL = none
+    const uint8_t *fp = o ? *(const uint8_t *const volatile *)(o + HU_OBJ_FP) : NULL;
+    return fp ? *(void *const volatile *)(fp + HU_FP_ROOTOFF) : NULL;
+}
+// from the stub at main+0x10cf52c: the game's UI start-up, x19 = the Flash library manager (the stub then runs the Fonts/fonts.lsx step)
+static void hu_lib_kb(uint8_t *lib) {
+    static const char name[] = "tooltipHelper_kb.swf", path[] = "GUI/tooltipHelper_kb.swf";   // static: the manager may keep the name pointer
+    _Static_assert(sizeof path == 0x18 + 1, "the builder 0xbf8f70 appends exactly 24 characters");
+    if (!lib || !g_main) return;
+    uint8_t s[16] __attribute__((aligned(16))); memset(s, 0, sizeof s);   // the game's path string {u8 short length << 1 | long flag, u32 length +4, char * +8}
+    ((void (*)(void *, uint64_t, const char *))(void *)(g_main->base + HU_LIB_BUILD))(s, HU_LIB_ROOTS, path);
+    const uint64_t cfg = *(const volatile uint64_t *)(g_main->base + HU_LIB_CFG);
+    char shown[160]; const int lng = s[0] & 1; const char *p = lng ? *(const char *const *)(const void *)(s + 8) : (const char *)s + 1;
+    const unsigned len = lng ? *(const uint32_t *)(const void *)(s + 4) : (unsigned)(s[0] >> 1);
+    snprintf(shown, sizeof shown, "%.*s", p ? (int)(len < 150 ? len : 150) : 0, p ? p : "");
+    void **vt = *(void ***)(void *)lib;
+    const uint64_t r = ((uint64_t (*)(void *, const char *, void *, uint64_t))vt[0x68 / 8])(lib, name, s, cfg);
+    if (lng && p) ((void (*)(void *))(void *)(g_main->base + HU_FREE))((void *)(uintptr_t)p);
+    atomic_store(&g_tip_lib, 1);
+    LOG("[hud] tooltip: Flash library %s registered from \"%s\" (lib->vt[0x68] -> %#llx), as the iPad's loader 0x1012f2db8 does: GUI/tooltip.swf (type %#x) imports it, without it "
+        "Iggy made no player and the window had no root (crash main+0x111e6ec, phone 21.11)", name, shown, (unsigned long long)r, HU_TIP_T);
+}
+// from the stub at main+0xae4980 (the generic init after a movie load) for a type-0x2c object whose Flash player has no root; returns to the caller
+static void hu_tip_init_bad(uint8_t *o) {
+    uint8_t *ui = g_main ? *(uint8_t *volatile *)(g_main->base + HU_UI_THIS) : NULL, *mgr = g_main ? hu_mgr() : NULL;
+    *(volatile uint32_t *)(o + HU_OBJ_FLAGS) &= ~1u;   // not "load pending" any more: the manager's loop (0xaedcbc) stops loading it every frame; never "loaded" (bit 1)
+    const int in_slot = ui && mgr && hu_obj(mgr, *(const volatile uint64_t *)(ui + HU_TIP_SLOT)) == o;
+    if (in_slot) *(volatile uint64_t *)(ui + HU_TIP_SLOT) = 0;
+    g_tip_dead = 1; g_tip_h = 0;
+    const uint8_t *fp = *(const uint8_t *const volatile *)(o + HU_OBJ_FP);
+    LOG("【红】[hud] tooltip: GUI/tooltip.swf loaded WITHOUT a root (Flash player %p, Iggy player %p; library tooltipHelper_kb.swf %s): its init skipped (the crash main+0x111e6ec of "
+        "21.11), the object left inert%s, no more tries; tooltips stay dropped in the PC UI", (const void *)fp, fp ? *(void *const volatile *)(fp + 0x30) : NULL,
+        atomic_load(&g_tip_lib) ? "registered" : "NOT registered", in_slot ? ", [+0x88] emptied" : "");
+}
+static void hu_tip_make(uint8_t *ui, uint8_t *mgr, const char *why) {   // game thread (create-all hook, every pad poll)
+    if (!g_tip || !g_tip_ok || g_tip_dead || !ui || !mgr || *hu_mode() != 0) return;
+    if (g_tip_h) {   // made: [+0x88] gets it once its movie is loaded with a root and its init ran (0xae49e0: flags bits 0..1 = 2)
+        uint8_t *o = hu_obj(mgr, g_tip_h);
+        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != HU_TIP_T) { LOG("[hud] tooltip: the object made (handle %#llx) is gone before its movie was ready: made again", (unsigned long long)g_tip_h); g_tip_h = 0; }
+        else {
+            const uint32_t fl = *(volatile uint32_t *)(o + HU_OBJ_FLAGS);
+            if ((fl & 3) == 2 && hu_fp_root(o)) {
+                *(volatile uint64_t *)(ui + HU_TIP_SLOT) = g_tip_h;
+                LOG("[hud] tooltip: GUI/tooltip.swf loaded with a root (%d poll(s) after its creation, flags %#x): handle %#llx into [[main+0x3298140]+%#x] - main+0x110e1f0 finds it, "
+                    "the PC movies' item / skill / status tooltips show (hover = the short long press)", g_tip_wait, fl, (unsigned long long)g_tip_h, HU_TIP_SLOT);
+                g_tip_h = 0; g_tip_wait = 0;
+            } else if (++g_tip_wait == 600) LOG("【红】[hud] tooltip: GUI/tooltip.swf still not loaded after 600 polls (flags %#x, root %p): [+0x88] stays empty, tooltips dropped", fl, hu_fp_root(o));
+            return;
+        }
+    }
+    if (g_tip_tries >= 3 || hu_tip_obj(ui, mgr)) return;
+    if (!atomic_load(&g_tip_lib)) { g_tip_tries = 3; LOG("【红】[hud] tooltip: the library tooltipHelper_kb.swf was not registered at the UI start-up (the loader main+%#x did not run through the host): "
+                                                         "GUI/tooltip.swf would get no root - not made, tooltips are dropped in the PC UI", HU_LIB_SITE); return; }
     char mv[96]; hu_tail(mgr, HU_TIP_T, mv, sizeof mv);
     if (strcmp(mv, "GUI/tooltip.swf")) { g_tip_tries = 3; LOG("【红】[hud] tooltip: type %#x plays \"%s\", not GUI/tooltip.swf: not made (tooltip calls are dropped in the PC UI)", HU_TIP_T, mv); return; }
     g_tip_tries++;
     const uint64_t h = ((hu_fn)(void *)(g_main->base + HU_CREATE))((uint64_t)(uintptr_t)mgr, HU_TIP_LAYER, HU_TIP_T, HU_TIP_FLAGS, 0x80, 0);
     uint8_t *o = hu_obj(mgr, h);
     if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != HU_TIP_T) { LOG("【红】[hud] tooltip: CreateUIObject type %#x -> handle %#llx FAILED (try %d of 3; tooltip calls are dropped in the PC UI)", HU_TIP_T, (unsigned long long)h, g_tip_tries); return; }
-    *(volatile uint64_t *)(ui + HU_TIP_SLOT) = h; g_tip_tries = 0;
-    LOG("[hud] tooltip: the PC tooltip window made (%s): CreateUIObject type %#x = GUI/tooltip.swf layer %#x flags %#x player 0 -> handle %#llx, into [[main+0x3298140]+%#x] "
-        "as the iPad's PC branch does (main+0x110e1f0 finds it now: item / skill / status tooltips of the PC movies)", why, HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, (unsigned long long)h, HU_TIP_SLOT);
+    g_tip_h = h; g_tip_wait = 0; g_tip_tries = 0;
+    LOG("[hud] tooltip: the PC tooltip window made (%s): CreateUIObject type %#x = GUI/tooltip.swf layer %#x flags %#x player 0 -> handle %#llx, as the iPad's PC branch does; "
+        "into [[main+0x3298140]+%#x] once its movie has a root", why, HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, (unsigned long long)h, HU_TIP_SLOT);
 }
 static int hu_ei_tip(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // show*Tooltip: dropped when nothing could draw it
     (void)ctx; (void)player; (void)n; (void)a;
@@ -999,22 +1093,66 @@ void dm_dos2_touchui_hud_install(void) {
     {   // the PC tooltip window (run 20.11 review, the section above hu_tip_make)
         static const hu_site k_tip[] = {{HU_TIP_GET, 4, k_hu_tip_get}, {HU_TIP_REG, 3, k_hu_tip_reg}};
         const int bt = hu_same(m, k_tip, 2);
-        g_tip_ok = bt < 0;
-        // phone 21.11: the window is made but its Flash player has no root (vt+0x118 -> NULL) and the class crashes on the first mouse
-        // move (main+0x111e6ec, twice). Off by default until the load is understood; DM_DOS2_TOUCHUI_HUD_TIP=1 = make it (test)
+        // phone 21.11: the window had no root (its import tooltipHelper_kb.swf was never registered on the Switch) and crashed at main+0x111e6ec.
+        // Now the host registers that library at the UI start-up and guards the init (the section above hu_lib_kb): on by default again,
+        // DM_DOS2_TOUCHUI_HUD_TIP=0 = not made (and no library, no init stub)
+        static const hu_site k_lib[] = {{HU_LIB_SITE, 4, k_hu_lib_site}, {HU_LIB_PREV, 9, k_hu_lib_prev}, {HU_LIB_FREE_RD, 2, k_hu_lib_free}, {HU_LIB_BUILD, 4, k_hu_lib_build},
+            {HU_LIB_APPEND, 1, k_hu_lib_append}, {HU_LIB_LEN, 1, k_hu_lib_len}, {HU_INIT, 4, k_hu_init}, {HU_INIT_CALL, 2, k_hu_init_call}, {HU_INIT_FL, 4, k_hu_init_fl},
+            {HU_TIP_INIT, 4, k_hu_tip_init}, {HU_FP_ROOT, 2, k_hu_fp_root}, {HU_FP_LOAD, 3, k_hu_fp_load}, {HU_FP_ROOT_ST, 2, k_hu_fp_root_st}};
+        const int bl2 = hu_same(m, k_lib, sizeof k_lib / sizeof *k_lib);
+        static const char k_fonts[] = "Fonts/fonts.lsx";
+        g_tip_lib_ok = bl2 < 0 && (uint64_t)HU_LIB_FONTS + sizeof k_fonts <= m->size && !memcmp(m->base + HU_LIB_FONTS, k_fonts, sizeof k_fonts);
+        g_tip_ok = bt < 0 && g_tip_lib_ok;
+        // phone 21.11 (run1121d): with the library registered, Options -> Sound / Game (optionsSettings_d, type 0x58: the console movie TOUCH
+        // inherits from the hybrid table) crashed in Iggy at main+0x3c56b4 right after the window was shown; with TIP=0 (run1121e) it did not.
+        // The console movies must stay exactly as in the hybrid, so the registration (a global Iggy library) is OFF by default; =1 = d5013e4
         g_tip = (v = getenv("DM_DOS2_TOUCHUI_HUD_TIP")) && *v == '1';
         int nreg = 0;
         if (dm_dos2_touchui_ei_on()) for (unsigned i = 0; i < sizeof k_hu_tip_names / sizeof *k_hu_tip_names; i++) nreg += dm_dos2_touchui_ei_register(k_hu_tip_names[i], hu_ei_tip, NULL);
         if (bt >= 0) LOG("【红】[hud] main+%#x differs (the tooltip getter / type 0x2c): no PC tooltip window is made; in the PC UI the %d tooltip calls are dropped", k_tip[bt].off, nreg);
-        else LOG("[hud] PC tooltip window: %s (type %#x layer %#x flags %#x into [[main+0x3298140]+%#x] once a TOUCH HUD is up, as the iPad's PC branch 0x1012dfd60); "
-                 "while there is none the PC UI's %d show*Tooltip calls are dropped (the game would use a NULL object)", g_tip ? "made" : "NOT made (DM_DOS2_TOUCHUI_HUD_TIP=0)",
-                 HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, HU_TIP_SLOT, nreg);
+        else if (!g_tip_lib_ok) LOG("【红】[hud] main+%#x differs (the Flash library loader / the UI init / FlashPlayer root): tooltipHelper_kb.swf cannot be registered, so no PC tooltip window "
+                                   "is made (it would have no root); in the PC UI the %d tooltip calls are dropped", bl2 >= 0 ? k_lib[bl2].off : HU_LIB_FONTS, nreg);
+        else LOG("[hud] PC tooltip window: %s (type %#x layer %#x flags %#x into [[main+0x3298140]+%#x] once a TOUCH HUD is up and its movie has a root, as the iPad's PC branch "
+                 "0x1012dfd60; its library tooltipHelper_kb.swf registered at the UI start-up as the iPad's loader; init guard main+%#x); while there is none the PC UI's %d "
+                 "show*Tooltip calls are dropped (the game would use a NULL object)", g_tip ? "made (DM_DOS2_TOUCHUI_HUD_TIP=1)" : "NOT made (default; DM_DOS2_TOUCHUI_HUD_TIP=1 = on: its library registration broke the console menus 21.11)",
+                 HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, HU_TIP_SLOT, HU_INIT, nreg);
     }
     if (g_env > 0) {   // the old switch: the PC set follows the last input, rebuilt in game
         const char *lv = getenv("DM_DOS2_TOUCH_LIVE");
         if (!lv || !*lv) setenv("DM_DOS2_TOUCH_LIVE", "1", 1);
         if (lv && atoi(lv) != 1) LOG("【红】[hud] DM_DOS2_TOUCH_LIVE=%s: DM_DOS2_TOUCHUI_HUD=1 needs 1 (the set rebuilt in game)", lv);
     }
+}
+// The tooltip window's two stubs (the section above hu_lib_kb), written before the game runs (its UI start-up registers the libraries once):
+//   main+0x10cf52c (the Fonts/fonts.lsx step of the library loader) -> hu_lib_kb(x19), then that step's own four words rebuilt (x2 = the
+//   absolute address of "Fonts/fonts.lsx", w1 = 5, x0 = sp + 0x10) and back to 0x10cf53c;
+//   main+0xae4980 (the generic init) -> type 0x2c with [obj+0x18] or its root [fp+0x108] NULL: hu_tip_init_bad(obj), back to the game's caller;
+//   anything else: the four prologue words and 0xae4990.
+// Both or neither: the init stub first (harmless alone), then the library jump; a failure takes the window off (g_tip_ok = 0).
+static void hu_tip_hook(module_t *m) {
+    uint32_t *t = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (t == MAP_FAILED) { g_tip_ok = 0; LOG("【红】[hud] tooltip: mmap failed: no PC tooltip window"); return; }
+    uint32_t *lb = t, *in = t + 32;
+    const uint64_t lhost = (uint64_t)(uintptr_t)(void *)hu_lib_kb, fonts = (uint64_t)(uintptr_t)(m->base + HU_LIB_FONTS), lrest = (uint64_t)(uintptr_t)(m->base + HU_LIB_SITE + 16);
+    static const uint32_t lcode[12] = {0xa9bf7bfd /* stp x29,x30,[sp,#-16]! */, 0x910003fd /* mov x29,sp */, 0xaa1303e0 /* mov x0,x19 */, 0x58000130 /* ldr x16,=hu_lib_kb */,
+        0xd63f0200 /* blr x16 */, 0xa8c17bfd /* ldp x29,x30,[sp],#16 */, 0x58000102 /* ldr x2,="Fonts/fonts.lsx" */, 0x528000a1 /* mov w1,#5 */, 0x910043e0 /* add x0,sp,#0x10 */,
+        0x580000f0 /* ldr x16,=main+0x10cf53c */, 0xd61f0200 /* br x16 */, 0xd503201f};
+    memcpy(lb, lcode, sizeof lcode);
+    lb[12] = (uint32_t)lhost; lb[13] = (uint32_t)(lhost >> 32); lb[14] = (uint32_t)fonts; lb[15] = (uint32_t)(fonts >> 32); lb[16] = (uint32_t)lrest; lb[17] = (uint32_t)(lrest >> 32);
+    const uint64_t ihost = (uint64_t)(uintptr_t)(void *)hu_tip_init_bad, irest = (uint64_t)(uintptr_t)(m->base + HU_INIT + 16);
+    static const uint32_t icode[8] = {0xb940f010 /* ldr w16,[x0,#0xf0]: type */, 0x7100b21f /* cmp w16,#0x2c */, 0x540000c1 /* b.ne the prologue */, 0xf9400c10 /* ldr x16,[x0,#0x18]: fp */,
+        0xb4000190 /* cbz x16, bad */, 0xf9408610 /* ldr x16,[x16,#0x108]: the root */, 0xb4000150 /* cbz x16, bad */, 0xd503201f};
+    memcpy(in, icode, sizeof icode); memcpy(in + 8, k_hu_init, sizeof k_hu_init);
+    in[12] = 0x58000050 /* ldr x16,#8 */; in[13] = 0xd61f0200 /* br x16 */; in[14] = (uint32_t)irest; in[15] = (uint32_t)(irest >> 32);
+    in[16] = 0x58000050; in[17] = 0xd61f0200; in[18] = (uint32_t)ihost; in[19] = (uint32_t)(ihost >> 32);
+    if (mprotect(t, 0x4000, PROT_READ | PROT_EXEC)) { g_tip_ok = 0; munmap(t, 0x4000); LOG("【红】[hud] tooltip: mprotect RX failed: no PC tooltip window"); return; }
+    __builtin___clear_cache((char *)t, (char *)(t + 64));
+    const uint64_t ito = (uint64_t)(uintptr_t)in, lto = (uint64_t)(uintptr_t)lb;
+    const uint32_t ij[4] = {0x58000050, 0xd61f0200, (uint32_t)ito, (uint32_t)(ito >> 32)}, lj[4] = {0x58000050, 0xd61f0200, (uint32_t)lto, (uint32_t)(lto >> 32)};
+    if (hu_poke(m, HU_INIT, ij, 4)) { g_tip_ok = 0; LOG("【红】[hud] tooltip: mprotect RW failed at main+%#x: no PC tooltip window", HU_INIT); return; }
+    if (hu_poke(m, HU_LIB_SITE, lj, 4)) { g_tip_ok = 0; LOG("【红】[hud] tooltip: mprotect RW failed at main+%#x: no PC tooltip window (the init guard stays, harmless)", HU_LIB_SITE); return; }
+    LOG("[hud] tooltip: the library loader main+%#x registers tooltipHelper_kb.swf (GUI/tooltip.swf's import) at the UI start-up; init guard main+%#x: a type-%#x object without a Flash "
+        "root is never initialised (DM_DOS2_TOUCHUI_HUD_TIP=0: neither)", HU_LIB_SITE, HU_INIT, HU_TIP_T);
 }
 // Step 2, main.c host_preload: AFTER dm_dos2_touch_install (which compares the same prologues for its live rebuild): the two jumps.
 void dm_dos2_touchui_hud_hook(void);
@@ -1039,6 +1177,7 @@ void dm_dos2_touchui_hud_hook(void) {
             return; }
     }
     g_hooked = 1;
+    if (g_tip && g_tip_ok) hu_tip_hook(m);
     char list[200]; size_t o = 0; list[0] = 0;
     for (int i = 0; i < HU_NTYPES; i++) if (g_t[i].on && o + 8 < sizeof list) o += (size_t)snprintf(list + o, sizeof list - o, "%s%#x", o ? ", " : "", g_t[i].type);
     LOG("[hud] touch HUD: create-all main+%#x / destroy-all main+%#x hooked (after hle_dos2_touch.c compared them); a player UI set built with the mode byte 0 gets the PC branch of the set (HUD + panels: types %s) "

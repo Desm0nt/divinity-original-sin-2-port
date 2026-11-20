@@ -177,6 +177,8 @@ def main():
                 pi = dos2_taps_touch.playerinfo_source(sw)
                 if dos2_taps_touch.check(dos2_taps_touch.PI_OUT, pi): sys.exit('%s: tap fix checks failed, package not written' % dos2_taps_touch.PI_OUT)
                 made[dos2_taps_touch.PI_OUT] = dos2_taps_touch.patch(dos2_taps_touch.PI_OUT, pi)[0]
+            # Options -> Controls (type 0x5f, owner 21.11): buttonLayoutNX_c as the input of the taps3 pass below (its "B Back" by a stage tap)
+            for bn, bdata in dos2_hint_touch.sources(sw, ['buttonLayoutNX']).items(): made[dos2_hint_touch.out_name(bn)] = bdata
             # third pass (tools/dos2_taps3_touch.py): hints by stage geometry, options rows / sliders, character creation step tabs, skills panel press; --no-taps3 = without
             if '--no-taps3' not in a:
                 for n in dos2_taps3_touch.POST:

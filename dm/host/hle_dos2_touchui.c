@@ -189,6 +189,9 @@ static const tu_def k_hint[] = {
     {0x58, 0, "optionsSettings_d", "GUI/optionsSettings_c.swf"}, {0x59, 0, "optionsSettings_d", "GUI/optionsSettings_c.swf"},
     {0x5a, 0, "optionsSettings_d", "GUI/optionsSettings_c.swf"}, {0x5b, 0, "optionsSettings_d", "GUI/optionsSettings_c.swf"},
     {0x67, 0, "mods_d", "GUI/mods_c.swf"}, {0x04, 0, "characterCreation_d", "GUI/characterCreation_c.swf"}, {0x5e, 0, "tutorialBox_d", "GUI/tutorialBox_c.swf"},
+    // Options -> Controls (the pad layout picture, owner 21.11: its "B Back" took no tap in either mode): a tap on the hint = dmPadBtn(1), the pad's B
+    // (tools/dos2_taps3_touch.py add_blback); its own code closes it on IE UICancel (PlaySound UI_Gen_Back + requestCloseUI). Off: DM_DOS2_TOUCHUI_DENY=5f
+    {0x5f, 0, "buttonLayoutNX_d", "GUI/buttonLayoutNX_c.swf"},
     // tools/dos2_list_touch.py: pause menu (taps on its list), dialog answers (a tap runs THAT answer; dialog_c's own drag / release code stays)
     {0x4d, 0, "gameMenu_d", "GUI/gameMenu_c.swf"}, {0x42, 0, "dialog_d", "GUI/dialog_c.swf"}, {0x65, 0, "dialog_d", "GUI/dialog_c.swf"},
     // the HUD with the iPad's on-screen buttons drawn in (owner 15.11, docs/dos2/TOUCH_VISIBLE.md): bottomBar_d = bottomBar_c + panel column, hot bar row arrows, cancel,

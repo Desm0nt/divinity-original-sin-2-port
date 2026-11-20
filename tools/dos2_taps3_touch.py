@@ -721,6 +721,57 @@ def patch_skills(data):
     return c
 
 
+# ---------------------------------------------------------------- 7. Options -> Controls: the "B Back" hint of buttonLayoutNX
+BL_PADX, BL_PADY = 160, 40   # px around the "Back" label (close_txt) in its own space: the B icon stands next to it
+
+
+def add_blback(c):
+    """buttonLayoutNX_c (type 0x5f, Options -> Controls: the pad layout picture + "(B) Back"; owner 21.11: its Back took no tap in hybrid or
+    touch). It has no LS_Classes.controllerBtnHint (its B is a plain symbol buttonB_1 next to the label close_txt), so parts 1 / 5 find nothing
+    there. A stage press and release within TAP_MS, both on close_txt's box (its own getBounds against close_txt.mouseX / mouseY, + BL_PADX
+    left / right for the icon, + BL_PADY up / down) = EI dmPadBtn(1): the pad's B (hybrid: the npad B; touch: its keyboard twin escape), which
+    the movie's own onEventUp turns into "IE UICancel" -> PlaySound UI_Gen_Back + requestCloseUI, the pad's path."""
+    P, S, abc, ref = c.P, c.S, c.abc, c.rbody
+    assert abc.mname(c.inst['name']) == 'buttonLayoutNX_c_fla.MainTimeline' and abc.trait(c.ci, 'close_txt') is not None
+    r = lambda f: [('getlocal2',), ('getproperty', P(f))]
+    c.add('dmBlHit', 0, HEAD + obj(1) + obj(2) + num(3) + num(4) + [
+        ('getlocal0',), ('getproperty', P('close_txt')), ('coerce_a',), ('setlocal1',), ('getlocal1',), ('iffalse', 'no'),
+        ('getlocal1',), ('getproperty', P('visible')), ('iffalse', 'no'),
+        ('getlocal1',), ('getlocal1',), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal2',), ('getlocal2',), ('iffalse', 'no'),
+        ('getlocal1',), ('getproperty', P('mouseX')), ('convert_d',), ('setlocal3',),
+        ('getlocal1',), ('getproperty', P('mouseY')), ('convert_d',), ('setlocal', 4),
+        ('getlocal3',)] + r('x') + [('pushshort', BL_PADX), ('subtract',), ('ifnge', 'no'),
+        ('getlocal3',)] + r('x') + r('width') + [('add',), ('pushshort', BL_PADX), ('add',), ('ifnle', 'no'),
+        ('getlocal', 4)] + r('y') + [('pushbyte', BL_PADY), ('subtract',), ('ifnge', 'no'),
+        ('getlocal', 4)] + r('y') + r('height') + [('add',), ('pushbyte', BL_PADY), ('add',), ('ifnle', 'no'),
+        ('pushtrue',), ('returnvalue',),
+        ('L', 'no'), ('pushfalse',), ('returnvalue',)], ref)
+    c.add('dmBlDown', 1, HEAD + [
+        ('getlocal0',), ('getlocal0',), ('callproperty', P('dmBlHit'), 0), ('setproperty', P('dmBlP')),
+        ('getlocal0',)] + c.now() + [('setproperty', P('dmBlT')), ('returnvoid',)], ref)
+    c.add('dmBlUp', 1, HEAD + [
+        ('getlocal0',), ('getproperty', P('dmBlP')), ('iffalse', 'end'),
+        ('getlocal0',), ('pushfalse',), ('setproperty', P('dmBlP'))] + c.now() + [
+        ('getlocal0',), ('getproperty', P('dmBlT')), ('subtract',), ('pushshort', TAP_MS), ('ifngt', 'k1'), ('jump', 'end'),
+        ('L', 'k1'), ('getlocal0',), ('callproperty', P('dmBlHit'), 0), ('iffalse', 'end')] + c.ei(2, ('pushstring', S('dmPadBtn')), ('pushbyte', 1)) + [
+        ('L', 'end'), ('returnvoid',)], ref)
+    c.add('dmBlStage', 0, HEAD + obj(1) + [
+        ('getlocal0',), ('getproperty', P('dmBlOn')), ('iftrue', 'end'),
+        ('getlocal0',), ('getproperty', P('stage')), ('coerce_a',), ('setlocal1',), ('getlocal1',), ('iffalse', 'end'),
+        ('getlocal0',), ('pushtrue',), ('setproperty', P('dmBlOn')),
+        ('getlocal1',), ('pushstring', S('mouseDown')), ('getlocal0',), ('getproperty', P('dmBlDown')), ('callpropvoid', P('addEventListener'), 2),
+        ('getlocal1',), ('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmBlUp')), ('callpropvoid', P('addEventListener'), 2),
+        ('L', 'end'), ('returnvoid',)], ref)
+    c.add('dmBlTick', 1, HEAD + [('getlocal0',), ('callpropvoid', P('dmBlStage'), 0), ('returnvoid',)], ref)
+    return ['dmBlStage', 'dmBlTick']
+
+
+def patch_bl(data):
+    c = doc_ctx(data); st = add_blback(c)
+    hook_init(c, 'dmBlInitOrig', [st[0]], [st[1]], early=True)
+    return c
+
+
 KINDS = {'inventorySkillPanel_d.swf': (patch_skills, ["'mouseDown'", 'mainpanel_mc', 'dmSkNop']),
          'saveLoad_d.swf': (patch_hints_only, ["'dmPadBtn'", 'dmHgWalk', 'istypelate', 'drawRect', "'enterFrame'"]),
          'optionsSettings_d.swf': (patch_options, ["'dmPadBtn'", 'dmHgWalk', 'onChange', 'onhandleUp', 'selectMC', 'previous', 'buttonReleased', "'mouseMove'",
@@ -728,6 +779,7 @@ KINDS = {'inventorySkillPanel_d.swf': (patch_skills, ["'mouseDown'", 'mainpanel_
          'mods_d.swf': (patch_hints_only, ["'dmPadBtn'", 'dmHgWalk', 'drawRect']),
          'mainMenu_d.swf': (patch_mainmenu, ["'dmPadBtn'", 'dmHgWalk', 'drawRect', 'dmHbFind', 'getBounds', 'buttonHintBar_mc', 'iconId',
                                              'dmSpWhy', 'dmSpFrame1Orig', 'splashScreen_mc', 'closingSplash', "'enterFrame'"]),
+         'buttonLayoutNX_d.swf': (patch_bl, ["'dmPadBtn'", 'close_txt', 'getBounds', "'mouseUp'", "'enterFrame'"]),
          'characterCreation_d.swf': (patch_cc, ["'dmPadBtn'", 'dmHgWalk', 'drawRect', "'IE UICreationTabNext'", 'tcPad', 'list_pos', 'dmHbFind', 'btnHints_mc', 'iconId'])}
 POST = list(KINDS)
 
