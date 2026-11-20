@@ -8254,6 +8254,7 @@ namespace nrz3{extern int mode;void begin();int draw(Commands &c,Descriptors *&d
     void served();void tick();void release();void span_end();extern uint64_t span_t0,span_calls,span_ns,span_n;extern bool ps_called;}
 namespace nrz5t{extern int gmode;extern bool held;extern const nr_dplan *plan_hint;void rec_begin(const nbd_hdr &h,const uint8_t *rec);void rec_end();void cut();void lost();void tick();}   // [DOS2] NR-ZERO Z5, the game thread's half (xbg_nr_z5g.inc)
 namespace nrz8t{extern int mode;void guard(bool on,bool twin);uint64_t pre_begin();void pre(uint64_t t0);int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);}   // [DOS2] NR-ZERO Z8 (xbg_nr_z8.inc): the hook of draw() for a record the submit walk answered
+namespace nrn{extern bool have,pgd;int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast,bool form);}   // [DOS2] NR-NATIVE step B (xbg_nr_nrn_exec.inc): the hook of draw() for a record that carries a card
 namespace nrdraw{enum{F_GI=1,F_QUAD=2,F_UIOFF=4,F_PP=8,F_QUADP=16};extern int mode;extern bool armed;extern const nrd_tail *cur;void reset();void record(const nrd_tail *t);void stale();void tick();void release();
     extern int ui_mode;extern bool ui_rec;bool ui_pick();void ui_end();   // [DOS2] NR-12 DM_NR_UI: plain Iggy draw records through the same lane
     bool lane(Commands &c,Descriptors &d,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,unsigned flags,int draw_fast);
@@ -8382,6 +8383,13 @@ void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instan
         if(nrz8t::mode==1 && !z8g && nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){if(nrz3::mode!=0)nrz3::begin();z3r=nrz8t::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}
     if(__builtin_expect(nrz3::mode!=0,0) && !z3r){nrz3::begin();
         if(nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){z3r=nrz3::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}
+#ifdef DM_GAME_DOS2
+    // [DOS2] NR-NATIVE step B DM_NRN_<PASS>=1|2 (0: one load and a not-taken branch): a record that carries a card asks the card's row (=1: the answered half of nrz3::draw
+    // runs with the row's answer; =2: the row is only remembered and compared with what the path below resolves)
+    if(__builtin_expect(nrn::have,0) && !z3r){
+        nrn::pgd=ppg.on || nbpost::inside || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;   // the prologue drew something else than the engine asked for (an override, a fused / twin draw, a redirect): the card does not describe it
+        z3r=nrn::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast,!(nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0));if(z3r==1)return;}
+#endif
     if(z3r!=2){   // (2: nrz3 answered the descriptors and the pass, its tail left the draw to the old tail below - as a lane() that returned false)
     if(z3r!=3)dp=&descriptors_stable(c,false);   // (3: nrz3 answered the descriptors; the read path of an image ended the open pass)
 #ifdef DM_GAME_ETERNAL
@@ -9577,6 +9585,7 @@ void exec_bind_handles(uint32_t op,const p_bind_handles &a,size_t n){need(a.stag
 #include "xbg_nr_sort.inc"   // [DOS2] NR-21 DM_NR_SORT: order-free draws of a depth-only segment recorded in pipeline order (namespace nrsort)
 #include "xbg_nr_mdi.inc"   // [DOS2] NR-MDI DM_NR_MDI: the multi-draw batching count of depth-only draws (namespace nrmdi; after nrsort: its order-free test)
 #include "xbg_nr_state3.inc"   // [DOS2] NR-09S3 DM_NR_STATE=4 / 5: OP_X_NR_STATE, the state of one opcode-21 packet applied to State (namespace nrstate3)
+#include "xbg_nr_nrn_exec.inc"   // [DOS2] NR-NATIVE step B: the rows of the cards, their publication, the hook of draw() (namespace nrn, second half; after nrz3, whose answered half it takes, and nrstate3, whose snapshot is the image of a card)
 #define XBG_NR_Z8_PART 2
 #include "xbg_nr_z8.inc"   // [DOS2] NR-ZERO Z8 DM_NR_Z8: the walk of a submission (nrz8g) and the hook of draw() (nrz8t::draw; after nrz3 and nr_state3.h)
 #undef XBG_NR_Z8_PART

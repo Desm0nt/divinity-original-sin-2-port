@@ -553,6 +553,16 @@ static _Atomic uint64_t g_wt_id_mem[WT_IDS]; static _Atomic uint32_t g_wt_id_use
 static _Atomic uint32_t g_wt_rec_n, g_wt_cur, g_wt_evict, g_wt_sub_rec; static _Atomic int g_wt_open, g_wt_multi;
 static pthread_mutex_t g_wt_mu = PTHREAD_MUTEX_INITIALIZER;
 #include "nvn_nb_tap.inc"   // [DOS2] DM_NB: frame IR tap (NB-04), NBT(...) lines below; reads g_wt_id_mem
+#ifdef DM_GAME_DOS2
+#include "../nr/nr_nrn.h"
+#define NRNP_RECORDING(c) (CB(c) && CB(c)->recording)
+#define NVN_NRN_PART 1
+#include "nvn_nrn.inc"   // [DOS2] NR-NATIVE step B: the short record of an engine draw (state: the waiting state records, the short flag)
+#undef NVN_NRN_PART
+#else
+#define NRNP_FLUSH(o) ((void)0)
+#define NRN_SHORT_BIND(op, st, first, n) 0
+#endif
 #include "nvn_nr_tap.inc"   // [DOS2] DM_NR: engine object registry tap (NR-01 four NRT(...) lines, NR-02 eight more; empty outside DOS2)
 #include "nvn_nr_nocall.inc"   // [DOS2] NR-23 DM_NR_NOCALL=2: the capture and its four NCT(...) lines (empty outside DOS2)
 #include "nvn_nr_state.inc"   // [DOS2] NR-09S DM_NR_STATE=2: the capture of the opcode-21 calls, 19 NST(...) lines (empty outside DOS2)
@@ -1428,6 +1438,7 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     size = (size + 7) & ~7u;
     NBS_BEFORE(o);    // [DOS2] DM_NB_OPS state bits (NB-13a): the dirty state of the shadow goes out first (one OP_X_NB_STATE)
     NBD_FOREIGN(o);   // [DOS2] DM_NB_OPS (NB-09): a record that is not modelled inside a captured draw: the shadow goes out first, order kept
+    NRNP_FLUSH(o);    // [DOS2] NR-NATIVE step B: state records that wait for their draw go out before any other record of this thread (one thread-local load)
     NBF_REC(o, size);   // [DOS2] DM_NB_FOREIGN (NB-15): count the record by caller class (after the flushes above: their records are filed first)
     { nvn_thr_t *t = nthr_self(); if (t) atomic_fetch_add_explicit(&t->recs, 1, memory_order_relaxed); }   // [DOS2] DM_NVN_THREADS
     if (t_nd.mode) {   // [DOS2] DM_NATIVE_DRAW: inside one engine draw
@@ -1580,6 +1591,11 @@ static int condr_rec(void) {
 }
 static void condr_write(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) { *REC(c, OP_X_RENDER_COND, p_render_cond) = (p_render_cond){kind, mode, addr}; }
 #include "nvn_nb_draw.inc"   // [DOS2] DM_NB_OPS (NB-09): one engine draw = one OP_X_NB_DRAW (shadow, flush, pack)
+#ifdef DM_GAME_DOS2
+#define NVN_NRN_PART 2
+#include "nvn_nrn.inc"   // [DOS2] NR-NATIVE step B: the short record (functions)
+#undef NVN_NRN_PART
+#endif
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *GVIEW(v); }
 NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NVNtexture *const *ct, const NVNtextureView *const *cv,
     const NVNtexture *dt, const NVNtextureView *dv) {
@@ -1676,6 +1692,7 @@ static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, 
     const int nrd_same = NRD_BT(c, op, st, first, n, h);   // [DOS2] NR-09R DM_NR_DIRECT: the backend's table already holds this handle (0 without the switch)
     if (nrd_same == 2) { wt_use_ids(h, n); return; }   // [DOS2] NR-09R =1: not sent (the use mark of DM_NVN_WT_DRAIN stays)
     NBD_TEXGEN();   // [DOS2] NB-09: the texture set changed
+    if (NRN_SHORT_BIND(op, st, first, n)) { wt_use_ids(h, n); return; }   // [DOS2] NR-NATIVE step B: a short draw - the backend puts the slot back from the image of the card
     if (NBD_TAKE(c) && n == 1 && nbd_take_bind(c, op == OP_BIND_TEX ? NBD_B_TEX : op == OP_BIND_SAMP ? NBD_B_SAMP : NBD_B_IMG, st, first, h[0], 0)) {
         NRD_BT_FLAG(nrd_same);   // [DOS2] NR-09R =2: a bind =1 would not send, flagged for the backend's check
         if (op == OP_BIND_TEX || op == OP_BIND_IMG) wt_use_ids(h, n);   // [DOS2] DM_NVN_WT_DRAIN, as below

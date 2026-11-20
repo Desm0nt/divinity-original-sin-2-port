@@ -19,7 +19,8 @@
 //   DM_NRN_<PASS>  0  default (xbg_nrn_default; DM_NRN sets every pass without a switch of its own): one load in nbdraw::apply and one
 //                     at the lane's tail; no table.
 //                  2  verify, as above. Nothing is drawn differently.
-//                  1  refused (red line, the pass is off): the replay is not built (NR-NATIVE.md section 4).
+//                  1  apply (step B, xbg_nr_nrn_exec.inc): a draw whose card has a live row is executed from the row; =2 also
+//                     compares the row with what the path without it resolves.
 //   DM_NRN_MAX     cards the table holds (16384; a power of two, 1024..262144; about 200 bytes each; full = cleared and learnt again)
 // Needs DM_NR_DRAW=1|2 (the lane and the NR-09 tail). Safe-mode step 2 forces every DM_NRN switch to 0; the app sets none.
 // Lines every 10 s: "[nr] native <PASS>: ..." for each pass that saw a card; at the start "[nr] native (NR-NATIVE, backend) ..."; red
@@ -27,8 +28,14 @@
 #include "../../nr/nr_nrn.h"
 static_assert(NBD_F_NRN==NRN_F_FLAG && sizeof(VkViewport)==sizeof(((nrn_vals*)nullptr)->vp) && sizeof(VkRect2D)==sizeof(((nrn_vals*)nullptr)->sc),"nr_nrn.h holds viewport and scissor as bytes");
 namespace nrn{
-bool on=false,read_env=false,have=false;uint8_t mode[NRN_P_N]{};
+bool on=false,read_env=false,have=false,pgd=false,answering=false;uint8_t mode[NRN_P_N]{};   // pgd: the prologue changed this draw (not answered, not learnt, not noted); answering: its tail runs from a row
 nrn_tab T{};bool tab_ok=false;
+// step B (xbg_nr_nrn_exec.inc, after nrz3): the rows, the publication, the hook of draw() and what the lane's tail teaches
+nrn_rows R{};bool rows_ok=false;nrn_pub PUB{};nrn_bstat b[NRN_P_N]{};
+int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast,bool form);
+void learn(const Pass &p);void lost();void exec_tick();
+// part 2 (the image of a card, the short record): what a state record wrote, a record before its binds are applied, the image of a long record, release
+void state_rec(const uint8_t *p,size_t n);void pre(const uint8_t *p,size_t n,const nbd_hdr &h,const uint8_t *binds);void image();void img_release();
 nrn_tail cur{};uint64_t cur_ibuf=0;   // the record whose draw is running
 nrn_pstat s[NRN_P_N]{};uint32_t last_seq[NRN_P_N]{};uint64_t next_ns=0,cards_seen=0;unsigned told=0;
 const char *env(const char *k){return getenv(k);}
@@ -38,31 +45,36 @@ void init(int draw_mode){read_env=true;
     if(!any)return;
     char names[96];names[0]=0;
     for(int p=0;p<NRN_P_N;p++){
-        if(m[p]==1){xbg_logf("【红】[nr] native: DM_NRN_%s=1 is refused - the replay of a draw from its card is not built (docs/dos2/nr/NR-NATIVE.md section 4): the pass is off, use =2",nrn_pass_name(p));m[p]=0;}
         if(m[p]){if(names[0])strncat(names," ",sizeof names-strlen(names)-1);strncat(names,nrn_pass_name(p),sizeof names-strlen(names)-1);}}
     if(!names[0])return;
     if(!draw_mode){xbg_logf("【红】[nr] native: DM_NRN (%s) needs DM_NR_DRAW=1|2 (the lane's tail is where a recorded draw's values are in hand): off",names);return;}
     const char *e=getenv("DM_NRN_MAX");uint32_t cap=e && *e?uint32_t(atoi(e)):16384u;
     if(cap<1024 || cap>262144 || (cap&(cap-1)))cap=16384;
     if(nrn_tab_init(&T,cap)){xbg_logf("【红】[nr] native: no memory for the card table (%u entries): off",cap);return;}
-    tab_ok=true;memcpy(mode,m,sizeof mode);on=true;
-    xbg_logf("[nr] native (NR-NATIVE, backend): passes %s at 2 (verify) - the Vulkan values the lane records for an engine draw are noted under the draw's card (the engine's "
+    if(nrn_rows_init(&R,cap)){nrn_tab_free(&T);xbg_logf("【红】[nr] native: no memory for the rows of the cards (%u): off",cap);return;}
+    rows_ok=true;tab_ok=true;memcpy(mode,m,sizeof mode);on=true;
+    xbg_logf("[nr] native (NR-NATIVE, backend): passes %s (1 = apply: a draw whose card has a live row takes its plan, NR-08 entry and pipeline from the row; 2 = verify) - the Vulkan values the lane records for an engine draw are noted under the draw's card (the engine's "
         "mesh / material / target objects in one word, written by the front end) and compared with the card's last recording: bad = a function of the objects differs, "
         "moved = a resource was placed elsewhere, view = viewport / scissor; table %u cards of %zu bytes; nothing is drawn differently",names,cap,sizeof(nrn_ent));}
-void release(){if(tab_ok){nrn_tab_free(&T);tab_ok=false;}on=false;have=false;memset(mode,0,sizeof mode);}
+void release(){if(rows_ok){nrn_pub_bump(&PUB);img_release();nrn_rows_free(&R);rows_ok=false;}if(tab_ok){nrn_tab_free(&T);tab_ok=false;}on=false;have=false;memset(mode,0,sizeof mode);}
 // From nbdraw::apply: the record whose draw() runs next (p / n: its payload, h: its header).
 inline void record(const uint8_t *p,size_t n,const nbd_hdr &h){
     have=false;
     if(!(h.flags&NBD_F_NRN) || !(h.flags&NBD_F_NR))return;
     nrn_tail t;
     if(!nrn_tail_get(p,n,nrn_tail_off(&h),h.flags,&t) || !mode[t.pass])return;
-    cur=t;cur_ibuf=h.ibuf;have=true;
+    cur=t;cur_ibuf=h.ibuf;have=true;pgd=false;answering=false;
+    if(!(t.rsv&NRN_T_SHORT))image();   // part 2: the State this long record left is the image of its card (compared when the card has one)
+    if(t.rsv&NRN_T_READY)++b[t.pass].ready;
     ++s[t.pass].records;nrn_seq_note(&s[t.pass],&last_seq[t.pass],t.seq);}
 inline uint32_t index_bytes(VkIndexType it){return it==VK_INDEX_TYPE_UINT16?2u:it==VK_INDEX_TYPE_UINT32?4u:1u;}
 // From the lane's tail, after the commands of the draw were recorded (only while `have`).
 void draw_end(VkPipeline pipe,uint16_t used,const VkBuffer *vb,const uint64_t *vbo,VkBuffer ib,uint64_t ibo,VkIndexType it,const VkViewport &vp,const VkRect2D &sc,
-              VkPipelineLayout layout,VkDescriptorSet set,uint32_t noff,bool indexed,uint32_t first_index,uint32_t k){
+              VkPipelineLayout layout,VkDescriptorSet set,uint32_t noff,bool indexed,uint32_t first_index,uint32_t k,const Pass &p,bool own){
     have=false;
+    if(pgd)return;
+    if(own)learn(p);   // step B: the path without the row recorded this draw - its resolution is the card's row (=2: compared with the row first)
+    if(mode[cur.pass]!=2)return;
     uint64_t b[16];for(unsigned i=0;i<16;i++)b[i]=(used>>i&1u)?uint64_t(vb[i]):0;
     nrn_vals v;
     nrn_vals_make(&v,uint64_t(pipe),uint64_t(layout),uint64_t(set),noff,used,b,vbo,k,indexed,uint64_t(ib),ibo,uint32_t(it),cur_ibuf,first_index,index_bytes(it),&vp,&sc);
@@ -80,9 +92,11 @@ void tick(){   // every submission (nrdraw::tick)
     if(!next_ns){next_ns=now+10000000000ull;return;}
     if(now<next_ns)return;
     next_ns=now+10000000000ull;
+    exec_tick();
     for(int p=0;p<NRN_P_N;p++){const nrn_pstat &x=s[p];
         if(!x.records)continue;
         const double n=x.noted?double(x.noted):1.;
+        if(mode[p]!=2){s[p]=nrn_pstat{};continue;}
         xbg_logf("[nr] native %s (DM_NRN_%s=2, last 10 s): %llu draw records with a card, %llu recorded by the lane and noted (%.1f%%); of those: the card's first recording %llu, "
             "same as its last %llu (%.1f%% - a replay from the card alone), moved only %llu (%.1f%%), viewport / scissor only %llu, BAD %llu; differences by word: pipeline %llu, "
             "set layout %llu, vertex bindings %llu, index type %llu, offset count %llu | descriptor set %llu, vertex buffer %llu, vertex offset / fold %llu, index buffer %llu, "

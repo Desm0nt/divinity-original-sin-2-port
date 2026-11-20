@@ -27,7 +27,8 @@ void exec(const uint8_t *p,size_t n){NRCPU_SCOPE(NbState);   // [DOS2] NR-CPU: t
     const bool tm=!(n_seen++&63);const uint64_t t0=tm?timing_clock():0;
     need(n>=sizeof(nr3_hdr),"Truncated OP_X_NR_STATE record");const uint8_t flags=p[1];
     if(!flags){need(apply_state(&state,p,n)==0,"Invalid OP_X_NR_STATE record");
-        if(nbpipe::mode)nbpipe::G->dirty|=nr3_kinds_raw(p)&((1u<<(NR3_K_VFMT+1))-1);}   // [DOS2] NB-13b: as nbpipe::mark for the bind records
+        if(nbpipe::mode)nbpipe::G->dirty|=nr3_kinds_raw(p)&((1u<<(NR3_K_VFMT+1))-1);
+        if(__builtin_expect(nrn::on,0))nrn::state_rec(p,n);}   // [DOS2] NR-NATIVE step B part 2: which fields the engine writes through state records   // [DOS2] NB-13b: as nbpipe::mark for the bind records
     else if(flags==NR3_F_CHECK){snap_of(&want,&state,missing_program);need(apply_snap(&want,p,n)==0,"Invalid OP_X_NR_STATE record");{uint16_t q;memcpy(&q,p+14,2);want_seq=q;}want_on=true;}
     else{nr3_rec v;need(flags==NR3_F_CHECK_END && nr3_parse(p,n,&v)!=0,"Invalid OP_X_NR_STATE record");
         if(!want_on || want_seq!=v.seq)++unpaired;

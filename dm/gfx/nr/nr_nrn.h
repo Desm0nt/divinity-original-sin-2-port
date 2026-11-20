@@ -11,8 +11,15 @@
 //   card      one 64-bit word of those bytes (nrn_card_of). Two draws with the same card were asked for with the same engine objects.
 //   pass      which pass of the frame the draw belongs to, from the NAMES the engine gives its targets (opcode 55, "DeferredBufferStage::
 //             GBuffer1", ...): nrn_name_class / nrn_pass_of. The switches are per pass: DM_NRN_SHADOW / _PREPASS / _GBUF / _LIGHT / _POST /
-//             _OTHER (0 off = the record stream byte for byte as before, 2 verify, 1 apply - refused until the replay is built).
-//   the tail  16 bytes after the NR-09 tail of the draw record (NBD_F_NRN): card, pass, a sequence number.
+//             _OTHER (0 off = the record stream byte for byte as before, 2 verify, 1 apply - step B below).
+//   the tail  16 bytes after the NR-09 tail of the draw record (NBD_F_NRN): card, pass, a sequence number; rsv bit 0 (NRN_T_READY): the
+//             game thread found the card in the published table when it wrote the record.
+//   the row   step B (nrn_rows): what the translation path RESOLVED for a card - NR-08's plan and entry, NR-09's pipeline entry - with
+//             the generations it is valid under and the few live words the card does not hold (pass definition, shader objects,
+//             NR-08's fixed words). A draw whose card has a live row is executed from the row (no descriptor key, no variant, no
+//             table walk); =2 compares the row with what the path without it resolves.
+//   the publication (nrn_pub)  which cards have a row, readable by the game thread without a lock: one word a slot, a generation that
+//             retires every word at once.
 //   the table what the translation path recorded for a card (pipeline, set layout, set, vertex / index buffers, viewport ...): the
 //             verify of =2 - "the engine's objects decide the Vulkan draw" - is this table noting every recorded draw and classing
 //             every difference (nrn_tab_note): a word that must be a function of the card (pipeline, layout, bindings, index type:
@@ -28,7 +35,11 @@
 // The mutation switch of the host test (never defined in the engine build): NRN_MUTATE = k - 1 the card does not read the shader handle,
 // 2 the card does not read the texture slots, 3 the table does not compare the pipeline, 4 a differing entry is not replaced, 5 a
 // depth-only draw into a shadow target is called the pre-pass, 6 the tail is read 8 bytes early, 7 the volatile bytes of the renderer
-// (conditional render, dirty masks) are read into the card, 8 a missing sequence number is not counted.
+// (conditional render, dirty masks) are read into the card, 8 a missing sequence number is not counted; step B - 9 a row answers although
+// a generation of the backend moved, 10 the published word is not compared with the card, 11 a bump of the publication's generation
+// leaves the old words ready, 12 the row's answer is compared without its NR-08 entry id, 13 a row of another pass answers; part 2 -
+// 14 a full table of rows starts again (a card whose short records are in flight loses its image), 15 the engine mask of the image
+// ignores the vertex-buffer slots of a dropped state record, 16 a dropped card stays published.
 #ifndef NRN_MUTATE
 #define NRN_MUTATE 0
 #endif
@@ -72,9 +83,14 @@ static inline int nrn_name_class(const char *s) {
 }
 // An engine handle that names no target (the renderer holds 0 or all ones in an unused slot).
 static inline int nrn_h_none(uint64_t h) { return !h || (uint32_t)h == 0xffffffffu; }
-// The pass of a draw: class of colour target 0 (NRN_RC_NONE when the draw has no colour target), class of the depth target.
-static inline int nrn_pass_of(int have_color, int c0, int ds) {
-    if (!have_color) return ds == NRN_RC_SHADOW && NRN_MUTATE != 5 ? NRN_P_SHADOW : NRN_P_PREPASS;
+// The pass of a draw: class of colour target 0 (NRN_RC_NONE when the draw has no colour target), class of the depth target, and
+// whether ANY colour target is a G-buffer. Phone series N_v1 (20.11): the engine's colour target 0 of the G-buffer pass and of the
+// cascade draws is a handle no transition names, so by colour 0 alone both passes fell into OTHER - a shadow depth target decides
+// first, then a G-buffer among the colour targets, then colour 0.
+static inline int nrn_pass_of(int have_color, int c0, int ds, int any_gbuf) {
+    if (ds == NRN_RC_SHADOW && NRN_MUTATE != 5) return NRN_P_SHADOW;
+    if (!have_color) return NRN_P_PREPASS;
+    if (any_gbuf) return NRN_P_GBUF;
     switch (c0) {
     case NRN_RC_SHADOW: return NRN_P_SHADOW;   // a local light's shadow buffer is a colour target
     case NRN_RC_GBUF: return NRN_P_GBUF;
@@ -112,7 +128,15 @@ enum { NRN_R_SMP_VS = 0x13c0, NRN_R_SMP_FS = 0x1448, NRN_R_TEX_VS = 0x1558, NRN_
 enum { NRN_W_TEX = 1, NRN_W_SMP = 2, NRN_W_VBDIRTY = 4, NRN_W_IBFIRST = 8, NRN_W_REN = 16, NRN_W_SHREC = 32, NRN_W_DEFAULT = NRN_W_TEX | NRN_W_SMP };
 static inline uint64_t nrn_mix(uint64_t h, uint64_t w) { h = (h ^ w) * 0x9e3779b97f4a7c15ull; return h ^ (h >> 29); }
 static inline uint64_t nrn_mix_bytes(uint64_t h, const uint8_t *p, size_t n) {   // n: a multiple of 8
-    for (size_t i = 0; i < n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = nrn_mix(h, w); }
+    // four independent lanes over 32-byte steps (the multiplies of a lane do not wait for the other lanes: the card is taken on the
+    // game thread at every engine draw - N_v1 measured 291-365 ns a card with one chain), then the lanes and the rest in one chain
+    size_t i = 0;
+    if (n >= 64) {
+        uint64_t a = h, b = h ^ 0x243f6a8885a308d3ull, c = h ^ 0x13198a2e03707344ull, d = h ^ 0xa4093822299f31d0ull;
+        for (; i + 32 <= n; i += 32) { uint64_t w[4]; memcpy(w, p + i, 32); a = nrn_mix(a, w[0]); b = nrn_mix(b, w[1]); c = nrn_mix(c, w[2]); d = nrn_mix(d, w[3]); }
+        h = nrn_mix(nrn_mix(nrn_mix(a, b), c), d);
+    }
+    for (; i < n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = nrn_mix(h, w); }
     return h;
 }
 // R = the renderer. Never 0 (0 = "no card").
@@ -133,18 +157,25 @@ static inline uint64_t nrn_card_of(const uint8_t *R, unsigned words) {
 }
 // The pass of the draw the renderer is about to make.
 static inline int nrn_pass_of_r(const uint8_t *R, const nrn_rtmap *m) {
-    uint64_t c0, ds; memcpy(&c0, R + NRN_R_RT, 8); memcpy(&ds, R + NRN_R_DEPTH_RT, 8);
-    return nrn_pass_of(!nrn_h_none(c0), nrn_rt_get(m, c0), nrn_rt_get(m, ds));
+    uint64_t c[8], ds; memcpy(c, R + NRN_R_RT, sizeof c); memcpy(&ds, R + NRN_R_DEPTH_RT, 8);
+    int g = 0;
+    for (int i = 0; i < 8; i++) g |= nrn_rt_get(m, c[i]) == NRN_RC_GBUF;
+    return nrn_pass_of(!nrn_h_none(c[0]), nrn_rt_get(m, c[0]), nrn_rt_get(m, ds), g);
 }
 
 // ---- the tail of the draw record (after nrd_tail; the record's header carries NBD_F_NRN = 32) ----
-enum { NRN_VER = 1, NRN_F_FLAG = 32, NRN_TAIL_BYTES = 16 };
+enum { NRN_VER = 1, NRN_F_FLAG = 32, NRN_TAIL_BYTES = 16, NRN_T_READY = 1, NRN_T_SHORT = 2 };
+// rsv bit 1 (NRN_T_SHORT, step B part 2): the record is SHORT - the state records of the packets of the draw and the texture binds of
+// its flush (one handle, stage < NRN_TEX_STAGES, slot < NRN_TEX_SLOTS) were not written; an nrn_short_ext (NRN_SHORT_EXT_BYTES) follows
+// the tail and names exactly the fields and slots left out; the backend writes those into its State from the image of the card before
+// it executes the record.
+enum { NRN_TEX_STAGES = 6, NRN_TEX_SLOTS = 32 };
 typedef struct nrn_tail { uint64_t card; uint8_t ver, pass; uint16_t rsv; uint32_t seq; } nrn_tail;
 // at = the byte right after the NR-09 tail; cap / n = bytes of the record's payload.
-static inline int nrn_tail_put(uint8_t *dst, size_t cap, size_t at, uint64_t card, int pass, uint32_t seq) {
+static inline int nrn_tail_put(uint8_t *dst, size_t cap, size_t at, uint64_t card, int pass, uint32_t seq, unsigned rsv) {
     if (!dst || at + sizeof(nrn_tail) > cap) return 0;
     nrn_tail t; memset(&t, 0, sizeof t);
-    t.card = card; t.ver = NRN_VER; t.pass = (uint8_t)pass; t.seq = seq;
+    t.card = card; t.ver = NRN_VER; t.pass = (uint8_t)pass; t.seq = seq; t.rsv = (uint16_t)rsv;
     memcpy(dst + at, &t, sizeof t);
     return 1;
 }
@@ -262,5 +293,177 @@ static inline void nrn_pstat_note(nrn_pstat *s, int r, unsigned diff) {
     if (diff & (NRN_D_BAD | NRN_D_PASS)) s->bad++;
     else if (diff & NRN_D_MOVED) s->moved_only++;
     else s->view_only++;
+}
+
+// ---- step B: the row of a card ----
+// What an answered draw takes instead of its lookups. plan / pent / did / frag: the resolution (nr_z3.h nrz_val: NR-08's plan of the
+// shader set, NR-09's entry of the pipeline, NR-08's entry id, "no stage before the fragment shader reads an image"). passdef / sh / f:
+// words the card does not hold and the resolution depends on, compared live before the row answers - the render pass definition of the
+// open pass, the backend's five shader objects, NR-08's six fixed words (viewport size, texture / sampler pool).
+enum { NRN_STAMPS = 3 };   // NR-08's id generation, NR-09's table generation, the backend's object epoch
+typedef struct nrn_ans { uint64_t plan, pent; int32_t did; uint8_t frag, pad[3]; uint64_t passdef, sh[5], f[6]; } nrn_ans;
+static inline int nrn_ans_same(const nrn_ans *a, const nrn_ans *b) {
+    return a->plan == b->plan && a->pent == b->pent && (a->did == b->did || NRN_MUTATE == 12) && a->frag == b->frag && a->passdef == b->passdef &&
+           !memcmp(a->sh, b->sh, sizeof a->sh) && !memcmp(a->f, b->f, sizeof a->f);
+}
+// The live words of a row against the state now: 0 = they stand; else which differ (NRN_L_*).
+enum { NRN_L_PASSDEF = 1, NRN_L_SHADERS = 2, NRN_L_FIXED = 4 };
+static inline unsigned nrn_ans_live(const nrn_ans *a, uint64_t passdef, const uint64_t sh[5], const uint64_t f[6]) {
+    return (a->passdef != passdef ? NRN_L_PASSDEF : 0u) | (memcmp(a->sh, sh, sizeof a->sh) ? NRN_L_SHADERS : 0u) | (memcmp(a->f, f, sizeof a->f) ? NRN_L_FIXED : 0u);
+}
+typedef struct nrn_row { uint64_t card; nrn_ans a; uint64_t stamp[NRN_STAMPS]; uint32_t answered, relearned; uint8_t pass, unstable, pad[6]; } nrn_row;   // stamp all 0: no answer yet (the row holds an image only)
+typedef struct nrn_rows { nrn_row *e; uint32_t cap, n; uint64_t clears; } nrn_rows;
+static inline int nrn_rows_init(nrn_rows *t, uint32_t cap) {   // cap: a power of two
+    memset(t, 0, sizeof *t);
+    if (cap < 64 || (cap & (cap - 1))) return -1;
+    t->e = (nrn_row *)calloc(cap, sizeof *t->e);
+    if (!t->e) return -1;
+    t->cap = cap;
+    return 0;
+}
+static inline void nrn_rows_free(nrn_rows *t) { free(t->e); memset(t, 0, sizeof *t); }
+static inline void nrn_rows_clear(nrn_rows *t) { if (t->n) { memset(t->e, 0, sizeof *t->e * t->cap); t->n = 0; } t->clears++; }
+enum { NRN_F_HIT, NRN_F_NONE, NRN_F_STALE, NRN_F_PASS };
+// The row of a card for a draw of `pass` under the generations `stamp`. *why = NRN_F_*: no row; a row made under other generations
+// (it does not answer: the path without it teaches the card anew); a row of another pass (one card in two passes: the caller counts
+// it bad). NULL unless NRN_F_HIT.
+static inline nrn_row *nrn_rows_find(nrn_rows *t, uint64_t card, int pass, const uint64_t stamp[NRN_STAMPS], int *why) {
+    uint32_t i = (uint32_t)(card ^ card >> 32) & (t->cap - 1);
+    for (;; i = (i + 1) & (t->cap - 1)) {
+        nrn_row *e = &t->e[i];
+        if (!e->card) { *why = NRN_F_NONE; return NULL; }
+        if (e->card != card) continue;
+        if (memcmp(e->stamp, stamp, sizeof e->stamp) && NRN_MUTATE != 9) { *why = NRN_F_STALE; return NULL; }
+        if (e->pass != pass && NRN_MUTATE != 13) { *why = NRN_F_PASS; return NULL; }
+        *why = NRN_F_HIT;
+        return e;
+    }
+}
+// The row of a card, made when the card has none (no answer yet: stamps 0). NULL: the table is full - it never starts again (part 2:
+// a row carries the image short records in flight are executed from), a new card simply gets no row and is never published.
+static inline nrn_row *nrn_rows_get(nrn_rows *t, uint64_t card, int pass, int *made) {
+    *made = 0;
+    if (NRN_MUTATE == 14 && t->n * 4 >= t->cap * 3) nrn_rows_clear(t);
+    uint32_t i = (uint32_t)(card ^ card >> 32) & (t->cap - 1);
+    for (;; i = (i + 1) & (t->cap - 1)) {
+        nrn_row *e = &t->e[i];
+        if (e->card == card) return e;
+        if (e->card) continue;
+        if (t->n * 4 >= t->cap * 3) return NULL;
+        memset(e, 0, sizeof *e); e->card = card; e->pass = (uint8_t)pass; t->n++; *made = 1;
+        return e;
+    }
+}
+// The resolution the path without the row just made for the card. Returns 0 = the row's first answer, 1 = the row held the same answer
+// under the same generations, 2 = the answer was replaced (another answer or other generations), -1 = no row (*full: the table is full).
+static inline int nrn_rows_put(nrn_rows *t, uint64_t card, int pass, const nrn_ans *a, const uint64_t stamp[NRN_STAMPS], int *full) {
+    int made = 0; static const uint64_t none[NRN_STAMPS] = {0, 0, 0};
+    nrn_row *e = nrn_rows_get(t, card, pass, &made);
+    *full = !e;
+    if (!e) return -1;
+    const int first = !memcmp(e->stamp, none, sizeof none);
+    if (!first && nrn_ans_same(&e->a, a) && !memcmp(e->stamp, stamp, sizeof e->stamp) && e->pass == pass) return 1;
+    e->a = *a; memcpy(e->stamp, stamp, sizeof e->stamp); e->pass = (uint8_t)pass;
+    if (first) return 0;
+    e->relearned++;
+    return 2;
+}
+
+// ---- step B: the publication - which cards have a row, for the game thread ----
+// One writer (the translation thread), any reader, no lock. A slot is one word: the card's upper 48 bits and the 16-bit generation it
+// was published under; the slot is picked by the card's bits 16..29, so a reader that finds its 48 bits and the current generation
+// has found its card (48 bits compared). nrn_pub_bump retires every word at once (the rows were cleared, a backend generation
+// moved); when the 16-bit generation wraps the words are zeroed first, so an old word never becomes current again.
+// The answer is a hint about the past: the row may be gone by the time the record is executed - the backend always asks its own table.
+enum { NRN_PUB_SLOTS = 16384 };
+typedef struct nrn_pub { uint64_t gen; uint64_t w[NRN_PUB_SLOTS]; } nrn_pub;   // gen: 1..65535 (0 = nothing was ever published)
+static inline uint32_t nrn_pub_slot(uint64_t card) { return (uint32_t)(card >> 16) & (NRN_PUB_SLOTS - 1); }
+static inline void nrn_pub_bump(nrn_pub *p) {
+    uint64_t g = __atomic_load_n(&p->gen, __ATOMIC_RELAXED) + 1;
+    if (g > 0xffffu) { for (unsigned i = 0; i < NRN_PUB_SLOTS; i++) __atomic_store_n(&p->w[i], 0, __ATOMIC_RELAXED); g = 1; }
+    if (NRN_MUTATE == 11) return;
+    __atomic_store_n(&p->gen, g, __ATOMIC_RELEASE);
+}
+static inline void nrn_pub_set(nrn_pub *p, uint64_t card) {
+    uint64_t g = __atomic_load_n(&p->gen, __ATOMIC_RELAXED);
+    if (!g) { g = 1; __atomic_store_n(&p->gen, g, __ATOMIC_RELEASE); }
+    __atomic_store_n(&p->w[nrn_pub_slot(card)], (card & ~0xffffull) | g, __ATOMIC_RELEASE);
+}
+static inline void nrn_pub_drop(nrn_pub *p, uint64_t card) {   // this card is not to be written short any more (another card of the slot stays)
+    const uint64_t g = __atomic_load_n(&p->gen, __ATOMIC_RELAXED);
+    uint64_t *w = &p->w[nrn_pub_slot(card)];
+    if (__atomic_load_n(w, __ATOMIC_RELAXED) == ((card & ~0xffffull) | g) && NRN_MUTATE != 16) __atomic_store_n(w, 0, __ATOMIC_RELEASE);
+}
+static inline int nrn_pub_ready(const nrn_pub *p, uint64_t card) {
+    const uint64_t g = __atomic_load_n(&p->gen, __ATOMIC_ACQUIRE), w = __atomic_load_n(&p->w[nrn_pub_slot(card)], __ATOMIC_ACQUIRE);
+    if (NRN_MUTATE == 10) return g && (w & 0xffffu) == g;
+    return g && w == ((card & ~0xffffull) | g);
+}
+
+// ---- step B: counters of one pass (the backend's, a window of the 10 s line) ----
+enum { NRN_BW_NO_ROW, NRN_BW_STALE, NRN_BW_PASS, NRN_BW_GUARD, NRN_BW_FORM, NRN_BW_GATE, NRN_BW_PASSDEF, NRN_BW_SHADERS, NRN_BW_FIXED, NRN_BW_REFUSED, NRN_BW_N };
+static inline const char *nrn_bw_name(int w) {
+    static const char *const k[NRN_BW_N] = {"no row yet", "row of other generations", "row of another pass", "the prologue changed the draw", "special draw form",
+                                            "a gate of the short path", "another pass definition", "other shader objects", "viewport size / pools moved", "the answered half refused"};
+    return w >= 0 && w < NRN_BW_N ? k[w] : "?";
+}
+typedef struct nrn_bstat {
+    uint64_t asked, why[NRN_BW_N], answered[4], predicted, p_same, p_bad, p_lost, learned, relearned, kept,
+             ready, ready_ans, ready_not,   // records the game thread flagged ready: answered (or predicted) at execution / not
+             shorts, s_noimg, s_changed, img_new, img_same, img_bad, img_full;   // part 2: short records (without an image: cannot be drawn right; that changed State), images captured / confirmed / differing / not kept (table full)
+} nrn_bstat;
+
+// ---- step B part 2: what a short record leaves out ----
+// The image of a card is the part of the backend State the records of an engine draw write: the fields of its OP_X_NR_STATE records
+// (nr_state3.h) and the texture slots its flush binds. A short record names exactly what was left out of it - the union of the fields
+// of the dropped state records (nrn_emask) and the dropped texture binds (at most two stages, a slot mask each) - and the backend
+// writes those, and only those, from the image. Nothing the engine did not write at this very draw is touched.
+//   have / vb / blend / nstream   as nr3_hdr; stages: the NVN stage bits of the programs (nr3_hdr pst); sten[w]: the faces of stencil
+//   word w (0 value mask, 1 write mask, 2 ref).
+typedef struct nrn_emask { uint16_t have, vb; uint8_t blend, stages, sten[3], nstream, pad[2]; } nrn_emask;
+typedef struct nrn_short_ext { nrn_emask m; uint8_t st[2], pad[2]; uint32_t tm[2]; } nrn_short_ext;   // st: the two stages (0xff none), tm: their slot masks
+enum { NRN_SHORT_EXT_BYTES = 24 };
+static inline int nrn_emask_add(nrn_emask *m, unsigned have, unsigned vb, unsigned blend, unsigned stages, const uint8_t sten_faces[3], unsigned nstream) {
+    nrn_emask o = *m;
+    m->have |= (uint16_t)have; if (NRN_MUTATE != 15) m->vb |= (uint16_t)vb; m->blend |= (uint8_t)blend; m->stages |= (uint8_t)stages;
+    for (int w = 0; w < 3; w++) m->sten[w] |= sten_faces[w];
+    if (nstream > m->nstream) m->nstream = (uint8_t)nstream;
+    return memcmp(&o, m, sizeof o) != 0;
+}
+static inline void nrn_emask_or(nrn_emask *m, const nrn_emask *a) { (void)nrn_emask_add(m, a->have, a->vb, a->blend, a->stages, a->sten, a->nstream); }
+// The fields one OP_X_NR_STATE record payload writes (layout nr_state3.h: nr3_hdr {ver, flags, nprog, nstream, u16 have, u16 vb, u8 blend,
+// nvattr, pst[3], _r, u16 seq}, then prog[nprog] x 8, ds (8) when have bit 0, then the stencil words {i32 face, i32 value} for have
+// bits 1..3). 0 = too short to be a record (nothing added).
+static inline int nrn_emask_of_state(nrn_emask *m, const uint8_t *p, size_t n) {
+    if (!p || n < 16) return 0;
+    const unsigned nprog = p[2], nstream = p[3]; uint16_t have, vb; memcpy(&have, p + 4, 2); memcpy(&vb, p + 6, 2);
+    const unsigned blend = p[8];
+    unsigned stages = 0; for (unsigned i = 0; i < nprog && i < 3; i++) stages |= p[10 + i];
+    uint8_t faces[3] = {0, 0, 0};
+    size_t at = 16 + 8u * nprog + ((have & 1u) ? 8u : 0u);
+    for (int w = 0; w < 3; w++) if (have & (2u << w)) { int32_t f; if (at + 8 > n) return 0; memcpy(&f, p + at, 4); at += 8; faces[w] = (uint8_t)(f & 3); }
+    (void)nrn_emask_add(m, have, vb, blend, stages, faces, nstream);
+    return 1;
+}
+// A texture bind left out of a short record. 0 = it cannot be named (a third stage, a slot or stage outside the image): the caller
+// records the bind as before.
+static inline int nrn_short_ext_tex(nrn_short_ext *x, int st, int slot) {
+    if (st < 0 || st >= NRN_TEX_STAGES || slot < 0 || slot >= NRN_TEX_SLOTS) return 0;
+    for (int k = 0; k < 2; k++) {
+        if (x->st[k] == 0xff) x->st[k] = (uint8_t)st;
+        if (x->st[k] == st) { x->tm[k] |= 1u << slot; return 1; }
+    }
+    return 0;
+}
+// The ext of a short record: right after the nrn_tail (at = the byte after it). 1 = read / written.
+static inline int nrn_short_ext_put(uint8_t *dst, size_t cap, size_t at, const nrn_short_ext *x) {
+    if (!dst || at + sizeof *x > cap) return 0;
+    memcpy(dst + at, x, sizeof *x);
+    return 1;
+}
+static inline int nrn_short_ext_get(const uint8_t *p, size_t n, size_t at, nrn_short_ext *x) {
+    if (!p || at + sizeof *x > n) return 0;
+    memcpy(x, p + at, sizeof *x);
+    return (x->st[0] == 0xff || x->st[0] < NRN_TEX_STAGES) && (x->st[1] == 0xff || x->st[1] < NRN_TEX_STAGES) && x->m.nstream <= 16;
 }
 #endif

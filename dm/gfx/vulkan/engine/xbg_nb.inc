@@ -273,6 +273,7 @@ void do_draw(const nbd_hdr &h){const unsigned saved=cur_op;
 void apply(const uint8_t *p,size_t n){
     nbd_hdr h;const uint8_t *b=nullptr;
     need(nbd_view(p,n,&h,&b)==0,"Invalid OP_X_NB_DRAW record");
+    if(__builtin_expect(nrn::on,0))nrn::pre(p,n,h,b);   // [DOS2] NR-NATIVE step B part 2: a SHORT record gets the image of its card into State first (what its state records and texture binds would have left)
     const bool timed=!(s.records&63);const uint64_t t0=timed?timing_clock():0;
     unsigned ts=0,bs=0;
     if(nbdesc::mode<0){const char *e=getenv("DM_NB_DESC");nbdesc::mode=e && *e?std::clamp(atoi(e),0,2):0;
@@ -302,7 +303,7 @@ void apply(const uint8_t *p,size_t n){
     do_draw(h);
     if(__builtin_expect(nrz5t::gmode,0))nrz5t::rec_end();   // (a marked record whose draw did not reach the lane's command section cuts its run)
     if(__builtin_expect(nrdraw::mode,0))nrdraw::stale();
-    nrn::have=false;   // [DOS2] NR-NATIVE: a card whose draw did not reach the lane's tail belongs to no later draw
+    if(__builtin_expect(nrn::on,0))nrn::lost();nrn::have=false;   // [DOS2] NR-NATIVE: a card whose draw did not reach the lane's tail belongs to no later draw
     nbdesc::cand=false;}   // [DOS2] NB-11: a draw() that returned before descriptors() leaves no candidate
 // NB-09: the faithful unpack - the binds become, one by one in call order, exactly the NVN bind records they replaced (exec_bind_buf /
 // exec_bind_handles of xbg_game.cpp, same checks, tables and per-bind generation bumps). Kept behind DM_NB_DRAW_UNPACK=1.

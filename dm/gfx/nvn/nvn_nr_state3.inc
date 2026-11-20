@@ -48,7 +48,8 @@ uint32_t nvn_nrs3_exec(const nrst_op *op, int n, uint64_t cb, int mode, uint32_t
     nr3_writeback(b);
     const uint32_t sz = nr3_size(&b->r);
     NBS_EXT_BEFORE();
-    nr3_rec_write(c, &b->r);
+    uint8_t *w = __builtin_expect(g_nrn_defer, 0) ? nrnp_room(c, sz) : NULL;   // [DOS2] NR-NATIVE step B: the record waits for its draw (a short draw drops it)
+    if (w) nr3_put(&b->r, w); else nr3_rec_write(c, &b->r);
     NBS_EXT_AFTER(nr3_kinds(&b->r));
     for (int i = 0; i < b->nren; i++) {
         const nrst_op *o = &op[b->ren[i]];

@@ -231,6 +231,7 @@ void nvn_nrd_draw(uint64_t cb, int32_t prim, uint32_t itype, int32_t count, uint
     t_nbs_time = 0; if (timed) NRD_ADD(NVN_NRD_NS_STATE, t_nbs_ns);
 #endif
     if (!taken) {   // the bracket went away between nvn_nrd_can and here (it cannot: same thread, no call in between) - the plain record
+        if (t_nrn_short) { LOG("【红】[nr] native: a short draw lost its bracket - its texture binds were not recorded"); t_nrn_short = 0; }
         *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){prim, (int)itype, count, 0, 0, inst, ib};
         NRD_ADD(NVN_NRD_PLAIN, 1);
     }

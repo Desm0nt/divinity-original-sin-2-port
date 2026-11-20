@@ -35,7 +35,7 @@ def delimiter_gate():   # -> names of files whose delimiters do not balance (NB-
 #   R = read-only after init (switches, device facts)              D = diagnostic (DM_NB_MT stays serial while armed)
 #   N = name collision: a global of another namespace whose name the path uses for a local / member
 NB20A_DRAW_GLOBALS = {
- 'C': 'command_pool cx_sh draw_timing nvn_stage P cand ps_called snap_how',   # not moved yet (cx_sh / draw_timing: diagnostics; P / cand: nbdesc; ps_called / snap_how: NR-ZERO Z3 - scratch of the draw / the snapshot() call in hand); the rest: NB20B_CTX below
+ 'C': 'command_pool cx_sh draw_timing nvn_stage P cand have pgd ps_called snap_how',   # not moved yet (cx_sh / draw_timing: diagnostics; P / cand: nbdesc; ps_called / snap_how: NR-ZERO Z3 - scratch of the draw / the snapshot() call in hand; have / pgd: NR-NATIVE - the card of the record in hand and whether the prologue changed its draw); the rest: NB20B_CTX below
  'K': 'alpha_draws alpha_refused alpha_variants async_skips bad barrier_by binds_skipped changed compile_ns create_max_ns create_ns '
       'creates depth_bounds_dropped depth_feedback_reads depth_idle_passes desc_abandoned desc_chained desc_memo_hits desc_memo_misses '
       'desc_memo_texel_fail desc_memo_why desc_ns dirty_pages fallbacks fb_creates fb_hits hits key_diff lazy_storage_saved '
@@ -1358,7 +1358,7 @@ def nr09_check():
     head = 'void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances=1,uint32_t first_instance=0,const GpuIndirect *gi=nullptr){'
     di = g_raw.index(head); dr = g_raw[di:g_raw.index('\n}', di)]
     assert g_raw.index('namespace nrdraw{enum{F_GI=1') < di, 'NR-09: declared ahead of draw()'
-    assert dr.count('nrdraw::lane(') == 1 and dr.count('nrdraw::done(') == 1 and dr.count('nrdraw::cur') == 4 and dr.count('nrdraw::armed') == 1, 'NR-09: draw() has the lane line and the done line (NR-ZERO Z3: + the span clock and the nrz3 hook, NR-ZERO Z8: + the nrz8t hook, all behind nrdraw::cur), nothing else'
+    assert dr.count('nrdraw::lane(') == 1 and dr.count('nrdraw::done(') == 1 and dr.count('nrdraw::cur') == 5 and dr.count('nrdraw::armed') == 1, 'NR-09: draw() has the lane line and the done line (NR-ZERO Z3: + the span clock and the nrz3 hook, NR-ZERO Z8: + the nrz8t hook, NR-NATIVE step B: + the form test of the nrn hook, all behind nrdraw::cur), nothing else'
     assert re.search(r'    create_pass\(p,c\);DRAW_MARK\(2\);\n(?:#ifdef DM_GAME_DOS2\n(?:    if\(nrlf::fused_draw && pgm::mode\)\{pgm::note_lightfuse\(c\.command\);\+\+nrlf::s\.gmem;\}[^\n]*\n)?    if\(nroc::mode>0 && !nroc::adjust\(p,c\)\)\{[^\n]*\n(?:        [^\n]*\n){2}#endif\n    \}   // z3r!=2\n    Descriptors &d=\*dp;\n)?(?:    if\(__builtin_expect\(nrpo::mode!=0,0\)\)nrpo::decide\([^\n]*\n)?(?:    if\(__builtin_expect\(nrps::mode!=0,0\)\)\{if\(!\(z3r==2 && nrz3::ps_called\)\)nrps::decide\([^\n]*\n)?    if\(z3r!=2 && \(nrdraw::cur \|\| \(nrdraw::ui_rec && nrdraw::ui_pick\(\)\)\) && nrdraw::lane\(c,d,p,prim,first,count,indexed,instances,first_instance,[^\n]*,draw_fast\)\)return;', dr), \
         'NR-09: the lane line is the first statement after create_pass, behind nrdraw::cur (NR-12: or a picked UI draw)'
     assert re.search(r'\n    if\(nrdraw::armed\)nrdraw::done\(pipeline\.pipeline,pipeline\.transient,bindings,zero_binding,vertex_buffers,ib,index_type,viewport,sc,indexed,first\);[^\n]*\n    drecy::done\(d\);', dr), \
@@ -3894,13 +3894,76 @@ def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md):
             assert 'DM_NRN' not in q.read_text(encoding='utf-8', errors='replace'), 'NRN: the app does not set the switches (%s)' % q.name
     # one list of passes and one reader of the switches for both halves
     assert 'nrn_env_modes(nrn_getenv, 0, mode, &bad)' in f and h.count('"SHADOW", "PREPASS", "GBUF", "LIGHT", "POST", "OTHER"') == 1, 'NRN: both halves read the switches with nr_nrn.h'
-    # =1 is refused by both halves (the replay is not built): a pass asked with 1 is off, never half on
-    for src, name in ((f, 'front end'), (b, 'backend')):
-        assert 'is refused - the replay of a draw from its card is not built' in src, 'NRN: =1 refused (%s)' % name
-    assert 'if (mode[p] == 1) {' in f and 'mode[p] = 0;' in f and 'if(m[p]==1){' in b and 'm[p]=0;}' in b, 'NRN: a refused pass is off'
+    # step B: =1 executes a draw from its card's row. The hook sits after the prologue of draw() and after nrz8t / nrz3 (never two answers),
+    # asks nothing when the prologue changed the draw or the form is special, and takes nrz3's answered half (the path's own statements)
+    x = (root / 'gfx/vulkan/engine/xbg_nr_nrn_exec.inc').read_text(encoding='utf-8')
+    hook = g[g.index('if(__builtin_expect(nrn::have,0) && !z3r){'):]
+    hook = hook[:hook.index('#endif')]
+    assert g.index('z3r=nrz3::draw(c,dp,p,') < g.index('if(__builtin_expect(nrn::have,0) && !z3r){') < g.index('if(z3r!=2){   // (2: nrz3 answered'), 'NRN step B: the hook after nrz8t / nrz3, before descriptors_stable'
+    assert 'nrn::pgd=ppg.on || nbpost::inside || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;' in hook and 'if(z3r==1)return;' in hook, 'NRN step B: a draw the prologue changed is marked'
+    sn_ = (root / 'gfx/nvn/nvn_nrn.inc').read_text(encoding='utf-8')
+    d = x[x.index('int draw(Commands &c'):x.index('// From the lane\'s tail (draw_end')]
+    order = [d.index(k) for k in ('if(pgd)return out(NRN_BW_GUARD);', 'if(form || pp)return out(NRN_BW_FORM);', 'nrn_rows_find(&R,cur.card,cur.pass,st,&why)', 'nrz3::gate(t,pp,draw_fast,false)',
+                                  'nrn_ans_live(&r->a,', 'if(mode[cur.pass]==2){P.valid=true;', 'nrz3::answered(zs,a,c,dp,p,')]
+    assert order == sorted(order), 'NRN step B: guard, form, row, gates, live words, verify, then the answered half'
+    assert 'state.' not in d.replace('state.shader[', '').replace('state.rt.', '') and 'vkCmd' not in x + sn_, 'NRN step B: before the answered half the hook only reads; it records nothing itself'
+    lr = x[x.index('void learn(const Pass &p){'):x.index('// ---- part 2: the image of a card and the short record ----')]
+    assert lr.index('if(answering)return;') < lr.index('nrdesc::z_out==NRZD_HIT || nrdesc::z_out==NRZD_BUILT') < lr.index('nrn_ans_same(&P.a,&now)') < lr.index('nrn_rows_put(&R,cur.card,cur.pass,&now,st,&full)') and 'nrn_pub_set' not in lr, \
+        'NRN step B: only the path without a row teaches; =2 compares before the row is replaced; a card is published for its image (part 2), not for its answer'
+    assert 'if(pgd)return;' in b and b.index('if(pgd)return;') < b.index('if(own)learn(p);') < b.index('if(mode[cur.pass]!=2)return;'), 'NRN step B: a changed draw teaches nothing and is not noted'
+    assert 'dr!=nullptr && !pp && !ui && !nrpo::P.on && !nrps::P.on);' in lane, 'NRN step B: learnt only from a draw the lane resolved itself, without another module\'s variant'
+    assert 'extern "C" const void *xbg_nrn_pub(void){return &nrn::PUB;}' in x and 'const void *xbg_nrn_pub(void) __attribute__((weak));' in f and \
+        '*rsv = g_nrn_pub && nrn_pub_ready(g_nrn_pub, *card) ? NRN_T_READY : 0u;' in f, 'NRN step B: the game thread reads the publication, the record says what it saw'
+    assert g.index('#include "xbg_nr_z3.inc"') < g.index('#include "xbg_nr_nrn_exec.inc"'), 'NRN step B: after nrz3'
+    assert '__atomic_store_n(&p->gen, g, __ATOMIC_RELEASE);' in h and h.count('__atomic_load_n(&p->gen, __ATOMIC_ACQUIRE)') == 1, 'NRN step B: the publication is atomics only'
+    assert (root / 'gfx/vulkan/engine/tests/nr_nrn_pub_test.cpp').is_file(), 'NRN step B: the cross-thread test exists'
+    # step B part 2: the short record. The NVN layer: state records wait and go out before ANY other record of the thread; a short draw
+    # drops them and names their fields; a texture bind is left out only when it can be named; the ext follows the tail
+    hn = (root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8')
+    sn = (root / 'gfx/nvn/nvn_nrn.inc').read_text(encoding='utf-8')
+    s3 = (root / 'gfx/nvn/nvn_nr_state3.inc').read_text(encoding='utf-8')
+    ca = hn[hn.index('static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {'):]
+    ca = ca[:ca.index('\n}\n')]
+    assert ca.index('NBD_FOREIGN(o);') < ca.index('NRNP_FLUSH(o);') < ca.index('NBF_REC(o, size);'), 'NRN short: cmd_alloc writes the waiting state records before the record it allocates'
+    assert '#define NRNP_FLUSH(o) do { if (__builtin_expect(t_nrnp.n, 0) && !t_nrnp.busy) nrnp_flush(); } while (0)' in sn, 'NRN short: one thread-local load when nothing waits'
+    assert 'uint8_t *w = __builtin_expect(g_nrn_defer, 0) ? nrnp_room(c, sz) : NULL;' in s3 and 'if (w) nr3_put(&b->r, w); else nr3_rec_write(c, &b->r);' in s3 and \
+        s3.index('NBS_EXT_BEFORE();') < s3.index('nrnp_room(c, sz)') < s3.index('NBS_EXT_AFTER(nr3_kinds(&b->r));'), 'NRN short: the state record waits only when armed, at the place it was written'
+    fl = sn[sn.index('static void nrnp_flush(void) {'):sn.index('// Room for a state record')]
+    assert fl.index('t_nrnp.n = 0;') < fl.index('t_nrnp.busy = 1;') < fl.index('rec(c, OP_X_NR_STATE, t_nrnp.len[i])') < fl.index('t_nrnp.busy = 0;'), 'NRN short: the flush cannot re-enter itself'
+    sh = sn[sn.index('void nvn_nrn_short(int on) {'):sn.index('// A texture bind of a short draw')]
+    assert sh.index('nrn_emask_of_state(&t_nrn_sx.m, t_nrnp.b[i], t_nrnp.len[i]);') < sh.index('t_nrnp.n = 0;'), 'NRN short: the fields of a dropped state record are named before it is dropped'
+    bh = hn[hn.index('static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {'):]
+    bh = bh[:bh.index('\n}\n')]
+    assert bh.index('NBT(nbt_bind(c, op, st, first, n, h));') < bh.index('const int nrd_same = NRD_BT(') < bh.index('NBD_TEXGEN();') < bh.index('if (NRN_SHORT_BIND(op, st, first, n)) { wt_use_ids(h, n); return; }') < bh.index('nbd_take_bind('), \
+        'NRN short: a left-out texture bind still runs its tap, the mirror, the texture-set generation and the use mark'
+    assert '(op) == OP_BIND_TEX && (n) == 1 && nrn_short_bind((int)(st), (first))' in sn and 'if (!nrn_short_ext_tex(&t_nrn_sx, st, slot)) return 0;' in sn, 'NRN short: only a bind the record can name is left out'
+    assert 'const int nrn_sh = nrn && t_nrn_short;' in rec and '(nrn_sh ? (uint32_t)NRN_SHORT_EXT_BYTES : 0u);' in rec and \
+        'if (nrn_sh) nrn_short_ext_put(p, size, nrn_tail_off(&t_nbd.s.h) + NRN_TAIL_BYTES, &t_nrn_sx);' in rec, 'NRN short: the ext only on a short record with a card'
+    # the front end: the card before the flush, short only for a published card of a pass at 1, never with reordered execution / state copies
+    dr = (root / 'host/hle_dos2_nr_direct.inc').read_text(encoding='utf-8')
+    tk = dr[dr.index('static int nrd_draw_take('):dr.index('static void nrd_draw_after(')]
+    assert tk.index('else nk_draw(r, g_nrd_base') < tk.index('NRN_PRE(R);') < tk.index('nrnc_flush_plan(R, &p)') < tk.index('nvn_on_bigstack(nrd_job, &j);'), 'NRN short: decided after the identity, before the flush is planned and recorded'
+    assert "t_nrn_pre.shrt = g_nrn_short && g_nrn_mode[p] == 1 && t_nrn_pre.ready;" in f and 'if (t_nrn_pre.shrt) nvn_nrn_short(1);' in f and \
+        '#define NRN_PRE(R) do { if (__builtin_expect(g_nrn_any, 0)) nrn_pre(R); } while (0)' in f, 'NRN short: a published card of a pass at 1; one load when off'
+    assert 'g_nrn_short = apply && g_nrn_pub && !(sh && *sh && atoi(sh) == 0);' in f and all('"%s"' % k in f for k in ('DM_NB_ORDER', 'DM_NB_RELOC', 'DM_NB_MX', 'DM_NR_Z5', 'DM_NR_Z8')), \
+        'NRN short: only with a pass at 1, DM_NRN_SHORT=0 turns it off, never with another execution order or another copy of State'
+    assert 'add("DM_NRN_SHORT","0");' in sm, 'NRN short: safe-mode step 2'
+    # the backend: the image goes into State before anything of the record is applied; only what the ext names; taken after the binds of a long record
+    ap = nb[nb.index('void apply(const uint8_t *p,size_t n){'):nb.index('// NB-09: the faithful unpack')]
+    assert ap.index('need(nbd_view(p,n,&h,&b)==0') < ap.index('nrn::pre(p,n,h,b);') < ap.index('nb_desc_pre(') < ap.index('nbd_apply(&h,b,state.tex') < ap.index('nrn::record(p,n,h);') < ap.index('do_draw(h);') < ap.index('nrn::lost();'), \
+        'NRN short: image before the descriptor memo looks at the record, the image of a long record after its binds, W starts again after the draw'
+    pre = x[x.index('void pre(const uint8_t *p,size_t n,const nbd_hdr &h,const uint8_t *binds){'):x.index('// From nbdraw::apply (record), after the binds')]
+    assert pre.index('nrn_short_ext_get(p,n,nrn_tail_off(&h)+NRN_TAIL_BYTES,&sx)') < pre.index('img_walk(*I,sx.m,tm,true,ts)') and 'nbpipe::G->dirty|=(1u<<(NR3_K_VFMT+1))-1;' in pre and \
+        '++tex_gen[__builtin_ctz(m)];' in pre and 'nbdesc::cand=false;nbdesc::P.valid=false;' in pre, 'NRN short: the mask of the record, then what a state record / texture bind does after it changed State'
+    im = x[x.index('void image(){'):x.index('void img_release()')]
+    assert im.index('img_walk(*I,W.m,W.tex,false,ts)') < im.index('r->unstable=1;nrn_pub_drop(&PUB,cur.card);') < im.index('nrstate3::snap_of(&I->s,&state,missing_program);') < im.index('if(!r->unstable)nrn_pub_set(&PUB,cur.card);'), \
+        'NRN short: a long record compares what it wrote with the image; a card whose image differed is never published again'
+    assert 'if(!(t.rsv&NRN_T_SHORT))image();' in b and 'if(__builtin_expect(nrn::on,0))nrn::state_rec(p,n);}' in (root / 'gfx/vulkan/engine/xbg_nr_state3.inc').read_text(encoding='utf-8'), 'NRN short: images from long records only; W from the state records as they are applied'
+    assert 'if (NRN_MUTATE == 14 && t->n * 4 >= t->cap * 3) nrn_rows_clear(t);' in h and h.count('nrn_rows_clear(t)') == 1 and 'nrn_rows_clear(&R)' not in x + b, 'NRN short: rows are never dropped while the backend runs'
+    assert (root / 'gfx/vulkan/engine/tests/nr_nrn_short_test.c').is_file() and '#include "../../../nvn/nvn_nrn.inc"' in (root / 'gfx/vulkan/engine/tests/nr_nrn_short_test.c').read_text(encoding='utf-8'), 'NRN short: the host test compiles the NVN half itself'
     # off = byte for byte: the record grows and gets its flag only when the front end hands a card over; one load otherwise
-    assert 'const int nrn = __builtin_expect(g_nrn_on, 0) && nr && !t_nbd_chk && dm_nrn_draw_card(&nrn_card, &nrn_pass, &nrn_seq);' in rec, 'NRN: the record asks for a card only when armed, only with the NR-09 tail, never in a check bracket'
-    assert rec.index('if (nrn) h->flags |= NRN_F_FLAG;') < rec.index('(nrn ? (uint32_t)NRN_TAIL_BYTES : 0u);') < rec.index('if (nrn) nrn_tail_put(p, size, nrn_tail_off(&t_nbd.s.h), nrn_card, (int)nrn_pass, nrn_seq);'), 'NRN: flag, size, tail - in this order'
+    assert 'const int nrn = __builtin_expect(g_nrn_on, 0) && nr && !t_nbd_chk && dm_nrn_draw_card(&nrn_card, &nrn_pass, &nrn_seq, &nrn_rsv);' in rec, 'NRN: the record asks for a card only when armed, only with the NR-09 tail, never in a check bracket'
+    assert rec.index('if (nrn) h->flags |= NRN_F_FLAG;') < rec.index('(nrn ? (uint32_t)NRN_TAIL_BYTES : 0u)') < rec.index('if (nrn) nrn_tail_put(p, size, nrn_tail_off(&t_nbd.s.h), nrn_card, (int)nrn_pass, nrn_seq, nrn_rsv | (nrn_sh ? (unsigned)NRN_T_SHORT : 0u));'), 'NRN: flag, size, tail - in this order'
     assert 'void nvn_nrn_enable(int on) { g_nrn_on = on && dm_nrn_draw_card; }' in rec and 'NBD_F_NRN = 32' in rh and 'NRN_F_FLAG = 32' in h and 'static_assert(NBD_F_NRN==NRN_F_FLAG' in b and 'return nrd_tail_off(h) + (uint32_t)sizeof(nrd_tail); }' in rh, 'NRN: the flag bit and the place of the tail'
     assert f.count('nvn_nrn_enable(1);') == 1 and f.index('if (!draw_on) {') < f.index('nvn_nrn_enable(1);'), 'NRN: armed only with DM_NR_DRAW'
     assert '#define NRN_NOTE(r) do { if (__builtin_expect(g_nrn_any, 0)) t_nrn_r = (r); } while (0)' in f, 'NRN: the identity hooks pay one load when off'
@@ -3913,15 +3976,15 @@ def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md):
         assert 'if (!(words & %s)) memset(' % w in card, 'NRN: %s is masked by default' % w
     assert 'NRN_W_DEFAULT = NRN_W_TEX | NRN_W_SMP' in h and 'return h ? h : 1;' in card, 'NRN: default words, a card is never 0'
     # the backend: the record is executed as before; the note sits after the lane's commands and cannot be taken by another draw
-    assert 'if(__builtin_expect(nrn::on,0))nrn::record(p,n,h);' in nb and nb.index('nrn::record(p,n,h);') < nb.index('do_draw(h);') < nb.index('nrn::have=false;'), 'NRN: record -> draw -> the card is dropped'
+    assert 'if(__builtin_expect(nrn::on,0))nrn::record(p,n,h);' in nb and nb.index('nrn::record(p,n,h);') < nb.index('do_draw(h);') < nb.index('nrn::have=false;   // [DOS2] NR-NATIVE'), 'NRN: record -> draw -> the card is dropped'
     i = lane.index('if(__builtin_expect(nrn::have,0))nrn::draw_end(')
     assert lane.index('else vkCmdDraw(c.command,uint32_t(count),instances,uint32_t(first)+H.k,first_instance);') < i, 'NRN: the values are noted after the draw was recorded'
-    assert 'vkCmd' not in b and 'state.' not in b.replace('state.shader[0]', '').replace('state.shader[4]', ''), 'NRN: the verify records nothing and changes no state'
+    assert 'vkCmd' not in b and 'state.' not in b.replace('state.shader[0]', '').replace('state.shader[4]', '') and 'NRN_MUTATE' not in x and 'NRN_MUTATE' not in sn_, 'NRN: the verify records nothing and changes no state'
     assert g.index('#include "xbg_nr_nrn.inc"') < g.index('#include "xbg_nb.inc"') < g.index('#include "xbg_nr_draw.inc"'), 'NRN: included ahead of its callers'
     assert 'void reset(){if(!read_env){init();nrn::init(mode);}}' in lane and 'void release(){nrn::release();' in lane, 'NRN: read once with the lane, released with it'
     assert 'NRN_MUTATE' not in b and 'NRN_MUTATE' not in f and '#define NRN_MUTATE 0' in h, 'NRN: the mutations exist in the host test only'
     assert (root / 'gfx/vulkan/engine/tests/nr_nrn_test.c').is_file(), 'NRN: the host test exists'
-    return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 refused by both halves; off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
+    return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 executes a draw from the row of its card through the answered half of nrz3 (step B; never a draw the prologue changed), =2 compares the row with the path; a published card of a pass at 1 is written SHORT (no state record, no texture bind of its flush: the backend writes exactly what the record names from the image of the card); off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
 print('PASS: '+nrn_check())
 def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
     z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')

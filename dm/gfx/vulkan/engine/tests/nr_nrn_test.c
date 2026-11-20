@@ -11,7 +11,13 @@
 //                   placed elsewhere, "moved" exactly when a buffer or a set was, "view" when only the viewport changed
 //   4 the journal   one scripted frame end to end: front end (card + tail into the record) -> the record's bytes -> back end (the tail
 //                   read back, the lane's values noted) -> a text journal compared line by line with the expected one
-//   5 mutations     built with -DNRN_MUTATE=k (k = 1..8) the test must FAIL: each k breaks one rule the parts above stand on
+//   5 rows          step B: a model of the backend resolves every draw from the engine's objects and records its calls through a bind
+//                   cache; the same draw executed from its card's row (when the row answers: generations, pass, live words) must give
+//                   the same calls byte for byte and leave the same bind cache; generations move, the resolution changes under a card
+//   6 publication   which cards have a row, as the game thread reads it: ready exactly for the last card set in a slot under the
+//                   current generation; a bump retires everything; the 16-bit generation wraps without an old word coming back
+//                   (the cross-thread run is tests/nr_nrn_pub_test.cpp, ThreadSanitizer)
+//   mutations       built with -DNRN_MUTATE=k (k = 1..14, 16; 14 and 15 also fail tests/nr_nrn_short_test.c) the test must FAIL: each k breaks one rule the parts above stand on
 // Build: clang -std=c11 -O2 -Wall -Wextra nr_nrn_test.c -o nr_nrn_test        (mutations: add -DNRN_MUTATE=k, expect exit code 1)
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,7 +119,7 @@ static void test_tail(void) {
         nbd_pack(&s, rec, size);
         if (nr) { nrd_tail_put(rec, size, key, ts, 0, 3); nrd_tail_ext_put(rec, size, x); }
         const uint64_t card = rnd() | 1; const int pass_ = (int)rn(NRN_P_N); const uint32_t seq = (uint32_t)rnd();
-        if (nrn) CHECK(nrn_tail_put(rec, size, nrd_tail_off(&s.h) + sizeof(nrd_tail), card, pass_, seq), "tail put");
+        if (nrn) CHECK(nrn_tail_put(rec, size, nrd_tail_off(&s.h) + sizeof(nrd_tail), card, pass_, seq, (unsigned)(it & 1)), "tail put");
         if (!nrn) CHECK(size == size_old && !memcmp(old, rec, sizeof old), "a record without the switch is the old record, byte for byte");
         else {   // the old part differs only in the flag bit
             old[offsetof(nbd_hdr, flags)] |= NBD_F_NRN;
@@ -125,7 +131,7 @@ static void test_tail(void) {
         CHECK(nrd_tail_get(rec, size, &h, &t) == nr && (!nr || (t.key == key && t.texset == ts && t._pad == x)), "the NR-09 tail and its spare word are where they were");
         const int got = nrn_tail_get(rec, size, nrd_tail_off(&h) + sizeof(nrd_tail), h.flags, &nt);
         CHECK(got == nrn, "the card is read exactly from the records that carry it");
-        if (got) CHECK(nt.card == card && nt.pass == pass_ && nt.seq == seq, "card / pass / seq read back");
+        if (got) CHECK(nt.card == card && nt.pass == pass_ && nt.seq == seq && nt.rsv == (it & 1), "card / pass / seq / ready bit read back");
         if (nrn) CHECK(!nrn_tail_get(rec, size - 1, nrd_tail_off(&h) + sizeof(nrd_tail), h.flags, &nt), "a cut record gives no card");
         if (nrn) { rec[nrd_tail_off(&h) + sizeof(nrd_tail) + offsetof(nrn_tail, ver)] = 9; CHECK(!nrn_tail_get(rec, size, nrd_tail_off(&h) + sizeof(nrd_tail), h.flags, &nt), "another version gives no card"); }
     }
@@ -141,9 +147,19 @@ static void test_pass(void) {
         {"ShadowRenderStage::ShadowResult", NRN_RC_AUX}, {"SSAOStage::m_RT_DeinterleavedDepth1", NRN_RC_AUX}, {"SSAOStage::m_RT_SAOResult2", NRN_RC_AUX},
         {"Whatever::Else", NRN_RC_NAMED}, {"", NRN_RC_NONE}, {NULL, NRN_RC_NONE}};
     for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) CHECK(nrn_name_class(k[i].n) == k[i].c, "class of '%s'", k[i].n ? k[i].n : "(null)");
-    CHECK(nrn_pass_of(0, NRN_RC_NONE, NRN_RC_SHADOW) == NRN_P_SHADOW && nrn_pass_of(0, NRN_RC_NONE, NRN_RC_NONE) == NRN_P_PREPASS && nrn_pass_of(0, NRN_RC_NONE, NRN_RC_NAMED) == NRN_P_PREPASS, "depth-only draws");
-    CHECK(nrn_pass_of(1, NRN_RC_GBUF, NRN_RC_NONE) == NRN_P_GBUF && nrn_pass_of(1, NRN_RC_HDR, NRN_RC_SHADOW) == NRN_P_LIGHT && nrn_pass_of(1, NRN_RC_LDR, 0) == NRN_P_POST &&
-          nrn_pass_of(1, NRN_RC_AUX, 0) == NRN_P_POST && nrn_pass_of(1, NRN_RC_SHADOW, 0) == NRN_P_SHADOW && nrn_pass_of(1, NRN_RC_NONE, 0) == NRN_P_OTHER, "colour draws");
+    CHECK(nrn_pass_of(0, NRN_RC_NONE, NRN_RC_SHADOW, 0) == NRN_P_SHADOW && nrn_pass_of(0, NRN_RC_NONE, NRN_RC_NONE, 0) == NRN_P_PREPASS && nrn_pass_of(0, NRN_RC_NONE, NRN_RC_NAMED, 0) == NRN_P_PREPASS, "depth-only draws");
+    CHECK(nrn_pass_of(1, NRN_RC_GBUF, NRN_RC_NONE, 1) == NRN_P_GBUF && nrn_pass_of(1, NRN_RC_HDR, NRN_RC_NAMED, 0) == NRN_P_LIGHT && nrn_pass_of(1, NRN_RC_LDR, 0, 0) == NRN_P_POST &&
+          nrn_pass_of(1, NRN_RC_AUX, 0, 0) == NRN_P_POST && nrn_pass_of(1, NRN_RC_SHADOW, 0, 0) == NRN_P_SHADOW && nrn_pass_of(1, NRN_RC_NONE, 0, 0) == NRN_P_OTHER, "colour draws");
+    // phone series N_v1: colour target 0 of the G-buffer pass and of the cascade draws is a handle no transition names
+    CHECK(nrn_pass_of(1, NRN_RC_NONE, NRN_RC_NAMED, 1) == NRN_P_GBUF && nrn_pass_of(1, NRN_RC_NAMED, NRN_RC_NONE, 1) == NRN_P_GBUF, "a G-buffer among the colour targets decides when colour 0 has no name");
+    CHECK(nrn_pass_of(1, NRN_RC_NONE, NRN_RC_SHADOW, 0) == NRN_P_SHADOW && nrn_pass_of(1, NRN_RC_NAMED, NRN_RC_SHADOW, 0) == NRN_P_SHADOW, "a shadow depth target decides first");
+    { static nrn_rtmap m2; memset(&m2, 0, sizeof m2); memset(R, 0, sizeof R);
+      const uint64_t un = 0x0000000300000011ull, g2 = 0x0000000300000012ull, sd = 0x0000000300000013ull, zd = 0x0000000300000014ull;
+      nrn_rt_put(&m2, g2, NRN_RC_GBUF); nrn_rt_put(&m2, sd, NRN_RC_SHADOW);
+      memcpy(R + NRN_R_RT, &un, 8); memcpy(R + NRN_R_RT + 16, &g2, 8); memcpy(R + NRN_R_DEPTH_RT, &zd, 8);
+      CHECK(nrn_pass_of_r(R, &m2) == NRN_P_GBUF, "renderer bytes: unnamed colour 0, G-buffer at colour 2");
+      memset(R + NRN_R_RT + 16, 0, 8); CHECK(nrn_pass_of_r(R, &m2) == NRN_P_OTHER, "renderer bytes: unnamed colour 0 alone");
+      memcpy(R + NRN_R_DEPTH_RT, &sd, 8); CHECK(nrn_pass_of_r(R, &m2) == NRN_P_SHADOW, "renderer bytes: unnamed colour 0 over a shadow depth target"); memset(R, 0, sizeof R); }
     static nrn_rtmap m; memset(&m, 0, sizeof m);
     const uint64_t a = 0x0000002a00000007ull, b = 0x0000002b00000007ull /* the same index, a later generation */, c = 0x0000000100000407ull /* the same slot */;
     nrn_rt_put(&m, a, NRN_RC_GBUF);
@@ -266,7 +282,7 @@ static void test_journal(void) {
         s.h.flags |= NBD_F_NR | NBD_F_NRN;
         uint8_t rec[512]; const uint32_t size = nbd_size(&s) + (uint32_t)sizeof(nrd_tail) + (uint32_t)NRN_TAIL_BYTES;
         nbd_pack(&s, rec, size); nrd_tail_put(rec, size, 40 + (uint32_t)script[i].mat, 0, 0, 1);
-        nrn_tail_put(rec, size, nrd_tail_off(&s.h) + sizeof(nrd_tail), nrn_card_of(R, NRN_W_DEFAULT), p, ++seq[p]);
+        nrn_tail_put(rec, size, nrd_tail_off(&s.h) + sizeof(nrd_tail), nrn_card_of(R, NRN_W_DEFAULT), p, ++seq[p], 0);
         // back end: the record is read, the path records the draw, the values are noted under the card
         nbd_hdr h; const uint8_t *binds; nrn_tail nt; char line[96];
         const int got = nbd_view(rec, size, &h, &binds) == 0 && nrn_tail_get(rec, size, nrd_tail_off(&h) + sizeof(nrd_tail), h.flags, &nt);
@@ -285,9 +301,134 @@ static void test_journal(void) {
     nrn_tab_free(&T);
 }
 
+// ---- 5: step B - the rows: a draw executed from its card's row is the draw the path without the row records ----
+// The model of the backend: what the path RESOLVES for a set of engine objects (nrn_ans) and the Vulkan calls its tail then records.
+// Ids are only valid under the generations they were given out in: after a generation moves the same objects resolve to other ids.
+static uint64_t g_gen[NRN_STAMPS] = {1, 1, 1};
+static uint64_t g_vpw = 1920;   // NR-08's fixed word 0 (viewport size): not in the card
+static void resolve(const mesh *me, const material *ma, const pass *pa, nrn_ans *a) {
+    memset(a, 0, sizeof *a);
+    a->plan = hh(ma->shader, 0x706c616eull);
+    uint64_t did = hh(ma->shader, g_gen[0]); for (int st = 0; st < 2; st++) for (int s = 0; s < NRN_SLOTS; s++) { did = hh(did, (uint32_t)ma->tex[st][s]); did = hh(did, (uint32_t)ma->smp[st][s]); }
+    did = hh(did, g_vpw); a->did = (int32_t)(did & 0x3fffff);
+    uint64_t pe = hh(ma->shader, ma->blend); pe = hh(pe, ma->depth); pe = hh(pe, ma->raster); pe = hh(pe, me->vformat); pe = hh(pe, pa->prim); pe = hh(pe, ma->blend_arg); pe = hh(pe, ma->alpha >= 0.f);
+    for (int c = 0; c < 8; c++) pe = hh(pe, pa->color[c] ? 1 + (pa->color[c] & 7) : 0);
+    a->pent = hh(hh(pe, pa->ds != 0), g_gen[1] * 31 + g_gen[2]);
+    a->frag = (uint8_t)(ma->tex[0][0] < 0);
+    uint64_t pd = 0; for (int c = 0; c < 8; c++) pd = hh(pd, pa->color[c] ? 1 + (pa->color[c] & 7) : 0); a->passdef = hh(pd, pa->ds != 0);
+    for (int i = 0; i < 5; i++) a->sh[i] = i == 0 || i == 4 ? hh(ma->shader, 0x5348 + (unsigned)i) : 0;
+    a->f[0] = g_vpw; a->f[1] = 0x1111; a->f[3] = 4096; a->f[4] = 0x2222;
+}
+// The calls of one draw through a bind cache, as text (the lane's command section: pipeline, set, vertex streams, index buffer, draw).
+typedef struct { uint64_t pipe, set, vb[2], ib; } bcache;
+static int calls_of(const nrn_ans *a, const mesh *me, uint32_t count, uint32_t first, bcache *bc, char *out, size_t cap) {
+    int n = 0;
+    const uint64_t pipe = hh(a->pent, 1), set = hh((uint64_t)(uint32_t)a->did, a->plan), ib = hh(me->ib, 3);
+    if (bc->pipe != pipe) { n += snprintf(out + n, cap - (size_t)n, "pipe %llx;", (unsigned long long)pipe); bc->pipe = pipe; }
+    if (bc->set != set) { n += snprintf(out + n, cap - (size_t)n, "set %llx/%llx;", (unsigned long long)hh(a->plan, 9), (unsigned long long)set); bc->set = set; }
+    for (unsigned i = 0; i < me->streams; i++) { const uint64_t v = hh(me->vb[i], 2); if (bc->vb[i] != v) { n += snprintf(out + n, cap - (size_t)n, "vb%u %llx;", i, (unsigned long long)v); bc->vb[i] = v; } }
+    if (bc->ib != ib) { n += snprintf(out + n, cap - (size_t)n, "ib %llx;", (unsigned long long)ib); bc->ib = ib; }
+    n += snprintf(out + n, cap - (size_t)n, "draw %u %u", count, first);
+    return n;
+}
+static void test_rows(void) {
+    enum { DRAWS = 80000, COMBOS = 500 };
+    static struct { unsigned mesh, mat, pass; } combo[COMBOS];
+    for (unsigned i = 0; i < COMBOS; i++) { combo[i].mesh = rn(MESHES); combo[i].mat = rn(MATS); combo[i].pass = rn(PASSES); }
+    static nrn_rtmap rt; memset(&rt, 0, sizeof rt);
+    for (unsigned i = 0; i < PASSES; i++) { nrn_rt_put(&rt, g_pass[i].color[0], nrn_name_class(g_pass[i].c0_name)); nrn_rt_put(&rt, g_pass[i].ds, nrn_name_class(g_pass[i].ds_name)); }
+    nrn_rows T; CHECK(nrn_rows_init(&T, 8192) == 0, "rows");
+    static nrn_pub pub; memset(&pub, 0, sizeof pub);
+    bcache bc_path, bc_row; memset(&bc_path, 0, sizeof bc_path); memset(&bc_row, 0, sizeof bc_row);
+    unsigned long long answered = 0, refused_live = 0, stale = 0, none = 0, journal_bytes = 0, ready_right = 0, ready_late = 0;
+    for (int d = 0; d < DRAWS; d++) {
+        if (rn(6000) == 0) { g_gen[rn(NRN_STAMPS)]++; nrn_pub_bump(&pub); }   // NR-08's ids / NR-09's table / the object epoch start again (the backend retires the publication when it sees it)
+        if (rn(9000) == 0) g_vpw ^= 0x100;                                     // the resolution changes: NR-08's fixed word, not in the card
+        const unsigned ci = rn(COMBOS);
+        const mesh *me = &g_mesh[combo[ci].mesh]; const material *ma = &g_mat[combo[ci].mat]; const pass *pa = &g_pass[combo[ci].pass];
+        engine_draw_state(me, ma, pa);
+        const uint64_t card = nrn_card_of(R, NRN_W_DEFAULT); const int p = nrn_pass_of_r(R, &rt);
+        const int front_ready = nrn_pub_ready(&pub, card);   // the game thread, when it writes the record
+        const uint32_t count = 3 * (1 + rn(400)), first = rn(3000);
+        // the path without the row: resolves from the objects, records
+        nrn_ans now; resolve(me, ma, pa, &now);
+        char ja[512], jb[512];
+        const int na = calls_of(&now, me, count, first, &bc_path, ja, sizeof ja);
+        // the row path: the same draw from the card alone (+ the live words)
+        int why = 0; nrn_row *r = nrn_rows_find(&T, card, p, g_gen, &why);
+        int took = 0;
+        if (r && !nrn_ans_live(&r->a, now.passdef, now.sh, now.f)) {
+            const int nb = calls_of(&r->a, me, count, first, &bc_row, jb, sizeof jb);
+            CHECK(na == nb && !memcmp(ja, jb, (size_t)na), "draw %d: the row's calls are not the path's:\n  path %s\n  row  %s", d, ja, jb);
+            journal_bytes += (unsigned long long)na; answered++; took = 1;
+        } else {
+            if (r) refused_live++; else if (why == NRN_F_STALE) stale++; else none++;
+            CHECK(why != NRN_F_PASS, "a card of this model never changes its pass");
+            calls_of(&now, me, count, first, &bc_row, jb, sizeof jb);   // not answered: the path records it (the same bind cache goes on)
+            int full = 0; const int k = nrn_rows_put(&T, card, p, &now, g_gen, &full);
+            CHECK(!full && (k == 0 || k == 2), "an unanswered draw teaches or replaces its row (%d)", k);
+            nrn_pub_set(&pub, card);
+        }
+        if (front_ready) { if (took) ready_right++; else ready_late++; }
+        CHECK(!memcmp(&bc_path, &bc_row, sizeof bc_path), "the bind cache after the draw is the same on both paths");
+    }
+    CHECK(answered > 60000 && stale > 100 && refused_live > 20 && none > 400, "the model exercised every outcome (answered %llu, stale %llu, live words %llu, no row %llu)", answered, stale, refused_live, none);
+    CHECK(ready_right > 50000 && ready_right * 100 > (ready_right + ready_late) * 90, "published cards are answered when their record is executed (%llu of %llu)", ready_right, ready_right + ready_late);
+    CHECK(journal_bytes > 1000000, "journal bytes compared: %llu", journal_bytes);
+    // one card in two passes never answers for the other pass; an answer is compared with every word
+    { nrn_ans a, b2; resolve(&g_mesh[2], &g_mat[3], &g_pass[2], &a); int full, why; const uint64_t c = 0x1234567812345679ull;
+      CHECK(nrn_rows_put(&T, c, NRN_P_GBUF, &a, g_gen, &full) == 0 && nrn_rows_find(&T, c, NRN_P_GBUF, g_gen, &why) && why == NRN_F_HIT, "a row answers for its pass");
+      CHECK(!nrn_rows_find(&T, c, NRN_P_LIGHT, g_gen, &why) && why == NRN_F_PASS, "a row of another pass does not answer");
+      b2 = a; b2.did ^= 4; CHECK(!nrn_ans_same(&a, &b2) && nrn_rows_put(&T, c, NRN_P_GBUF, &b2, g_gen, &full) == 2, "another NR-08 entry is another answer");
+      CHECK(nrn_rows_put(&T, c, NRN_P_GBUF, &b2, g_gen, &full) == 1, "the same answer is confirmed");
+      uint64_t g2[NRN_STAMPS]; memcpy(g2, g_gen, sizeof g2); g2[1]++;
+      CHECK(!nrn_rows_find(&T, c, NRN_P_GBUF, g2, &why) && why == NRN_F_STALE, "a row of other generations does not answer");
+      b2 = a; b2.passdef ^= 1; CHECK(nrn_ans_live(&a, b2.passdef, a.sh, a.f) == NRN_L_PASSDEF, "live word: pass definition");
+      b2 = a; b2.sh[4] ^= 1; CHECK(nrn_ans_live(&a, a.passdef, b2.sh, a.f) == NRN_L_SHADERS, "live word: shader objects");
+      b2 = a; b2.f[0] ^= 1; CHECK(nrn_ans_live(&a, a.passdef, a.sh, b2.f) == NRN_L_FIXED, "live word: fixed words"); }
+    // part 2: a full table never starts again (a row carries the image short records in flight are drawn from): new cards get no row
+    { nrn_rows t2; nrn_rows_init(&t2, 64); nrn_ans z; memset(&z, 0, sizeof z); int full, fulls = 0, made; const uint64_t c1 = 0x9e3779b97f4a7c15ull | 1;
+      for (uint64_t c = 1; c <= 200; c++) { const int k = nrn_rows_put(&t2, c * 0x9e3779b97f4a7c15ull | 1, 0, &z, g_gen, &full); fulls += full; CHECK((k == -1) == (full != 0), "no row exactly when the table is full"); }
+      CHECK(t2.clears == 0 && fulls == 200 - 48 && t2.n == 48, "full rows keep what they hold (%u rows, %d refused, %llu clears)", t2.n, fulls, (unsigned long long)t2.clears);
+      nrn_row *r1 = nrn_rows_get(&t2, c1, 0, &made); CHECK(r1 && !made && r1->card == c1, "the first card is still there");
+      CHECK(!nrn_rows_get(&t2, 0x7777777777777777ull, 0, &made) && !made, "a new card gets no row in a full table");
+      nrn_rows_free(&t2); }
+    // a row made for its image has no answer until the path teaches one
+    { nrn_rows t3; nrn_rows_init(&t3, 64); int made, why, full; nrn_ans a; resolve(&g_mesh[1], &g_mat[2], &g_pass[2], &a);
+      nrn_row *r = nrn_rows_get(&t3, 0xabcdef01ull, NRN_P_GBUF, &made); CHECK(r && made, "a row for an image");
+      CHECK(!nrn_rows_find(&t3, 0xabcdef01ull, NRN_P_GBUF, g_gen, &why) && why == NRN_F_STALE, "a row without an answer does not answer");
+      CHECK(nrn_rows_put(&t3, 0xabcdef01ull, NRN_P_GBUF, &a, g_gen, &full) == 0 && nrn_rows_find(&t3, 0xabcdef01ull, NRN_P_GBUF, g_gen, &why) == r, "its first answer is learnt in place");
+      nrn_rows_free(&t3); }
+    nrn_rows_free(&T);
+}
+// ---- 6: step B - the publication ----
+static void test_pub(void) {
+    static nrn_pub p; memset(&p, 0, sizeof p);
+    const uint64_t a = 0x1111222233330001ull, b = 0x9999222233330001ull /* the same slot, another card */, c = 0x1111222233340001ull;
+    CHECK(nrn_pub_slot(a) == nrn_pub_slot(b) && nrn_pub_slot(a) != nrn_pub_slot(c), "the test's cards");
+    CHECK(!nrn_pub_ready(&p, a), "nothing published");
+    nrn_pub_set(&p, a); CHECK(nrn_pub_ready(&p, a) && !nrn_pub_ready(&p, b) && !nrn_pub_ready(&p, c), "a published card is ready, its slot neighbour is not");
+    nrn_pub_set(&p, b); CHECK(nrn_pub_ready(&p, b) && !nrn_pub_ready(&p, a), "the slot holds the last card");
+    nrn_pub_set(&p, c); nrn_pub_bump(&p); CHECK(!nrn_pub_ready(&p, b) && !nrn_pub_ready(&p, c), "a bump retires every word");
+    nrn_pub_set(&p, c); CHECK(nrn_pub_ready(&p, c), "published again under the new generation");
+    nrn_pub_set(&p, a); nrn_pub_drop(&p, b); CHECK(nrn_pub_ready(&p, a), "dropping another card of the slot leaves the published one");
+    nrn_pub_drop(&p, a); CHECK(!nrn_pub_ready(&p, a) && nrn_pub_ready(&p, c), "a dropped card is not ready, the others stay");
+    for (unsigned i = 0; i < 70000; i++) { nrn_pub_bump(&p); CHECK(!nrn_pub_ready(&p, c) && p.gen >= 1 && p.gen <= 0xffff, "no old word comes back when the generation wraps (%u)", i); if (g_fail) break; }
+    // every card of a long run: ready exactly while it is the last one set in its slot under the current generation
+    static uint64_t own[NRN_PUB_SLOTS]; memset(own, 0, sizeof own);
+    for (int i = 0; i < 200000; i++) {
+        const uint64_t k = rnd() | 1;
+        if (rn(5000) == 0) { nrn_pub_bump(&p); memset(own, 0, sizeof own); }
+        if (rn(2)) { nrn_pub_set(&p, k); own[nrn_pub_slot(k)] = k & ~0xffffull; }
+        const uint64_t q = rn(3) ? k : rnd() | 1;
+        CHECK(nrn_pub_ready(&p, q) == (own[nrn_pub_slot(q)] == (q & ~0xffffull)), "ready %d for a card %s", nrn_pub_ready(&p, q), q == k ? "just handled" : "never set");
+        if (g_fail > 12) break;
+    }
+}
+
 int main(void) {
     objects();
-    test_tail(); test_pass(); test_env(); test_equiv(); test_journal();
+    test_tail(); test_pass(); test_env(); test_equiv(); test_journal(); test_rows(); test_pub();
     printf("nr_nrn_test%s: %llu checks, %llu failed: %s\n", NRN_MUTATE ? " (mutation)" : "", g_checks, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;
 }

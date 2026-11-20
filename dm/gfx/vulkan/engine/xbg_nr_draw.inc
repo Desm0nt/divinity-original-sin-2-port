@@ -345,7 +345,7 @@ bool lane_tail(Commands &c,Descriptors *dr,const DSet &ds,Pass &p,int first,int 
     if(__builtin_expect(nrz5::mode!=0,0))nrz5::draw_end(bc,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),   // [DOS2] NR-ZERO Z5 DM_NR_Z5=2: the same draw by the run assembler, compared
         indexed?uint32_t(indexed->instances):instances,indexed?H.first_index:uint32_t(first)+H.k,indexed?int32_t(indexed->base_vertex)+int32_t(H.k):0,indexed?uint32_t(indexed->base_instance):first_instance,cond_gpu_draw);
     S->cmds+=n;
-    if(__builtin_expect(nrn::have,0))nrn::draw_end(H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,indexed!=nullptr,H.first_index,H.k);   // [DOS2] NR-NATIVE DM_NRN_<PASS>=2: what was recorded, noted under the draw's card
+    if(__builtin_expect(nrn::have,0))nrn::draw_end(H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,indexed!=nullptr,H.first_index,H.k,p,dr!=nullptr && !pp && !ui && !nrpo::P.on && !nrps::P.on);   // [DOS2] NR-NATIVE DM_NRN_<PASS>: what was recorded - the card's row (step B) and, =2, the values noted under the card
     if(__builtin_expect(nrz5t::z8,0)){nrz8t::Hint &zh=nrz8t::hint;zh.pent=H.have_ent?H.ent:nullptr;zh.zero=H.zero;zh.qpat=H.qpat;zh.pp=pp;zh.special=nrpo::P.on || nrps::P.on;zh.lane_gen=tab_gen();}   // [NR-ZERO Z8] what a template needs besides the values
     if(__builtin_expect(nrz5t::gmode!=0,0))nrz5t::recorded(bc,ui,cond_gpu_draw,H.t.key,H.pipe,H.used,H.vb,H.vbo,H.ib,H.ibo,H.it,H.vp,H.sc,ds.layout,ds.set,ds.no,ds.off,indexed!=nullptr,uint32_t(count),z5i,z5f,z5v,z5b,H.first_index,H.k);   // [NR-ZERO Z5] =2: the comparison; the template of the record's slot
     }

@@ -186,6 +186,7 @@ static int nrd_draw_take(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint
     const uint64_t t1 = timed ? nr_now() : 0;
     if (g_nrd_lean == 1) nrd_ident(r, op == 36 ? 0 : 1);                                 // k_nk_site[0] / [1]: the two flush calls of the draw functions
     else nk_draw(r, g_nrd_base + (op == 36 ? NRNC_LR_DRAW : NRNC_LR_DRAWI));            // what the flush hook does first (NR-02 / NR-09)
+    NRN_PRE(R);   // NR-NATIVE step B part 2: the card of this draw, taken before its flush - a published card is written short
     const uint64_t t2 = timed ? nr_now() : 0;
     nrnc_plan p; nrd_job_t j = {R, NULL, 0, &d, timed, ub};
     const uint64_t fcb = nrnc_cb(R);
@@ -193,6 +194,7 @@ static int nrd_draw_take(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint
     else { g_o_tf(r, NC_Z); t_nrd.c[NRDC_FLUSH_ENGINE]++; }                              // the engine's flush (the original, past the hook)
     if (R[NRNC_R_REN_OFF] && R[NRNC_R_REN_NEED]) t_nrd.c[NRDC_REN]++;
     nvn_on_bigstack(nrd_job, &j);
+    NRN_POST();   // NR-NATIVE step B part 2: the record of the draw took the short flag (red line if it did not)
     if (g_nrd_ubd) nvn_nrub_scope(0);   // NR-UBD
     t_nrd.c[op == 37 ? NRDC_D37 : NRDC_D36]++;
     if (timed) { const uint64_t t3 = nr_now(); t_nrd.c[NRDC_TIMED]++; t_nrd.c[NRDC_NS] += t3 - t0; t_nrd.c[NRDC_NS_UBO] += t1 - t0; t_nrd.c[NRDC_NS_ID] += t2 - t1; t_nrd.c[NRDC_NS_REC] += t3 - t2; }
