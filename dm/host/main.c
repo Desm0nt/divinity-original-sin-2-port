@@ -174,6 +174,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_tl2_wide_install(void); dm_tl2_wide_install(); }   // [TL2] DM_TL2_WIDE: the window / video settings at the screen's aspect before the guest runs (hle_tl2_wide.c)
 #endif
 #ifdef DM_GAME_DOS2
+    { void dm_dos2_vkn_pre(void); dm_dos2_vkn_pre(); }   // [DOS2] DM_VK_NATIVE=1: every switch of the old native / NB / NR / NRN layers forced off FIRST (hle_dos2_vkn_exec.c)
     { void dm_dos2_wide_install(void); dm_dos2_wide_install(); }   // [DOS2] DM_DOS2_WIDE: the renderer's display modes at the screen's shape before the guest runs (hle_dos2_wide.c)
     { void dm_dos2_native_install(void); dm_dos2_native_install(); }   // [DOS2] DM_NATIVE_RC / DM_NATIVE_DRAW: render command census, engine draws as one record (hle_dos2_native.c)
     { void dm_dos2_nb_install(void); dm_dos2_nb_install(); }   // [DOS2] DM_NB: native backend front end, frame counters for now (hle_dos2_nb.c, NATIVE_BACKEND_PLAN.md NB-03)
