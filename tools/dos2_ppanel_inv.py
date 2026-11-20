@@ -41,6 +41,7 @@ from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC
 import dos2_swf_graft as gr
 
 STAGE_H = 1080
+STAGE_WMAX = 2560     # the movies' stage width (SWF header): wider than any screen in stage px - the movie spans the screen, the window is placed in it
 # ---- partyInventory (PC: inventory_mc at 0,20 on a 682 x 1152 stage; the window = bgFrame_mc 680 x 1056 at the clip's origin). Own px of the clip:
 INV_W0, INV_H0 = 680, 1056
 INV_COLS, INV_PITCH = 13, 56     # the iPad's 13 columns; cell 50 + spacing 6 (PC 11 columns, spacing 8): x 1.52 = cell 76, pitch 85 (iPad 76 / 86)
@@ -53,12 +54,13 @@ INV_BAG_HEAD, INV_LIST_REST, INV_BOT = 56, 4, 27       # a bag's header, the PC'
 INV_ROWS_MAX = 12
 INV_HEAD_ART, INV_BODY_SRC, INV_BODY_ART, INV_BOT_ART = 235, 400, 56, 100   # background rows: the header, plain body rows (stretched), the bottom edge
 INV_SORT_BOT = 612               # the sort popup's own bottom (its y + 607 + 5)
-INV_HEAD_S = 1.52                # the header's scale never grows past the iPad's (cell 76); the list takes the cell's (dm/host/hle_dos2_touch_scale.h TS_INV_HEAD_S)
+INV_HEAD_S = 1.19                # the header's scale cap (dm/host/hle_dos2_touch_scale.h TS_INV_HEAD_S): 202 own px -> 240 px, so 7 rows of 76 make the iPad's
+                                 # 968 px window (was 1.52: 1035 px; owner 21.11 'header lower, like the iPad'); the list takes the cell's scale
 INV_RIGHT = ('close_mc', 'minimise_mc', 'autosortBtn_mc', 'sortByBtn_mc', 'allBtn_mc', 'totalGold_mc')   # stand at the header's right end
 TOP_M = 8                        # screen px kept free above the window
 COL_RES = 40                     # the equipment view: px kept free at each side beyond MARGIN (the right column at the iPad's place: 92 x 1.2 + a gap)
 INV_CLOSE = 50                   # screen px of the close button at the iPad's cell (iPad mcBtnCloseTouch 50 x 50)
-INV_BTN, INV_BTN_AT = 'dmDoll_mc', (22, 88, 48)        # the doll button: own x, y, size (x 1.52 = 73 px, the iPad's)
+INV_BTN, INV_BTN_AT = 'dmDoll_mc', (20, 84, 61)        # the doll button: own x, y, size (x 1.19 = 73 px, the iPad's)
 BTN_ART = 148.0                  # px of our plate drawing (set from the asset when it is embedded)
 # ---- characterSheet (PC: stats_mc at 0,20 on a 680 x 1152 stage; the window = bg_mc 680 x 1056, one bitmap with holes for the two halves). Own px of the clip:
 CS_W, CS_H0 = 680, 1056
@@ -77,7 +79,13 @@ CS_HIT_H = 1085.0
 CS_EQ_Y, CS_EQ_Y_DOLL = CS_ROW1 - CS_UP, CS_STRIP[0] + CS_ROW1 - CS_EQ_BAR   # equip_mc.y on the sheet (off it: x far) / in the doll panel
 CS_DOLL_W = CS_W - CS_SPLIT
 CS_DOLL_H = CS_EQ_Y_DOLL + CS_H0 - CS_ROW1        # 901 own: the title bar, the equipment bar, the doll with its numbers
-DOLL_PX = CS_DOLL_W * float(STAGE_H) / CS_DOLL_H  # the doll panel's screen width in the equipment view (its height is the screen's)
+DOLL_PX = CS_DOLL_W * 967.0 / CS_DOLL_H   # = BOTTOM0  # the doll panel's screen width in the equipment view at the default bottom (its height = dmB)
+def eq_block(a, C, DW, BT):
+    """the equipment view's shared numbers, the SAME statements in both movies (so the two halves are one block): DP the doll panel's width
+    (its height = the band above dmB, 21.11: it went under the hot bar), SQ the bag's scale, MQ the block's width"""
+    DP = a.let('DP', CS_DOLL_W * fmax(600, fmin(1080, BT)) / CS_DOLL_H)
+    SQ = a.let('SQ', fmin(C / 50, (DW - 2 * MARGIN - 2 * COL_RES - DP) / INV_W))
+    a.let('MQ', ffloor(DP + INV_W * SQ + R(999, 1000)))
 CS_TITLE_X = (42, CS_SPLIT + CS_DOLL_W // 2 - 299)             # title_txt.x (a 598 px centred field): on the sheet / centred in the doll panel
 CS_BTN_AT = (626, 40)            # the doll button: own x, size (on the equipment title bar)
 CS_LISTS = [('combatAbilityHolder_mc', 270, 705), ('civicAbilityHolder_mc', 270, 705), ('talentHolder_mc', 328, 705), ('tagsHolder_mc', 328, 705),
@@ -404,8 +412,11 @@ INPUTS = [('C', 'dmCell'), ('ST', 'dmState'), ('DW', 'dmW'), ('BT', 'dmB'), ('OX
 # px, through the same invoke channel: CMD + OX_CMD + OX_BIAS + origin (dmOX, dmOXok = 1) and CMD + DW_CMD + width (dmW, the screen width in
 # stage px). dmLay then shifts the window by DX = dmOXok x ((dmW - MW) / 2 - dmOX): its middle on the screen's middle, whatever the engine did.
 OX_CMD, OX_BIAS, DW_CMD = 100000, 5000, 200000
-BOTTOM0 = 1080         # dmB: the bottom limit the host sets (the hot bar's top; `cmd`(CMD + n) with n >= 400); 1080 = none
-def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None):
+BOTTOM0 = 967          # dmB: the bottom limit the host sets (the hot bar's top; `cmd`(CMD + n) with n >= 400); default = the iPad's hot bar top
+                       # (21.11: with it the baked inventory is the iPad's 1170 x 968, 7 rows; 1080 = no limit)
+HEAD_PADS = [(('inventory_mc', 'autosortBtn_mc'), 42), (('inventory_mc', 'sortByBtn_mc'), 42), (('inventory_mc', 'allBtn_mc'), 42), (('inventory_mc', 'view_mc'), 42)]
+                       # header buttons (own px at the header's scale 1.19: 28..31 own = 33..37 px): invisible pads 42 own = 50 px tall (LSButton hits its own graphics)
+def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pads=()):
     """the document class of a `_p` window: vars dmCell (cell px, CELL0 = the iPad's), dmState, dmW (the screen width in stage px, height 1080);
     dmLay() = `spec`; dmSetCell(px) / dmSetState(n) for the host; `cmd`(CMD + n) = the same two through a name the engine class registers;
     onEventInit = original + dmHook (drag bar `off` hidden, the doll button `btn` armed: dmSide(8) = the equipment view, dmSide(back) from it)
@@ -426,7 +437,17 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None):
              ('getlocal0',), ('getlocal1',), ('setproperty', P('dmB'))] + lay + [('returnvoid',), ('L', 'x'), ('returnvoid',),
              ('L', 'c'), ('getlocal0',), ('getlocal1',), ('setproperty', P('dmCell'))] + lay + [('returnvoid',)])
     d.method('dmSetState', 1, HEAD + [('getlocal0',), ('getlocal1',), ('setproperty', P('dmState'))] + lay + [('returnvoid',)])
-    hook = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1)]
+    hook = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1), ('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3)]
+    for k, (path, h) in enumerate(pads):   # a finger pad: a transparent rectangle in the object's own graphics, h own px tall, centred on its drawing
+        hook += [('getlocal0',), ('coerce_a',), ('setlocal', 1)]
+        for p in path: hook += [('getlocal', 1), ('getproperty', P(p)), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'pd%d' % k)]
+        hook += [('getlocal', 1), ('getlocal', 1), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', 2),
+                 ('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 3), ('getlocal', 3), ('iffalse', 'pd%d' % k),
+                 ('getlocal', 3), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2),
+                 ('getlocal', 3), ('getlocal', 2), ('getproperty', P('x')),
+                 ('getlocal', 2), ('getproperty', P('y')), ('getlocal', 2), ('getproperty', P('height')), ('pushbyte', 2), ('divide',), ('add',)] + num(h // 2) + [('subtract',),
+                 ('getlocal', 2), ('getproperty', P('width'))] + num(h) + [('callpropvoid', P('drawRect'), 4),
+                 ('getlocal', 3), ('callpropvoid', P('endFill'), 0), ('L', 'pd%d' % k)]
     for k, path in enumerate(off):
         hook += [('getlocal0',), ('coerce_a',), ('setlocal', 1)]
         for p in path: hook += [('getlocal', 1), ('getproperty', P(p)), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'h%d' % k)]
@@ -466,23 +487,26 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None):
 
 
 def pieces_sprite(swf, before, bid, bw, bh, groups):
-    """new sprites made of rectangles of ONE existing bitmap. groups = [(name | None, x, y, [(dst x, dst y, src x, src y, w, h, sx)])]: every
+    """new sprites made of rectangles of ONE existing bitmap. groups = [(name | None, x, y, [(dst x, dst y, src x, src y, w, h, sx[, sy])])]: every
     group is a 1-frame sprite of its pieces (each its own DefineShape: a clipped, smoothed 1:1 bitmap fill, drawn 1 px larger to the right
-    and down while the bitmap has those px, then scaled sx horizontally), placed by name at x, y inside one outer sprite. -> (outer id, n tags)"""
+    and down while the bitmap has those px, then scaled sx horizontally / sy vertically), placed by name at x, y inside one outer sprite.
+    -> (outer id, n tags)"""
     used = {struct.unpack_from('<H', d, 0)[0] for c, d, _ in swf.tags if c in gr.DEFS} | set(gr.Movie(swf).imports)
     nid = [max(used) + 1]; tags = []
     def nb(*v): return max(2, max(abs(int(x)).bit_length() for x in v) + 1)
     def new(): nid[0] += 1; assert nid[0] < 0xffff; return nid[0] - 1
-    def place(depth, cid, x, y, sx=1.0, name=None):
-        return gr.tag_bytes(*gr.place_build(dict(depth=depth, char=cid, matrix=gr.matrix_bytes(x, y, sx, 1.0), cx=None, ratio=None, name=None if name is None else name.encode() + b'\0',
+    def place(depth, cid, x, y, sx=1.0, name=None, sy=1.0):
+        return gr.tag_bytes(*gr.place_build(dict(depth=depth, char=cid, matrix=gr.matrix_bytes(x, y, sx, sy), cx=None, ratio=None, name=None if name is None else name.encode() + b'\0',
                                                  clip=None, cls=None, f2=0, rest3=b'', move=False, v3=False, actions=None)))
     outer = b''
     for gk, (name, gx, gy, pieces) in enumerate(groups):
         spr = b''
-        for k, (dx, dy, sx, sy, w, h, scx) in enumerate(pieces):
+        for k, pc in enumerate(pieces):
+            dx, dy, sx, sy, w, h, scx = pc[:7]; scy = pc[7] if len(pc) > 7 else 1.0
             assert 0 <= sx and sx + w <= bw and 0 <= sy and sy + h <= bh, 'piece %r outside the %d x %d bitmap' % ((sx, sy, w, h), bw, bh)
             if scx == 1.0: w = min(w + 1, bw - sx)
-            h = min(h + 1, bh - sy); W, H = w * 20, h * 20
+            if scy == 1.0: h = min(h + 1, bh - sy)
+            W, H = w * 20, h * 20
             fill = b'\x01\x41' + struct.pack('<H', bid) + gr.matrix_bytes(-sx, -sy, 20.0, 20.0)
             rec = [(0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (1, 1), (2, 5), (0, 2), (0, 2), (1, 1)]
             for ex, ey in ((W, 0), (0, H), (-W, 0), (0, -H)):
@@ -490,7 +514,7 @@ def pieces_sprite(swf, before, bid, bw, bh, groups):
             rec += [(0, 1), (0, 5)]
             n = nb(W, H); sid = new()
             tags.append([2, struct.pack('<H', sid) + gr.wbits([(n, 5), (0, n), (W, n), (0, n), (H, n)]) + fill + b'\x00' + bytes([0x10]) + gr.wbits(rec), False])
-            spr += place(k + 1, sid, dx, dy, scx)
+            spr += place(k + 1, sid, dx, dy, scx, None, scy)
         gid = new(); tags.append([gr.T_SPRITE, struct.pack('<HH', gid, 1) + spr + gr.tag_bytes(gr.T_SHOW, b'') + gr.tag_bytes(gr.T_END, b''), False])
         outer += place(gk + 1, gid, gx, gy, 1.0, name)
     oid = new(); tags.append([gr.T_SPRITE, struct.pack('<HH', oid, 1) + outer + gr.tag_bytes(gr.T_SHOW, b'') + gr.tag_bytes(gr.T_END, b''), False])
@@ -533,7 +557,8 @@ def inv_spec(k):
     s = Spec(); C, ST, DW, BT = V('C'), V('ST'), V('DW'), V('BT')
     # the equipment view is the widest block: it also keeps clear of the right column (tools/dos2_pchud_touch.py dmSide_p: 92 px x its factor
     # <= 1.2 from the right edge), on both sides because the block is centred
-    s.state('ST', lambda a: a.let('AV', DW - 2 * MARGIN - 2 * COL_RES - DOLL_PX), lambda a: a.let('AV', DW - 2 * MARGIN))
+    eq_block(s, C, DW, BT)
+    s.state('ST', lambda a: a.let('AV', DW - 2 * MARGIN - 2 * COL_RES - V('DP')), lambda a: a.let('AV', DW - 2 * MARGIN))
     S = s.let('S', fmin(C / 50, V('AV') / INV_W))
     SH = s.let('SH', fmin(S, INV_HEAD_S))
     RR = s.let('RR', S / SH)
@@ -545,10 +570,15 @@ def inv_spec(k):
     LH = s.let('LH', INV_BAG_HEAD + INV_LIST_REST + rows * INV_PITCH)
     H = s.let('H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
     HS = s.let('HS', H * SH)                                                 # screen px
-    s.state('ST', lambda a: a.let('X0', DOLL_PX), lambda a: a.let('X0', 0))
+    s.state('ST', lambda a: a.let('X0', V('DP')), lambda a: a.let('X0', 0))
     MW = s.let('MW', ffloor(V('X0') + INV_W * S + R(999, 1000)))
-    X0 = s.let('X1', V('X0') + V('OK') * ((DW - MW) / 2 - V('OX')))      # run 21.11: the movie centres itself (dmOX from the host)
-    Y0 = s.let('Y0', fmax(0, fmin(1080 - HS, TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
+    # phone 21.11 (inv2.png): the engine anchored the movie top right (its rect = setMcSize's width) and the window shifted left inside it was cut
+    # at the rect's edge. Now the movie spans the screen (setMcSize(SW): SW = the screen width, the header STAGE_WMAX), so any anchor puts its
+    # origin at 0 (or where the host says: dmOX) and the window is centred INSIDE it: X1 = (DW - MW) / 2 - dmOX
+    SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
+    X0 = s.let('X1', V('X0') + (DW - MW) / 2 - V('OK') * V('OX'))
+    # centred in the band above B; the whole window (its bottom rim too) above B where it fits (21.11: nothing under the hot bar), else from the top
+    Y0 = s.let('Y0', fmax(0, fmin(fmin(1080 - HS, B - HS), TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
     s.let('PX', 50 * S)
     if k is None: return s
     w = (INV_CLIP,)
@@ -574,7 +604,7 @@ def inv_spec(k):
     # keepCustomInScreen: the part of the stage the engine keeps on the screen (PC: uiLeft 0, uiRight 680, uiTop 45, uiMinHeight 190, uiMinWidth 150)
     for prop, e in (('uiLeft', X0), ('uiRight', X0 + INV_W * S), ('uiTop', Y0 + 45 * SH), ('uiMinHeight', 190 * SH), ('uiMinWidth', 150 * SH)): s.root(prop, ffloor(e + R(1, 2)))
     s.let('DX', X0 - V('X0'))
-    s.ei('setMcSize', MW, 1080); s.ei('setPosition', 'center', 'screen', 'center')
+    s.ei('setMcSize', SW, 1080); s.ei('setPosition', 'center', 'screen', 'center')
     return s
 
 
@@ -613,7 +643,7 @@ def party(data, env=None):
         elif name == 'sortByBg_mc': _set(rec, sx=sx * (INV_LIST_W + 15) / (INV_LIST_W0 + 15.0))
     edit_places(swf, win, fix)
     kids = _kids(swf, win)
-    cs = INV_CLOSE / float(CELL0) * 50 / 23.0   # the close button: INV_CLOSE screen px at the iPad's cell
+    cs = INV_CLOSE / (INV_HEAD_S * 23.0)   # the close button: INV_CLOSE screen px at the iPad's cell (the header's scale)
     edit_places(swf, win, lambda name, rec: _set(rec, x=kids['close_mc'][1] + 11.5 - 11.5 * cs, y=kids['close_mc'][2] + 11.5 - 11.5 * cs, sx=cs, sy=cs) if name == 'close_mc' else None)
     # a bag's header (playerInventory): its frame, body and drop mark grow with the grid, gold / weight / the fold mark stay at the right end
     bag = [c for c, n in mv.classes.items() if n == 'playerInventory']; assert len(bag) == 1
@@ -628,10 +658,10 @@ def party(data, env=None):
 
     env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
     spec = inv_spec(_kids(swf, win)); res = spec.run(env); rest = bake(swf, res)
-    swf.head = rect_bytes(int(env['MW']), STAGE_H) + swf.head[-4:]
+    swf.head = rect_bytes(STAGE_WMAX, STAGE_H) + swf.head[-4:]
 
     code = Code(swf)
-    d = window_doc(code, spec, [(INV_CLIP, 'minimise_mc'), (INV_CLIP, 'dragHit_mc')], INV_BTN, 4, ctx=((INV_CLIP,), 'partyInventory_1'))
+    d = window_doc(code, spec, [(INV_CLIP, 'minimise_mc'), (INV_CLIP, 'dragHit_mc')], INV_BTN, 4, ctx=((INV_CLIP,), 'partyInventory_1'), pads=HEAD_PADS)
     # the sort popup: its OK sends setSortFilter (handled) and applySortFilters (NOT in main.raw: nothing would be sorted) -> then `autosort`,
     # the call of the sort button, which the class handles (main+0x13a77f0)
     sp = code.of('sortPopup_21', 'okPressed')
@@ -645,8 +675,8 @@ def party(data, env=None):
     for name, v in (('invColW', INV_COLS), ('cSpacing', INV_PITCH - 50), ('invW', INV_LIST_W), ('invH', int(inv_geom()['LH']))): set_const(w, name, v)
     made = code.done()
     S = env['S']
-    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['X0'], env['Y0'], env['X0'] + INV_W * S, env['Y0'] + env['HS']), bitmap=bid, shape=new,
-                             stage=(int(env['MW']), STAGE_H), spec=spec)
+    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['X1'], env['Y0'], env['X1'] + INV_W * S, env['Y0'] + env['HS']), bitmap=bid, shape=new,
+                             stage=(STAGE_WMAX, STAGE_H), spec=spec)
 
 
 # ---------------------------------------------------------------- characterSheet_p
@@ -655,22 +685,25 @@ def cs_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
     env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); cs_spec(None).run(env); return env
 
 
-def cs_spec(k):
+def cs_spec(k, glow=None):
     """dmLay of characterSheet_p: state 0 = the sheet (two stat columns, no doll), state 1 = the doll panel of the equipment view"""
     s = Spec(); C, DW = V('C'), V('DW')
+    AVH = s.let('AVH', fmax(600, fmin(1080, V('BT'))) - TOP_M)            # the height above the host's bottom limit (the hot bar's top)
     def sheet(a):
-        S = a.let('S', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (DW - 2 * MARGIN) / CS_W), R(STAGE_H, CS_HEAD + CS_BOT + CS_PB_MIN)))
-        PB = a.let('PB', fmax(CS_PB_MIN, fmin(CS_PB0, ffloor(STAGE_H / S - CS_HEAD - CS_BOT))))
+        S = a.let('S', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (DW - 2 * MARGIN) / CS_W), AVH / (CS_HEAD + CS_BOT + CS_PB_MIN)))
+        PB = a.let('PB', fmax(CS_PB_MIN, fmin(CS_PB0, ffloor(AVH / S - CS_HEAD - CS_BOT))))
         H = a.let('H', CS_HEAD + PB + CS_BOT)
-        a.let('MW', ffloor(CS_W * S + R(999, 1000))); a.let('Y0', (STAGE_H - H * S) / 2)
+        a.let('MW', ffloor(CS_W * S + R(999, 1000))); a.let('Y0', TOP_M + (AVH - H * S) / 2)
         for n, v in (('RX', 0), ('RW', CS_W), ('XS', 0), ('XD', CS_FAR), ('EY', CS_EQ_Y), ('TX', CS_TITLE_X[0])): a.let(n, v)
     def doll(a):
-        S = a.let('S', R(STAGE_H, CS_DOLL_H)); a.let('PB', CS_PB_MIN); a.let('H', CS_DOLL_H)
-        a.let('MW', ffloor(DOLL_PX + INV_W * fmin(C / 50, (DW - 2 * MARGIN - DOLL_PX) / INV_W) + R(999, 1000))); a.let('Y0', 0)
+        eq_block(a, C, DW, V('BT'))
+        S = a.let('S', V('DP') / CS_DOLL_W); a.let('PB', CS_PB_MIN); a.let('H', CS_DOLL_H)
+        a.let('MW', V('MQ')); a.let('Y0', 0)
         for n, v in (('RX', CS_SPLIT), ('RW', CS_DOLL_W), ('XS', CS_FAR), ('XD', 0), ('EY', CS_EQ_Y_DOLL), ('TX', CS_TITLE_X[1])): a.let(n, v)
     s.state('ST', doll, sheet)
     S, PB, H, MW, Y0, RX, RW, XS, XD, EY = [V(n) for n in ('S', 'PB', 'H', 'MW', 'Y0', 'RX', 'RW', 'XS', 'XD', 'EY')]
-    DX = s.let('DX', V('OK') * ((DW - MW) / 2 - V('OX')))                # run 21.11: the movie centres itself (dmOX from the host)
+    DX = s.let('DX', (DW - MW) / 2 - V('OK') * V('OX'))                  # centred inside the screen-wide movie (see inv_spec, phone 21.11)
+    SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
     if k is None: return s
     w = (CS_CLIP,)
     s.on(w, [('scaleX', S), ('scaleY', S), ('x', DX), ('y', Y0)])
@@ -690,9 +723,11 @@ def cs_spec(k):
     s.on(w + ('title_txt',), [('x', V('TX'))])
     s.on(w + ('hitArea_mc',), [('scaleY', k['hitArea_mc'][4] * (H - 17) / CS_HIT_H)])
     s.raw('lists', cs_lists)
+    for h, sy in sorted((glow or {}).items()):   # a tab list's glow behind it (PC: the 735 px panel) - else it shows under a shorter window
+        s.on(w + (h, 'bgGlow_mc'), [('scaleY', sy * PB / CS_PB0)])
     s.on((('nm', INV_BTN),), [('x', DX + (CS_BTN_AT[0] - RX) * S), ('y', Y0 + (EY - 45) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
     for prop, e in (('uiLeft', DX), ('uiRight', DX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
-    s.ei('setMcSize', MW, STAGE_H); s.ei('setPosition', 'center', 'screen', 'center')
+    s.ei('setMcSize', SW, STAGE_H); s.ei('setPosition', 'center', 'screen', 'center')
     return s
 
 
@@ -780,8 +815,12 @@ def sheet(data, env=None):
 
     kids = _kids(swf, win)
     env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
-    spec = cs_spec(kids); res = spec.run(env); rest = bake(swf, res)
-    swf.head = rect_bytes(int(env['MW']), STAGE_H) + swf.head[-4:]
+    glow = {}
+    for h, _, _ in CS_LISTS:
+        hk = _kids(swf, kids[h][0])
+        if 'bgGlow_mc' in hk: glow[h] = hk['bgGlow_mc'][4]
+    spec = cs_spec(kids, glow); res = spec.run(env); rest = bake(swf, res)
+    swf.head = rect_bytes(STAGE_WMAX, STAGE_H) + swf.head[-4:]
     code = Code(swf)
     window_doc(code, spec, [(CS_CLIP, 'dragHit_mc')], INV_BTN, 3, 'setHelmetOptionState', ctx=((CS_CLIP, 'equip_mc'), 'equipment_41'))
     # The doll turns under the finger by the PC class's own means, nothing is changed here: equipment_41.onDown sends dollDown (handled,
@@ -789,8 +828,8 @@ def sheet(data, env=None):
     # 0x6b (FlashMouseMoveLeft / Right: [object+0x3fc] = the turn) and STOPS it on event 1 (FlashLeftMouse, the button's release:
     # [+0x3f8] = 0, capture off). dollUp / dollOut of the movie are not in main.raw and are not needed: the engine stops on the release itself.
     made = code.done(); S = env['S']
-    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(0.0, env['Y0'], env['RW'] * S, env['Y0'] + env['H'] * S), bitmap=bid, shape=new, moved=moved,
-                             stage=(int(env['MW']), STAGE_H), spec=spec)
+    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['DX'], env['Y0'], env['DX'] + env['RW'] * S, env['Y0'] + env['H'] * S), bitmap=bid, shape=new, moved=moved,
+                             stage=(STAGE_WMAX, STAGE_H), spec=spec)
 
 
 MAKE = {'partyInventory_p.swf': party, 'characterSheet_p.swf': sheet}
@@ -839,14 +878,15 @@ def check(o, data, out, rep, say):
         elif ida[cid] != (code, d): changed.append(cid)
     mv = gr.Movie(a); nm = lambda c: mv.classes.get(c, '#%d' % c).split('.')[-1]
     want = {'partyInventory_p.swf': {'partyInventory_1', 'bgFrame_3', 'playerInventory'},
-            'characterSheet_p.swf': {'stats_1', 'bg_22', 'plusButton_62', 'minusButton_65', 'equipment_41', '#456'}}[o]
+            'characterSheet_p.swf': {'stats_1', 'bg_22', 'plusButton_62', 'minusButton_65', 'equipment_41', '#456',
+                                     'abilitiesholder_9', 'tagsholder_13', 'talentsHolder_11', 'visualsHolder_18'}}[o]   # the holders: their glow's height (21.11)
     say(not g and {nm(c) for c in changed} == want and len(new) == rep['defs'],
         'tags: ids unique, uses after definitions; of %d PC definitions %d rebuilt (%s), +%d new (background pieces, the doll button); the rest byte for byte%s' % (
         len(ida), len(changed), ', '.join(sorted(nm(c) for c in changed)), len(new), '' if not g else ': ' + str(g)))
     bitmaps = lambda s: sorted(hashlib.sha256(d[2:]).hexdigest() for c, d, _ in s.tags if c in gr.T_BITMAPS)
     ba, bb = bitmaps(a), bitmaps(b); extra = [h for h in bb if h not in ba]
     say(all(h in bb for h in ba) and len(extra) == 2, 'art: the PC movie\'s %d bitmaps + %d of our own drawings (assets/touchui plate_square_copper, pan_helmet: the doll button); no iPad file is read' % (len(ba), len(extra)))
-    say(b.head[:-4] == rect_bytes(*rep['stage']), 'stage %d x %d = the window at the iPad\'s cell (dmLay tells the engine the real size: setMcSize)' % rep['stage'])
+    say(b.head[:-4] == rect_bytes(*rep['stage']), 'stage %d x %d: wider than any screen; dmLay sets the movie to the screen width (setMcSize) and centres the window inside it (phone 21.11: a window shifted inside a window-wide movie was cut at the movie rect)' % rep['stage'])
     ea, eb = _ei(A), _ei(B); added = sorted(set(eb) - set(ea))
     say(set(ea) <= set(eb) and set(added) <= {'dmSide', 'setMcSize'}, 'ExternalInterface: the PC movie\'s %d names kept; added: %s (dmSide = the host\'s; setMcSize = the engine\'s own, as the PC inventory calls it)' % (len(ea), ' '.join(added)))
     def doc(X):
@@ -881,7 +921,9 @@ def check(o, data, out, rep, say):
         cl = w['inventory_mc.close_mc']['stage']; bt = w[INV_BTN]['stage']
         say(abs((cl[2] - cl[0]) - INV_CLOSE) < 1 and abs((bt[2] - bt[0]) - INV_BTN_AT[2] * env['SH']) < 1, 'close button %.0f px (iPad 50), the doll button %.0f px at %.0f,%.0f (iPad 73)' % (cl[2] - cl[0], bt[2] - bt[0], bt[0], bt[1]))
         sizes = [(n, w['inventory_mc.' + n]['stage']) for n in ('autosortBtn_mc', 'sortByBtn_mc', 'view_mc', 'allBtn_mc')]
-        say(all(bx[3] - bx[1] >= 42 and bx[2] <= x1 for _, bx in sizes), 'buttons: ' + ', '.join('%s %.0f x %.0f' % (n[:-3], bx[2] - bx[0], bx[3] - bx[1]) for n, bx in sizes) + ' px; a tab 41 -> %.0f px' % (41 * S))
+        h = dis('MainTimeline', 'dmHook'); padh = min(p[1] for p in HEAD_PADS) * env['SH']
+        say(all(bx[2] <= x1 for _, bx in sizes) and h.count('drawRect') == len(HEAD_PADS) and padh >= 49.5 and all(p[0][-1] in h for p in HEAD_PADS),
+            'buttons: ' + ', '.join('%s %.0f x %.0f' % (n[:-3], bx[2] - bx[0], bx[3] - bx[1]) for n, bx in sizes) + ' px drawn, finger pads %.0f px tall (dmHook); a tab 41 -> %.0f px' % (padh, 41 * env['SH']))
         t = dis('sortPopup_21', 'okPressed'); say('dmOkOrig' in t and "'autosort'" in t, 'the sort popup: OK = original (setSortFilter; applySortFilters is not in main.raw) + autosort (handled: the sort button\'s call)')
         t = dis('partyInventory_1', 'onContextMenuInputUp'); u = dis('MainTimeline', 'dmCtxUp'); h = dis('MainTimeline', 'dmHook')
         say('dmCtxOrig' in t and 'getTimer' in t and 'onContextMenuInputUp' in u and "'rightMouseUp'" in h, 'long press: right mouse up on the window -> onContextMenuInputUp (openContextMenu, handled by the class: main+0x13a7690), at most once in %d ms with the engine\'s own event' % CTX_GUARD_MS)
@@ -897,7 +939,9 @@ def check(o, data, out, rep, say):
         say(eq[0] < -1000 and abs((p2[0] - p1[0]) - CS_SPLIT * S) < 1 and abs((p1[3] - p1[1]) - env['PB'] * S) < 1.5 and p1[3] <= y1,
             'two stat columns: list panels %.0f x %.0f px at x %.0f and %.0f; a stat row 26 -> %.0f px (iPad 46); the doll is off the sheet (its own view)' % (p1[2] - p1[0], p1[3] - p1[1], p1[0], p2[0], 26 * S))
         d = cs_geom(CELL0, 1, SCREEN0); mvb = gr.Movie(b); hits = []
-        say(abs(d['S'] * CS_DOLL_W - DOLL_PX) < 0.01 and abs(d['H'] * d['S'] - STAGE_H) < 0.01, 'the doll panel (state 1): %.0f x %.0f px, a slot 64 -> %.0f px (iPad: doll 422 x 678 in a 1160 x 1040 window, slot 82)' % (DOLL_PX, d['H'] * d['S'], 64 * d['S']))
+        iq = inv_geom(CELL0, 1, SCREEN0)
+        say(abs(d['S'] * CS_DOLL_W - DOLL_PX) < 0.01 and abs(d['H'] * d['S'] - BOTTOM0) < 0.01 and d['MW'] == iq['MW'] and abs(d['DX'] - (iq['X1'] - iq['X0'])) < 0.01,
+            'the doll panel (state 1): %.0f x %.0f px (above the hot bar), a slot 64 -> %.0f px (iPad: doll 422 x 678 in a 1160 x 1040 window, slot 82); block %d px, both movies compute the same width and left edge' % (DOLL_PX, d['H'] * d['S'], 64 * d['S'], d['MW']))
         for cls in ('plusButton_62', 'minusButton_65'):
             cid = [k for k, n in mvb.classes.items() if n.endswith('.' + cls)][0]
             st = gr.frame_state(b.tags[_def_index(b, cid)][1], 1); hm = [_mat(r) for r in st.values() if r['name'] == b'hit_mc\0'][0]
@@ -958,11 +1002,13 @@ def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None):
         # what the PC code keeps hidden is not in the picture: the sort popup (until "sort by" is tapped), the game master's tabs of the sheet
         hide = ('sortBy_mc',) if o == 'partyInventory_p.swf' else ('invTabHolder_mc', 'customStats_mc', 'skillTabHolder_mc', 'panelBg2_mc')
         edit_places(swf, _root_names(swf)[INV_CLIP if o == 'partyInventory_p.swf' else CS_CLIP]['char'], lambda name, rec: False if name in hide else None)
-        pic, org = rn.render(swf, 'root', 1.0); x0 = int(round((DW - e['MW']) / 2.0))
-        if e.get('RX'): pic = pic.crop((0, 0, int(e['RW'] * e['S']), pic.size[1]))
-        img.alpha_composite(pic, (max(x0, 0), 0)) if x0 >= 0 else img.alpha_composite(pic.crop((-x0, 0, pic.size[0], pic.size[1])), (0, 0))
+        # the movie spans the screen from x 0 (setMcSize(screen width)); the window stands where dmLay put it inside
+        pic, org = rn.render(swf, 'root', 1.0); x0 = 0
+        if e.get('RX'):   # the scrollRect crop: only the doll half, the rest of the clip is not drawn
+            dx = int(round(e['DX'])); pic = pic.crop((dx, 0, dx + int(e['RW'] * e['S']), pic.size[1])); img.alpha_composite(pic, (dx, 0))
+        else: img.alpha_composite(pic.crop((0, 0, DW, STAGE_H)), (0, 0))
         if o == 'partyInventory_p.swf':
-            S = e['S']; gx = x0 + e['X0'] + 8 * e['SH'] + 12 * S; gy = e['Y0'] + INV_LIST_Y * e['SH'] + INV_BAG_HEAD * S
+            S = e['S']; gx = x0 + e['X1'] + 8 * e['SH'] + 12 * S; gy = e['Y0'] + INV_LIST_Y * e['SH'] + INV_BAG_HEAD * S
             if grid:
                 for r in range(int(e['ROWS'])):
                     for c in range(INV_COLS):

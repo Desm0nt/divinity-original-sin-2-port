@@ -512,7 +512,7 @@ def check(src):
         for who, why in errs: print('       %s: %s' % (who, why))
         say(not errs, 'ABC verifies: %d method bodies' % len(B.bodies))
         say(Swf(Swf(out).write()).body() == b.body(), 'the movie parses and round-trips')
-        g = gr.check(data, out, quiet=True); want = ['header / tail differ'] if o == 'dmSide_p.swf' else []
+        g = pps.tag_filter(o, gr.check(data, out, quiet=True)); want = ['header / tail differ'] if o == 'dmSide_p.swf' else []   # uiCraft_p: widened art (dos2_ppanel_skills)
         say(g == want, 'every original tag kept, ids unique, uses after definitions%s' % ('' if g == want else ': ' + str(g)))
         ib = {v: k for k, v in B.owners().items()}; doc = [B.mname(c['name']) for c in B.instances if B.mname(c['name']).endswith('.MainTimeline')][0]
         dis = lambda m: '\n'.join(B.dis(B.methods[ib[doc + '::' + m]].body))
