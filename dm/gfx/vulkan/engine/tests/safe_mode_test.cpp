@@ -45,8 +45,14 @@ int main(){
     for(XbgGpuFamily f:{XBG_GPU_ADRENO,XBG_GPU_XCLIPSE,XBG_GPU_MALEOON,XBG_GPU_OTHER})for(int st=0;st<=3;st++)CHECK(sw(st,f).empty());
     CHECK(sw(0,XBG_GPU_MALI).empty() && sw(0,XBG_GPU_POWERVR).empty() && sw(-1,XBG_GPU_MALI).empty());
     // step 1 exactly
-    CHECK(sw(1,XBG_GPU_MALI)=="DM_GFX_ZEROCOPY=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 ");
-    CHECK(sw(1,XBG_GPU_POWERVR)=="DM_GFX_ZEROCOPY=0 DM_GFX_UBO_DYNAMIC=0 DM_NR_UBODYN=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 ");
+    CHECK(sw(1,XBG_GPU_MALI)=="DM_GFX_ZEROCOPY=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 ");
+    CHECK(sw(1,XBG_GPU_POWERVR)=="DM_GFX_ZEROCOPY=0 DM_GFX_UBO_DYNAMIC=0 DM_NR_UBODYN=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 ");
+    // [VK-NATIVE stage 5] step 1 turns the backend's techniques off (mode 1 stays on: a technique bug does not end on the old path); step 2
+    // is the old path; the far-cascade hack and the measurement stay the player's / the tier's
+    for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const std::string s1=sw(1,f),s2=sw(2,f);
+        for(const char *kv:{"DM_VK_NATIVE_SH=0","DM_VK_NATIVE_SH_PCF=0","DM_VK_NATIVE_SHCACHE=0","DM_VK_NATIVE_LIGHTFUSE=0","DM_VK_NATIVE_LIGHTFUSE_FOG=0","DM_VK_NATIVE_COND=0",
+            "DM_VK_NATIVE_GBUF_LE=0","DM_VK_NATIVE_COST=0"}){CHECK(has(s1,kv));CHECK(has(s2,kv));}
+        CHECK(!has(s1,"DM_VK_NATIVE=0") && has(s2,"DM_VK_NATIVE=0")); CHECK(s1.find("DM_VK_NATIVE_SHFAR")==std::string::npos && s1.find("DM_VK_NATIVE_PROF")==std::string::npos);}
     // step 2: step 1 + the tile pass policies (engine + NB) + the native recording paths; nothing of step 3
     for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const std::string s1=sw(1,f),s2=sw(2,f),s3=sw(3,f);
         CHECK(s2.compare(0,s1.size(),s1)==0 && s3.compare(0,s2.size(),s2)==0);   // each step is the one before plus more, same order

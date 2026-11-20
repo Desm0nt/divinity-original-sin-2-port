@@ -179,6 +179,12 @@ static void readback(q_slot *s, int si) {   // the slot's last recording finishe
     uint32_t keyed = 0;
     for (uint32_t q = 0; q < s->nq; q++) keyed += s->qkey[q] != 0;
     if (!keyed) return;
+    // [stage 5.1 A5 fix] verdicts older than the newest folded ones are not folded: a slot whose recording was keyed in another mode and
+    // is read only when the oracle takes it again (mode 2 -> 4) would otherwise become "the last read" and void the newer verdicts
+    // (host test: the frames after the third oracle lost every CPU skip)
+    static uint64_t fold_frame; static int fold_any;
+    if (fold_any && s->frame < fold_frame) return;
+    fold_frame = s->frame; fold_any = 1;
     nro_hist_begin(&g_hist); g_os.read_frames++;
     for (uint32_t q = 0; q < s->nq; q++) {
         const uint64_t k = s->qkey[q]; if (!k) continue;

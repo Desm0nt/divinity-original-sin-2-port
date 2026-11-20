@@ -20,7 +20,9 @@
 //   - mk_validate_on: a validator replays each command buffer's log at its submit, in submission order (= GPU order): per-image layout
 //     tracking (every image starts UNDEFINED), render pass begin / end pairing, commands legal inside / outside a pass, attachment and
 //     descriptor layouts, feedback (an image sampled while it is an attachment of the pass), pipeline / pass compatibility, set /
-//     pipeline layout match, dynamic offset count and range, bound vertex / index buffers, viewport / scissor inside the render area.
+//     pipeline layout match, dynamic offset count and range, bound vertex / index buffers, viewport / scissor inside the render area;
+//   - [stage 5.1 A5] mk_depth_on: a depth CONTENT model of D16 images executed by that replay (clears, load ops, clear rectangles,
+//     copies, image -> buffer copies, draws with a content-derived z and rectangle: see "the depth content model" below).
 #ifndef VKN_MOCK_VK_H
 #define VKN_MOCK_VK_H
 #include <pthread.h>
@@ -89,6 +91,7 @@ typedef struct mk_obj {
     uint64_t qv[64];                                              // query pool: values
     // [stage 4: queries] occlusion pools: samples and state per query (0 undefined, 1 reset, 2 active, 3 available)
     int qocclusion; uint32_t *qocc; uint8_t *qst;
+    uint16_t *dpx;                                                // [stage 5.1 A5] D16 image: the depth model's texels (mk_depth_on)
 } mk_obj;
 
 static pthread_mutex_t mk_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -125,12 +128,14 @@ enum { MK_E_BEGIN_CB = 1, MK_E_END_CB, MK_E_SUBMIT, MK_E_PRESENT, MK_E_PRESENT_W
        MK_E_BIND_IB, MK_E_VIEWPORT, MK_E_SCISSOR, MK_E_DRAW, MK_E_DRAW_IDX, MK_E_DISPATCH, MK_E_RESET_QP, MK_E_TIMESTAMP, MK_E_WAIT,
        MK_E_BEGIN_Q, MK_E_END_Q, MK_E_COPY_Q, MK_E_BEGIN_COND, MK_E_END_COND,   // [stage 4: queries]
        MK_E_COPY_BUF, MK_E_PUSH,                                                 // [stage 4: GPU BC route] buffer copies, push constants
+       MK_E_COPY_IMG_BUF,                                                        // [stage 5.1 A5] image -> buffer copies (logged with mk_depth_on only)
        MK_E_N };
 static const char *const mk_ev_name[MK_E_N] MK_U = {"?", "begin", "end", "submit", "present", "present-wait", "barrier", "copy-buf-img", "copy-img",
     "blit", "clear-color-img", "clear-ds-img", "begin-rp", "end-rp", "clear-att", "bind-pipe", "bind-sets", "bind-vb", "bind-ib", "viewport",
     "scissor", "draw", "draw-idx", "dispatch", "reset-qp", "timestamp", "fence-wait",
     "begin-query", "end-query", "copy-query", "begin-cond", "end-cond",   // [stage 4: queries]
-    "copy-buf", "push"};                                                 // [stage 4: GPU BC route]
+    "copy-buf", "push",                                                  // [stage 4: GPU BC route]
+    "copy-img-buf"};                                                     // [stage 5.1 A5]
 typedef struct mk_ev {
     int op; VkCommandBuffer cb; uint64_t seq;
     uint64_t a[4];                 // handles (image / buffer / pipeline / set / pass / framebuffer / fence), by op
@@ -171,6 +176,7 @@ static void mk_del(uint64_t h, int kind) {
     if (!o) mk_err("destroy of %s %#llx that is not a live %s", mk_kind_name[kind], (unsigned long long)h, mk_kind_name[kind]);
     else {
         o->live = 0; mk_destroyed[kind]++; if (kind == MK_MEMORY) { free(o->cpu); o->cpu = NULL; }
+        if (kind == MK_IMAGE) { free(o->dpx); o->dpx = NULL; }   // [stage 5.1 A5]
         if (kind == MK_DPOOL)   // its sets die with it
             for (uint32_t i = 0; i < mk_nobj; i++) { mk_obj *s = mk_obj_tab[i]; if (s->kind == MK_DSET && s->live && s->dpool == h) { s->live = 0; mk_destroyed[MK_DSET]++; } }
     }
@@ -646,8 +652,18 @@ void vkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout 
 }
 // (the warm-up's cache file, vkn_warm.c: no data in the mock)
 VkResult vkGetPipelineCacheData(VkDevice d, VkPipelineCache c, size_t *n, void *data) { (void)d; (void)c; (void)data; if (n) *n = 0; return VK_SUCCESS; }
-// (only the DM_VK_NATIVE_DUMP debug aid of vkn_pass.c calls it; the tests never set that switch)
-void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) { (void)cb; (void)src; (void)sl; (void)dst; (void)n; (void)r; }
+// (the DM_VK_NATIVE_DUMP debug aid of vkn_pass.c, which the tests never switch on, and the shadow cache's verify read-back) [stage 5.1 A5]
+// logged only while the depth model is on (mk_depth_on): its replay writes the D16 texels of the region into the buffer's memory
+static int mk_depth_on;
+void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) {
+    if (!mk_depth_on) { (void)cb; (void)src; (void)sl; (void)dst; (void)n; (void)r; return; }
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdCopyImageToBuffer", MK_E_COPY_IMG_BUF);
+    e->a[0] = MK_H(src); e->a[1] = MK_H(dst); e->l0 = sl; e->n = n;
+    if (n) { e->off[0] = r[0].bufferOffset; e->rect.offset.x = r[0].imageOffset.x; e->rect.offset.y = r[0].imageOffset.y; e->rect.extent.width = r[0].imageExtent.width; e->rect.extent.height = r[0].imageExtent.height;
+             e->u[0] = r[0].bufferRowLength; e->u[1] = r[0].imageSubresource.aspectMask; e->u[2] = r[0].imageSubresource.mipLevel; }
+    if (n != 1) mk_err("vkCmdCopyImageToBuffer: %u regions (the depth model copies one)", n);
+    pthread_mutex_unlock(&mk_mu);
+}
 void vkCmdBlitImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageBlit *b, VkFilter f) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdBlitImage", MK_E_BLIT_IMG);
     e->a[0] = MK_H(src); e->a[1] = MK_H(dst); e->l0 = sl; e->l1 = dl; e->n = n; memcpy(e->ib, b, sizeof *b * (n > 4 ? 4 : n)); e->filter = f;
@@ -982,6 +998,172 @@ static void mk_v_set(mk_obj *cbo, const mk_vstate *st, uint64_t set, uint64_t pl
     if (kd != ndyn) MK_V("%u dynamic offsets bound, the set layout has %u dynamic descriptors", ndyn, kd);
 }
 
+// ---- [stage 5.1 A5] the depth content model (mk_depth_on; vkn_stage3_test's shadow-cache block). Every D16_UNORM image keeps its level-0 /
+// layer-0 texels on the CPU, and the validator's replay (GPU order) executes on them: whole-image depth clears, render-pass load ops
+// (CLEAR: the value, DONT_CARE: garbage 0x5a5a), vkCmdClearAttachments rectangles, image copies, image -> buffer copies (into the buffer's
+// memory) and DRAWS. A draw with a depth test writes one constant z over one rectangle, both derived from a hash of what its fragments
+// depend on - by CONTENT, never by handle (two runs of the same scenario that create other objects in between give equal draws equal z):
+// the first 16 bytes the draw fetches from each vertex binding (bound offset + vertexOffset / firstVertex x stride), the first 8 index
+// bytes (bound offset + firstIndex x size), the index / vertex count, instances, the first 16 bytes of every buffer descriptor of the
+// bound set (dynamic offsets applied), the viewport and the scissor. The rectangle lies inside the viewport, cut by scissor, render area
+// and image; the depth compare op / write enable of the pipeline apply per texel (rasterizer discard, a predicate that discarded the draw:
+// nothing). So min(clear, z of every LESS draw) is order-free exactly as the shadow cache assumes, and GREATER / ALWAYS draws are not.
+static uint64_t mk_depth_draws;
+static uint16_t *mk_dpx(mk_obj *im) {
+    if (!mk_depth_on || !im || im->ici.format != VK_FORMAT_D16_UNORM) return NULL;
+    if (!im->dpx) {
+        const size_t n = (size_t)im->ici.extent.width * im->ici.extent.height;
+        im->dpx = (uint16_t *)malloc(n * 2); if (!im->dpx) return NULL;
+        for (size_t i = 0; i < n; i++) im->dpx[i] = 0x5a5a;   // undefined content
+    }
+    return im->dpx;
+}
+static uint16_t mk_q16(float d) { if (!(d > 0.0f)) return 0; if (d >= 1.0f) return 0xffff; return (uint16_t)(d * 65535.0f + 0.5f); }
+static void mk_dfill(mk_obj *im, int32_t x, int32_t y, int64_t w, int64_t h, uint16_t v) {
+    uint16_t *p = mk_dpx(im); if (!p) return;
+    const int64_t W = im->ici.extent.width, Hh = im->ici.extent.height;
+    int64_t x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y, x1 = (int64_t)x + w, y1 = (int64_t)y + h;
+    if (x1 > W) x1 = W;
+    if (y1 > Hh) y1 = Hh;
+    for (int64_t j = y0; j < y1; j++) for (int64_t i = x0; i < x1; i++) p[j * W + i] = v;
+}
+static uint64_t mk_hmix(uint64_t h, uint64_t v) { h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2); h ^= h >> 31; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 29; return h; }
+static uint64_t mk_hbytes(uint64_t h, uint64_t buf, uint64_t off, uint32_t n) {   // n bytes of a buffer's memory (zeros past its end / without memory)
+    mk_obj *b = mk_any(buf); uint8_t t[16] = {0};
+    if (n > 16) n = 16;
+    if (b && b->kind == MK_BUFFER && b->cpu) for (uint32_t i = 0; i < n && off + i < b->size; i++) t[i] = ((const uint8_t *)b->cpu)[off + i];
+    uint64_t a, c; memcpy(&a, t, 8); memcpy(&c, t + 8, 8);
+    return mk_hmix(mk_hmix(h, a), c);
+}
+static int mk_dcmp(VkCompareOp op, uint16_t z, uint16_t d) {
+    switch (op) {
+    case VK_COMPARE_OP_NEVER: return 0;
+    case VK_COMPARE_OP_LESS: return z < d;
+    case VK_COMPARE_OP_EQUAL: return z == d;
+    case VK_COMPARE_OP_LESS_OR_EQUAL: return z <= d;
+    case VK_COMPARE_OP_GREATER: return z > d;
+    case VK_COMPARE_OP_NOT_EQUAL: return z != d;
+    case VK_COMPARE_OP_GREATER_OR_EQUAL: return z >= d;
+    default: return 1;
+    }
+}
+// The z and rectangle of a draw (identity hash above). 0 = the draw writes nothing.
+static int mk_dmodel_draw(const mk_vstate *st, const mk_ev *e) {
+    if (!mk_depth_on || !st->in || !st->rp || !st->rp->rp.has_depth || e->u[7]) return 0;
+    const uint32_t da = st->rp->rp.depth.attachment; if (da >= 9) return 0;
+    mk_obj *im = st->att_img[da] ? mk_find(st->att_img[da], MK_IMAGE) : NULL; uint16_t *px = mk_dpx(im);
+    mk_obj *p = st->gpipe ? mk_find(st->gpipe, MK_PIPE) : NULL;
+    if (!px || !p || p->compute || p->gp.rs.rasterizerDiscardEnable || !p->gp.has_ds || !p->gp.ds.depthTestEnable) return 0;
+    const int idx = e->op == MK_E_DRAW_IDX;
+    uint64_t h = mk_hmix(0xD3, (uint64_t)e->u[0] | (uint64_t)e->u[1] << 32);
+    const int64_t vo = idx ? (int32_t)e->u[3] : (int64_t)e->u[2];
+    if (idx) { const uint64_t isz = st->itype == VK_INDEX_TYPE_UINT32 ? 4 : 2; h = mk_hbytes(h, st->ib, st->iboff + (uint64_t)e->u[2] * isz, 8); }
+    for (uint32_t i = 0; i < p->gp.nbind; i++) {
+        const VkVertexInputBindingDescription *b = &p->gp.bind[i]; if (b->binding >= 8) continue;
+        const int64_t a = (int64_t)st->vboff[b->binding] + (b->inputRate == VK_VERTEX_INPUT_RATE_VERTEX ? vo * (int64_t)b->stride : 0);
+        h = mk_hbytes(mk_hmix(h, b->binding), st->vb[b->binding], a < 0 ? 0 : (uint64_t)a, 16);
+    }
+    {   // the buffer descriptors of the bound set (binding order, dynamic offsets in that order)
+        mk_obj *pl = mk_any(MK_H(p->gp.layout)); mk_obj *sl = pl && pl->nset ? mk_any(MK_H(pl->set0)) : NULL; mk_obj *s = st->gset ? mk_any(st->gset) : NULL;
+        if (sl && s && s->kind == MK_DSET) {
+            uint32_t order[64], n = sl->nb < 64 ? sl->nb : 64, kd = 0;
+            for (uint32_t i = 0; i < n; i++) order[i] = i;
+            for (uint32_t i = 1; i < n; i++) for (uint32_t j = i; j > 0 && sl->b[order[j]].binding < sl->b[order[j - 1]].binding; j--) { const uint32_t t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+            for (uint32_t i = 0; i < n; i++) {
+                const VkDescriptorSetLayoutBinding *lb = &sl->b[order[i]];
+                if (!mk_is_buf_desc(lb->descriptorType)) continue;
+                const mk_dw *w = NULL; for (uint32_t j = 0; j < s->ndw; j++) if (s->dw[j].binding == lb->binding && s->dw[j].elem == 0) w = &s->dw[j];
+                uint64_t d = 0; if (mk_is_dyn_desc(lb->descriptorType)) { if (kd < st->gndyn) d = st->gdyn[kd]; kd++; }
+                if (w) h = mk_hbytes(mk_hmix(h, lb->binding), MK_H(w->buf), w->off + d, 16);
+            }
+        }
+    }
+    uint32_t vb[4]; memcpy(&vb[0], &st->vpv.x, 4); memcpy(&vb[1], &st->vpv.y, 4); memcpy(&vb[2], &st->vpv.width, 4); memcpy(&vb[3], &st->vpv.height, 4);
+    h = mk_hmix(mk_hmix(h, (uint64_t)vb[0] | (uint64_t)vb[1] << 32), (uint64_t)vb[2] | (uint64_t)vb[3] << 32);
+    h = mk_hmix(mk_hmix(h, (uint64_t)(uint32_t)st->scr.offset.x | (uint64_t)(uint32_t)st->scr.offset.y << 32), (uint64_t)st->scr.extent.width | (uint64_t)st->scr.extent.height << 32);
+    const uint16_t z = (uint16_t)(0x0800 + h % 0xF000);
+    // the rectangle: inside the viewport (its height may be negative: the backend's y flip)
+    const int64_t vx = (int64_t)st->vpv.x, vh = (int64_t)(st->vpv.height < 0 ? -st->vpv.height : st->vpv.height), vw = (int64_t)st->vpv.width;
+    const int64_t vy = (int64_t)(st->vpv.height < 0 ? st->vpv.y + st->vpv.height : st->vpv.y);
+    if (vw <= 0 || vh <= 0) return 0;
+    const int64_t rw = vw / 4 + (int64_t)((h >> 8) % (uint64_t)(vw / 2 + 1)), rh = vh / 4 + (int64_t)((h >> 20) % (uint64_t)(vh / 2 + 1));
+    int64_t x0 = vx + (int64_t)((h >> 32) % (uint64_t)(vw - rw + 1)), y0 = vy + (int64_t)((h >> 44) % (uint64_t)(vh - rh + 1)), x1 = x0 + rw, y1 = y0 + rh;
+    if (st->sc) { if (x0 < st->scr.offset.x) x0 = st->scr.offset.x; if (y0 < st->scr.offset.y) y0 = st->scr.offset.y;
+                  if (x1 > (int64_t)st->scr.offset.x + st->scr.extent.width) x1 = (int64_t)st->scr.offset.x + st->scr.extent.width;
+                  if (y1 > (int64_t)st->scr.offset.y + st->scr.extent.height) y1 = (int64_t)st->scr.offset.y + st->scr.extent.height; }
+    if (x0 < st->area.offset.x) x0 = st->area.offset.x;
+    if (y0 < st->area.offset.y) y0 = st->area.offset.y;
+    if (x1 > (int64_t)st->area.offset.x + st->area.extent.width) x1 = (int64_t)st->area.offset.x + st->area.extent.width;
+    if (y1 > (int64_t)st->area.offset.y + st->area.extent.height) y1 = (int64_t)st->area.offset.y + st->area.extent.height;
+    if (x1 > (int64_t)im->ici.extent.width) x1 = im->ici.extent.width;
+    if (y1 > (int64_t)im->ici.extent.height) y1 = im->ici.extent.height;
+    const int64_t W = im->ici.extent.width; const VkCompareOp op = p->gp.ds.depthCompareOp; const int wr = p->gp.ds.depthWriteEnable != 0;
+    for (int64_t j = y0 < 0 ? 0 : y0; j < y1; j++) for (int64_t i = x0 < 0 ? 0 : x0; i < x1; i++) { uint16_t *d = &px[j * W + i]; if (mk_dcmp(op, z, *d) && wr) *d = z; }
+    mk_depth_draws++;
+    return 1;
+}
+// One replayed command on the model (called by mk_replay after its own checks of the command, with the state before / after as noted).
+static void mk_dmodel(const mk_vstate *st, const mk_ev *e) {
+    if (!mk_depth_on) return;
+    switch (e->op) {
+    case MK_E_CLEAR_DS_IMG: {   // the whole image (its only level / layer)
+        mk_obj *im = mk_find(e->a[0], MK_IMAGE);
+        if (im && (e->r.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) mk_dfill(im, 0, 0, im->ici.extent.width, im->ici.extent.height, mk_q16(e->cv[0].depthStencil.depth));
+        break;
+    }
+    case MK_E_BEGIN_RP: {       // (st: the pass just begun) load ops of the depth attachment over the render area
+        if (!st->rp || !st->rp->rp.has_depth) break;
+        const uint32_t da = st->rp->rp.depth.attachment; if (da >= 9) break;
+        mk_obj *im = st->att_img[da] ? mk_find(st->att_img[da], MK_IMAGE) : NULL; if (!im) break;
+        const VkAttachmentLoadOp lo = st->rp->rp.att[da].loadOp;
+        if (lo == VK_ATTACHMENT_LOAD_OP_CLEAR) mk_dfill(im, e->rect.offset.x, e->rect.offset.y, e->rect.extent.width, e->rect.extent.height, mk_q16(da < e->n ? e->cv[da].depthStencil.depth : 0.0f));
+        else if (lo == VK_ATTACHMENT_LOAD_OP_DONT_CARE) mk_dfill(im, e->rect.offset.x, e->rect.offset.y, e->rect.extent.width, e->rect.extent.height, 0x5a5a);
+        break;
+    }
+    case MK_E_CLEAR_ATT: {
+        if (!st->rp || !st->rp->rp.has_depth) break;
+        const uint32_t da = st->rp->rp.depth.attachment; if (da >= 9) break;
+        mk_obj *im = st->att_img[da] ? mk_find(st->att_img[da], MK_IMAGE) : NULL; if (!im) break;
+        for (uint32_t i = 0; i < e->n; i++) if (e->ca[i].aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+            for (uint32_t r = 0; r < e->u[0] && r < 2; r++) mk_dfill(im, e->cr[r].rect.offset.x, e->cr[r].rect.offset.y, e->cr[r].rect.extent.width, e->cr[r].rect.extent.height, mk_q16(e->ca[i].clearValue.depthStencil.depth));
+        break;
+    }
+    case MK_E_COPY_IMG: {
+        mk_obj *s = mk_find(e->a[0], MK_IMAGE), *d = mk_find(e->a[1], MK_IMAGE); uint16_t *sp = mk_dpx(s), *dp = mk_dpx(d);
+        if (!sp || !dp) break;
+        for (uint32_t k = 0; k < e->n && k < 4; k++) {
+            const VkImageCopy *c = &e->ic[k];
+            if (c->srcSubresource.mipLevel || c->dstSubresource.mipLevel) continue;
+            for (uint32_t j = 0; j < c->extent.height; j++) for (uint32_t i = 0; i < c->extent.width; i++) {
+                const int64_t sx = c->srcOffset.x + i, sy = c->srcOffset.y + j, dx = c->dstOffset.x + i, dy = c->dstOffset.y + j;
+                if (sx < s->ici.extent.width && sy < s->ici.extent.height && dx < d->ici.extent.width && dy < d->ici.extent.height)
+                    dp[dy * d->ici.extent.width + dx] = sp[sy * s->ici.extent.width + sx];
+            }
+        }
+        break;
+    }
+    case MK_E_COPY_IMG_BUF: {
+        mk_obj *s = mk_find(e->a[0], MK_IMAGE), *b = mk_find(e->a[1], MK_BUFFER); uint16_t *sp = mk_dpx(s);
+        if (!sp || !b || !b->cpu || e->u[2]) break;
+        const uint32_t w = e->rect.extent.width, hh = e->rect.extent.height, row = e->u[0] ? e->u[0] : w;
+        for (uint32_t j = 0; j < hh; j++) for (uint32_t i = 0; i < w; i++) {
+            const uint64_t at = e->off[0] + ((uint64_t)j * row + i) * 2; const int64_t x = e->rect.offset.x + i, y = e->rect.offset.y + j;
+            if (at + 2 <= b->size && x < s->ici.extent.width && y < s->ici.extent.height) memcpy((uint8_t *)b->cpu + at, &sp[y * s->ici.extent.width + x], 2);
+        }
+        break;
+    }
+    case MK_E_DRAW: case MK_E_DRAW_IDX: mk_dmodel_draw(st, e); break;
+    default: break;
+    }
+}
+// The test's view of an image's model texels (NULL = not a D16 image / model off).
+static MK_U const uint16_t *mk_depth_px(VkImage img, uint32_t *w, uint32_t *h) {
+    pthread_mutex_lock(&mk_mu); mk_obj *o = mk_find(MK_H(img), MK_IMAGE); const uint16_t *p = mk_dpx(o);
+    if (w) *w = o ? o->ici.extent.width : 0;
+    if (h) *h = o ? o->ici.extent.height : 0;
+    pthread_mutex_unlock(&mk_mu); return p;
+}
+
 static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
     cbo->nuses = 0; mk_v_cb = cb;
     static const mk_ev nil = {0}; mk_v_ev = &nil;
@@ -994,7 +1176,8 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
         if (e->op == MK_E_END_CB) { if (st.in) MK_V("command buffer ended inside a render pass"); if (st.qon || st.condon) MK_V("command buffer ended with a query / conditional block active"); break; }
         if (e->op == MK_E_SUBMIT || e->op == MK_E_BEGIN_CB) { MK_V("recording without its end"); break; }
         const int outside = e->op == MK_E_BARRIER || e->op == MK_E_COPY_BUF_IMG || e->op == MK_E_COPY_IMG || e->op == MK_E_BLIT_IMG || e->op == MK_E_CLEAR_COLOR_IMG ||
-                            e->op == MK_E_CLEAR_DS_IMG || e->op == MK_E_DISPATCH || e->op == MK_E_RESET_QP || e->op == MK_E_BEGIN_RP || e->op == MK_E_COPY_Q;
+                            e->op == MK_E_CLEAR_DS_IMG || e->op == MK_E_DISPATCH || e->op == MK_E_RESET_QP || e->op == MK_E_BEGIN_RP || e->op == MK_E_COPY_Q ||
+                            e->op == MK_E_COPY_IMG_BUF;   // [stage 5.1 A5]
         if (outside && st.in) MK_V("not allowed inside a render pass");
         const int inside = e->op == MK_E_END_RP || e->op == MK_E_CLEAR_ATT || e->op == MK_E_DRAW || e->op == MK_E_DRAW_IDX ||
                            e->op == MK_E_BEGIN_Q || e->op == MK_E_END_Q || e->op == MK_E_BEGIN_COND || e->op == MK_E_END_COND;   // [stage 4: queries] (the port's rule)
@@ -1152,8 +1335,15 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
             mk_v_set(cbo, &st, st.cset, MK_H(p->cs_layout), st.clayout, st.cdyn, st.cndyn);
             break;
         }
+        case MK_E_COPY_IMG_BUF: {   // [stage 5.1 A5]
+            mk_obj *im = mk_v_img(cbo, e->a[0]); mk_use(cbo, e->a[1]);
+            if (im && (im->gpu_layout != e->l0 || (e->l0 != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && e->l0 != VK_IMAGE_LAYOUT_GENERAL))) MK_V("source layout %d, the image is in %d", (int)e->l0, (int)im->gpu_layout);
+            if (!mk_find(e->a[1], MK_BUFFER)) MK_V("dead destination buffer");
+            break;
+        }
         default: break;
         }
+        mk_dmodel(&st, e);   // [stage 5.1 A5] the depth content model (mk_depth_on only)
     }
 }
 

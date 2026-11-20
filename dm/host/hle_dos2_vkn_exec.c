@@ -569,6 +569,7 @@ static void ex_census(void) {
 }
 
 // ---- registration ----
+static void stage5_line(void);   // [stage 5.1 A5] (end of file)
 void dm_vkn_exec_register(void);
 void dm_vkn_exec_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;   // stage 3 is mode 1 only; mode 2 keeps the engine's executor and functions untouched
@@ -592,6 +593,7 @@ void dm_vkn_exec_register(void) {
     else vkn_logf("exec: ExecuteRenderCommand opcodes 0x04 0x07 0x08 0x0a 0x0b 0x12 0x13 0x15 0x23 0x37 0x3d 0x3e 0x3f taken; BindShader, ApplyBlend, "
                   "ApplyDrawState, 0x92c130, SetRasterState / ListDrawArrays immediate branches replaced (cache fields only)");
     dm_vkn_census(ex_census);
+    dm_vkn_census(stage5_line);   // [stage 5.1 A5] the stage-5 switches in effect, once (end of file)
     // Stage 4: conditional rendering and visibility queries (vkn_query.h). DM_VK_NATIVE_COND 0 (default) = everything drawn, the
     // pairs and conditions only counted (the shipping picture); 1 = on; 2 = count what the GPU would skip; 3 = poison (inverted).
     const char *qc = getenv("DM_VK_NATIVE_COND");
@@ -602,44 +604,139 @@ void dm_vkn_exec_register(void) {
 // With DM_VK_NATIVE=1 the old layers must neither hook nor record: their hooks sit on the same engine functions (ExecuteRenderCommand,
 // the draw / flush / state functions, BeginFrame / EndFrame, the buffer / texture creates) and assume the NVN stream; their records
 // and the translator features that read them expect NVN calls that mode 1 no longer makes. Forced to 0 (setenv overwrite) before any
-// installer of the DOS2 block runs; app defaults (dm/android/jni_android.c k_nb_on) and a player's dm/env lose to it.
-static const char *const k_pre_off[] = {
-    // hle_dos2_native.c: ExecuteRenderCommand census / pass-graph marks written into the NVN command buffer / draws as one NVN record
-    "DM_NATIVE_RC", "DM_NATIVE_DRAW", "DM_GFX_PASS_GRAPH",
-    // hle_dos2_nb.c / hle_dos2_nb_post.c: NB front end (hooks ExecuteCommandList, BeginFrame, EndFrame, the ExecuteRenderCommand
-    // chain, the draw functions; NB-13 state records, NB-18 post-process replacement, ordering, relocation, dumps)
-    "DM_NB", "DM_NB_OPS", "DM_NB_OPS_CHECK", "DM_NB_OWN", "DM_NB_FOREIGN", "DM_NB_ORDER", "DM_NB_RELOC", "DM_NB_DUMP", "DM_NB_MX",
-    "DM_NB_POST", "DM_NB_POST_AA", "DM_NB_POST_AA_OUTLINE", "DM_NR_LEAN", "DM_NR_TAPSET",
-    // hle_dos2_nr.c + its .inc parts: the registry and every NR step on top (DM_NR is also implied by DM_NR_TEX / DM_NR_TEXSTREAM:
-    // NR-05 / NR-22 texture events, NR-06 buffers, NR-07 pipe hints, NR-02 keys, NR-09 / 09R direct draws, NR-23 no-call, NR-09S state,
-    // NR-09U / UBD uniforms, NR-Z5 / Z8)
-    "DM_NR", "DM_NR_TEX", "DM_NR_TEXSTREAM", "DM_NR_BUF", "DM_NR_PIPE", "DM_NR_DUMP", "DM_NR_KEY", "DM_NR_DRAW", "DM_NR_DIRECT",
-    "DM_NR_NOCALL", "DM_NR_STATE", "DM_NR_UBO", "DM_NR_UBD", "DM_NR_Z5", "DM_NR_Z8",
-    // hle_dos2_nrn*.inc: NR-NATIVE (per-pass cards, events, list rewriting, packet models, no-body binds)
-    "DM_NRN", "DM_NRN_EV", "DM_NRN_LIST", "DM_NRN_REC", "DM_NRN_PKT", "DM_NRN_NOBODY", "DM_NRN_SHORT", "DM_NRN_LIVE", "DM_NRN_SHC",
-    "DM_NRN_SHADOW", "DM_NRN_PREPASS", "DM_NRN_GBUF", "DM_NRN_LIGHT", "DM_NRN_POST", "DM_NRN_OTHER",
-    // translator features that consume NB / NR records or their native descriptors (k_nb_on and the safe-mode table)
-    "DM_NB_RP", "DM_NB_OPBARRIER", "DM_NB_PIPE", "DM_NB_DESC", "DM_NB_UBO", "DM_NB_UIAREA", "DM_NB_MT", "DM_NR_DESC", "DM_NR_HEAT",
-    "DM_NR_SH_SURF", "DM_NR_MAT", "DM_NR_TRX_STICKY", "DM_NR_TRX_ZC", "DM_NR_SEED", "DM_NR_SH", "DM_NR_Z3",
-    // Bundle swaps of the translator's shader loader (the backend takes its modules through that loader): replacement shaders that
-    // expect the translator to cooperate at the draw (a compare sampler for the dref shadow taps, the fused light draw, the on-chip
-    // chain, the FSR pass, trimmed vertex outputs). Phone run V3_f: with DM_NR_SH=1 still on (family default, read by the
-    // translator's init before this function ran) the last post pass wrote zeros and the lighting was incomplete.
-    "DM_NR_SH_PCF", "DM_NR_LIGHTFUSE", "DM_NR_LIGHTFUSE_FOG", "DM_NR_ONCHIP", "DM_NR_ONCHIP_FOG", "DM_NR_MAT_VS", "DM_NR_XLQ", "DM_HACK_FSR",
+// installer of the DOS2 block runs and before the Vulkan start (jni_android.c host_thread); app defaults (k_nb_on) and a player's
+// dm/env lose to it.
+// [stage 5.1 A5] Two kinds of entry since stage 5 (checked 21.11 by the readers of each name, dm/ without tests):
+//   H  a host layer (dm/host): its installer hooks engine functions the backend owns - matters in every mode-1 run;
+//   T  read by the translator only (dm/gfx/vulkan/engine): in mode 1 the translator is NOT initialised (DM_VK_NATIVE_SHLIB, default 1:
+//      the backend's own shader library), so these matter only for the DM_VK_NATIVE_SHLIB=0 fallback, where the translator is
+//      initialised library-only and its init / shader loader would read them (phone run V3_f: DM_NR_SH=1 from the family default broke
+//      the post chain). Stage 5 ports techniques under NEW names DM_VK_NATIVE_<TECH> (the backend reads only those; their values are
+//      printed once by stage5_line below), so the old names stay forced off: with SHLIB=0 the translator would otherwise apply its
+//      own version on top of the backend's (a named bundle read twice, a Dref module without the compare sampler, ...).
+// Each entry: kind, what it would do in mode 1.
+static const struct { const char *name; char kind; } k_pre_off[] = {   // kind: 'H' host, 'T' translator, 'B' both
+    {"DM_NATIVE_RC", 'H'},             // H hle_dos2_native.c: ExecuteRenderCommand census hook
+    {"DM_NATIVE_DRAW", 'H'},           // H hle_dos2_native.c: draws as one NVN record
+    {"DM_GFX_PASS_GRAPH", 'B'},        // H+T pass-graph marks written into the NVN command buffer / their reader
+    {"DM_NB", 'H'},                    // H hle_dos2_nb.c: the NB front end (ExecuteCommandList, BeginFrame, EndFrame, the draw functions)
+    {"DM_NB_OPS", 'H'},                // H NB-13 state records
+    {"DM_NB_OPS_CHECK", 'H'},          // H their check
+    {"DM_NB_OWN", 'B'},                // H+T NB own-pass records / the translator's executor of them
+    {"DM_NB_FOREIGN", 'H'},            // H foreign-command records
+    {"DM_NB_ORDER", 'B'},              // H+T record ordering (also read by the NR direct / NRN layers)
+    {"DM_NB_RELOC", 'B'},              // H+T record relocation
+    {"DM_NB_DUMP", 'H'},               // H record dumps
+    {"DM_NB_MX", 'B'},                 // H+T NB multi-execution
+    {"DM_NB_POST", 'H'},               // H hle_dos2_nb_post.c: NB-18 post-process replacement (hooks the post chain)
+    {"DM_NB_POST_AA", 'H'},            // H its AA variant
+    {"DM_NB_POST_AA_OUTLINE", 'H'},    // H its AA + character outline variant (app default 1)
+    {"DM_NR_LEAN", 'H'},               // H the NB lean call path
+    {"DM_NR_TAPSET", 'H'},             // H NR-TAPSET hash set of the NB layer (app default 1)
+    {"DM_NR", 'H'},                    // H hle_dos2_nr.c: the engine object registry (texture / buffer / pipe events)
+    {"DM_NR_TEX", 'H'},                // H NR-05 texture events (implies DM_NR; app default 1)
+    {"DM_NR_TEXSTREAM", 'H'},          // H NR-22 texture stream worker (implies DM_NR; app default 1)
+    {"DM_NR_BUF", 'B'},                // H+T NR-06 buffers
+    {"DM_NR_PIPE", 'B'},               // H+T NR-07 pipe hints
+    {"DM_NR_DUMP", 'H'},               // H registry dumps
+    {"DM_NR_KEY", 'H'},                // H NR-02 draw keys (hooks the texture flush 0x924730)
+    {"DM_NR_DRAW", 'B'},               // H+T NR-09 direct draws
+    {"DM_NR_DIRECT", 'B'},             // H+T NR-09R direct records
+    {"DM_NR_NOCALL", 'H'},             // H NR-23 no-call path
+    {"DM_NR_STATE", 'H'},              // H NR-09S state records (app default 4)
+    {"DM_NR_UBO", 'H'},                // H NR-09U uniform allocator (app default 1)
+    {"DM_NR_UBD", 'B'},                // H+T NR-UBD repeated uniform binds (app default 1)
+    {"DM_NR_Z5", 'B'},                 // H+T NR-ZERO Z5 packets from the game thread
+    {"DM_NR_Z8", 'B'},                 // H+T NR-ZERO Z8 submit walk
+    {"DM_NRN", 'H'},                   // H NR-NATIVE pass cards, all passes (nr_nrn.h)
+    {"DM_NRN_EV", 'B'},                // H+T NR-NATIVE events
+    {"DM_NRN_LIST", 'H'},              // H NR-NATIVE list rewriting
+    {"DM_NRN_REC", 'H'},               // H NR-NATIVE records
+    {"DM_NRN_PKT", 'H'},               // H NR-NATIVE packet models
+    {"DM_NRN_NOBODY", 'H'},            // H NR-NATIVE no-body binds
+    {"DM_NRN_SHORT", 'H'},             // H NR-NATIVE short path
+    {"DM_NRN_LIVE", 'T'},              // T NR-NATIVE live (xbg_nr_z3e.inc)
+    {"DM_NRN_SHC", 'T'},               // T NR-NATIVE shadow cache (xbg_nr_shc.inc)
+    {"DM_NRN_SHADOW", 'H'},            // H the per-pass NR-NATIVE modes (nr_nrn.h composes "DM_NRN_<PASS>")
+    {"DM_NRN_PREPASS", 'H'},           // H "
+    {"DM_NRN_GBUF", 'H'},              // H "
+    {"DM_NRN_LIGHT", 'H'},             // H "
+    {"DM_NRN_POST", 'H'},              // H "
+    {"DM_NRN_OTHER", 'H'},             // H "
+    {"DM_NB_RP", 'T'},                 // T NB-06 render-pass planner (app default 1)
+    {"DM_NB_OPBARRIER", 'T'},          // T NB narrow copy barriers (app default 1)
+    {"DM_NB_PIPE", 'T'},               // T NB pipeline cache
+    {"DM_NB_DESC", 'T'},               // T NB descriptor cache
+    {"DM_NB_UBO", 'T'},                // T NB uniform hits
+    {"DM_NB_UIAREA", 'T'},             // T NB UI render area
+    {"DM_NB_MT", 'T'},                 // T NB-20b recording worker
+    {"DM_NR_DESC", 'T'},               // T NR descriptors / seed policy
+    {"DM_NR_HEAT", 'B'},               // H+T pass heat measurement (replaced by DM_VK_NATIVE_PROF)
+    {"DM_NR_SH_SURF", 'T'},            // T NR-33C surface bundles (app default 1)
+    {"DM_NR_MAT", 'T'},                // T NR-33B empty depth-pass FS (app default 1)
+    {"DM_NR_TRX_STICKY", 'T'},         // T translator sticky pages (app default 1)
+    {"DM_NR_TRX_ZC", 'T'},             // T translator zero-copy chunk index (app default 1)
+    {"DM_NR_SEED", 'T'},               // T NR-31 portable warm-up seed (the backend has vkn_warm)
+    {"DM_NR_SH", 'T'},                 // T NR-04 bundles by name (backend: DM_VK_NATIVE_SH)
+    {"DM_NR_Z3", 'T'},                 // T NR-ZERO Z3 answer tables
+    {"DM_NR_SH_PCF", 'T'},             // T NR-04 shadow class / Dref (backend: DM_VK_NATIVE_SH_PCF)
+    {"DM_NR_LIGHTFUSE", 'T'},          // T fused Sky -> Light (backend: DM_VK_NATIVE_LIGHTFUSE, stage 5.1 A4)
+    {"DM_NR_LIGHTFUSE_FOG", 'T'},      // T + Fog (backend: DM_VK_NATIVE_LIGHTFUSE_FOG)
+    {"DM_NR_ONCHIP", 'T'},             // T NR-ONCHIP Sky -> Light subpasses (not ported: owner 20.11)
+    {"DM_NR_ONCHIP_FOG", 'T'},         // T its fog variant
+    {"DM_NR_MAT_VS", 'T'},             // T NR-33B trimmed vertex outputs
+    {"DM_NR_XLQ", 'T'},                // T NR-32 output trim
+    {"DM_HACK_FSR", 'T'},              // T EASU module swap of the stretch pass (stage 5.4 ports it to the backend; until then off in mode 1)
 };
 // Kept on purpose: DM_NR_MEM (RAM budget, no hook; with NR off it plans only the encoder and warm-up caches), DM_GFX_PRESENT_THREAD
 // (the presenter the frame part hands images to), DM_DOS2_* (screen shape, quality / DRS, touch UI: not NVN-stream features), the
-// translator's own DM_GFX_* policies (they act on the NVN stream only, which mode 1 leaves empty).
+// translator's own DM_GFX_* policies (they act on the NVN stream only, which mode 1 leaves empty), DM_HACK_* other than FSR (read by
+// the backend's pieces through nr_hacks.h: DM_HACK_SHFAR / _SHPCF / _TIER), and every DM_VK_NATIVE_* switch.
 void dm_dos2_vkn_pre(void) {
     const char *e = getenv("DM_VK_NATIVE");
     if (!e || atoi(e) != VKN_NATIVE) return;
-    int was_on = 0;
+    int was_on = 0, was_t = 0;
     const int n = (int)(sizeof k_pre_off / sizeof k_pre_off[0]);
+    const char *sl = getenv("DM_VK_NATIVE_SHLIB"); const int translator = sl && *sl && !atoi(sl);   // the SHLIB=0 fallback (vkn_shlib.cpp)
     for (int i = 0; i < n; i++) {
-        const char *v = getenv(k_pre_off[i]);
-        if (v && *v && strcmp(v, "0")) was_on++;
-        setenv(k_pre_off[i], "0", 1);
+        const char *v = getenv(k_pre_off[i].name);
+        if (v && *v && strcmp(v, "0")) { was_on++; was_t += k_pre_off[i].kind == 'T'; }
+        setenv(k_pre_off[i].name, "0", 1);
     }
-    vkn_logf("DM_VK_NATIVE=1: %d switches of the old native / NB / NR / NRN layers forced to 0 (%d of them were on): no old hook, no old record", n, was_on);
+    vkn_logf("DM_VK_NATIVE=1: %d switches of the old native / NB / NR / NRN layers forced to 0 (%d of them were on, %d of those translator-only: %s): no old hook, no old record",
+             n, was_on, was_t, translator ? "DM_VK_NATIVE_SHLIB=0, the translator is initialised library-only and would read them" : "the translator is not initialised");
 }
+
+// [stage 5.1 A5] One line with the value in effect of every stage-5 switch of the backend, read the way each module reads it (its getter,
+// or its getenv with its default), printed once, at the first census of this part (every module has installed and the shader library
+// has read its first bundle by then). A module that is not in this build (weak getter absent) prints "n/a".
+#include "../gfx/vkn/vkn_draw.h"
+#include "../gfx/vkn/vkn_prof.h"
+#include "../gfx/vkn/vkn_shlib_named.h"
+#include "../gfx/nr/nr_hacks.h"
+int vkn_lightfuse_mode(void) __attribute__((weak));      // stage 5.1 A4 (vkn_lightfuse.c): DM_VK_NATIVE_LIGHTFUSE in effect
+int vkn_lightfuse_fog(void) __attribute__((weak));       // DM_VK_NATIVE_LIGHTFUSE_FOG in effect
+int vkn_shc_active(void) __attribute__((weak));          // vkn_shc.c
+void vkn_shlib_named_stats_get(vkn_shlib_named_stats *s) __attribute__((weak));
+static void stage5_line(void) {
+    static int done; if (done) return; done = 1;
+    char lf[16], lff[16], sh[16], pcf[16];
+    if (vkn_lightfuse_mode) snprintf(lf, sizeof lf, "%d", vkn_lightfuse_mode()); else snprintf(lf, sizeof lf, "n/a");
+    if (vkn_lightfuse_fog) snprintf(lff, sizeof lff, "%d", vkn_lightfuse_fog()); else snprintf(lff, sizeof lff, "n/a");
+    vkn_shlib_named_stats ns; memset(&ns, 0, sizeof ns); ns.mode = ns.pcf = -1;
+    if (vkn_shlib_named_stats_get) vkn_shlib_named_stats_get(&ns);
+    if (ns.mode >= 0) { snprintf(sh, sizeof sh, "%d", ns.mode); snprintf(pcf, sizeof pcf, "%d", ns.pcf); }
+    else { snprintf(sh, sizeof sh, "%s", vkn_shlib_named_stats_get ? "not read" : "n/a"); snprintf(pcf, sizeof pcf, "%s", sh); }
+    const char *c = getenv("DM_VK_NATIVE_COST");   // hle_dos2_vkn_draw.c
+    const uint32_t cost = c && *c ? (uint32_t)strtoul(c, NULL, 0) & VKN_COST_ALL : VKN_COST_ALL;
+    const char *s = getenv("DM_VK_NATIVE_SHCACHE");   // vkn_shc_install
+    int shc = s && *s ? atoi(s) : 1; if (shc < 0 || shc > 3) shc = 0;
+    const char *f = getenv("DM_VK_NATIVE_SHFAR"); char from = 0;
+    int far = f && *f ? atoi(f) : nrh_value(NRH_SHFAR, &from); if (far < 0 || far > 2) far = 0;
+    vkn_logf("stage 5 switches in effect: DM_VK_NATIVE_COST=%#x DM_VK_NATIVE_SH=%s DM_VK_NATIVE_SH_PCF=%s DM_VK_NATIVE_SHCACHE=%d DM_VK_NATIVE_SHFAR=%d%s "
+             "DM_VK_NATIVE_LIGHTFUSE=%s DM_VK_NATIVE_LIGHTFUSE_FOG=%s DM_VK_NATIVE_COND=%d DM_VK_NATIVE_GBUF_LE=%d%s DM_VK_NATIVE_PROF=%d",
+             cost, sh, pcf, shc, far, vkn_shc_active ? (vkn_shc_active() ? " (cache module on)" : " (cache module off)") : " (no cache module)", lf, lff,
+             vkn_query_mode(), vkn_query_le(), vkn_query_le_asked() && !vkn_query_le() ? " (asked, family gate 0)" : "", vkn_prof_level());
+}
+
 #endif

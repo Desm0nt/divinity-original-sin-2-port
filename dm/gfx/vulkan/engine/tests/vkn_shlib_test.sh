@@ -1,7 +1,7 @@
 #!/bin/bash
 # [DOS2] VK-NATIVE shader library comparison test (vkn_shlib_test.cpp): build under WSL and run it for every device model.
 # Run from Git Bash:  MSYS_NO_PATHCONV=1 wsl bash <checkout>/dm/gfx/vulkan/engine/tests/vkn_shlib_test.sh [limit] [models...]
-# Env: WT = the worktree (WSL path form), SHADERS = the shader directory (default <dos2-port>/work/shaders-vk), NATIVE = a native.xgspack
+# Env: WT = the worktree (WSL path form), B = the build / copy directory (default ~/vkn-shlib-test; one per parallel run), SHADERS = the shader directory (default <dos2-port>/work/shaders-vk), NATIVE = a native.xgspack
 # (default <dos2-port>/work/shaders-native/native.xgspack), NR = a native-nr.xgspack for the "+nr" models (stage 5 A1; default
 # <dos2-port>/work/native-lightfuse/native-nr.xgspack, the newest full one: x / m / d of all 16 NR-04 entries). The tree is copied into the Linux file system first: gcc's #pragma once is not
 # reliable on /mnt drives, and the 270 MB pack reads much faster there.
@@ -15,7 +15,7 @@ LIMIT=${1:-0}; shift || true
 # "+nr<q>" (q 0..3), "+nrv", "+nr3nl": the named-bundle replacement on both sides (vkn_shlib_test.cpp head comment)
 MODELS=${*:-adreno mali powervr adreno-simmali adreno-native adreno-files adreno+nr3 mali+nr3 powervr+nr3 adreno+nr1 adreno+nr2 adreno+nrv adreno+nr3nl adreno-native+nr3}
 NDK=${NDK:?set NDK to <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include}
-B=$HOME/vkn-shlib-test; mkdir -p $B/inc/android $B/obj $B/shaders $B/src/dm
+B=${B:-$HOME/vkn-shlib-test}; mkdir -p $B/inc/android $B/obj $B/shaders $B/src/dm
 [ -d $B/inc/vulkan ] || cp -r $NDK/vulkan $NDK/vk_video $B/inc/
 [ -f $B/inc/zlib.h ] || cp $NDK/zlib.h $NDK/zconf.h $B/inc/
 cat > $B/inc/android/hardware_buffer.h <<'EOF'

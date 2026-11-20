@@ -19,7 +19,9 @@
 // DM_NR_SH_PCF=q, the library with DM_VK_NATIVE_SH=1 / DM_VK_NATIVE_SH_PCF=q (vkn_shlib_named.cpp), both reading <shader dir>/native-nr.xgspack;
 // every compare above then covers the named bundles too (the module words with the replacement = the translator's with DM_NR_SH=1), and
 // the summary counts the NR-04 keys replaced, those with a Dref binding, and the "#nrt" translated twin of each replaced key (loaded, a
-// fragment module whose binding list equals the named one's, words other than the named module's). Without "+nr" both sides run with
+// fragment module whose binding list equals the named one's, words other than the named module's), and [stage 5.1 A5] the pass check of each
+// replaced entry (vkn_shlib_named_pass: verified pass kept; another colour count / colour-0 format / sample count -> the translated twin in
+// mode 1 unless Dref, counted only in mode 2; unknown pass kept; the counters). Without "+nr" both sides run with
 // the replacement off (DM_NR_SH=0 / DM_VK_NATIVE_SH=0: the stage-4 column).
 // Build + run (WSL; tests/vkn_shlib_test.sh does exactly this, and copies the pack into the Linux file system first):
 //   g++ -std=c++17 -O1 -w -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -DVK_USE_PLATFORM_ANDROID_KHR
@@ -218,6 +220,7 @@ struct Count { uint64_t compared = 0, same = 0, differ = 0; };
 static Count c_base, c_alpha, c_retype;
 static uint64_t g_unusable, g_missing, g_alpha_refused, g_retype_refused, g_vs, g_fs, g_cs;
 static uint64_t g_nr_keys, g_nr_replaced, g_nr_same, g_nr_dref, g_nr_alt, g_nr_alt_bad;   // [stage 5 A1] the "with replacement" column
+static uint64_t g_nr_pass, g_nr_pass_bad;   // [stage 5.1 A5] the pass check of every replaced entry (vkn_shlib_named_pass)
 static int g_diff_lines;
 static void diff(const char *what, const std::string &key, const char *fmt, ...) {
     if (g_diff_lines++ >= 40) return;
@@ -331,8 +334,31 @@ int main(int argc, char **argv) {
         tally(c_base, ok);
         if (nr_on && ro == 0 && nr_sh_find_key(key.c_str()) >= 0 && key.size() == 16) {   // [stage 5 A1] an NR-04 key
             g_nr_keys++; uint64_t dref = 0;
-            if (vkn_shlib_named_entry(key.c_str(), &dref) >= 0) {
+            const int ent = vkn_shlib_named_entry(key.c_str(), &dref);
+            if (ent >= 0) {
                 g_nr_replaced++; if (ok) g_nr_same++; if (dref) g_nr_dref++;
+                {   // [stage 5.1 A5] the pass check (vkn_shlib_named_pass, at pipeline creation in vkn_shader.c): the verified pass keeps the
+                    // module; one colour more, another format of colour 0, two samples take the translated twin in mode 1 - except a Dref
+                    // module (its binding has the comparison sampler in every pipeline: kept, as on the old path) - and are only counted in
+                    // mode 2 (verify); a pass not known (built off the recording thread) keeps the module; every call is counted
+                    const nr_sh_entry &e = nr_sh_table[ent]; uint32_t f[8], g[8];
+                    for (int c = 0; c < 8; c++) { f[c] = e.color0; g[c] = e.color0; }
+                    g[0] = e.color0 == 0x25 ? 0x3f : 0x25;
+                    vkn_shlib_named_stats a, b; vkn_shlib_named_stats_get(&a);
+                    const int v = vkn_shlib_named_pass(ent, e.colors, f, 0x32, 1, 1920, 1080), c1 = vkn_shlib_named_pass(ent, e.colors + 1, f, 0x32, 1, 1920, 1080),
+                              fo = vkn_shlib_named_pass(ent, e.colors, g, 0x32, 1, 1920, 1080), sa = vkn_shlib_named_pass(ent, e.colors, f, 0x32, 2, 1920, 1080),
+                              un = vkn_shlib_named_pass(ent, -1, nullptr, 0, 1, 0, 0), bad = vkn_shlib_named_pass(-1, 1, f, 0, 1, 0, 0);
+                    vkn_shlib_named_stats_get(&b);
+                    const int want = nr != "nrv" && !dref ? 1 : 0;
+                    const bool pg = v == 0 && c1 == want && fo == want && sa == want && un == 0 && bad == 0 && b.pass_verified == a.pass_verified + 1 &&
+                                    b.pass_outside == a.pass_outside + 3 && b.pass_unchecked == a.pass_unchecked + 1 &&
+                                    b.pass_dref_kept == a.pass_dref_kept + (nr != "nrv" && dref ? 3 : 0) && b.passes >= a.passes;
+                    (pg ? g_nr_pass : g_nr_pass_bad)++;
+                    if (!pg) diff("nr-pass", key, "entry %d (%s, %u colours, colour 0 %#x, dref %d): verified %d, +1 colour %d, other format %d, 2 samples %d (want %d), unknown %d, bad entry %d; "
+                                  "counted verified +%llu outside +%llu unchecked +%llu dref kept +%llu", ent, e.name, e.colors, e.color0, int(dref != 0), v, c1, fo, sa, want, un, bad,
+                                  (unsigned long long)(b.pass_verified - a.pass_verified), (unsigned long long)(b.pass_outside - a.pass_outside),
+                                  (unsigned long long)(b.pass_unchecked - a.pass_unchecked), (unsigned long long)(b.pass_dref_kept - a.pass_dref_kept));
+                }
                 xbg_vkn_stage *sa = new xbg_vkn_stage;
                 const int ra = vkn_shlib_named_alt(key.c_str(), sa);
                 const std::vector<uint32_t> *wa = ra == 0 && sa->module ? words(sa->module) : nullptr, *wn = sn->module ? words(sn->module) : nullptr;
@@ -375,18 +401,18 @@ int main(int argc, char **argv) {
     printf("model %s: bundles compared %llu identical %llu different %llu (vertex %llu fragment %llu compute %llu, unusable %llu, missing %llu); "
            "alpha variants compared %llu identical %llu different %llu (both refused %llu); retype variants compared %llu identical %llu different %llu (both refused %llu); "
            "library: %llu from the pack, %llu from files, %llu native; modules created %llu; words digest %016llx; %.1f s\n"
-           "with replacement (%s): NR-04 keys %llu, replaced by name %llu (identical to the translator %llu), with a Dref binding %llu; translated twins ok %llu, bad %llu\n",
+           "with replacement (%s): NR-04 keys %llu, replaced by name %llu (identical to the translator %llu), with a Dref binding %llu; translated twins ok %llu, bad %llu; pass checks ok %llu, bad %llu\n",
            argv[1], (unsigned long long)c_base.compared, (unsigned long long)c_base.same, (unsigned long long)c_base.differ, (unsigned long long)g_vs, (unsigned long long)g_fs,
            (unsigned long long)g_cs, (unsigned long long)g_unusable, (unsigned long long)g_missing, (unsigned long long)c_alpha.compared, (unsigned long long)c_alpha.same,
            (unsigned long long)c_alpha.differ, (unsigned long long)g_alpha_refused, (unsigned long long)c_retype.compared, (unsigned long long)c_retype.same,
            (unsigned long long)c_retype.differ, (unsigned long long)g_retype_refused, (unsigned long long)st.from_pack, (unsigned long long)st.from_file,
            (unsigned long long)st.native_used, (unsigned long long)g_mod_creates, (unsigned long long)g_digest, s,
            nr_on ? nr.c_str() : "off", (unsigned long long)g_nr_keys, (unsigned long long)g_nr_replaced, (unsigned long long)g_nr_same, (unsigned long long)g_nr_dref,
-           (unsigned long long)g_nr_alt, (unsigned long long)g_nr_alt_bad);
+           (unsigned long long)g_nr_alt, (unsigned long long)g_nr_alt_bad, (unsigned long long)g_nr_pass, (unsigned long long)g_nr_pass_bad);
     if (nr_on) vkn_shlib_named_census();
     if (g_log) fclose(g_log);
     if (!ovr.empty()) remove(ovr.c_str());
-    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit);
+    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && !g_nr_pass_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit);
     printf("%s\n", pass ? "PASS" : "FAIL");
     fflush(stdout); _exit(pass ? 0 : 1);   // no static destructors: the translator's state is not shut down
 }

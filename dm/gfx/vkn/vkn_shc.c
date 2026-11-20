@@ -331,6 +331,10 @@ static void precopy(void) {
         const nrshc_cas *c = g.cas[j]; const int32_t *r = c->rect;
         if (!c->layer || !g.slot_real[j] || g.slot_unrep[j] || !c->ranges || !c->prev_ok || c->atlas != g.atlas_gen || c->clear_bits != g.clear_bits || c->layer_ranges >= g.par.max_age) continue;
         if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 || (uint64_t)r[0] + (uint64_t)r[2] > g.atlas->w || (uint64_t)r[1] + (uint64_t)r[3] > g.atlas->h) continue;
+        // [stage 5.1 A5 fix] the slot's last cascade was another tile (a cascade split by a clear / read took this slot for the rest of
+        // another tile, keeping the layer): nrshc_pick_slot gives this tile to the slot that last drew it, so the copy would be put back
+        // unused every frame (host test: frames after a split showed "put back" 1-2 a frame)
+        if (memcmp(g.slot_rect[j], r, sizeof g.slot_rect[j])) continue;
         int ov = 0; for (int i = 0; i < j; i++) if ((m >> i & 1) && overlap(g.cas[i]->rect, r)) ov = 1;
         if (ov) continue;
         if (copy_tile(g.S, g.atlas, r)) break;

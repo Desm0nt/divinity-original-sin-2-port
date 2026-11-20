@@ -14,7 +14,8 @@
 //           skip), DM_NR_UBOVEC=0 (NR-27 SPIR-V uniform-load rewrite, default on Mali), DM_NR_ONCHIP=0 (the merged Sky -> Light render pass),
 //           DM_NR_LIGHTFUSE=0 / DM_NR_SH_PCF=0 (the 19.11 defaults: fused Sky -> Light -> Fog draw, dref shadow resolve),
 //           DM_NR_UIX_DS=0 / DM_NR_UIX_AREA=0 (NR-UIX Iggy pass DS detach / render area, default on the tile families since tiler plan step 1;
-//           DM_NR_RP_FRESH, its other step-1 default, needs DM_NR_RP=1 and is off with it);
+//           DM_NR_RP_FRESH, its other step-1 default, needs DM_NR_RP=1 and is off with it); [VK-NATIVE stage 5] the native backend's own
+//           techniques (DM_VK_NATIVE_SH / _SH_PCF / _SHCACHE / _LIGHTFUSE / _LIGHTFUSE_FOG / _COND / _GBUF_LE / _COST = 0): mode 1 stays on;
 //   step 2  + the tile pass policies (DOOM step 2): DM_GFX_NOLOAD, DM_GFX_STORE_HIST (DOS2's store-DONT_CARE heuristic; DOOM STORE_DEAD /
 //           STORE_NONE), DM_GFX_CLEAR_FOLD, DM_GFX_TILE_BARRIER, DM_GFX_LAZY_CLEAR = 0, and their native-backend versions DM_NB_RP (the NB-06
 //           planner's load / store / clear folding + pre-pass barrier), DM_NB_OPBARRIER (narrow copy barriers), DM_NB_UIAREA (UI render
@@ -72,6 +73,12 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
     add("DM_NR_RP","0");add("DM_DOS2_PREPASS","0");add("DM_NR_UBOVEC","0");add("DM_NR_ONCHIP","0");   // NR-ONCHIP: the merged Sky -> Light pass
     add("DM_NR_LIGHTFUSE","0");add("DM_NR_SH_PCF","0");add("DM_NR_PRESKIN","0");add("DM_NR_IDVS","0");   // 19.11 defaults (fused Sky -> Light -> Fog draw, dref shadows), untried on tilers
     add("DM_NR_UIX_DS","0");add("DM_NR_UIX_AREA","0");   // tiler plan step 1 (NR-UIX defaults on the tile families); DM_NR_RP=0 above also ends DM_NR_RP_FRESH
+    // [DOS2] VK-NATIVE stage 5 (mode 1, docs/dos2/nr/VK-STAGE5-PLAN.md 1.e): the backend's techniques off - named shaders + Dref, shadow cache,
+    // fused lighting, conditional rendering / its oracle, LEQUAL G-buffer, the draw-cost shortcuts - so a technique's fault keeps the player
+    // on the backend (step 2 is the old path: DM_VK_NATIVE=0). Not here: DM_VK_NATIVE_SHFAR (a quality choice of DM_HACK_SHFAR / _TIER),
+    // DM_VK_NATIVE_PROF (measurement). Without effect in modes 0 / 2 (only mode 1 reads them).
+    add("DM_VK_NATIVE_SH","0");add("DM_VK_NATIVE_SH_PCF","0");add("DM_VK_NATIVE_SHCACHE","0");add("DM_VK_NATIVE_LIGHTFUSE","0");add("DM_VK_NATIVE_LIGHTFUSE_FOG","0");
+    add("DM_VK_NATIVE_COND","0");add("DM_VK_NATIVE_GBUF_LE","0");add("DM_VK_NATIVE_COST","0");
     if(step>=2){
         add("DM_GFX_NOLOAD","0");add("DM_GFX_STORE_HIST","0");add("DM_GFX_CLEAR_FOLD","0");add("DM_GFX_TILE_BARRIER","0");add("DM_GFX_LAZY_CLEAR","0");
         add("DM_NB_RP","0");add("DM_NB_OPBARRIER","0");add("DM_NB_UIAREA","0");
@@ -101,7 +108,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
 }
 inline const char *xbg_safe_step_text(int step){
     switch(step){case 0:return "nothing changed";
-    case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass)";
+    case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass; native backend: its stage-5 techniques)";
     case 2:return "step 1 + the tile pass policies off (noload / store-hist / clear fold / tile barrier / lazy clear, NB-06 planner, NB barriers, UI area) and the native recording paths (NR-09 direct / draw, NR-ZERO Z3 / Z3b / Z3c / Z3d / Z5 / Z8, NR-20 rotate, NR-04 shaders)";
     default:return "step 2 + one pipeline build at a time, no worker recording, PowerVR colour mask of output-less shaders off, culling GS kept, every NR / NB step off (the v0.1.1 renderer)";}
 }
