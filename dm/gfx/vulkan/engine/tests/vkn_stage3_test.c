@@ -14,6 +14,10 @@
 //            ranges, the zero block, the null stream, placeholders (unknown / empty / feedback), unknown sampler, drops (missing
 //            stage, unknown state / shader / vertex buffer, index range, viewport), alpha variant, scissor clamp, arrays, index rewrite
 //            of fans / quads / line loops (generated indices checked), the set cache and its retirement, compute dispatch;
+//            [stage 5] draw effects (vkn_fx.h); [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE: the EQUAL -> LEQUAL swap of a conditional draw
+//            whose pair holds the same draw drawn whole, and each refusal reason (no pair, other draw, alpha test, discard / unknown
+//            fragment facts, pre-pass depth state, depth raised / clear pending, several draws, pre-pass draw skipped, wider scissor),
+//            count-only mode, the tile-model gate;
 //   end to end  one synthetic frame (targets A with clears, 3 draws, targets B sampling A, 1 draw, present B) checked as a whole;
 //   thumbnail  shared render-target storage (vkn_tex_create_shared): the save-game thumbnail of 0xa66bc0 - clear the override, draw
 //            the scene into its alias, copy the override: one image, the clear folded into the scene pass, the copy reads the drawn
@@ -711,6 +715,16 @@ static uint32_t g_cost_tex_gen = 1;
 static uint32_t cost_tex_gen(void) { return g_cost_tex_gen; }
 static uint32_t cost_state_gen(void) { return 7; }
 static int cost_vindex(const void *s) { (void)s; return 0; }   // the test's vertex modules read no gl_VertexIndex
+// [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE: the fragment facts the test gives every shader (vkn_query_le_test_facts), and the depth compare op
+// of the pipeline bound since `from` (-1 = no pipeline bound).
+static int g_lef;
+static int le_facts_test(const vkn_shader *s) { (void)s; return g_lef; }
+static int le_op_since(uint64_t from, VkCommandBuffer cb) {
+    const mk_ev *bp = NULL;
+    for (int k = 0; nth(from, cb, MK_E_BIND_PIPE, k); k++) bp = nth(from, cb, MK_E_BIND_PIPE, k);
+    mk_obj *po = pipe_of(bp);
+    return po && po->gp.has_ds ? (int)po->gp.ds.depthCompareOp : -1;
+}
 static void test_draw(void) {
     draw_setup();
     if (!g_s1 || !g_t0 || !g_t3 || !g_t5 || !g_ts || !g_a2 || !g_d3 || !g_b2) return;
@@ -1019,6 +1033,57 @@ static void test_draw(void) {
         { const mk_ev *d = nth(m, cb, MK_E_DRAW, 0); CHECK(d && d->u[2] == 2 + k); }
         vkn_draw_cost_gens(NULL, NULL, NULL);
         vkn_draw_indexed(&in, 0, 3, 1); in.vb_off[0] = 16;
+    }
+    // ---- [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE (vkn_query.h): a conditional EQUAL draw whose pair holds the same draw, drawn whole in the
+    // pre-pass with LESS + writes, gets LEQUAL (only the compare op changes); every other case keeps EQUAL and is counted by its reason
+    {
+        enum { P = 0x52000 };
+        CHECK(vkn_ds_put(H(42, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // pre-pass: LESS with writes
+        CHECK(vkn_ds_put(H(43, 1), 1, 0, 2, 1, 0xff, 7, 0, 2) != 0);   // G-buffer: EQUAL, no writes, stencil ALWAYS / replace
+        CHECK(vkn_ds_put(H(44, 1), 1, 1, 7, 0, 0, 0, 0, 0) != 0);   // ALWAYS with writes: raises depth
+        vkn_draw_in pre = in, gb = in; pre.ds = H(42, 1); gb.ds = H(43, 1);
+        vkn_draw_in up = in; up.ds = H(44, 1);
+        vkn_query_le_stats l0, l1; vkn_query_le_stats_get(&l0);
+        g_fxm = 0; g_lef = 0; vkn_query_le_test_facts(le_facts_test);
+        vkn_query_le_init(1); CHECK_EQ(vkn_query_le(), 1);
+        uint64_t key = P;
+#define LE_PAIR(pd) do { key += 16; vkn_query_begin(key); vkn_draw_indexed(&(pd), 0, 3, 1); vkn_query_end(key); } while (0)
+#define LE_GB(cnt_) (vkn_query_cond(key), m = mark(), vkn_draw_indexed(&gb, 0, (cnt_), 1), le_op_since(m, cb))
+        LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_LESS_OR_EQUAL);                       // the swap
+        if (le_op_since(m, cb) == VK_COMPARE_OP_LESS_OR_EQUAL) {
+            const mk_obj *po = pipe_of(nth(m, cb, MK_E_BIND_PIPE, 0));
+            CHECK(po->gp.ds.depthTestEnable && !po->gp.ds.depthWriteEnable && po->gp.ds.stencilTestEnable && po->gp.ds.front.passOp == VK_STENCIL_OP_REPLACE);
+        }
+        vkn_draw_indexed(&pre, 0, 3, 1); m = mark(); vkn_draw_indexed(&gb, 0, 3, 1); CHECK_EQ(le_op_since(m, cb), VK_COMPARE_OP_EQUAL);   // no condition
+        LE_PAIR(pre); vkn_query_cond(key + 8); m = mark(); vkn_draw_indexed(&gb, 0, 3, 1); CHECK_EQ(le_op_since(m, cb), VK_COMPARE_OP_EQUAL);   // no such pair
+        LE_PAIR(pre); CHECK_EQ(LE_GB(6), VK_COMPARE_OP_EQUAL);                               // not the pair's draw
+        pre.alpha_ref = 0.5f; LE_PAIR(pre); pre.alpha_ref = -1.0f; CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);   // alpha-test variant in the pre-pass
+        g_lef = 1 /* VKN_SHLIB_FS_KILL */; LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);  // OpKill in the pre-pass fragment words
+        g_lef = -1; LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL); g_lef = 0;        // facts unknown
+        LE_PAIR(gb); vkn_draw_indexed(&pre, 0, 3, 1); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);   // the pre-pass draw has no LESS + writes
+        LE_PAIR(pre); vkn_draw_indexed(&up, 0, 3, 1); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);   // depth raised in between
+        key += 16; vkn_query_begin(key); vkn_draw_indexed(&pre, 0, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1); vkn_query_end(key);
+        CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);                                             // two draws in the pair
+        g_fxm = 1; LE_PAIR(pre); g_fxm = 0; vkn_draw_indexed(&pre, 0, 3, 1); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);   // an effect skipped the pre-pass draw
+        LE_PAIR(pre); targets(g_a2, NULL, NULL); vkn_pass_clear_depth(g_d3, 1, 1.0f, 0); targets(g_a2, NULL, g_d3);
+        CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);                                             // a depth clear pending at the G-buffer draw
+        gb.scissor[2] = 65; LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL); gb.scissor[2] = in.scissor[2];   // scissor wider
+        LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_LESS_OR_EQUAL);                       // and the plain case again
+        vkn_query_le_init(2); CHECK_EQ(vkn_query_le(), 2);
+        LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);                               // count only: decided, not applied
+        setenv("DM_GFX_SIM_GPU", "mali", 1); vkn_query_le_init(1); CHECK_EQ(vkn_query_le(), 0); unsetenv("DM_GFX_SIM_GPU");   // tile model: off
+        LE_PAIR(pre); CHECK_EQ(LE_GB(3), VK_COMPARE_OP_EQUAL);
+#undef LE_PAIR
+#undef LE_GB
+        vkn_query_le_stats_get(&l1);
+        CHECK_EQ(l1.swaps - l0.swaps, 3); CHECK_EQ(l1.twins - l0.twins, 1); CHECK_EQ(l1.ds_table_full, l0.ds_table_full);
+        CHECK_EQ(l1.refused[VKN_LE_NO_PAIR] - l0.refused[VKN_LE_NO_PAIR], 1); CHECK_EQ(l1.refused[VKN_LE_DRAW] - l0.refused[VKN_LE_DRAW], 1);
+        CHECK_EQ(l1.refused[VKN_LE_PRE_ALPHA] - l0.refused[VKN_LE_PRE_ALPHA], 1); CHECK_EQ(l1.refused[VKN_LE_PRE_FS] - l0.refused[VKN_LE_PRE_FS], 2);
+        CHECK_EQ(l1.refused[VKN_LE_PRE_DS] - l0.refused[VKN_LE_PRE_DS], 1); CHECK_EQ(l1.refused[VKN_LE_DEPTH_EVENT] - l0.refused[VKN_LE_DEPTH_EVENT], 2);
+        CHECK_EQ(l1.refused[VKN_LE_SEVERAL] - l0.refused[VKN_LE_SEVERAL], 1); CHECK_EQ(l1.refused[VKN_LE_LOST] - l0.refused[VKN_LE_LOST], 1);
+        CHECK_EQ(l1.refused[VKN_LE_VIEW] - l0.refused[VKN_LE_VIEW], 1);
+        vkn_query_census_occ();
+        vkn_query_le_init(0); vkn_query_le_test_facts(NULL); CHECK_EQ(vkn_query_le(), 0);
     }
     fsubmit(0);
     frames_n(4);

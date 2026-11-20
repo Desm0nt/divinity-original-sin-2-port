@@ -152,6 +152,13 @@ const char *vkn_shlib_translator_entry_name(int which);
 // ---- [DOS2] GPU BC route data (vkn_shlib_bc.cpp; was xbg_game.cpp's VK-NATIVE export block): pure functions of their arguments ----
 // The declarations are dm/gfx/vkn/vkn_bcgpu.h (vkn_shlib_bc_*), kept there next to their only caller.
 
+// ==== [DOS2] VK-NATIVE stage 5.1 piece O2 (vkn_query.c, DM_VK_NATIVE_GBUF_LE) ====
+// A fragment shader object of this library (vkn_shader.xs[VKN_SRC_FS] while vkn_shlib_on()): what its final words (every load-time
+// rewrite applied: the words its base module is made of) can do to depth / coverage. -1 = not a fragment shader of this library.
+// The "#at" alpha-test variants discard on top of this (the caller knows from the draw's alpha reference). Any thread.
+enum { VKN_SHLIB_FS_KILL = 1, VKN_SHLIB_FS_DEPTH = 2, VKN_SHLIB_FS_MASK = 4 };
+int vkn_shlib_fs_facts(const void *shader);
+
 // ---- host tests: the words handed to vkCreateShaderModule are what the comparison test checks (it mocks that entry point) ----
 #ifdef __cplusplus
 }

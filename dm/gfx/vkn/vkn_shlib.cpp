@@ -524,9 +524,26 @@ VkResult make_module(const std::vector<uint32_t> &w, VkShaderModule *m, const st
 }
 
 // ---------------------------------------------------------------- shaders
+// [DOS2] VK-NATIVE stage 5.1 piece O2 (vkn_shlib_fs_facts, vkn_query.c DM_VK_NATIVE_GBUF_LE): what a fragment module's final words
+// can do to the depth a draw leaves. Bits VKN_SHLIB_FS_*: OpKill (252) / OpTerminateInvocation (4416) / OpDemoteToHelperInvocation
+// (5380); a BuiltIn FragDepth (22) / SampleMask (20) decoration (OpDecorate 71 / OpMemberDecorate 72, decoration BuiltIn = 11): the
+// written depth / coverage is not the rasterised one. A malformed stream sets every bit (= "may discard").
+uint32_t fs_facts_of(const std::vector<uint32_t> &w) {
+    uint32_t f = 0;
+    for (size_t i = 5; i < w.size();) {
+        const uint32_t n = w[i] >> 16, op = w[i] & 65535;
+        if (!n || i + n > w.size()) return 7u;
+        if (op == 252 || op == 4416 || op == 5380) f |= 1u;
+        const size_t d = op == 71 ? 2 : op == 72 ? 3 : 0;   // index of the decoration word
+        if (d && n > d + 1 && w[i + d] == 11) { if (w[i + d + 1] == 22) f |= 2u; else if (w[i + d + 1] == 20) f |= 4u; }
+        i += n;
+    }
+    return f;
+}
 struct Sh {
     std::string key; uint32_t stage = 0; VkShaderModule module = VK_NULL_HANDLE; std::string unusable;
     std::vector<xbg_shader_binding> bindings; std::vector<uint32_t> inputs, input_classes; std::vector<uint8_t> c1;
+    int32_t fs_facts = -1;         // [DOS2] stage 5.1 O2: fragment: fs_facts_of(final words), set once at load; -1 = other stage
     std::vector<uint32_t> words;   // vertex: the final words while DM_GFX_VTX_RETYPE is on (the "#vi" variants start from them)
     std::map<uint64_t, VkShaderModule> retyped, alpha;
 };
@@ -592,6 +609,7 @@ Sh *load(const std::string &key, const void *control, const void *code) {
         if (g.retype_keep) p->words = words;
     }
     ubd_mark(p->bindings, words, key.c_str(), h.stage);
+    if (h.stage == 4) p->fs_facts = int32_t(fs_facts_of(words));   // [DOS2] stage 5.1 O2: the words the module is made of
     if (p->unusable.empty() && make_module(words, &p->module, key) != VK_SUCCESS) p->unusable = "vkCreateShaderModule failed";
     if (!p->unusable.empty()) ++st_unusable;
     Sh *out = p.get(); g_sh.emplace(key, std::move(p)); ++st_loads; st_ns += now_ns() - t0;
@@ -757,6 +775,11 @@ extern "C" VkShaderModule vkn_shlib_alpha_module(void *shader, uint32_t func, fl
     std::lock_guard<std::mutex> lock(g_mu); Sh &s = *static_cast<Sh *>(shader);
     if (!g.ready || !s.unusable.empty() || s.stage != 4 || func == 8 || !g.alpha) return s.module;
     return alpha_variant(s, func, ref);
+}
+// [DOS2] stage 5.1 O2: immutable after load (written before the object is published under g_mu): no lock.
+extern "C" int vkn_shlib_fs_facts(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 4 ? s->fs_facts : -1;
 }
 extern "C" VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!shader) return VK_NULL_HANDLE;

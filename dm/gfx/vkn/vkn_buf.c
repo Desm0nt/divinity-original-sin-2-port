@@ -252,6 +252,7 @@ uint32_t vkn_buf_get_n(int kind, const uint64_t *h, uint32_t n, const vkn_block 
     }
     pthread_mutex_unlock(&g_mu);
     return i;
+}
 // ==== [stage 5 A3] content versions (vkn_buf.h; the shadow cache, vkn_shc.c) ====
 uint64_t vkn_buf_version(int kind, uint64_t handle, int *none) {
     if (none) *none = 1;

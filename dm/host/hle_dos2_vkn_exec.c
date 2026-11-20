@@ -527,6 +527,7 @@ static void q_census(void) {
 #undef QU
 #undef QF
     g_qprev = q; g_qprev_frame = f;
+    vkn_query_census_occ();   // [stage 5.1 O1 / O2] object census (COND 2 / 4) and DM_VK_NATIVE_GBUF_LE swaps / refusals
 }
 
 // ---- census ----
