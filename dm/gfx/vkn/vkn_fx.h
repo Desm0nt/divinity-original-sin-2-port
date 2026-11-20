@@ -122,6 +122,14 @@ typedef struct vkn_fx_stats {
 void vkn_fx_stats_get(vkn_fx_stats *s);
 void vkn_fx_census(void);                          // one line through vkn_logf (names of the chain, counters)
 
+// ==== [stage 5.1 A4] LIGHTFUSE (vkn_lightfuse.c): a piece's own draw WITH an effect output ====
+// Between vkn_fx_force(o) and vkn_fx_force(NULL) the draw path does not run the chain: every draw takes a copy of *o as its effect
+// output (skip ignored), as if the chain had produced it (a swapped shader with its fx bindings, ds, discard, no_fs, cmp_mask). For a
+// draw that must change the target set (vkn_pass_targets) and still carry a swapped shader: the function issues it itself inside
+// the chain call of the engine draw it replaces, then sets out->skip. *o must not be the `out` the chain hands the function (the
+// draw path's own output: the forced draw overwrites it). Recording thread; not nested (the last call wins). Counted by the caller.
+void vkn_fx_force(const vkn_fx_out *o);
+
 #ifdef __cplusplus
 }
 #endif

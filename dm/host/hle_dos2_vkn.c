@@ -115,6 +115,7 @@ void dm_vkn_tex_register(void) __attribute__((weak));      // hle_dos2_vkn_tex.c
 void dm_vkn_shader_register(void) __attribute__((weak));   // hle_dos2_vkn_shader.c: shaders
 void dm_vkn_state_register(void) __attribute__((weak));    // hle_dos2_vkn_state.c: state objects, vertex formats
 void vkn_shc_install(void) __attribute__((weak)); int vkn_shc_active(void) __attribute__((weak)); void vkn_shc_census(void) __attribute__((weak));   // [stage 5 A3] dm/gfx/vkn/vkn_shc.c
+void vkn_lf_install(void) __attribute__((weak)); int vkn_lf_active(void) __attribute__((weak)); void vkn_lf_census(void) __attribute__((weak));   // [stage 5.1 A4] dm/gfx/vkn/vkn_lightfuse.c
 
 void dm_dos2_vkn_install(void);   // main.c host_preload, after every other dm_dos2_*_install (before any guest code runs)
 void dm_dos2_vkn_install(void) {
@@ -141,6 +142,7 @@ void dm_dos2_vkn_install(void) {
     if (dm_vkn_ui_register) dm_vkn_ui_register();
     if (dm_vkn_cmd_register) dm_vkn_cmd_register();
     if (mode == VKN_NATIVE && vkn_shc_install && vkn_shc_active) { vkn_shc_install(); if (vkn_shc_active()) dm_vkn_census(vkn_shc_census); }   // [stage 5 A3] the static shadow cache
+    if (mode == VKN_NATIVE && vkn_lf_install && vkn_lf_active) { vkn_lf_install(); if (vkn_lf_active()) dm_vkn_census(vkn_lf_census); }   // [stage 5.1 A4] LIGHTFUSE + FOG
     int in = 0, want = 0;
     for (int i = 0; i < g_nsite; i++) {
         vkn_site *s = &g_site[i];

@@ -19,6 +19,8 @@
 //            whose pair holds the same draw drawn whole, and each refusal reason (no pair, other draw, alpha test, discard / unknown
 //            fragment facts, pre-pass depth state, depth raised / clear pending, several draws, pre-pass draw skipped, wider scissor),
 //            count-only mode, the tile-model gate;
+//            [stage 5.1 A4] LIGHTFUSE (vkn_lightfuse.c): a learned chain skips Sky and draws the fused shader with Sky's stashed
+//            textures / blocks; a skipped Sky whose Light does not come is drawn late (exact) at the next draw;
 //   end to end  one synthetic frame (targets A with clears, 3 draws, targets B sampling A, 1 draw, present B) checked as a whole;
 //   thumbnail  shared render-target storage (vkn_tex_create_shared): the save-game thumbnail of 0xa66bc0 - clear the override, draw
 //            the scene into its alias, copy the override: one image, the clear folded into the scene pass, the copy reads the drawn
@@ -33,9 +35,9 @@
 // Build + run (WSL gcc, as vkn_stage2_test.c; <vk> = a directory holding only vulkan/ and vk_video/ of the NDK sysroot include):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
-//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c
+//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/nvn/nvn_tex.c
-//       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage3_test
+//       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -56,6 +58,7 @@
 #include "../../../vkn/vkn_fx.h"
 #include "../../../vkn/vkn_ui.h"
 #include "../../../vkn/vkn_query.h"
+#include "../../../vkn/vkn_lightfuse.h"   // [stage 5.1 A4]
 
 static int g_checks, g_fails;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -729,6 +732,19 @@ static int le_op_since(uint64_t from, VkCommandBuffer cb) {
     mk_obj *po = pipe_of(bp);
     return po && po->gp.has_ds ? (int)po->gp.ds.depthCompareOp : -1;
 }
+// [stage 5.1 A4] the shader library's fused-bundle door (vkn_shlib_named.h; weak in vkn_lightfuse.c): the Light bundle's table, a
+// module of its own, every binding but 52 (Sp) declared, no depth comparison.
+static int g_lf_fused_calls;
+int vkn_shlib_named_fused(const char *light_fs_key, char variant, xbg_vkn_stage *out, uint64_t declared[4], uint64_t *dref) {
+    g_lf_fused_calls++;
+    for (int i = 0; i < mk_nbundles; i++) if (!strcmp(mk_bundles[i].key, light_fs_key)) {
+        *out = mk_bundles[i].st; out->module = (VkShaderModule)(uintptr_t)(0x6f00000ull + (uint32_t)variant);
+        for (int k = 0; k < 4; k++) declared[k] = ~0ull;
+        declared[0] &= ~(1ull << 52);   // the fused module computes Sky's ambient: Sp (binding 52) is not read
+        *dref = 0; return 0;
+    }
+    return 1;
+}
 static void test_draw(void) {
     draw_setup();
     if (!g_s1 || !g_t0 || !g_t3 || !g_t5 || !g_ts || !g_a2 || !g_d3 || !g_b2) return;
@@ -1130,6 +1146,98 @@ static void test_draw(void) {
         CHECK_EQ(l1.refused[VKN_LE_VIEW] - l0.refused[VKN_LE_VIEW], 1);
         vkn_query_census_occ();
         vkn_query_le_init(0); vkn_query_le_test_facts(NULL); CHECK_EQ(vkn_query_le(), 0);
+    }
+    // ---- [stage 5.1 A4] LIGHTFUSE (vkn_lightfuse.h): DeferredSky into [Sp, Df] then ClusteredLightingWithSSAO into [Df] (ONE, ONE). Frame 1 is
+    // drawn as recorded and teaches the chain; frame 2 skips Sky and draws the fused shader with Sky's stashed textures (bindings
+    // 200..242) and blocks (248 / 254); frame 3 skips Sky, then a draw that is not the Light comes: Sky is drawn first into [Sp, Df].
+    {
+        const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        xbg_vkn_stage *lv = mk_bundle_add("a400000000000001", 0); mk_bind(lv, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392);
+        xbg_vkn_stage *sk = mk_bundle_add("640a4c497bcc748b", 4);   // the DeferredSky key (nr_sh table): textures 10..52 (slots 1..8), c8 / c6 at 64 / 70
+        for (uint32_t k = 1; k <= 8; k++) mk_bind(sk, k, CIS, XBG_SOURCE_TEXTURE, k, 0);
+        mk_bind(sk, 10, UB, XBG_SOURCE_UNIFORM, 10, 64); mk_bind(sk, 11, UB, XBG_SOURCE_UNIFORM, 11, 64);
+        xbg_vkn_stage *li = mk_bundle_add("d236b8d5b7ffad3c", 4);   // ClusteredLightingWithSSAO: depth 22, Sp 52, c16 82, c15 100
+        mk_bind(li, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(li, 3, CIS, XBG_SOURCE_TEXTURE, 9, 0); mk_bind(li, 8, CIS, XBG_SOURCE_TEXTURE, 8, 0);
+        mk_bind(li, 13, UB, XBG_SOURCE_UNIFORM, 14, 128); mk_bind(li, 16, UB, XBG_SOURCE_UNIFORM, 15, 256);
+        xbg_vkn_stage *fo = mk_bundle_add("d8aeec640d465275", 4);   // DeferredFog: depth 10, scene 16, c16 22, c15 28 (the Light's blocks)
+        mk_bind(fo, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(fo, 1, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(fo, 2, CIS, XBG_SOURCE_TEXTURE, 1, 0);
+        mk_bind(fo, 3, UB, XBG_SOURCE_UNIFORM, 14, 128); mk_bind(fo, 4, UB, XBG_SOURCE_UNIFORM, 15, 256);
+        const vkn_shader *ssky = mkshader(H(70, 1), "a400000000000001", "640a4c497bcc748b", NULL), *slt = mkshader(H(71, 1), "a400000000000001", "d236b8d5b7ffad3c", NULL);
+        const vkn_shader *sfog = mkshader(H(72, 1), "a400000000000001", "d8aeec640d465275", NULL);
+        vkn_tex *sp = mktex(320, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 320, 0), *df = mktex(321, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 321, 0);
+        vkn_tex *cc = mktex(322, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 322, 0);   // the Fog's target C
+        CHECK(ssky && slt && sfog && sp && df && cc);
+        if (ssky && slt && sfog && sp && df && cc) {
+            int32_t stex[VKN_TEX_SLOTS], ssmp[VKN_TEX_SLOTS], ltex[VKN_TEX_SLOTS], lsmp[VKN_TEX_SLOTS], ftx[VKN_TEX_SLOTS], fsm[VKN_TEX_SLOTS], rtx[VKN_TEX_SLOTS], rsm[VKN_TEX_SLOTS];
+            for (int i = 0; i < VKN_TEX_SLOTS; i++) stex[i] = ssmp[i] = ltex[i] = lsmp[i] = ftx[i] = fsm[i] = rtx[i] = rsm[i] = -1;
+            ftx[0] = 300; ftx[1] = 321; fsm[0] = fsm[1] = 10; rtx[0] = 322; rtx[3] = 303; rsm[0] = 10; rsm[3] = 13;   // Fog: depth, Df; reader g_s1: C at slot 0
+            for (int k = 1; k <= 8; k++) { stex[k] = 300; ssmp[k] = 10; }
+            stex[1] = 303;   // Sky's binding 10 reads g_t3: the fused draw's binding 200 must too
+            ltex[8] = 320; ltex[9] = 300; lsmp[8] = lsmp[9] = 10;
+            uint32_t o8 = 0, o6 = 0, o16 = 0, o15 = 0; CHECK_EQ(vkn_ring_alloc(64, &o8), 0); CHECK_EQ(vkn_ring_alloc(64, &o6), 0);
+            CHECK_EQ(vkn_ring_alloc(128, &o16), 0); CHECK_EQ(vkn_ring_alloc(256, &o15), 0);
+            vkn_draw_in sky = in, lt;
+            sky.shader = H(70, 1); sky.blend = 0; sky.ds = 0; sky.raster = 0; sky.vfmt = 0; sky.tex[0] = NULL; sky.tex[1] = stex; sky.smp[1] = ssmp; sky.tex[2] = NULL;
+            lt = sky; lt.shader = H(71, 1); lt.blend = H(41, 1); lt.tex[1] = ltex; lt.smp[1] = lsmp;
+            vkn_draw_in fg = sky, rdr = in; fg.shader = H(72, 1); fg.tex[1] = ftx; fg.smp[1] = fsm; rdr.tex[1] = rtx; rdr.smp[1] = rsm;
+            static const float z4[4] = {0, 0, 0, 0};
+            vkn_lf_stats a0, a1; vkn_lf_test_setup(1, 1); vkn_lf_stats_get(&a0);
+#define LF_SKY() do { targets(sp, df, NULL); vkn_pass_clear_color(sp, 0, z4, NULL); vkn_pass_clear_color(df, 0, z4, NULL); \
+                      vkn_draw_ubo(1, 10, o8, 64); vkn_draw_ubo(1, 11, o6, 64); m = mark(); CHECK_EQ(vkn_draw_arrays(&sky, 0, 3), 0); } while (0)
+            fsubmit(0); cb = fbegin(1);
+            LF_SKY(); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1);                                     // frame 1: Sky drawn (learning)
+            targets(df, NULL, NULL); m = mark(); CHECK_EQ(vkn_draw_arrays(&lt, 0, 3), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1);
+            vkn_lf_stats_get(&a1); CHECK_EQ(a1.would - a0.would, 1); CHECK_EQ(a1.learn - a0.learn, 1); CHECK_EQ(a1.fused, a0.fused); CHECK_EQ(g_lf_fused_calls, 1);
+            fsubmit(0); cb = fbegin(1);
+            LF_SKY(); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 0);    // frame 2: Sky skipped, no pass
+            targets(df, NULL, NULL); m = mark(); CHECK_EQ(vkn_draw_arrays(&lt, 0, 3), 0);
+            CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
+            {
+                const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, 0);
+                const mk_dw *w200 = dw_of(bs, 200), *w206 = dw_of(bs, 206), *w248 = dw_of(bs, 248), *w52 = dw_of(bs, 52);
+                CHECK(w200 && w200->view == g_t3->view); CHECK(w206 && w206->view == g_t0->view); CHECK(w248 != NULL); CHECK(w52 == NULL);   // Sp: left out (undeclared)
+                const mk_rp *rp = rp_of(nth(m, cb, MK_E_BEGIN_RP, 0)); CHECK(rp && rp->att[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);   // Df's remembered clear folded
+            }
+            vkn_lf_stats_get(&a1); CHECK_EQ(a1.sky_skipped - a0.sky_skipped, 1); CHECK_EQ(a1.fused - a0.fused, 1); CHECK_EQ(a1.lost, a0.lost); CHECK_EQ(g_lf_fused_calls, 1);
+            fsubmit(0); cb = fbegin(1);
+            LF_SKY(); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 0);                                     // frame 3: Sky skipped ...
+            targets(g_a2, NULL, g_d3); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);    // ... and another draw comes
+            CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2);
+            {
+                const mk_ev *d = nth(m, cb, MK_E_DRAW, 0), *di = nth(m, cb, MK_E_DRAW_IDX, 0); CHECK(d && di && d->seq < di->seq);   // Sky first
+                const mk_rp *r0 = rp_of(nth(m, cb, MK_E_BEGIN_RP, 0)); CHECK(r0 && r0->ncolor == 2 && r0->att[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && r0->att[1].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+            }
+            CHECK(vkn_pass_color(0) == g_a2 && vkn_pass_depth() == g_d3);                       // the engine's target set put back
+            vkn_lf_stats_get(&a1); CHECK_EQ(a1.recovered - a0.recovered, 1); CHECK_EQ(a1.lost, a0.lost); CHECK_EQ(a1.sky_skipped - a0.sky_skipped, 2);
+            fsubmit(0); cb = fbegin(1);
+            LF_SKY(); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1);                                     // learning again: frame 4 draws Sky
+            vkn_draw_ubo(1, 14, o16, 128); vkn_draw_ubo(1, 15, o15, 256);                    // c16 / c15: the Light's view of the Fog inputs
+            targets(df, NULL, NULL); vkn_draw_arrays(&lt, 0, 3);
+            targets(cc, NULL, NULL); vkn_pass_clear_color(cc, 0, z4, NULL); m = mark(); CHECK_EQ(vkn_draw_arrays(&fg, 0, 3), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1);
+            vkn_lf_stats_get(&a1); CHECK_EQ(a1.fog_ok - a0.fog_ok, 1); CHECK_EQ(a1.fog_skipped, a0.fog_skipped);   // the Fog passed: variant B learned
+            // frame 5 (variant B): Sky skipped, the Light drawn as the 'g' module into [Df, Sp] (this module's own draw), the Fog skipped,
+            // its reader samples Sp, a draw into C gets Sp copied into C first
+            fsubmit(0); cb = fbegin(1);
+            LF_SKY(); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 0);
+            vkn_draw_ubo(1, 14, o16, 128); vkn_draw_ubo(1, 15, o15, 256);
+            targets(df, NULL, NULL); m = mark(); CHECK_EQ(vkn_draw_arrays(&lt, 0, 3), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 1);
+            {
+                const mk_rp *rp = rp_of(nth(m, cb, MK_E_BEGIN_RP, 0)); CHECK(rp && rp->ncolor == 2);
+                const mk_dw *w = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 200); CHECK(w && w->view == g_t3->view);
+            }
+            CHECK(vkn_pass_color(0) == df && vkn_pass_color(1) == NULL);                        // the engine's set put back
+            targets(cc, NULL, NULL); vkn_pass_clear_color(cc, 0, z4, NULL); m = mark(); CHECK_EQ(vkn_draw_arrays(&fg, 0, 3), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW), 0);
+            targets(g_a2, NULL, g_d3); m = mark(); CHECK_EQ(vkn_draw_indexed(&rdr, 0, 3, 1), 0);
+            { const mk_dw *w = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 22); CHECK(w && w->view == sp->view); }   // C's binding reads Sp
+            rdr.ds = 0; targets(cc, NULL, NULL); m = mark(); CHECK_EQ(vkn_draw_indexed(&rdr, 0, 3, 1), 0); CHECK_EQ(cnt(m, cb, MK_E_COPY_IMG), 1);   // C drawn into: Sp -> C first
+            vkn_lf_stats_get(&a1);
+            CHECK_EQ(a1.fog_fused - a0.fog_fused, 1); CHECK_EQ(a1.fog_skipped - a0.fog_skipped, 1); CHECK_EQ(a1.redir_draws - a0.redir_draws, 1);
+            CHECK_EQ(a1.redir_copies - a0.redir_copies, 1); CHECK_EQ(a1.twins - a0.twins, 1); CHECK_EQ(a1.lost, a0.lost); CHECK_EQ(a1.redir_lost, a0.redir_lost);
+#undef LF_SKY
+            vkn_lf_census();
+            vkn_lf_test_setup(0, 0);
+            targets(g_a2, NULL, g_d3);
+        }
     }
     fsubmit(0);
     frames_n(4);

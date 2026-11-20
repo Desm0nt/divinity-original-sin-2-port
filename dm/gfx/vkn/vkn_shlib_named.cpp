@@ -22,6 +22,7 @@
 #include <mutex>
 #include "../nr/nr_sh.h"
 #include "../nr/nr_hacks.h"
+#include "../nr/nr_lightfuse.h"   // [stage 5.1 A4] nr_lf_bindings_ok (the fused bundle's extras)
 #include "../vulkan/engine/xbg_vendor_policy.h"
 
 // vkn_tex.c (weak: the shader-library host test links without it): the comparison twins made so far
@@ -167,12 +168,40 @@ bool apply(int i, const std::string &key, std::vector<uint8_t> &bytes) {
     if (g_mode == 1) { bytes.swap(nb); c_swapped++; return true; }
     c_would++; return false;
 }
+// ---- [stage 5.1 A4] LIGHTFUSE (vkn_shlib_named.h, dm/gfx/vkn/vkn_lightfuse.c): the fused bundle, checked as xbg_nr_sh.inc oc_apply ----
+std::atomic<vkn_shlib_reader> g_read{nullptr};   // the library's reader (saved at its first bundle read)
+std::atomic<uint64_t> c_lf_ok{0}, c_lf_refused{0};
+// The fused bundle "<v>.ClusteredLightingWithSSAO" for the translated bundle `tr` of the Light key: 1 = `nb` holds it and it passes.
+int lf_bundle(int i, char v, const std::vector<uint8_t> &tr, std::vector<uint8_t> &nb, const char **why) {
+    char pk[32]; *why = NULL;
+    if (!nr_sh_pack_key(i, v, pk, sizeof pk)) { *why = "no pack key"; return 0; }
+    if (!get(pk, nb)) { *why = g_fd < 0 ? "no native-nr.xgspack" : "no such bundle in native-nr.xgspack (run setup again)"; return 0; }
+    uint32_t ti, to, ni, no; io(tr, ti, to); io(nb, ni, no);
+    if (!nr_sh_head_equal(tr.data(), tr.size(), nb.data(), nb.size())) *why = "head differs from the translated bundle";
+    else if (!nr_lf_bindings_ok(nb.data(), nb.size())) *why = "descriptors outside the head table + the extras, or an extra missing";
+    else if (ti != ni || ti == ~0u) *why = "input locations differ";
+    else if (v == 'g' ? no != (to | 2u) : no != to) *why = "output locations differ";
+    return *why ? 0 : 1;
+}
+int lf_light_entry(const std::string &key16) { const int i = entry(key16); return i >= 0 && i == nr_sh_find_name("ClusteredLightingWithSSAO") ? i : -1; }
+// read_bundle's door for "<key>#nlf" / "<key>#nlg": the checked fused bundle in place of a file (from_pack: it comes from a pack)
+int lf_read(const std::string &key, std::vector<uint8_t> &out, bool &from_pack, vkn_shlib_reader read) {
+    const std::string k16 = key.substr(0, 16); const char v = key[19] == 'g' ? 'g' : 'f';
+    const int i = lf_light_entry(k16); if (i < 0) return 0;
+    std::vector<uint8_t> tr; bool fp = false;
+    t_bypass++; const bool have = read(k16, tr, fp); t_bypass--;
+    if (!have || tr.empty()) return 0;
+    std::vector<uint8_t> nb; const char *why = NULL;
+    if (!lf_bundle(i, v, tr, nb, &why)) return 0;   // (vkn_shlib_named_fused said why already)
+    out.swap(nb); from_pack = true; return 1;
+}
 }  // namespace
 
 int vkn_shlib_named_read(const std::string &key, std::vector<uint8_t> &out, bool &from_pack, vkn_shlib_reader read, const std::string &dir,
                          VkPhysicalDevice phys, bool ffl2, int policy) {
     if (t_bypass || !read) return -1;
-    std::call_once(g_init, [&] { g_dir = dir; init(phys, ffl2, policy); });
+    std::call_once(g_init, [&] { g_dir = dir; g_read.store(read); init(phys, ffl2, policy); });
+    if (key.size() == 20 && (!key.compare(16, 4, "#nlf") || !key.compare(16, 4, "#nlg"))) return lf_read(key, out, from_pack, read);   // [stage 5.1 A4] LIGHTFUSE (any DM_VK_NATIVE_SH)
     if (g_mode <= 0) return -1;
     // "<key>#nrt": the translated bundle of a replaced key (vkn_shlib_named_alt), read past this module
     if (key.size() == 20 && !key.compare(16, 4, "#nrt")) { t_bypass++; const bool have = read(key.substr(0, 16), out, from_pack); t_bypass--; return have ? 1 : 0; }
@@ -250,5 +279,47 @@ extern "C" void vkn_shlib_named_census(void) {
              (unsigned long long)s.dref_missing, (unsigned long long)s.dref_shaders, (unsigned long long)s.dref_flagged, (unsigned long long)tm, (unsigned long long)tg,
              (unsigned long long)tf, ta, (unsigned long long)s.pass_verified, (unsigned long long)s.pass_outside, (unsigned long long)s.alt_made,
              (unsigned long long)s.alt_failed, (unsigned long long)s.pass_dref_kept, (unsigned long long)s.pass_unchecked, s.passes, (unsigned long long)s.reds);
+}
+// ---- [stage 5.1 A4] LIGHTFUSE doors (vkn_shlib_named.h) ----
+extern "C" int vkn_shlib_named_fused(const char *light_fs_key, char variant, xbg_vkn_stage *out, uint64_t declared[4], uint64_t *dref) {
+    if (declared) memset(declared, 0, 4 * sizeof declared[0]);
+    if (dref) *dref = 0;
+    const vkn_shlib_reader read = g_read.load();
+    if (!light_fs_key || strlen(light_fs_key) != 16 || !out || (variant != 'f' && variant != 'g')) return 1;
+    if (!read || !vkn_shlib_ready()) return -1;
+    const std::string k16(light_fs_key); const int i = lf_light_entry(k16);
+    if (i < 0) { c_lf_refused++; red("lightfuse: %s is not the fragment key of ClusteredLightingWithSSAO: no fused bundle", light_fs_key); return 1; }
+    std::vector<uint8_t> tr, nb; bool fp = false; const char *why = NULL;
+    t_bypass++; const bool have = read(k16, tr, fp); t_bypass--;
+    if (!have || tr.empty()) why = "the translated bundle of the key is missing";
+    else lf_bundle(i, variant, tr, nb, &why);
+    if (why) { c_lf_refused++; red("lightfuse: %c.ClusteredLightingWithSSAO for %s refused: %s (no fusion)", variant, light_fs_key, why); return 1; }
+    const std::vector<uint32_t> w = spirv_of(nb);
+    for (size_t k = 5; k < w.size();) {   // OpDecorate (71) <id> Binding (33) <n>
+        const uint32_t c = w[k] >> 16, op = w[k] & 0xffff;
+        if (!c || k + c > w.size()) break;
+        if (op == 71 && c >= 4 && w[k + 2] == 33 && w[k + 3] < 256 && declared) declared[w[k + 3] >> 6] |= 1ull << (w[k + 3] & 63);
+        k += c;
+    }
+    if (dref) *dref = nr_sh_depth_bindings(w.data(), w.size());
+    const std::string lk = k16 + (variant == 'g' ? "#nlg" : "#nlf");
+    const int rc = vkn_shlib_shader(lk.c_str(), nullptr, nullptr, out);
+    if (rc || !out->module || out->stage != 4) {
+        c_lf_refused++; red("lightfuse: %c.ClusteredLightingWithSSAO for %s: the library made no fragment module (rc %d, stage %u): no fusion", variant, light_fs_key, rc, rc ? 0u : out->stage);
+        return rc < 0 ? -1 : 1;
+    }
+    c_lf_ok++;
+    L("lightfuse: %c.ClusteredLightingWithSSAO for %s: %zu words, %u bindings in the head table (DeferredSky inside%s; extras: Sky's 8 textures on 200..242, c8 / c6 on 248 / 254)",
+      variant, light_fs_key, w.size(), out->binding_count, variant == 'g' ? ", DeferredFog on output 1" : "");
+    return 0;
+}
+extern "C" int vkn_shlib_named_same_bundle(const char *key_a, const char *key_b) {
+    const vkn_shlib_reader read = g_read.load();
+    if (!read) return -1;
+    if (!key_a || !key_b) return 0;
+    if (!strcmp(key_a, key_b)) return 1;
+    std::vector<uint8_t> a, b; bool fp = false;
+    t_bypass++; const bool ha = read(key_a, a, fp), hb = read(key_b, b, fp); t_bypass--;
+    return ha && hb && !a.empty() && a == b ? 1 : 0;
 }
 #endif

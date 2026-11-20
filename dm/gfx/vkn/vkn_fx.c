@@ -36,12 +36,16 @@ int vkn_fx_register(const char *name, vkn_fx_fn fn, void *user, int order) {
     else vkn_logf("fx: \"%s\" registered, order %d", name ? name : "?", order);
     return rc;
 }
+static const vkn_fx_out *g_force;                 // [stage 5.1 A4] vkn_fx_force: recording thread
+void vkn_fx_force(const vkn_fx_out *o) { g_force = o; }
 int vkn_fx_active(void) {
+    if (g_force) return 1;                         // [stage 5.1 A4] a piece's own draw with its output (vkn_fx_run copies it)
     if (g_bypass) { g_st.bypassed++; return 0; }
     return __atomic_load_n(&g_nfn, __ATOMIC_ACQUIRE) != 0;
 }
 void vkn_fx_bypass(int on) { if (on) g_bypass++; else if (g_bypass > 0) g_bypass--; }
 void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
+    if (g_force) { if (out != g_force) *out = *g_force; out->skip = 0; g_st.bypassed++; return; }   // [stage 5.1 A4] (counted as a piece's own draw)
     memset(out, 0, sizeof *out);
     const uint32_t n = __atomic_load_n(&g_nfn, __ATOMIC_ACQUIRE);
     vkn_fx_ctx c = *ctx;

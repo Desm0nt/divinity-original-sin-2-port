@@ -73,6 +73,21 @@ typedef struct vkn_shlib_named_stats {
 void vkn_shlib_named_stats_get(vkn_shlib_named_stats *s);
 void vkn_shlib_named_census(void);
 
+// ==== [stage 5.1 A4] LIGHTFUSE (dm/gfx/vkn/vkn_lightfuse.c): the fused DeferredSky -> ClusteredLightingWithSSAO bundle by name ====
+// The pack's "<variant>.ClusteredLightingWithSSAO" ('f': DeferredSky inside the Light shader; 'g': + DeferredFog on output 1) for
+// the Light shader's fragment key, under the checks of the old path (xbg_nr_sh.inc oc_apply): head equal to the translated head byte
+// for byte (except the SPIR-V length word), input locations equal, output locations equal ('g': the translated ones | location 1),
+// every descriptor in the head table or one of nr_lightfuse.h's extras and each extra declared (nr_lf_bindings_ok). The module is
+// loaded through the library's whole load-time chain under the key "<key>#nlf" / "<key>#nlg" (as the translator's bundle_words +
+// bundle_module did for "#lf" / "#lfg"); out as vkn_shlib_shader (bindings = the head table, uniform extents trimmed by the fused
+// words). declared[4]: bit b = the fused SPIR-V declares descriptor set 0 binding b (< 256). *dref: nr_sh_depth_bindings of the fused
+// words (bindings < 64 sampled with a depth comparison). Independent of DM_VK_NATIVE_SH. The library's rewrites want a big stack:
+// call it on a thread with >= 8 MB. 0 = ok; 1 = no such bundle / refused (one line, red); -1 = the library is not up.
+int vkn_shlib_named_fused(const char *light_fs_key, char variant, xbg_vkn_stage *out, uint64_t declared[4], uint64_t *dref);
+// 1 = the translated bundles of the two keys (the library's packs / files, as read_translated) are equal byte for byte, 0 = they
+// differ or one is missing, -1 = the library has read no bundle yet. File reads: once per pair (the caller keeps the answer).
+int vkn_shlib_named_same_bundle(const char *key_a, const char *key_b);
+
 #ifdef __cplusplus
 }
 #endif
