@@ -70,6 +70,12 @@
 //                    verdict runs and what it finds in the chunks must be what this thread named.
 //   DM_NR_Z8_SPLIT   with the thread: the first run of a submission the translation thread is close behind is published after this
 //                    many tail draws, the next after twice as many, ... (8; 0 off, 1..1024)
+//   DM_NR_Z8_TWIN    [NR-ZERO.md section 39] 1 (xbg_nr_z8_twin_default; only while DM_NR_Z8 is on): a draw whose prologue swapped only the
+//                    fragment shader for a twin (NR-MAT, NR-SH-SURF) is published and answered - its answer names the twin and is
+//                    taken only when the shaders at the hook are the answer's (nr_z8.h same_shaders); 0: as before (never).
+// [section 39] The table has buckets of four ways (nr_z8.h find / pick); a draw whose vertex ranges differ from its template's is
+// answered without values (M_NOVAL: no packets written ahead); the walker's outcome rides with each mark (DM_NR_Z8_THREAD=1) and the
+// translation thread counts it at the lane's command section ("[nr] z8 census").
 // Lines: "[nr] DM_NR_Z8=..." at the start, "[nr] z8 walk: ...", "[nr] z8, translation thread: ...", "[nr] z8 by part ...",
 // "[nr] z8 check ..." every 10 s, red "【红】[nr] z8: ...".
 #if XBG_NR_Z8_PART == 1
@@ -117,21 +123,25 @@ struct DgRing{enum{N=4096};Dg slot[N];std::atomic<uint32_t> w{0},r{0};
     Dg *front(){const uint32_t i=r.load(std::memory_order_relaxed);return i==w.load(std::memory_order_acquire)?nullptr:&slot[i%N];}
     void pop(){r.store(r.load(std::memory_order_relaxed)+1,std::memory_order_release);}};
 DgRing *dgr=nullptr;
-enum{G_SUBS,G_RECORDS,G_DRAWS,G_NO_KEY,G_CALLED,G_EMPTY,G_MISS,G_VALUES=G_MISS+nrz8::M_N,G_HEADS,G_TAILS,G_RUNS,G_NO_CHUNK,G_RING_FULL,G_CHUNK_FULL,G_SHORT_RUNS,G_SHORT_TAILS,G_TAIL_BYTES,G_SIDE_BYTES,
-     G_WALK_NS,G_DRAW_NS,G_DRAW_TIMED,G_FIX_NEW,G_FIX_REFRESH,G_FIX_CLEARS,G_FIX_STALE,G_DG_PUSHED,G_DG_FULL,G_REF_MISS,G_BAD,G_SPLITS,G_CLOSE,G_N};
+enum{G_SUBS,G_RECORDS,G_DRAWS,G_LOOK,G_VALUES=G_LOOK+nrz8::M_OK,G_NOVAL=G_LOOK+nrz8::M_NOVAL,G_EMPTY=G_LOOK+nrz8::M_EMPTY,G_NO_KEY=G_LOOK+nrz8::M_NOKEY,G_CALLED=G_LOOK+nrz8::M_CALLED,G_HEADS=G_LOOK+nrz8::M_ALL,G_TAILS,G_RUNS,G_NO_CHUNK,G_RING_FULL,G_CHUNK_FULL,G_SHORT_RUNS,G_SHORT_TAILS,G_TAIL_BYTES,G_SIDE_BYTES,
+     G_WALK_NS,G_DRAW_NS,G_DRAW_TIMED,G_T_BIND,G_T_FIX,G_T_LOOK,G_T_WRITE,G_T_MARK,G_FIX_NEW,G_FIX_REFRESH,G_FIX_CLEARS,G_FIX_STALE,G_DG_PUSHED,G_DG_FULL,G_REF_MISS,G_BAD,G_SPLITS,G_CLOSE,G_N};
 std::atomic<uint64_t> pub[G_N];   // the walk's counters, published at the end of every submission (relaxed; read by nrz8t::tick)
 }
 namespace nrz8t{
 int mode=0;                         // 0 off, 1 apply, 2 verify (set by init(), from nrz3::init on the translation thread)
-bool guarded=false;                 // draw(), at the hook: the prologue changed State for the draw in hand (pre-pass override, a shader twin, LIGHTFUSE, a post fusion)
+bool guarded=false;                 // draw(), at the hook: the prologue changed State for the draw in hand (pre-pass override, LIGHTFUSE, ONCHIP, a post fusion; a twin while DM_NR_Z8_TWIN=0)
+bool twin=false;int twin_ok=1;      // [section 39] the prologue swapped only the fragment shader for a twin (NR-MAT / NR-SH-SURF); DM_NR_Z8_TWIN
+int cur_why=-1;                     // [section 39] the walker's outcome for the record in hand (nr_z8.h M_*; -1: no words of the walk)
+struct Census{uint64_t lane[nrz8::M_ALL+1]{},gone[nrz8::M_ALL+1]{},twin_lane=0,twin_ans=0;} cz;   // the outcomes at the lane's command section / of records that never reached it ([M_ALL]: no words)
 uint64_t cur_sub=0;                 // the number of the submission being executed (0: not one the front announced)
 // what the translation thread resolved for the record it published a slot's template from (same version as the template)
 struct Priv{uint32_t ver=0;int32_t did=-1;uint64_t plan=0,pent=0,passdef=0,stamp[3]{};uint8_t frag=0;const Shader *sh[5]{};};   // sh: the shader objects the plan and the NR-09 entry belong to
+uint32_t *used=nullptr,uclock=0;    // [section 39] a slot's use stamp: uclock when its template was last put or used (nr_z8.h pick: the oldest way goes first)
 Priv *priv=nullptr;
 // the draw in hand, from the lane's tail (before nrz5t::recorded): what a template needs besides the values
 struct Hint{const void *pent=nullptr;int zero=-1;bool qpat=false,pp=false,special=false;uint64_t lane_gen=0;} hint;
 struct Stats{uint64_t asked=0,no_tmpl=0,stamp=0,again=0,replaced=0,stale=0,passdef=0,gate=0,shaders=0,taken_path=0,published=0,pub_no=0,pub_why[8]{},a_cmp=0,a_same=0,a_stale=0,a_bad=0,
-             dg_cmp=0,dg_same=0,dg_bad=0,dg_unreached=0,sh_bad=0,spot=0,spot_bad=0,pre_ns=0,pre_n=0;} s;
+             dg_cmp=0,dg_same=0,dg_bad=0,dg_unreached=0,sh_bad=0,spot=0,spot_bad=0,pre_ns=0,pre_n=0,twin_pub=0,twin_took=0,none_put=0;} s;
 uint64_t next_ns=0,last[nrz8g::G_N]{},pre_calls=0;unsigned told=0;
 nrz8::MarkReader mr;                // [DM_NR_Z8_THREAD=1] the place of the record in hand in its submission
 // ---- [DM_NR_Z8_IMG] the read word of an NR-08 entry (nrz3::answered asks it for a draw the walk answered) ----
@@ -180,7 +190,10 @@ inline void img_done(nrdesc::Ent &e,bool hook,bool stood,const ImgSnap &z0,bool 
         if(!nrz_rt_img_ok(&r)){++is.no_set[!r.rt?1:r.in_open?2:r.written?3:4];return;}}
     nrz_rtq_set(&e.rtq,nrz_img_ep,nrz_sub_now(),slot_serial,write_seq-nrz_pm,uint64_t(open_pass.pass),uint64_t(open_pass.framebuffer),fo);++is.set;}
 struct TStats{uint64_t waits=0,wait_ns=0,ends=0,recs=0;} ts;uint64_t tl_post=0,tl_posts=0,tl_cpu=0,tl_jobs=0,tl_wakes=0,tl_passed=0;nrz8::MarkReader mrl;
-void guard(bool on){guarded=on;}
+void guard(bool on,bool tw){guarded=on || (tw && !twin_ok);twin=tw && !guarded;}   // (DM_NR_Z8_TWIN=0: a twin is a changed State, as before section 39)
+// [section 39] the census: the walker's outcome of a record whose draw reached the lane's command section / that never reached it
+inline void census_lane(){const int w=cur_why<0 || cur_why>=nrz8::M_ALL?nrz8::M_ALL:cur_why;++cz.lane[w];if(twin){++cz.twin_lane;if(nrz8::answered(w))++cz.twin_ans;}}
+inline void census_gone(){++cz.gone[cur_why<0 || cur_why>=nrz8::M_ALL?nrz8::M_ALL:cur_why];}
 // nrz5t::tail, with the values the tail resolved (rv): what this thread can say of the tail draw in hand by itself. false: nothing
 // (not a tail draw of a walk on its own thread, the slot was published again, the prologue changed State for this draw).
 bool known(const nbd_hdr &rh,const nrz5_vals &rv,nrz5r::Reader::Known *k){
@@ -211,14 +224,14 @@ inline Shader *shader_of(uint64_t w,unsigned st){
 // nbdraw::apply, before the draw() of a record (from nrz5t::rec_begin): a record the walk of THIS submission did not write its words
 // into carries nothing; =2: the copy's digest at this record against State.
 inline void rec_begin(nbd_hdr &h,const uint8_t *rec){
-    cur_vw=0;cur_pk=0;
+    cur_vw=0;cur_pk=0;cur_why=-1;
     if(__builtin_expect(nrz8g::thread_mode,0)){   // [DM_NR_Z8_THREAD=1] the record carries nothing: its words are the walker's entry of its place in this submission - or it has none
         if(nrshc::again!=NRSHC_R_NONE){++s.again;return;}   // (a re-executed range is not counted: the walk met its records once)
         if(mr.sub!=cur_sub)mr.begin(cur_sub);
         ++ts.recs;nrz8::MarkVal mv;h._pad0=0;h._pad1=0;h._pad2=0;if(!(h.flags&NBD_F_COND))h.cond_addr=0;   // (whatever the record's unused words hold is not read)
         if(!cur_sub || !mr.next(nrz8g::marks,rec,&mv))return;
         h._pad0=nrz8::stamp_of(cur_sub);h._pad1=mv.mark;h._pad2=mv.slot1;if(!(h.flags&NBD_F_COND))h.cond_addr=mv.ca;
-        cur_vw=mv.vw;cur_pk=mv.pk;
+        cur_vw=mv.vw;cur_pk=mv.pk;cur_why=mv.why;
         if(mode!=2 || !nrz8g::dgr || !mv.aux)return;
         const uint32_t want=uint32_t(mv.aux-1);
         while(nrz8g::dgr->front() && int32_t(want-nrz8g::dgr->at())>0){nrz8g::dgr->pop();++s.dg_unreached;}   // (digests of records this thread executed before the walk reached them)
@@ -242,15 +255,15 @@ inline void rec_begin(nbd_hdr &h,const uint8_t *rec){
 // beside it; =2 first: the answer the walk used for this record against what the path resolved.
 void publish(const nbd_hdr &rh,uint32_t key,const nrz5_vals &v,uint32_t first_index,uint32_t k,const nr_dplan *plan_hint){
     if(!rh._pad0 || rh._pad2<=0 || uint32_t(rh._pad2-1)>=nrz8g::tab.n || !key)return;
-    const uint32_t slot=uint32_t(rh._pad2-1),ver=uint32_t(rh.cond_addr>>32);Priv &pv=priv[slot];
+    const uint32_t hslot=uint32_t(rh._pad2-1),ver=uint32_t(rh.cond_addr>>32);Priv &pv=priv[hslot];   // hslot: the way the walk read (the answer it used is that way's)
     nrdesc::Plan *pl=(nrdesc::mode==1 && (plan_hint || nrdesc::z_out==NRZD_HIT || nrdesc::z_out==NRZD_BUILT))?nrdesc::plan_for():nullptr;
     const uint64_t stamp[3]={nrdesc::tab_gen,hint.lane_gen,nbpipe::epoch};
-    if(ver && mode==2 && pv.ver==ver && !guarded && !hint.pp){++s.a_cmp;   // the walk had a template: its answer (a draw the prologue changed is never answered)
-        bool shs=true;for(unsigned i=0;i<5;i++)shs=shs && pv.sh[i]==state.shader[i];
+    if(ver && mode==2 && pv.ver==ver && !guarded && !hint.pp){++s.a_cmp;   // the walk had a template: its answer (a draw the prologue changed is never answered; a twin is - section 39)
+        const bool shs=nrz8::same_shaders(pv.sh,state.shader,5);
         if(!shs || memcmp(pv.stamp,stamp,sizeof stamp) || pv.passdef!=uint64_t(uintptr_t(last_pass.pass.definition)))++s.a_stale;   // (=1 would not have used it)
-        else if(pl && pl->last>=0 && pv.plan==uint64_t(uintptr_t(pl)) && pv.did==pl->last && pv.pent==uint64_t(uintptr_t(hint.pent)) && pv.frag==uint8_t(desc_frag_only_shaders()))++s.a_same;
+        else if(pl && pl->last>=0 && pv.plan==uint64_t(uintptr_t(pl)) && pv.did==pl->last && pv.pent==uint64_t(uintptr_t(hint.pent)) && pv.frag==uint8_t(desc_frag_only_shaders())){++s.a_same;used[hslot]=++uclock;}
         else{++s.a_bad;red("the answer the walk took for a draw is not what the path resolved: plan %p / %p, NR-08 entry %d / %d, NR-09 entry %p / %p (key %u, slot %u)",
-            (void*)uintptr_t(pv.plan),(void*)pl,pv.did,pl?pl->last:-1,(void*)uintptr_t(pv.pent),hint.pent,key,slot);}}
+            (void*)uintptr_t(pv.plan),(void*)pl,pv.did,pl?pl->last:-1,(void*)uintptr_t(pv.pent),hint.pent,key,hslot);}}
     // what cannot be a template (never answered)
     int why=0;
     if(!pl || pl->p.why || pl->last<0)why=1;                                   // NR-08 did not serve the draw
@@ -258,20 +271,24 @@ void publish(const nbd_hdr &rh,uint32_t key,const nrz5_vals &v,uint32_t first_in
     else if(!hint.pent || hint.special || hint.qpat || hint.zero>=0)why=4;      // no NR-09 entry of its own (PRESKIN / POSONLY variant), a pattern or zero stream
     else if(hint.pp || guarded)why=5;                                           // the prologue changed State for this draw: its words are not the walk's copy
     else if(!state.shader[0] || state.shader[1] || state.shader[2] || state.shader[3])why=6;
-    if(why){++s.pub_no;++s.pub_why[why];if(pv.ver){const uint64_t none[nrz8::HEAD_WORDS]={uint64_t(nrz8::HEAD_WORDS)};pv=Priv{};pv.ver=nrz8g::tab.put(slot,none,nrz8::HEAD_WORDS);}return;}
     nrz8::Desc d;
     nrz5_site_make(&d.site,key,rh.draw==NBD_DRAW_IDX?NRZ5S_IDX:NRZ5S_ARRAYS,rh.prim,rh.itype,rh.count,rh.base_vertex,rh.base_instance,rh.instances,rh.first,rh.ibuf,state.vb[0].address);
     d.fixid=uint32_t(rh.cond_addr);d.first_index=first_index;d.k=k;
+    // [section 39] the way of the bucket this template goes to (the way of the same draw, an empty way, else the way not used last); a draw
+    // that cannot be a template leaves the template that says so (with its site words and fix id: the walk tells it from another draw)
+    auto put=[&](const uint64_t *w,unsigned nw,uint32_t *was)->Priv&{const uint32_t sl=nrz8g::tab.pick(hslot,w,used);used[sl]=++uclock;
+        Priv &x=priv[sl];*was=x.ver;const uint32_t nv=nrz8g::tab.put(sl,w,nw);if(nv!=x.ver){x=Priv{};x.ver=nv;}return x;};
+    if(why){++s.pub_no;++s.pub_why[why];uint64_t z[nrz8::HEAD_WORDS];uint32_t was=0;put(z,nrz8::none_of(d.site,d.fixid,z),&was);++s.none_put;return;}
     struct A{bool ub(unsigned st,unsigned sl,uint64_t *x,uint64_t *z) const{if(st>=6 || sl>=16)return false;*x=uint64_t(state.ub[st][sl].address);*z=uint64_t(state.ub[st][sl].size);return true;}
              bool vb(unsigned i,uint64_t *x,uint64_t *z) const{if(i>=16)return false;*x=uint64_t(state.vb[i].address);*z=uint64_t(state.vb[i].size);return true;}
              uint64_t tex(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.tex[ns][sl]:~0ull;}uint64_t samp(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.samp[ns][sl]:~0ull;}};
     why=nrz8::describe(pl->p,pl->copy,v,A{},d);   // the dynamic offsets (ring blocks by their uniform slot, support / c1 blocks by their offset), the vertex ranges, the texture rows - from State
     uint64_t w[nrz8::MAX_WORDS];const unsigned nw=why?0u:nrz8::pack(d,w);
-    if(!nw){++s.pub_no;++s.pub_why[why?why:7];return;}
-    Priv n;n.ver=nrz8g::tab.put(slot,w,nw);n.plan=uint64_t(uintptr_t(pl));n.did=pl->last;n.pent=uint64_t(uintptr_t(hint.pent));n.passdef=uint64_t(uintptr_t(last_pass.pass.definition));
-    memcpy(n.stamp,stamp,sizeof stamp);n.frag=uint8_t(desc_frag_only_shaders());for(unsigned i=0;i<5;i++)n.sh[i]=state.shader[i];
-    if(n.ver!=pv.ver)++s.published;
-    pv=n;}
+    if(!nw){++s.pub_no;++s.pub_why[why?why:7];uint64_t z[nrz8::HEAD_WORDS];uint32_t was=0;put(z,nrz8::none_of(d.site,d.fixid,z),&was);++s.none_put;return;}
+    uint32_t was=0;Priv &n=put(w,nw,&was);const uint32_t nv=n.ver;
+    if(nv!=was){++s.published;if(twin)++s.twin_pub;}
+    n=Priv{};n.ver=nv;n.plan=uint64_t(uintptr_t(pl));n.did=pl->last;n.pent=uint64_t(uintptr_t(hint.pent));n.passdef=uint64_t(uintptr_t(last_pass.pass.definition));
+    memcpy(n.stamp,stamp,sizeof stamp);n.frag=uint8_t(desc_frag_only_shaders());for(unsigned i=0;i<5;i++)n.sh[i]=state.shader[i];}
 void tick();
 }
 #elif XBG_NR_Z8_PART == 2
@@ -287,7 +304,7 @@ inline bool bind_prog(Sh &S,const prog_t *prog,int32_t stages){
 #define NRZ8_VATTR(a,st,n) xbg_vertex_attributes_replace((a),(st),(n))
 NR3_DEFINE_APPLY_RAW(apply_copy,Sh,NRZ8_BIND,NRZ8_VATTR)
 struct Hnd;
-struct G{Sh S;nrz8::Fix fix;nrz8::Walker<Hnd> W;nrz5r::Writer wr;nrz8::Ranges vr;bool ready=false,answers=false,verify=false;std::atomic<bool> bad{false};uint64_t c[G_N]{},sub=0,n=0;uint8_t stamp=0;} g;
+struct G{Sh S;nrz8::Fix fix;nrz8::Walker<Hnd> W;nrz5r::Writer wr;nrz8::Ranges vr;bool ready=false,answers=false,verify=false;std::atomic<bool> bad{false};uint64_t c[G_N]{},sub=0,n=0,tn=0;uint8_t stamp=0;} g;
 struct Acc{
     bool ub(unsigned st,unsigned sl,uint64_t *a,uint64_t *z) const{if(st>=6 || sl>=16)return false;*a=uint64_t(g.S.ub[st][sl].address);*z=uint64_t(g.S.ub[st][sl].size);return true;}
     bool vb(unsigned i,uint64_t *a,uint64_t *z) const{if(i>=16)return false;*a=uint64_t(g.S.vb[i].address);*z=uint64_t(g.S.vb[i].size);return true;}
@@ -304,6 +321,8 @@ struct Hnd{
         g.fix.mark(nrz8::dirty_of_nr3(p,n));}
     void other(uint32_t){g.wr.end_run();}
     void nb_draw(uint8_t *rec,size_t n,bool top){
+        // [section 39] 1 draw record in 64 is clocked by part - never one that carries =2's digest (1 in DM_NR_Z8_DIGEST: the same count)
+        const bool timed=(++g.tn&63)==17;uint64_t t0=timed?nbmtq::now_ns():0,tb=t0,tf=t0,tl=t0,tw=t0;
         nbd_hdr h;const uint8_t *b=nullptr;
         if(nbd_view(rec,n,&h,&b)!=0){g.bad=true;return;}
         if(h.flags&NBD_F_CHECK)return;   // compared only by the backend (the old records carry the binds and the draw)
@@ -311,32 +330,35 @@ struct Hnd{
         if(nbd_apply(&h,b,g.S.tex,g.S.samp,g.S.img,reinterpret_cast<nbd_range(*)[16]>(g.S.ub),&ts,&bs)!=0){g.bad=true;return;}
         ++g.c[G_DRAWS];
         nrd_tail t;const bool nr=nrd_tail_get(rec,n,&h,&t)!=0;
-        const bool timed=!(++g.n&63);const uint64_t t0=timed?nbmtq::now_ns():0;
-        uint32_t mark=0;int32_t slot1=0;uint64_t ca=0,dg_at=0,vw=0;
-        if(!top){++g.c[G_CALLED];g.wr.no_values();}
+        ++g.n;if(timed)tf=tl=tw=tb=nbmtq::now_ns();
+        uint32_t mark=0;int32_t slot1=0;uint64_t ca=0,dg_at=0,vw=0;int why=nrz8::M_NOKEY;
+        if(!top){++g.c[G_CALLED];g.wr.no_values();why=nrz8::M_CALLED;}
         else if(!g.answers || !nr || !t.key || t.site==NRD_SITE_UI || (h.draw!=NBD_DRAW_IDX && h.draw!=NBD_DRAW_ARRAYS) || (h.flags&(NBD_F_REN|NBD_F_COND)) || h.prim==7 || h.count<=0 ||
-                (h.draw==NBD_DRAW_IDX && (h.instances<=0 || h.base_instance<0 || h.itype<1 || h.itype>2 || !h.ibuf)) || (g.S.sprog[0]>>63) || (g.S.sprog[4]>>63)){++g.c[G_NO_KEY];g.wr.no_values();}
+                (h.draw==NBD_DRAW_IDX && (h.instances<=0 || h.base_instance<0 || h.itype<1 || h.itype>2 || !h.ibuf)) || (g.S.sprog[0]>>63) || (g.S.sprog[4]>>63)){++g.c[G_NO_KEY];g.wr.no_values();}   // (why: M_NOKEY)
         else{
             nrz5_site site;nrz5_site_make(&site,t.key,h.draw==NBD_DRAW_IDX?NRZ5S_IDX:NRZ5S_ARRAYS,h.prim,h.itype,h.count,h.base_vertex,h.base_instance,h.instances,h.first,h.ibuf,uint64_t(g.S.vb[0].address));
-            const uint32_t fixid=g.fix.get(g.S,g.S.sprog);const uint32_t s=tab.slot_of(&site,fixid);slot1=int32_t(s+1);ca=fixid;
-            uint64_t w[nrz8::MAX_WORDS];uint32_t ver=0;nrz5_vals v;uint32_t off[nrz8::MAX_DYN];
-            if(!fixid || !tab.get(s,w,&ver)){++g.c[G_EMPTY];g.wr.no_values();}
-            else{const int m=nrz8::match(w,&site,fixid,h.count,h.instances,h.first,h.base_vertex,h.base_instance,Acc{},&v,off);
-                if(m){++g.c[G_MISS+m];g.wr.no_values();}
-                else{++g.c[G_VALUES];ca|=uint64_t(ver)<<32;
-                    mark=g.wr.draw(v,[](nbmtq::Chunk *ch,nrz5_cache *mm,const nrz5_vals *vv){nbmt::Build bb{ch};nbmt::Z5Sink sink{bb};return nrz5_emit(sink,mm,vv);});
-                    if(view_ids)vw=nrz8::ranges_word(g.vr,v.used,[](uint32_t i,uint64_t *a,uint64_t *z){*a=uint64_t(g.S.vb[i].address);*z=uint64_t(g.S.vb[i].size);return i<16;},   // [DM_NR_Z8_VIEW] the ranges the lane's tail will ask for
-                        h.draw==NBD_DRAW_IDX,uint64_t(h.ibuf),uint64_t(uint32_t(h.count))<<h.itype);}}
-            if(g.verify && dgr && !(g.c[G_DRAWS]%dig_every)){Dg x;x.rec=rec;x.sub=g.sub;digest(g.S,x.d);memcpy(x.sprog,g.S.sprog,sizeof x.sprog);x.fixid=fixid;x.fresh=g.fix.fresh(g.S,g.S.sprog);
+            const uint32_t fixid=g.fix.get(g.S,g.S.sprog);ca=fixid;const uint32_t bk=tab.slot_of(&site,fixid);
+            if(timed)tl=tw=tf=nbmtq::now_ns();
+            uint64_t w[nrz8::MAX_WORDS];nrz5_vals v;uint32_t off[nrz8::MAX_DYN];
+            const nrz8::Look L=nrz8::look(tab,bk,site,fixid,h,Acc{},w,&v,off);if(timed)tw=tl=nbmtq::now_ns();slot1=int32_t(L.slot+1);why=L.m;++g.c[G_LOOK+L.m];   // [section 39] the ways of the bucket; M_NOVAL: answered, no values
+            if(!nrz8::answered(L.m))g.wr.no_values();
+            else{ca|=uint64_t(L.ver)<<32;
+                if(L.m==nrz8::M_OK)mark=g.wr.draw(v,[](nbmtq::Chunk *ch,nrz5_cache *mm,const nrz5_vals *vv){nbmt::Build bb{ch};nbmt::Z5Sink sink{bb};return nrz5_emit(sink,mm,vv);});
+                else g.wr.no_values();   // (a vertex range differs from the template's: the values are not known - a head draw; the answer still is)
+                if(view_ids)vw=nrz8::ranges_word(g.vr,v.used,[](uint32_t i,uint64_t *a,uint64_t *z){*a=uint64_t(g.S.vb[i].address);*z=uint64_t(g.S.vb[i].size);return i<16;},   // [DM_NR_Z8_VIEW] the ranges the lane's tail will ask for
+                    h.draw==NBD_DRAW_IDX,uint64_t(h.ibuf),uint64_t(uint32_t(h.count))<<h.itype);}
+            if(timed)tw=nbmtq::now_ns();
+            if(g.verify && dgr && !(g.c[G_DRAWS]%dig_every) && !timed){Dg x;   // (a clocked record carries no digest: the clock is the walk's of =1)
+                x.rec=rec;x.sub=g.sub;digest(g.S,x.d);memcpy(x.sprog,g.S.sprog,sizeof x.sprog);x.fixid=fixid;x.fresh=g.fix.fresh(g.S,g.S.sprog);
                 const uint32_t at=dgr->next();
                 if(x.fixid!=x.fresh)++g.c[G_FIX_STALE];if(dgr->push(x)){++g.c[G_DG_PUSHED];dg_at=uint64_t(at)+1;}else ++g.c[G_DG_FULL];}}
         if(thread_mode){   // [DM_NR_Z8_THREAD=1] the translation thread may be executing this record: nothing is written into it
-            nrz8::MarkVal mv;mv.ca=(h.flags&NBD_F_COND)?0:ca;mv.mark=mark;mv.slot1=slot1;mv.aux=dg_at;mv.vw=vw;mv.pk=mark?uint64_t(g.wr.last_bytes)|uint64_t(g.wr.last_cmds)<<32:0;marks.put(rec,mv);}
+            nrz8::MarkVal mv;mv.ca=(h.flags&NBD_F_COND)?0:ca;mv.mark=mark;mv.slot1=slot1;mv.aux=dg_at;mv.vw=vw;mv.pk=mark?uint64_t(g.wr.last_bytes)|uint64_t(g.wr.last_cmds)<<32:0;mv.why=uint8_t(why);marks.put(rec,mv);}
         else{
         // the record's words (plain stores: the job that carries this recording is not queued yet)
         rec[offsetof(nbd_hdr,_pad0)]=g.stamp;memcpy(rec+offsetof(nbd_hdr,_pad1),&mark,4);memcpy(rec+offsetof(nbd_hdr,_pad2),&slot1,4);
         if(!(h.flags&NBD_F_COND))memcpy(rec+offsetof(nbd_hdr,cond_addr),&ca,8);}
-        if(timed){g.c[G_DRAW_NS]+=nbmtq::now_ns()-t0;++g.c[G_DRAW_TIMED];}}
+        if(timed){const uint64_t te=nbmtq::now_ns();g.c[G_DRAW_NS]+=te-t0;++g.c[G_DRAW_TIMED];g.c[G_T_BIND]+=tb-t0;g.c[G_T_FIX]+=tf-tb;g.c[G_T_LOOK]+=tl-tf;g.c[G_T_WRITE]+=tw-tl;g.c[G_T_MARK]+=te-tw;}}
 };
 // nvnQueueSubmitCommands, before the job of this recording is queued. sub: the number the job will get.
 inline void submit(const uint64_t *handles,int n,uint64_t sub){
@@ -403,7 +425,7 @@ void boot(){
     e=getenv("DM_NR_Z8_MIN");nrz8g::min_tails=e && *e?uint32_t(std::clamp(atoi(e),1,64)):4u;
     e=getenv("DM_NR_Z8_DIGEST");nrz8g::dig_every=e && *e?uint32_t(std::clamp(atoi(e),1,4096)):8u;
     nrz8g::G &g=nrz8g::g;
-    if(!nrz8g::tab.init(n) || !g.fix.init() || !g.W.init() || !(priv=new(std::nothrow) Priv[nrz8g::tab.n]) || (m==2 && !(nrz8g::dgr=new(std::nothrow) nrz8g::DgRing))){
+    if(!nrz8g::tab.init(n) || !g.fix.init() || !g.W.init() || !(priv=new(std::nothrow) Priv[nrz8g::tab.n]) || !(used=new(std::nothrow) uint32_t[nrz8g::tab.n]()) || (m==2 && !(nrz8g::dgr=new(std::nothrow) nrz8g::DgRing))){
         xbg_logf("【红】[nr] DM_NR_Z8=%d: no memory for %u templates and the dictionaries: off",m,n);return;}
     static_cast<State&>(g.S)=state;for(auto &x:g.S.shader)x=nullptr;memset(g.S.sprog,0,sizeof g.S.sprog);   // the copy = State as the backend starts it (no program bound)
     g.W.h=new(std::nothrow) nrz8g::Hnd;if(!g.W.h){xbg_logf("【红】[nr] DM_NR_Z8=%d: no memory: off",m);return;}
@@ -425,6 +447,10 @@ void boot(){
         "and writes ahead as the submitting thread did, and puts the words of each draw record into a ring of %u entries by the record's place in its submission - nothing is written into the command memory; the "
         "translation thread takes a record's words only when the walk of this submission wrote them for this record (ahead of the walk it resolves and records the draw itself) and waits for the walker at the end "
         "of a submission; the first run of a submission the translation thread is close behind is published after %u tail draws, then doubling",nrz8g::marks.n,nrz8g::split0);}
+    {const char *t=getenv("DM_NR_Z8_TWIN");const int tw=t && *t?atoi(t):xbg_nr_z8_twin_default();twin_ok=tw==0?0:1;
+     if(tw<0 || tw>1)xbg_logf("【红】[nr] DM_NR_Z8_TWIN=%d: only 0 / 1: 1",tw);
+     xbg_logf("[nr] DM_NR_Z8_TWIN=%d (NR-ZERO Z8, section 39): %s",twin_ok,twin_ok?"a draw whose prologue swapped only the fragment shader for a twin (NR-MAT, NR-SH-SURF) is published and answered - "
+        "the answer names the twin's shader set and is taken only when the shaders at the hook are the answer's":"a twin draw is neither published nor answered (as before section 39)");}
     nrz8g::boot=m;nrz8g::armed.store(1,std::memory_order_release);nvn_nr_z8_enable(1);   // 1: the walk folds; 2 (init): it also answers
     xbg_logf("[nr] DM_NR_Z8=%d (NR-ZERO Z8, read at init): every submission is walked before it is queued - its records folded into a copy of State; answers start when the lane's switches are read",m);}
 bool init(int draw_mode){
@@ -435,7 +461,7 @@ bool init(int draw_mode){
     if(nbord::mode>0 || nbkey::mode==1 || nbx::mode!=0){off("DM_NB_ORDER, DM_NB_RELOC=1 or DM_NB_MX is on (records are not executed in the order of the recording / State is set from a key frame)");return false;}
     nrz5t::R=nrz5r::Reader{};nrz5t::R.q=&nbmt::q;nrz5t::R.ring=&nrz8g::ring;nrz5t::held=false;nrz5t::r_have=false;nrz5t::s=nrz5t::Stats{};nrz5t::z8=true;
     if(nbmt::q.spare_max<256)nbmt::q.spare_max=256;
-    mode=m;nrz5t::gmode=m;nrz8g::armed.store(2,std::memory_order_release);
+    mode=m;nrz5t::gmode=m;
     {auto part=[](const char *n,int d){const char *e=getenv(n);int v=e && *e?atoi(e):d;if(v<0 || v>2){xbg_logf("【红】[nr] %s=%d: only 0 / 1 / 2: 0",n,v);v=0;}return v;};
      imode=part("DM_NR_Z8_IMG",xbg_nr_z8_img_default());
      if(imode && m==2)xbg_logf("[nr] DM_NR_Z8_IMG=%d with DM_NR_Z8=2: the read word is asked only by a draw that TAKES the walk's answer (the hook of draw(), DM_NR_Z8=1) - a verify run of DM_NR_Z8 does not exercise it; "
@@ -455,6 +481,10 @@ bool init(int draw_mode){
         "\"read with nothing to do\" (checked in this submission, in the layout sets read, no attachment of the open pass, not written since the barrier the read sees), under the image epoch, the submission, the slot "
         "serial, the open pass, and the count of write marks other than the marks draws give the attachments of the pass they continue; never while a clear is pending or a read hook is armed (tile policies)",
         imode,imode==2?"verify - the walk runs and must change nothing":"on");}
+    // [section 39] a reader that names every verdict itself (DM_NR_Z8=1 DM_NR_Z8_VAL=1: Reader::draw2) never reads the values records of
+    // the side chunk: the walk writes none (set before the walk starts answering: the release below orders it for the walker)
+    nrz8g::g.wr.side=!(m==1 && kmode==1);
+    nrz8g::armed.store(2,std::memory_order_release);   // the walk answers from here on
     xbg_logf("[nr] DM_NR_Z8=%d (NR-ZERO Z8: %s): the thread that submits walks its recording first - folds every state record, OP_X_NR_STATE and the binds of every draw record into a copy of State, "
         "gives the fixed part of the copy an id by content (5 groups), finds the draw's template by its site words and that id in a table of %u (%zu KB; the template names the texture / sampler handles, vertex ranges "
         "and uniform sizes the resolution read, with their values - all compared), writes the draw's packets into a spare chunk; the translation thread takes the plan, NR-08 entry and NR-09 entry it resolved for "
@@ -470,7 +500,7 @@ uint64_t calls=0;
 // 0: not answered here (nothing was touched: the path without the answer runs from its first line); 1 / 2 / 3: as nrz3::draw.
 int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast){NRCPU_SCOPE(NrZ3);
     const nbd_hdr &rh=nrz5t::r_h;
-    if(!nrz5t::r_have || nrz5t::r_done)return 0;
+    if(!nrz5t::r_have || nrz5t::r_done || guarded)return 0;   // (guarded: a twin while DM_NR_Z8_TWIN=0 - the caller's z8g holds every other guard)
     ++s.asked;
     const uint32_t ver=uint32_t(rh.cond_addr>>32);
     if(!ver || (rh.flags&(NBD_F_REN|NBD_F_COND)) || rh._pad2<=0 || uint32_t(rh._pad2-1)>=nrz8g::tab.n){++s.no_tmpl;return 0;}
@@ -483,14 +513,14 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
     if(nrz3::gate(t,pp,draw_fast,false)){++s.gate;return 0;}
     nrdesc::Plan *pl=reinterpret_cast<nrdesc::Plan*>(uintptr_t(pv.plan));
     if(nrps::mode==1 && state.shader[0]->psk==1){++s.gate;return 0;}   // (never published; a shader set does not change its kind)
-    for(unsigned i=0;i<5;i++)if(pv.sh[i]!=state.shader[i]){++s.shaders;return 0;}   // the shader objects the answer was resolved for are the ones State holds (program words -> shaders: the backend's table)
+    if(!nrz8::same_shaders(pv.sh,state.shader,5)){++s.shaders;return 0;}   // the shader objects the answer was resolved for are the ones State holds (program words -> shaders: the backend's table; a twin: the prologue made the same one - section 39)
     uint32_t active_colors=0;for(int i=0;i<state.rt.n;i++)if(state.rt.color[i])active_colors|=1u<<i;
     uint64_t f[6];nrdesc::fixed_words(f);
     nrz_val v{};v.plan=pv.plan;v.did=pv.did;v.pent=pv.pent;v.frag=pv.frag;
     nrz3::Ans a;a.v=&v;a.pl=pl;a.frag=pv.frag!=0;a.fhit=true;a.psk=false;a.pp=false;a.z8=true;a.f=f;a.varw=nullptr;a.re=nrdraw::restart_eff_of(prim,indexed);a.active_colors=active_colors;a.t=&t;
     const uint64_t tn=tm.sp?timing_clock():0;a.tg=a.tf=a.tk=tn;
     const int r=nrz3::answered(zs,a,c,dp,p,prim,first,count,indexed,instances,first_instance,draw_fast,tm);
-    if(r)++s.taken_path;
+    if(r){++s.taken_path;if(twin)++s.twin_took;used[uint32_t(rh._pad2-1)]=++uclock;}
     // 1 answered draw in 64: the words the answer stands on, read back from State (the fold itself is checked by =2)
     if(r==1 && !(calls&63)){++s.spot;uint64_t w[nrz8::MAX_WORDS];uint32_t tv=0;
         if(nrz8g::tab.get(uint32_t(rh._pad2-1),w,&tv) && tv==ver){
@@ -499,7 +529,7 @@ int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const
                      uint64_t tex(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.tex[ns][sl]:~0ull;}uint64_t samp(unsigned ns,unsigned sl) const{return ns<6 && sl<128?state.samp[ns][sl]:~0ull;}};
             nrz5_site site;nrz5_site_make(&site,t.key,rh.draw==NBD_DRAW_IDX?NRZ5S_IDX:NRZ5S_ARRAYS,rh.prim,rh.itype,rh.count,rh.base_vertex,rh.base_instance,rh.instances,rh.first,rh.ibuf,state.vb[0].address);
             nrz5_vals vv;uint32_t off[nrz8::MAX_DYN];const int m=nrz8::match(w,&site,uint32_t(w[0]>>32),rh.count,rh.instances,rh.first,rh.base_vertex,rh.base_instance,A{},&vv,off);
-            if(m){++s.spot_bad;red("a draw was answered from a template whose compared words are not State's (%s): off",m==nrz8::M_SITE?"site":m==nrz8::M_TEX?"texture / sampler handles":m==nrz8::M_VB?"vertex ranges":m==nrz8::M_UBO?"uniform ranges":"form");
+            if(!nrz8::answered(m)){++s.spot_bad;red("a draw was answered from a template whose compared words are not State's (%s): off",m==nrz8::M_SITE?"site":m==nrz8::M_FIX?"fix id":m==nrz8::M_TEX?"texture / sampler handles":m==nrz8::M_UBO?"uniform ranges":"form");
                 mode=0;nrz8g::armed.store(1,std::memory_order_release);}}}
     return r;}
 void tick(){   // every submission (nrdraw::tick) while the switch is on
@@ -510,20 +540,35 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
     if(!g[G_RECORDS] && !s.asked)return;
     const double dr=g[G_DRAWS]?double(g[G_DRAWS]):1.,runs=g[G_RUNS]?double(g[G_RUNS]):1.,subs=g[G_SUBS]?double(g[G_SUBS]):1.;
     static uint64_t sub_l[2];const uint64_t sn=sub_said.load(std::memory_order_relaxed),sb=sub_differ.load(std::memory_order_relaxed);
-    xbg_logf("[nr] z8 walk (DM_NR_Z8=%d): %llu submissions walked, %.0f records and %.0f draw records each; answered (template matched) %llu (%.1f%%); not: no key / UI / condition / QUADS %llu, through OP_CALL %llu, "
-        "slot empty or being written %llu, another site %llu, another fix id %llu, texture / sampler handles differ %llu, vertex ranges differ %llu, uniform range / size %llu, form %llu; head draws %llu, "
-        "tail draws written ahead %llu (%.1f%% of the draw records; %.0f bytes of packets and %.0f bytes of values each) in %llu runs (%.1f tail draws a run; published without chunks: %llu runs with %llu tail draws; "
-        "no spare chunk %llu, ring full %llu, chunk full %llu); fix ids: %llu new, %llu group refreshes (%.2f a draw record), dictionary cleared %llu; "
-        "walk %.0f ns a record = %.3f ms a submission; a draw record (fold of its binds, fix id, template, packets; 1 in 64) %.0f ns; "
+    const uint64_t ans=g[G_VALUES]+g[G_NOVAL];const double tdn=double(g[G_DRAW_TIMED]);
+    xbg_logf("[nr] z8 walk (DM_NR_Z8=%d): %llu submissions walked, %.0f records and %.0f draw records each; answered %llu (%.1f%%; with values %llu, without - a vertex range differs %llu); not: no key / UI / condition / QUADS %llu, "
+        "through OP_CALL %llu, slot empty or being written %llu, another site %llu, another fix id %llu, texture / sampler handles differ %llu, uniform range / size %llu, not describable (form) %llu; "
         "submission numbers: %llu announced to the walk and compared with the number the queue gave the job, differ %llu",
-        nrz8g::boot,(unsigned long long)g[G_SUBS],double(g[G_RECORDS])/subs,double(g[G_DRAWS])/subs,(unsigned long long)g[G_VALUES],100.*double(g[G_VALUES])/dr,(unsigned long long)g[G_NO_KEY],(unsigned long long)g[G_CALLED],
-        (unsigned long long)g[G_EMPTY],(unsigned long long)g[G_MISS+nrz8::M_SITE],(unsigned long long)g[G_MISS+nrz8::M_FIX],(unsigned long long)g[G_MISS+nrz8::M_TEX],(unsigned long long)g[G_MISS+nrz8::M_VB],
-        (unsigned long long)g[G_MISS+nrz8::M_UBO],(unsigned long long)g[G_MISS+nrz8::M_FORM],(unsigned long long)g[G_HEADS],(unsigned long long)g[G_TAILS],100.*double(g[G_TAILS])/dr,
+        nrz8g::boot,(unsigned long long)g[G_SUBS],double(g[G_RECORDS])/subs,double(g[G_DRAWS])/subs,(unsigned long long)ans,100.*double(ans)/dr,(unsigned long long)g[G_VALUES],(unsigned long long)g[G_NOVAL],
+        (unsigned long long)g[G_NO_KEY],(unsigned long long)g[G_CALLED],(unsigned long long)g[G_EMPTY],(unsigned long long)g[G_LOOK+nrz8::M_SITE],(unsigned long long)g[G_LOOK+nrz8::M_FIX],(unsigned long long)g[G_LOOK+nrz8::M_TEX],
+        (unsigned long long)g[G_LOOK+nrz8::M_UBO],(unsigned long long)g[G_LOOK+nrz8::M_FORM],(unsigned long long)(sn-sub_l[0]),(unsigned long long)(sb-sub_l[1]));
+    xbg_logf("[nr] z8 walk, runs and clock: head draws %llu, tail draws written ahead %llu (%.1f%% of the draw records; %.0f bytes of packets and %.0f bytes of values each) in %llu runs (%.1f tail draws a run; published without chunks: %llu runs with %llu tail draws; "
+        "no spare chunk %llu, ring full %llu, chunk full %llu); fix ids: %llu new, %llu group refreshes (%.2f a draw record), dictionary cleared %llu; "
+        "walk %.0f ns a record = %.3f ms a submission; a draw record (1 in 64, never one with =2's digest) %.0f ns = binds %.0f + fix id %.0f + template %.0f + packets and range numbers %.0f + its words %.0f; "
+        "the other records %.0f ns a draw record",
+        (unsigned long long)g[G_HEADS],(unsigned long long)g[G_TAILS],100.*double(g[G_TAILS])/dr,
         g[G_TAILS]?double(g[G_TAIL_BYTES])/double(g[G_TAILS]):0.,g[G_TAILS]?double(g[G_SIDE_BYTES])/double(g[G_TAILS]):0.,(unsigned long long)g[G_RUNS],double(g[G_TAILS])/runs,
         (unsigned long long)g[G_SHORT_RUNS],(unsigned long long)g[G_SHORT_TAILS],(unsigned long long)g[G_NO_CHUNK],(unsigned long long)g[G_RING_FULL],(unsigned long long)g[G_CHUNK_FULL],
         (unsigned long long)g[G_FIX_NEW],(unsigned long long)g[G_FIX_REFRESH],double(g[G_FIX_REFRESH])/dr,(unsigned long long)g[G_FIX_CLEARS],
-        g[G_RECORDS]?double(g[G_WALK_NS])/double(g[G_RECORDS]):0.,double(g[G_WALK_NS])/subs/1e6,g[G_DRAW_TIMED]?double(g[G_DRAW_NS])/double(g[G_DRAW_TIMED]):0.,
-        (unsigned long long)(sn-sub_l[0]),(unsigned long long)(sb-sub_l[1]));
+        g[G_RECORDS]?double(g[G_WALK_NS])/double(g[G_RECORDS]):0.,double(g[G_WALK_NS])/subs/1e6,tdn?double(g[G_DRAW_NS])/tdn:0.,tdn?double(g[G_T_BIND])/tdn:0.,tdn?double(g[G_T_FIX])/tdn:0.,
+        tdn?double(g[G_T_LOOK])/tdn:0.,tdn?double(g[G_T_WRITE])/tdn:0.,tdn?double(g[G_T_MARK])/tdn:0.,g[G_DRAWS] && tdn?(double(g[G_WALK_NS])-double(g[G_DRAW_NS])/tdn*double(g[G_DRAWS]))/double(g[G_DRAWS]):0.);
+    {const Census &c=cz;uint64_t nl=0,ng=0,al=0,ag=0;for(int i=0;i<=nrz8::M_ALL;i++){nl+=c.lane[i];ng+=c.gone[i];}al=c.lane[nrz8::M_OK]+c.lane[nrz8::M_NOVAL];ag=c.gone[nrz8::M_OK]+c.gone[nrz8::M_NOVAL];
+     auto line=[](const char *what,const uint64_t *x,uint64_t n,uint64_t a){
+        xbg_logf("[nr] z8 census, %s: %llu engine draw records, answered by the walk %llu (%.1f%%; with values %llu, without - a vertex range differs %llu); not: slot empty or being written %llu, another site %llu, "
+            "another fix id %llu, texture / sampler handles %llu, uniform range / size %llu, not describable (form) %llu, no key / UI / condition / QUADS %llu, through OP_CALL %llu, no words of the walk (another walk, "
+            "not yet written, a re-executed range, DM_NR_Z8_THREAD=0) %llu",what,(unsigned long long)n,(unsigned long long)a,n?100.*double(a)/double(n):0.,(unsigned long long)x[nrz8::M_OK],(unsigned long long)x[nrz8::M_NOVAL],
+            (unsigned long long)x[nrz8::M_EMPTY],(unsigned long long)x[nrz8::M_SITE],(unsigned long long)x[nrz8::M_FIX],(unsigned long long)x[nrz8::M_TEX],(unsigned long long)x[nrz8::M_UBO],(unsigned long long)x[nrz8::M_FORM],
+            (unsigned long long)x[nrz8::M_NOKEY],(unsigned long long)x[nrz8::M_CALLED],(unsigned long long)x[nrz8::M_ALL]);};
+     if(nl || ng){line("at the lane's command section (the draws an answer is for)",c.lane,nl,al);
+        line("never reached it (the shadow cache, the prologue, the old path)",c.gone,ng,ag);
+        xbg_logf("[nr] z8 census, twins (DM_NR_Z8_TWIN=%d): %llu draws at the lane's command section had a twin fragment shader, %llu of them answered by the walk; twin templates published %llu, answers taken at the hook %llu; "
+            "templates that say \"not describable\" put %llu",twin_ok,(unsigned long long)c.twin_lane,(unsigned long long)c.twin_ans,(unsigned long long)s.twin_pub,(unsigned long long)s.twin_took,(unsigned long long)s.none_put);}
+     cz=Census{};}
     sub_l[0]=sn;sub_l[1]=sb;
     if(thread_mode){   // [DM_NR_Z8_THREAD=1] who pays what: the submitting thread, the walker, the translation thread's wait
         const uint64_t pn=post_ns.load(std::memory_order_relaxed),pc=posts.load(std::memory_order_relaxed),cn=cpu_ns.load(std::memory_order_relaxed),jd=jobs_done.load(std::memory_order_relaxed),
@@ -557,20 +602,22 @@ void tick(){   // every submission (nrdraw::tick) while the switch is on
     const nrz5r::RStats &r=nrz5t::R.st;static nrz5r::RStats rl;auto d=[&](uint64_t nrz5r::RStats::*f){return r.*f-rl.*f;};
     const nrz5t::Stats &q=nrz5t::s;const double tails=q.tails?double(q.tails):1.;
     xbg_logf("[nr] z8, translation thread (DM_NR_Z8=%d): %llu engine draw records at the hook of draw()%s; took the walk's answer %llu (%.1f%%); not: the walk had no template %llu, the slot was published again %llu, "
-        "a generation moved (NR-08 / NR-09 / objects) %llu, another pass definition or a pre-pass override %llu, a gate %llu, other shader objects %llu; records of another walk %llu, of a re-executed range %llu; "
-        "at the lane's command section %llu draws (marked %llu), %s %llu (%.1f%%); runs met %llu, followed %llu: complete %llu, cut by: the bind cache did not hold the model %llu, values differ %llu "
-        "(pipeline %llu, set %llu, offsets %llu, viewport %llu, scissor %llu, vertex %llu, index %llu, arguments %llu), chunk ends early %llu, a record did not come %llu, another command %llu; first tail draw not taken %llu; "
-        "chunks %s %llu; runs gone %llu, never reached %llu; templates published %llu, not describable %llu (NR-08 did not serve %llu, a static uniform block %llu, too many rows / offsets %llu, "
-        "no entry of its own / pattern / zero stream %llu, State changed by the prologue %llu, stages %llu, an offset above its address %llu); spot checks of an answered draw's words %llu, bad %llu",
+        "a generation moved (NR-08 / NR-09 / objects) %llu, another pass definition or a pre-pass override %llu, a gate %llu, other shader objects %llu; records of another walk %llu, of a re-executed range %llu",
         mode,(unsigned long long)s.asked,mode==2?" (verify never asks the hook: the path resolves every draw itself and the walk's answer is compared at the lane's tail - \"answers of the walk ... compared\" in the line z8 check)":"",
         (unsigned long long)s.taken_path,s.asked?100.*double(s.taken_path)/double(s.asked):0.,(unsigned long long)s.no_tmpl,(unsigned long long)s.replaced,(unsigned long long)s.stale,
-        (unsigned long long)s.passdef,(unsigned long long)s.gate,(unsigned long long)s.shaders,(unsigned long long)s.stamp,(unsigned long long)s.again,(unsigned long long)q.tails,(unsigned long long)q.marked,mode==2?"would take":"taken",
+        (unsigned long long)s.passdef,(unsigned long long)s.gate,(unsigned long long)s.shaders,(unsigned long long)s.stamp,(unsigned long long)s.again);
+    xbg_logf("[nr] z8, translation thread, runs (DM_NR_Z8=%d): at the lane's command section %llu draws (marked %llu), %s %llu (%.1f%%); runs met %llu, followed %llu: complete %llu, cut by: the bind cache did not hold the model %llu, values differ %llu "
+        "(pipeline %llu, set %llu, offsets %llu, viewport %llu, scissor %llu, vertex %llu, index %llu, arguments %llu), chunk ends early %llu, a record did not come %llu, another command %llu; first tail draw not taken %llu",
+        mode,(unsigned long long)q.tails,(unsigned long long)q.marked,mode==2?"would take":"taken",
         (unsigned long long)q.taken,100.*double(q.taken)/tails,(unsigned long long)d(&nrz5r::RStats::runs),(unsigned long long)d(&nrz5r::RStats::started),(unsigned long long)d(&nrz5r::RStats::complete),
         (unsigned long long)(r.cut[nrz5r::CUT_CACHE]-rl.cut[nrz5r::CUT_CACHE]),(unsigned long long)(r.cut[nrz5r::CUT_VALUES]-rl.cut[nrz5r::CUT_VALUES]),
         (unsigned long long)(r.diff[1]-rl.diff[1]),(unsigned long long)(r.diff[2]-rl.diff[2]),(unsigned long long)(r.diff[3]-rl.diff[3]),(unsigned long long)(r.diff[4]-rl.diff[4]),(unsigned long long)(r.diff[5]-rl.diff[5]),
         (unsigned long long)(r.diff[6]-rl.diff[6]),(unsigned long long)(r.diff[7]-rl.diff[7]),(unsigned long long)(r.diff[8]-rl.diff[8]),
         (unsigned long long)(r.cut[nrz5r::CUT_CHUNK]-rl.cut[nrz5r::CUT_CHUNK]),(unsigned long long)(r.cut[nrz5r::CUT_RECORD]-rl.cut[nrz5r::CUT_RECORD]),(unsigned long long)(r.cut[nrz5r::CUT_WRITE]-rl.cut[nrz5r::CUT_WRITE]),
-        (unsigned long long)d(&nrz5r::RStats::first_no),mode==2?"that would be handed over":"handed over",(unsigned long long)d(&nrz5r::RStats::handed),(unsigned long long)d(&nrz5r::RStats::gone),(unsigned long long)d(&nrz5r::RStats::unreached),
+        (unsigned long long)d(&nrz5r::RStats::first_no));
+    xbg_logf("[nr] z8, translation thread, templates (DM_NR_Z8=%d): chunks %s %llu; runs gone %llu, never reached %llu; templates published %llu, not describable %llu (NR-08 did not serve %llu, a static uniform block %llu, "
+        "too many rows / offsets %llu, no entry of its own / pattern / zero stream %llu, State changed by the prologue %llu, stages %llu, an offset above its address %llu); spot checks of an answered draw's words %llu, bad %llu",
+        mode,mode==2?"that would be handed over":"handed over",(unsigned long long)d(&nrz5r::RStats::handed),(unsigned long long)d(&nrz5r::RStats::gone),(unsigned long long)d(&nrz5r::RStats::unreached),
         (unsigned long long)s.published,(unsigned long long)s.pub_no,(unsigned long long)s.pub_why[1],(unsigned long long)s.pub_why[2],(unsigned long long)s.pub_why[3],(unsigned long long)s.pub_why[4],
         (unsigned long long)s.pub_why[5],(unsigned long long)s.pub_why[6],(unsigned long long)s.pub_why[7],(unsigned long long)s.spot,(unsigned long long)s.spot_bad);
     const nrdraw::Stats &z=nrdraw::z8sz;

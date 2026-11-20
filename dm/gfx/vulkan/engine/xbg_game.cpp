@@ -8253,7 +8253,7 @@ namespace nrsort{extern int mode;bool take(Commands &c,Descriptors &d,Pass &p,in
 namespace nrz3{extern int mode;void begin();int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);
     void served();void tick();void release();void span_end();extern uint64_t span_t0,span_calls,span_ns,span_n;extern bool ps_called;}
 namespace nrz5t{extern int gmode;extern bool held;extern const nr_dplan *plan_hint;void rec_begin(const nbd_hdr &h,const uint8_t *rec);void rec_end();void cut();void lost();void tick();}   // [DOS2] NR-ZERO Z5, the game thread's half (xbg_nr_z5g.inc)
-namespace nrz8t{extern int mode;void guard(bool on);uint64_t pre_begin();void pre(uint64_t t0);int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);}   // [DOS2] NR-ZERO Z8 (xbg_nr_z8.inc): the hook of draw() for a record the submit walk answered
+namespace nrz8t{extern int mode;void guard(bool on,bool twin);uint64_t pre_begin();void pre(uint64_t t0);int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast);}   // [DOS2] NR-ZERO Z8 (xbg_nr_z8.inc): the hook of draw() for a record the submit walk answered
 namespace nrdraw{enum{F_GI=1,F_QUAD=2,F_UIOFF=4,F_PP=8,F_QUADP=16};extern int mode;extern bool armed;extern const nrd_tail *cur;void reset();void record(const nrd_tail *t);void stale();void tick();void release();
     extern int ui_mode;extern bool ui_rec;bool ui_pick();void ui_end();   // [DOS2] NR-12 DM_NR_UI: plain Iggy draw records through the same lane
     bool lane(Commands &c,Descriptors &d,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,unsigned flags,int draw_fast);
@@ -8373,11 +8373,12 @@ void draw(int prim,int first,int count,const p_draw_idx *indexed,uint32_t instan
     // [DOS2] NR-ZERO Z8 DM_NR_Z8=1 (0: one load and a not-taken branch): a record the submit walk answered takes the answered half of nrz3::draw with that answer
     if(__builtin_expect(nrz8t::mode!=0,0)){if(z8t0)nrz8t::pre(z8t0);
 #ifdef DM_GAME_DOS2
-        const bool z8g=ppg.on || nbpost::inside || nmg.saved || nsg.saved || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;   // the prologue changed State for this draw (an override, a twin, a redirect): State is not the walk's copy - not answered, not published
+        const bool z8tw=nmg.saved || nsg.saved;   // [NR-ZERO.md section 39] only the fragment shader is a twin's (NR-MAT / NR-SH-SURF): the rest of State is the walk's copy - published and answered (DM_NR_Z8_TWIN; guard() takes it for a changed State while that is 0)
+        const bool z8g=ppg.on || nbpost::inside || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;   // the prologue changed State for this draw (an override, a redirect, a subpass step): State is not the walk's copy - not answered, not published
 #else
-        const bool z8g=ppg.on;
+        const bool z8tw=false,z8g=ppg.on;
 #endif
-        nrz8t::guard(z8g);
+        nrz8t::guard(z8g,z8tw);
         if(nrz8t::mode==1 && !z8g && nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){if(nrz3::mode!=0)nrz3::begin();z3r=nrz8t::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}
     if(__builtin_expect(nrz3::mode!=0,0) && !z3r){nrz3::begin();
         if(nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){z3r=nrz3::draw(c,dp,p,prim,first,count,indexed,instances,first_instance,ppg.on,draw_fast);if(z3r==1)return;}}

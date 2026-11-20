@@ -120,6 +120,7 @@ void rec_begin(const nbd_hdr &h,const uint8_t *rec){r_h=h;r_have=(h.flags&NBD_F_
     if(z8)nrz8t::rec_begin(r_h,rec);}   // [NR-ZERO Z8] the words of a record another walk wrote are dropped; =2: the walk's copy of State against State
 // ... and after it: a marked record that did not reach the command section of the lane's tail.
 void rec_end(){
+    if(z8 && r_have && !r_done)nrz8t::census_gone();   // [NR-ZERO Z8 census] ... and for one that never did (the shadow cache, the prologue, the old path)
     if(r_have && !r_done && r_h._pad1){++s.missed;
         if(R.holding){if(gmode==1){R.flush(nrz5r::CUT_RECORD);sync_pend(held_cmd);}else R.verify_miss();}
         else R.abandon(r_h._pad1);}
@@ -148,6 +149,7 @@ bool tail(VkCommandBuffer cmd,BindCache &bc,bool ui,bool cond,VkPipeline pipe,ui
     v_would=false;++s.tails;
     if(R.holding && held && held_cmd!=cmd)lost();
     const bool rec=r_have && !r_done && !ui;if(!ui)r_done=true;
+    if(z8 && rec)nrz8t::census_lane();   // [NR-ZERO Z8 census] the walker's outcome for a draw that reached the command section
     const uint32_t mw=rec?r_h._pad1:0u;if(mw)++s.marked;
     // never taken: this submission is recorded by direct calls; a UI draw; a conditional bracket; switches that record the draw another way
     int no_take=0;

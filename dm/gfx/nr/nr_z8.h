@@ -43,7 +43,12 @@
 // 27 a set with a support / c1 block bound as a dynamic uniform buffer cannot be a template (plan_form() as it was before NR-ZERO.md
 // section 36: on a device with dynamic uniform buffers on, that is every set of the game - nothing was ever published), 28 match()
 // gives the offset of such a block as 0, 29 expect_diff does not compare it, 30 the walk does not get its own thread while
-// DM_NB_OWN is on (walker_thread() as it was: the game's default - the thread never started).
+// DM_NB_OWN is on (walker_thread() as it was: the game's default - the thread never started),
+// [NR-ZERO.md section 39] 31 the walk looks at way 0 of a bucket only (the direct-mapped table of the phone series R8: "another site"),
+// 32 prologue_ok() takes a prologue that changed State for a twin, 33 same_shaders() does not compare the fragment stage (a twin the
+// prologue did not make this time), 34 match() refuses a draw whose vertex ranges differ (R8: "vertex ranges differ" - the answer does
+// not read them). (31 and 34 cost answers, not exactness: they fail the census - the answer share of the world of the phone series;
+// 7 now also covers the fix id the walk compares in a way, find() / probe().)
 // (9 is the one that need NOT fail: the vertex ranges - like the uniform addresses - give values the translation thread resolves again and
 // compares at the moment; without the compare here a draw is only written ahead in vain. The texture rows, the fix id and the uniform
 // sizes pick the ANSWER, which is not resolved again: 7, 8, 10, 14 must fail.)
@@ -193,6 +198,18 @@ static inline uint64_t hash_bytes(const void *p, size_t n) {
     if (n) { uint64_t w = 0; memcpy(&w, b, n); h = (h ^ w) * 0xBF58476D1CE4E5B9ull; h ^= h >> 29; }
     return h ^ h >> 32;
 }
+// [section 39, the walker's cost] The dictionaries' hash: four independent lanes of 8 bytes (hash_bytes is one chain of multiplies -
+// 30 of them in a row for a group of 240 bytes). Equal ids still mean equal bytes: the dictionary compares the bytes.
+static inline uint64_t hash_fast(const void *p, size_t n) {
+    const uint8_t *b = static_cast<const uint8_t *>(p); const uint64_t M = 0xBF58476D1CE4E5B9ull;
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ (uint64_t(n) * 0xff51afd7ed558ccdull), h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
+    for (; n >= 32; n -= 32, b += 32) { uint64_t w[4]; memcpy(w, b, 32); h0 = (h0 ^ w[0]) * M; h1 = (h1 ^ w[1]) * M; h2 = (h2 ^ w[2]) * M; h3 = (h3 ^ w[3]) * M;
+        h0 ^= h0 >> 29; h1 ^= h1 >> 29; h2 ^= h2 >> 29; h3 ^= h3 >> 29; }
+    for (; n >= 8; n -= 8, b += 8) { uint64_t w; memcpy(&w, b, 8); h0 = (h0 ^ w) * M; h0 ^= h0 >> 29; }
+    if (n) { uint64_t w = 0; memcpy(&w, b, n); h1 = (h1 ^ w) * M; h1 ^= h1 >> 29; }
+    uint64_t h = (h0 ^ (h1 * 0x9E3779B97F4A7C15ull)) * M; h ^= (h2 ^ (h3 * 0xff51afd7ed558ccdull)) * M; h ^= h >> 31;
+    return h ^ h >> 32;
+}
 struct Dict {
     struct E { uint64_t h; uint32_t off, size, id, used; };
     E *e = nullptr; uint8_t *arena = nullptr; uint32_t cap = 0, n = 0, acap = 0, aused = 0, next_id = 1; uint64_t clears = 0, finds = 0, news = 0;
@@ -208,7 +225,7 @@ struct Dict {
     // 0 = the content is larger than the arena (never an id).
     uint32_t id_of(const void *p, uint32_t size) {
         if (size > acap) return 0;
-        const uint64_t hh = NRZ8_MUTATE == 5 ? (hash_bytes(p, size) & 15u) : hash_bytes(p, size);
+        const uint64_t hh = NRZ8_MUTATE == 5 ? (hash_fast(p, size) & 15u) : hash_fast(p, size);
         for (int round = 0; round < 2; round++) {
             uint32_t i = uint32_t(hh) & (cap - 1);
             for (;; i = (i + 1) & (cap - 1)) {
@@ -311,11 +328,18 @@ static inline unsigned pack(const Desc &d, uint64_t *w) {
     return n;
 }
 static inline unsigned words_of(uint64_t w0) { return unsigned(w0 & 0xffffu); }
-enum { M_OK = 0, M_SITE, M_FIX, M_TEX, M_VB, M_UBO, M_FORM, M_N };
+// The walker's outcome for a draw record. M_OK: the template's answer and the draw's values (packets are written ahead); M_NOVAL: the
+// answer, not the values - a vertex range differs from the template's (NR-ZERO.md section 39: the answer - plan, NR-08 entry, NR-09
+// entry - never reads a vertex range; the values do, and the translation thread resolves them again at the moment); the rest are
+// refusals: another site / another fix id in the way, texture / sampler handles of a row, a uniform slot or size, a template that says
+// "not describable" (form). M_EMPTY .. M_CALLED: outcomes before a template is asked (the census of the line "[nr] z8 census").
+enum { M_OK = 0, M_SITE, M_FIX, M_TEX, M_NOVAL, M_UBO, M_FORM, M_N, M_EMPTY = M_N, M_NOKEY, M_CALLED, M_ALL };
+static inline bool answered(int m) { return m == M_OK || m == M_NOVAL; }
 // The submitting thread: is this template the one of the draw it is looking at, and then its values. A: the copy -
 //   bool ub(unsigned st, unsigned sl, uint64_t *addr, uint64_t *size)   uint64_t tex(unsigned ns, unsigned slot)
 //   bool vb(unsigned i, uint64_t *addr, uint64_t *size)                 uint64_t samp(unsigned ns, unsigned slot)
-// off: room for MAX_DYN offsets (v->off points at it). M_OK: every compared word is equal and v holds the draw's values.
+// off: room for MAX_DYN offsets (v->off points at it). M_OK: every compared word is equal and v holds the draw's values. M_NOVAL:
+// every word that picks the answer is equal, a vertex range is not - v must not be written ahead (its vertex fields are the template's).
 template <class A> static inline int match(const uint64_t *w, const nrz5_site *s, uint32_t fixid, int32_t count, int32_t instances, int32_t first, int32_t base_vertex,
                                            int32_t base_instance, A &&a, nrz5_vals *v, uint32_t *off) {
     const unsigned nw = words_of(w[0]);
@@ -324,7 +348,8 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
     if (NRZ8_MUTATE != 7 && uint32_t(w[0] >> 32) != fixid) return M_FIX;
     const unsigned noff = w18_noff(w[18]), nvb = w18_nvb(w[18]), nrow = w18_nrow(w[18]);
     if (noff > MAX_DYN || nvb > MAX_VB || nrow > MAX_ROWS || nw != HEAD_WORDS + noff * 3 + nvb * 5 + nrow * 3) return M_FORM;
-    memset(v, 0, sizeof *v);
+    // (every field but the vertex arrays; of those only the used bindings are ever read - nrz5_emit / nrz5_after / pv_put / ranges_word)
+    memset(v, 0, offsetof(nrz5_vals, vb)); memset(reinterpret_cast<uint8_t *>(v) + offsetof(nrz5_vals, indexed), 0, sizeof *v - offsetof(nrz5_vals, indexed));
     const uint64_t *q = w + HEAD_WORDS;
     v->pipe = w[7]; v->layout = w[8]; v->set = w[9]; v->noff = noff; v->off = off;
     for (unsigned i = 0; i < noff; i++, q += 3) {
@@ -336,11 +361,11 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
         if (addr < q[0] || addr - q[0] > 0xffffffffull) return M_UBO;
         off[i] = uint32_t(addr - q[0]);
     }
-    v->used = uint16_t(w[18] >> 32);
+    v->used = uint16_t(w[18] >> 32); bool noval = false;
     for (unsigned j = 0; j < nvb; j++, q += 5) {
         const unsigned at = unsigned(q[0] & 15); uint64_t addr = 0, size = 0;
-        if (!a.vb(at, &addr, &size)) return M_VB;
-        if (NRZ8_MUTATE != 9 && (addr != q[3] || size != q[4])) return M_VB;
+        if (!a.vb(at, &addr, &size)) return M_FORM;
+        if (NRZ8_MUTATE != 9 && (addr != q[3] || size != q[4])) { if (NRZ8_MUTATE == 34) return M_UBO; noval = true; }   // (34: refused, as before section 39)
         v->vb[at] = q[1]; v->vbo[at] = q[2];
     }
     for (unsigned r = 0; r < nrow; r++, q += 3) {
@@ -354,7 +379,7 @@ template <class A> static inline int match(const uint64_t *w, const nrz5_site *s
     const uint32_t k = uint32_t(w[18]);
     if (v->indexed) { v->it = uint32_t(w[17]); v->ib = w[10]; v->ibo = w[11]; v->instances = uint32_t(instances); v->first = uint32_t(w[17] >> 32); v->vertex_offset = int32_t(uint32_t(base_vertex) + k); v->first_instance = uint32_t(base_instance); }
     else { v->instances = 1; v->first = uint32_t(first) + k; v->first_instance = 0; }
-    return M_OK;
+    return noval ? M_NOVAL : M_OK;
 }
 
 // [NR-ZERO Z8 values, NR-ZERO.md section 31] The values the walk wrote a draw's packets from are match()'s: the words of the
@@ -436,6 +461,22 @@ template <class A> static inline int describe(const nr_dplan &p, const uint32_t 
     return P_OK;
 }
 
+// ---- what the prologue of the translation thread's draw() did (NR-ZERO.md section 39) ----------------------------------------------
+// PRO_NONE: nothing - State at the hook / the lane's tail is the walk's copy. PRO_TWIN: only the fragment shader is a twin (NR-MAT's
+// empty fragment shader in a pass without colour, NR-SH-SURF's variant of a surface shader; their Guard puts the game's shader back
+// after the draw): every other word of State is the copy's. PRO_STATE: anything else (the pre-pass override, LIGHTFUSE, ONCHIP's
+// twin that steps a subpass, a post fusion) - State is not the copy.
+// A twin draw is published and answered: its answer (the plan and NR-08 entry of the twin's shader set, the NR-09 entry of its variant)
+// was resolved under the shaders the prologue left, and it is taken only when the shaders at the hook are those (same_shaders) - a
+// prologue that decides otherwise this time (NR-MAT's gate reads a uniform block; another NR-SH-SURF variant) is refused there.
+enum { PRO_NONE = 0, PRO_TWIN = 1, PRO_STATE = 2 };
+static inline bool prologue_ok(int pro, int twin) { return pro == PRO_NONE || (pro == PRO_TWIN && twin) || (NRZ8_MUTATE == 32 && pro == PRO_STATE); }
+// a[i] / b[i]: the shader of stage i the answer was resolved for / that State holds now; the fragment stage is the last of the n.
+template <class P> static inline bool same_shaders(const P *const *a, const P *const *b, unsigned n) {
+    for (unsigned i = 0; i < n; i++) if (a[i] != b[i] && !(NRZ8_MUTATE == 33 && i + 1 == n)) return false;
+    return true;
+}
+
 // [DM_NR_Z8_THREAD, NR-ZERO.md sections 28 and 36] Does the walk get its own thread? want: the switch (0 / 1). nb_own: DM_NB_OWN
 // (the game's default: a frame's last submission is queued as the frame's open job). It does not matter: an open job is numbered
 // by the queue exactly as any submission (hle_nvn.c x_push: the next number, under the lock the post is made under - the front
@@ -444,26 +485,39 @@ static inline int walker_thread(int want, int nb_own) { if (NRZ8_MUTATE == 30 &&
 
 // One writer (the translation thread), readers validate with the slot's version (as nr_z5p.h: 0 = never written, odd = being
 // written); every word an atomic. A reader copies only the words the template has.
-struct Slot { std::atomic<uint32_t> ver; std::atomic<uint64_t> w[MAX_WORDS]; };
+// [NR-ZERO.md section 39] A bucket of WAYS slots (slot_of gives its first): a draw's template lives in any of its ways; the walker asks
+// the ways for its site words and fix id (find), the translation thread picks the way it writes (pick: the way of the same draw, an
+// empty way, else the way used longest ago). The phone series R8 had one slot a site: 3.8 % of the draw records met another site's
+// template there (the census world: 2 ways 96.4 % answered, 4 ways 99.0 %). Words are loaded / stored relaxed between the version's acquire / release and a fence (a seqlock as Boehm's
+// "Can seqlocks get along with programming language memory models?"): one barrier a template instead of one a word.
+// "none" templates (not describable) carry the site and the fix id too: the walker tells "this draw is not describable" (M_FORM)
+// from "another draw is in the way" (M_SITE).
+enum { WAYS = 4 };   // (a power of two)
+struct alignas(64) Slot { std::atomic<uint32_t> ver; std::atomic<uint64_t> w[MAX_WORDS]; };   // (the version and the head - site words, fix id - in the first cache line)
+static_assert(sizeof(Slot) % 64 == 0 && offsetof(Slot, w) + 7 * 8 <= 64, "nr_z8.h: a slot's head is one cache line");
+static inline unsigned none_of(const nrz5_site &site, uint32_t fixid, uint64_t *w) {
+    memset(w, 0, HEAD_WORDS * 8); w[0] = uint64_t(HEAD_WORDS) | uint64_t(fixid) << 32; memcpy(w + 1, site.w, 6 * 8); return HEAD_WORDS; }
 struct Table {
     Slot *s = nullptr; uint32_t n = 0; uint64_t puts = 0, same = 0;
     bool init(uint32_t slots) {
         while (slots & (slots - 1)) slots &= slots - 1;
         if (!slots) return false;
-        void *m = malloc(sizeof(Slot) * size_t(slots)); if (!m) return false;
+        void *m = nullptr; if (posix_memalign(&m, 64, sizeof(Slot) * size_t(slots)) || !m) return false;
         s = static_cast<Slot *>(m); n = slots;
         for (uint32_t i = 0; i < n; i++) { new (&s[i]) Slot; s[i].ver.store(0, std::memory_order_relaxed); for (int j = 0; j < MAX_WORDS; j++) s[i].w[j].store(0, std::memory_order_relaxed); }
         return true;
     }
     void destroy() { free(static_cast<void *>(s)); s = nullptr; n = 0; }
-    uint32_t slot_of(const nrz5_site *site, uint32_t fixid) const { return uint32_t(nrz5_site_hash(site, fixid) >> 20) & (n - 1); }
+    // the bucket's first way (by the site words and the fix id: one site under several fix ids - the cascades of a shadow, say - is
+    // spread over buckets; by the site alone the host test's world lost a fifth of its answers to full buckets)
+    uint32_t slot_of(const nrz5_site *site, uint32_t fixid) const { return uint32_t(nrz5_site_hash(site, fixid) >> 20) & (n - 1) & ~uint32_t(WAYS - 1); }
     // writer: the words of a template (nw of them, pack()'s) into slot i unless it holds them. Returns the slot's version (even).
     uint32_t put(uint32_t i, const uint64_t *w, unsigned nw) {
         Slot &x = s[i & (n - 1)];
         const uint32_t v = x.ver.load(std::memory_order_relaxed);
         if (v) { bool eq = true; for (unsigned j = 0; j < nw && eq; j++) eq = x.w[j].load(std::memory_order_relaxed) == w[j]; if (eq) { ++same; return v; } }
-        x.ver.store(v + 1, std::memory_order_release);
-        for (unsigned j = 0; j < nw; j++) x.w[j].store(w[j], std::memory_order_release);
+        x.ver.store(v + 1, std::memory_order_relaxed); std::atomic_thread_fence(std::memory_order_release);   // (odd before any word)
+        for (unsigned j = 0; j < nw; j++) x.w[j].store(w[j], std::memory_order_relaxed);
         uint32_t nv = v + 2; if (!nv) nv = 2;
         x.ver.store(nv, std::memory_order_release); ++puts;
         return nv;
@@ -474,13 +528,71 @@ struct Table {
         const Slot &x = s[i & (n - 1)];
         const uint32_t v0 = x.ver.load(std::memory_order_acquire);
         if (!v0 || (v0 & 1)) return false;
-        w[0] = x.w[0].load(std::memory_order_acquire);
+        w[0] = x.w[0].load(std::memory_order_relaxed);
         unsigned nw = words_of(w[0]); if (nw > MAX_WORDS) nw = MAX_WORDS;
-        for (unsigned j = 1; j < nw; j++) w[j] = x.w[j].load(std::memory_order_acquire);
-        if (NRZ8_MUTATE != 11 && x.ver.load(std::memory_order_acquire) != v0) return false;
+        for (unsigned j = 1; j < nw; j++) w[j] = x.w[j].load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (NRZ8_MUTATE != 11 && x.ver.load(std::memory_order_relaxed) != v0) return false;
         *ver = v0; return true;
     }
+    // reader, one way: M_OK - slot i holds a template of (site, fixid): its words in w (as get()) and its version; M_SITE / M_FIX - a
+    // template of another draw; M_EMPTY - never written, being written or written meanwhile. The head (the site words, the fix id) is
+    // compared before the rest is read: a way of another draw costs its first cache line.
+    int probe(uint32_t i, const nrz5_site *site, uint32_t fixid, uint64_t *w, uint32_t *ver) const {
+        const Slot &x = s[i & (n - 1)];
+        const uint32_t v0 = x.ver.load(std::memory_order_acquire);
+        if (!v0 || (v0 & 1)) return M_EMPTY;
+        for (unsigned j = 0; j < 7; j++) w[j] = x.w[j].load(std::memory_order_relaxed);
+        int r = memcmp(w + 1, site->w, 6 * 8) ? M_SITE : (NRZ8_MUTATE != 7 && uint32_t(w[0] >> 32) != fixid) ? M_FIX : M_OK;
+        if (r == M_OK) { unsigned nw = words_of(w[0]); if (nw > MAX_WORDS) nw = MAX_WORDS; for (unsigned j = 7; j < nw; j++) w[j] = x.w[j].load(std::memory_order_relaxed); }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (NRZ8_MUTATE != 11 && x.ver.load(std::memory_order_relaxed) != v0) return M_EMPTY;
+        if (r == M_OK) *ver = v0;
+        return r;
+    }
+    // the walker: the way of bucket b (slot_of) that holds the template of (site, fixid) - M_OK, *slot that way; else the outcome
+    // (M_FIX: a way holds this site under another fix id; M_EMPTY: a way is empty or being written; M_SITE: every way holds another
+    // draw) and *slot the way a template of this draw would take (the translation thread picks again when it publishes).
+    int find(uint32_t b, const nrz5_site *site, uint32_t fixid, uint64_t *w, uint32_t *ver, uint32_t *slot) const {
+        int out = M_SITE; *slot = b;
+        for (uint32_t k = 0; k < (NRZ8_MUTATE == 31 ? 1u : uint32_t(WAYS)); k++) {
+            const int r = probe(b + k, site, fixid, w, ver);
+            if (r == M_OK) { *slot = b + k; return M_OK; }
+            if (r == M_FIX) { out = M_FIX; *slot = b + k; } else if (r == M_EMPTY && out != M_FIX) { if (out != M_EMPTY) *slot = b + k; out = M_EMPTY; }
+        }
+        return out;
+    }
+    // the translation thread (the only writer: its own words are read relaxed): the way of hint's bucket the template w (pack()'s or
+    // none_of()'s) goes to - the way that holds the same draw (site words and fix id), else an empty way, else the way whose use stamp
+    // is the oldest (used[slot]: the translation thread's count when it last put or used the slot's template).
+    uint32_t pick(uint32_t hint, const uint64_t *w, const uint32_t *used) const {
+        const uint32_t b = hint & (n - 1) & ~uint32_t(WAYS - 1); int empty = -1;
+        for (uint32_t k = 0; k < uint32_t(WAYS); k++) {
+            const Slot &x = s[b + k];
+            if (!x.ver.load(std::memory_order_relaxed)) { if (empty < 0) empty = int(k); continue; }
+            bool eq = uint32_t(x.w[0].load(std::memory_order_relaxed) >> 32) == uint32_t(w[0] >> 32);
+            for (unsigned j = 1; j < 7 && eq; j++) eq = x.w[j].load(std::memory_order_relaxed) == w[j];
+            if (eq) return b + k;
+        }
+        if (empty >= 0) return b + uint32_t(empty);
+        uint32_t old = b; for (uint32_t k = 1; k < uint32_t(WAYS); k++) if (int32_t(used[b + k] - used[old]) < 0) old = b + k;
+        return old;
+    }
 };
+
+// ---- the walker's look at one draw record (xbg_nr_z8.inc Hnd::nb_draw and the host test's walk call this) ---------------------
+// site / fixid: the record's site words and the copy's fix id. A: the copy (as match()'s). w / v / off: room for the template, the
+// values and the offsets. m: M_OK / M_NOVAL (answered: ver is the template's version, slot its way) or the refusal; slot is always the
+// way a template of this draw is published to (the translation thread picks again).
+// b: the bucket (Table::slot_of).
+struct Look { int m = M_EMPTY; uint32_t slot = 0, ver = 0; };
+template <class A> static inline Look look(const Table &t, uint32_t b, const nrz5_site &site, uint32_t fixid, const nbd_hdr &h, A &&a, uint64_t *w, nrz5_vals *v, uint32_t *off) {
+    Look o; o.slot = b;
+    if (!fixid) return o;
+    const int f = t.find(o.slot, &site, fixid, w, &o.ver, &o.slot);
+    o.m = f ? f : match(w, &site, fixid, h.count, h.instances, h.first, h.base_vertex, h.base_instance, a, v, off);
+    return o;
+}
 
 // ---- the marks of a walk that runs on its own thread (DM_NR_Z8_THREAD=1, NR-ZERO.md section 28) ----------------------------------
 // The walk on the submitting thread writes its words into the draw record before the job is queued. A walk on a thread of its own
@@ -495,10 +607,10 @@ struct Table {
 //            starts an entry by clearing its token). Not there yet (the translation thread is ahead of the walk), lapped, or the
 //            counts differ: the record has no words - it is resolved and recorded as today. Nothing waits for the walk here.
 // So a record's words are taken only when the walk of THIS submission wrote them for THIS record at THIS place of the order.
-struct MarkVal { uint64_t ca = 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t aux = 0, vw = 0, pk = 0; };   // pk: a tail draw's packets in its run's chunk, bytes | count << 32   // cond_addr word (fix id | version << 32), the run's mark, slot + 1, the caller's word (verify: the digest's place + 1)
+struct MarkVal { uint64_t ca = 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t aux = 0, vw = 0, pk = 0; uint8_t why = 0; };   // why: the walker's outcome (M_*; NR-ZERO.md section 39, the census)   // pk: a tail draw's packets in its run's chunk, bytes | count << 32   // cond_addr word (fix id | version << 32), the run's mark, slot + 1, the caller's word (verify: the digest's place + 1)
 enum { MARK_ORD_BITS = 24, MARK_SUBS = 64, MARK_SCAN = 2048 };
 struct Marks {
-    struct E { std::atomic<uint64_t> tok, rec, ca, w, aux, vw, pk; };   // vw: the places of the draw's vertex / index ranges among the ranges of the submission (Ranges; 0: none)
+    struct alignas(64) E { std::atomic<uint64_t> tok, rec, ca, w, aux, vw, pk; };   // (one cache line an entry; w: mark | slot + 1 << 32 (24 bits) | the outcome << 56)   // vw: the places of the draw's vertex / index ranges among the ranges of the submission (Ranges; 0: none)
     struct B { std::atomic<uint64_t> sub, base; };
     E *e = nullptr; uint32_t n = 0; B b[MARK_SUBS];
     std::atomic<uint64_t> done{0};               // the last submission the walker left (walked to its end or passed over)
@@ -520,12 +632,12 @@ struct Marks {
     void put(const uint8_t *rec, const MarkVal &v) {
         if (!room()) return;   // (16 million draw records in one submission: the rest has no words)
         E &x = e[seq & (n - 1)]; const uint64_t t = token(wsub, word);
-        if (NRZ8_MUTATE == 18) x.tok.store(t, std::memory_order_release); else x.tok.store(0, std::memory_order_release);
+        x.tok.store(NRZ8_MUTATE == 18 ? t : 0, std::memory_order_relaxed); std::atomic_thread_fence(std::memory_order_release);   // (0 before any word)
 #ifdef NRZ8_TEST_MID_PUT
         NRZ8_TEST_MID_PUT();   // (the host test only: what a reader on another thread sees between the first store and the words)
 #endif
-        x.rec.store(uint64_t(uintptr_t(rec)), std::memory_order_release); x.ca.store(v.ca, std::memory_order_release);
-        x.w.store(uint64_t(v.mark) | uint64_t(uint32_t(v.slot1)) << 32, std::memory_order_release); x.aux.store(v.aux, std::memory_order_release); x.vw.store(v.vw, std::memory_order_release); x.pk.store(v.pk, std::memory_order_release);
+        x.rec.store(uint64_t(uintptr_t(rec)), std::memory_order_relaxed); x.ca.store(v.ca, std::memory_order_relaxed);
+        x.w.store(uint64_t(v.mark) | uint64_t(uint32_t(v.slot1) & 0xffffffu) << 32 | uint64_t(v.why) << 56, std::memory_order_relaxed); x.aux.store(v.aux, std::memory_order_relaxed); x.vw.store(v.vw, std::memory_order_relaxed); x.pk.store(v.pk, std::memory_order_relaxed);
         x.tok.store(t, std::memory_order_release); ++seq; ++word;
     }
     void end() { done.store(wsub, std::memory_order_release); }
@@ -541,11 +653,12 @@ struct MarkReader {
         const Marks::E &x = m.e[(base + k) & (m.n - 1)];
         const uint64_t t = x.tok.load(std::memory_order_acquire);
         if (NRZ8_MUTATE == 15 ? (t & ((1u << MARK_ORD_BITS) - 1)) != k || !t : t != Marks::token(sub, k)) return 1;
-        const uint64_t r = x.rec.load(std::memory_order_acquire);
-        o->ca = x.ca.load(std::memory_order_acquire); const uint64_t w = x.w.load(std::memory_order_acquire); o->aux = x.aux.load(std::memory_order_acquire); o->vw = x.vw.load(std::memory_order_acquire); o->pk = x.pk.load(std::memory_order_acquire);
-        if (NRZ8_MUTATE != 17 && x.tok.load(std::memory_order_acquire) != t) return 1;
+        const uint64_t r = x.rec.load(std::memory_order_relaxed);
+        o->ca = x.ca.load(std::memory_order_relaxed); const uint64_t w = x.w.load(std::memory_order_relaxed); o->aux = x.aux.load(std::memory_order_relaxed); o->vw = x.vw.load(std::memory_order_relaxed); o->pk = x.pk.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (NRZ8_MUTATE != 17 && x.tok.load(std::memory_order_relaxed) != t) return 1;
         if (NRZ8_MUTATE != 16 && r != uint64_t(uintptr_t(rec))) return 2;
-        o->mark = uint32_t(w); o->slot1 = int32_t(uint32_t(w >> 32));
+        o->mark = uint32_t(w); o->slot1 = int32_t(uint32_t(w >> 32) & 0xffffffu); o->why = uint8_t(w >> 56);
         return 0;
     }
     // The next draw record the translation thread executes (every OP_X_NB_DRAW without NBD_F_CHECK, in execute()'s order, once).
@@ -580,10 +693,16 @@ struct Ranges {
     enum { N = 4096, MAX_ID = 3000 };
     struct E { uint64_t addr, bytes; uint32_t tag, gen, id; };
     E e[N]; uint32_t gen = 0, n = 0;
+    E last[4] = {};   // [section 39, the walker's cost] the last range met at each place of a draw (3 vertex bindings, the indices): a repeat skips the table
     Ranges() { memset(e, 0, sizeof e); }
-    void begin() { if (!++gen) { memset(e, 0, sizeof e); gen = 1; } n = 0; }
-    // 0: no number (the table of this submission is full)
-    uint32_t id_of(uint64_t addr, uint64_t bytes, uint32_t tag) {
+    void begin() { if (!++gen) { memset(e, 0, sizeof e); memset(last, 0, sizeof last); gen = 1; } n = 0; }
+    // 0: no number (the table of this submission is full). k: the place of the range in its draw (0..3; 4: none).
+    uint32_t id_of(uint64_t addr, uint64_t bytes, uint32_t tag, unsigned k = 4) {
+        if (k < 4) { E &l = last[k]; if ((l.gen == gen || NRZ8_MUTATE == 20) && l.id && l.addr == addr && (l.bytes == bytes || NRZ8_MUTATE == 19) && l.tag == tag) return l.id;
+            const uint32_t id = find(addr, bytes, tag); if (id) l = E{addr, bytes, tag, gen, id}; return id; }
+        return find(addr, bytes, tag);
+    }
+    uint32_t find(uint64_t addr, uint64_t bytes, uint32_t tag) {
         uint32_t i = uint32_t((addr ^ bytes * 0x9E3779B97F4A7C15ull ^ tag) * 0xBF58476D1CE4E5B9ull >> 40) & (N - 1);
         for (unsigned p = 0; p < 32; p++, i = (i + 1) & (N - 1)) {
             E &x = e[i];
@@ -598,8 +717,8 @@ enum { VW_MAX_VB = 3 };   // the word of a draw: 16 bits a vertex binding (ascen
 template <class VB> static inline uint64_t ranges_word(Ranges &r, uint32_t used, VB &&vb, bool indexed, uint64_t ibuf, uint64_t ibytes) {
     uint64_t w = 0; unsigned k = 0;
     for (uint32_t m = used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); if (k >= VW_MAX_VB) return 0;
-        uint64_t a = 0, z = 0; if (!vb(i, &a, &z)) return 0; const uint32_t id = r.id_of(a, z, 1); if (!id) return 0; w |= uint64_t(id) << (16 * k++); }
-    if (indexed) { const uint32_t id = r.id_of(ibuf, ibytes, 2); if (!id) return 0; w |= uint64_t(id) << 48; }
+        uint64_t a = 0, z = 0; if (!vb(i, &a, &z)) return 0; const uint32_t id = r.id_of(a, z, 1, k); if (!id) return 0; w |= uint64_t(id) << (16 * k++); }
+    if (indexed) { const uint32_t id = r.id_of(ibuf, ibytes, 2, 3); if (!id) return 0; w |= uint64_t(id) << 48; }
     return w;
 }
 

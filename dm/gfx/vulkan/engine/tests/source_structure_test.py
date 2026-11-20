@@ -3229,7 +3229,7 @@ def nrz8_check():   # [DOS2] NR-ZERO Z8 DM_NR_Z8 (docs/dos2/nr/NR-ZERO.md sectio
         assert part in h, 'Z8: the walk follows %s as execute() does' % part
     assert 'if(d.epoch!=h.epoch || !d.p){++miss;' in (root / 'gfx/vulkan/engine/xbg_nb_state.inc').read_text(encoding='utf-8'), 'Z8: the backend\'s REF rule the walk repeats'
     # never answered: through OP_CALL, no key, UI, a render condition, QUADS; a condition's address is not overwritten
-    assert 'if(!top){++g.c[G_CALLED];g.wr.no_values();}' in z and 't.site==NRD_SITE_UI' in z and '(h.flags&(NBD_F_REN|NBD_F_COND)) || h.prim==7' in z and 'if(!(h.flags&NBD_F_COND))memcpy(rec+offsetof(nbd_hdr,cond_addr),&ca,8);' in z, 'Z8: what the walk never answers'
+    assert 'if(!top){++g.c[G_CALLED];g.wr.no_values();why=nrz8::M_CALLED;}' in z and 't.site==NRD_SITE_UI' in z and '(h.flags&(NBD_F_REN|NBD_F_COND)) || h.prim==7' in z and 'if(!(h.flags&NBD_F_COND))memcpy(rec+offsetof(nbd_hdr,cond_addr),&ca,8);' in z, 'Z8: what the walk never answers'
     # the walk runs before the job is queued, under the front's lock, with the number the job will get; the translation thread learns the number before the backend executes
     sub = hle[hle.index('NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {'):]
     assert sub.index('int z8; uint64_t z8n = 0; Z8G_SUBMIT_BEGIN(z8, z8n, h, n, atomic_load(&g_x_subs) + 1);') < sub.index('if (!XOWN_SUBMIT(&j)) x_push(&j);') < sub.index('Z8G_SUBMIT_END(z8, z8n, j.sub);') and hle.count('Z8G_SUBMIT_BEGIN(') == 1, 'Z8: the walk before the job is queued, the lock over both'
@@ -3246,7 +3246,7 @@ def nrz8_check():   # [DOS2] NR-ZERO Z8 DM_NR_Z8 (docs/dos2/nr/NR-ZERO.md sectio
     assert 'const bool mine=cur_sub && h._pad0==nrz8::stamp_of(cur_sub) && nrshc::again==NRSHC_R_NONE;' in z and 'h._pad1=0;h._pad2=0;h.cond_addr&=0xffffffffull;return;}' in z and 'if(z8)nrz8t::rec_begin(r_h,rec);' in z5, 'Z8: only the words of this submission\'s walk are read'
     # the hook: nothing is touched before the answer is known to stand (version, generations, pass definition, gates); the answer goes through nrz3::answered without variant words
     d = z[z.index('int draw(Commands &c,Descriptors *&dp,Pass &p,int prim,int first,int count,const p_draw_idx *indexed,uint32_t instances,uint32_t first_instance,bool pp,int draw_fast){'):z.index('void tick(){   // every submission (nrdraw::tick) while the switch is on')]
-    order = ['if(!nrz5t::r_have || nrz5t::r_done)return 0;', 'if(pv.ver!=ver){++s.replaced;return 0;}', 'if(pv.stamp[0]!=nrdesc::tab_gen || pv.stamp[1]!=nrdraw::tab_gen() || pv.stamp[2]!=nbpipe::epoch || nrdraw::epoch!=nbpipe::epoch){++s.stale;return 0;}',
+    order = ['if(!nrz5t::r_have || nrz5t::r_done || guarded)return 0;', 'if(pv.ver!=ver){++s.replaced;return 0;}', 'if(pv.stamp[0]!=nrdesc::tab_gen || pv.stamp[1]!=nrdraw::tab_gen() || pv.stamp[2]!=nbpipe::epoch || nrdraw::epoch!=nbpipe::epoch){++s.stale;return 0;}',
              'if(pp || !last_pass.valid || pv.passdef!=uint64_t(uintptr_t(last_pass.pass.definition))){++s.passdef;return 0;}', 'if(nrz3::gate(t,pp,draw_fast,false)){++s.gate;return 0;}', 'a.varw=nullptr;', 'nrz3::answered(zs,a,c,dp,p,prim,first,count,indexed,instances,first_instance,draw_fast,tm);']
     at = -1
     for o in order:
@@ -3256,8 +3256,8 @@ def nrz8_check():   # [DOS2] NR-ZERO Z8 DM_NR_Z8 (docs/dos2/nr/NR-ZERO.md sectio
     hk = 'if(nrz8t::mode==1 && !z8g && nrdraw::cur && !gi && quad_indices.empty() && ui_uy==0 && ui_vs==1 && g_ui_moff==0){if(nrz3::mode!=0)nrz3::begin();z3r=nrz8t::draw('
     assert g.count(hk) == 1 and g.index('DRAW_MARK(1);Commands c(true);') < g.index(hk) < g.index('if(__builtin_expect(nrz3::mode!=0,0) && !z3r){nrz3::begin();'), 'Z8: the hook of draw(), where nrz3 asks its table; =2 never enters it'
     # the template is published with the answer under the same version; what cannot be a template is refused
-    assert 'if(z8){nrz8t::publish(r_h,key,v,first_index,k,plan_hint);return;}' in z5 and 'n.ver=nrz8g::tab.put(slot,w,nw);' in z and 'else if((why=nrz8::plan_form(pl->p,v))!=0){}' in z and 'why=nrz8::describe(pl->p,pl->copy,v,A{},d);' in z and \
-        'else if(!hint.pent || hint.special || hint.qpat || hint.zero>=0)why=4;' in z and 'else if(hint.pp || guarded)why=5;' in z and 'const bool z8g=ppg.on || nbpost::inside || nmg.saved || nsg.saved || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;' in g and 'for(unsigned i=0;i<5;i++)if(pv.sh[i]!=state.shader[i]){++s.shaders;return 0;}' in z, 'Z8: publish; a draw whose State the prologue changed is neither answered nor published'
+    assert 'if(z8){nrz8t::publish(r_h,key,v,first_index,k,plan_hint);return;}' in z5 and 'uint32_t was=0;Priv &n=put(w,nw,&was);const uint32_t nv=n.ver;' in z and 'else if((why=nrz8::plan_form(pl->p,v))!=0){}' in z and 'why=nrz8::describe(pl->p,pl->copy,v,A{},d);' in z and \
+        'else if(!hint.pent || hint.special || hint.qpat || hint.zero>=0)why=4;' in z and 'else if(hint.pp || guarded)why=5;' in z and 'const bool z8g=ppg.on || nbpost::inside || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;' in g and 'if(!nrz8::same_shaders(pv.sh,state.shader,5)){++s.shaders;return 0;}' in z, 'Z8: publish; a draw whose State the prologue changed is neither answered nor published (a twin is - section 39, below)'
     assert 'zh.pent=H.have_ent?H.ent:nullptr;zh.zero=H.zero;zh.qpat=H.qpat;zh.pp=pp;zh.special=nrpo::P.on || nrps::P.on;zh.lane_gen=tab_gen();' in lane, 'Z8: the lane\'s hint for a template'
     # [section 36] what a template can carry is decided in nr_z8.h (host-tested with plans the real builder makes): a ring block baked
     # into the set is refused, a support / c1 block bound as a dynamic buffer is described by its offset - the phone's first series
@@ -3801,9 +3801,9 @@ def nrz9_check():   # [DOS2] NR-ZERO Z8, the parts of NR-ZERO.md section 28 on (
         'Z9 thread: Z8G_DONE costs one load without the switch and still waits for a walk posted before the switch went off'
     # the marks: token cleared first and written last; the reader compares the token, the record, and the token again
     mp = h[h.index('    void put(const uint8_t *rec, const MarkVal &v) {'):h.index('    void end() { done.store(wsub')]
-    assert mp.index('x.tok.store(0, std::memory_order_release);') < mp.index('x.rec.store(') < mp.index('x.aux.store(') < mp.rindex('x.tok.store(t, std::memory_order_release);'), 'Z9 thread: an entry is cleared, written, then named'
+    assert mp.index('x.tok.store(NRZ8_MUTATE == 18 ? t : 0, std::memory_order_relaxed); std::atomic_thread_fence(std::memory_order_release);') < mp.index('x.rec.store(') < mp.index('x.aux.store(') < mp.rindex('x.tok.store(t, std::memory_order_release);'), 'Z9 thread: an entry is cleared, written, then named'
     pr = h[h.index('    int probe(const Marks &m, uint32_t k, const uint8_t *rec, MarkVal *o) const {'):h.index('    // The next draw record the translation thread executes')]
-    assert 't != Marks::token(sub, k)) return 1;' in pr and 'x.tok.load(std::memory_order_acquire) != t) return 1;' in pr and 'r != uint64_t(uintptr_t(rec))) return 2;' in pr, 'Z9 thread: the reader\'s three checks'
+    assert 't != Marks::token(sub, k)) return 1;' in pr and 'std::atomic_thread_fence(std::memory_order_acquire);' in pr and 'x.tok.load(std::memory_order_relaxed) != t) return 1;' in pr and 'r != uint64_t(uintptr_t(rec))) return 2;' in pr, 'Z9 thread: the reader\'s three checks'
     assert 'if (max_tails && cur.tails >= max_tails) {' in r5 and 'uint32_t max_tails = 0;' in r5 and 'g.wr.max_tails=close?split0:0;' in z, 'Z9 thread: runs are split only for a walker whose reader is close (0 = never, the default of the writer)'
     # [section 36] the thread is not refused under DM_NB_OWN (the game's default): the open frame job is numbered like any submission
     assert 'if(tm && o && *o && atoi(o)!=0){' not in z and 'if(tm && !nrz8::walker_thread(tm,own)){' in z and \
@@ -3831,7 +3831,7 @@ def nrz9_check():   # [DOS2] NR-ZERO Z8, the parts of NR-ZERO.md section 28 on (
     assert 'void image_read_hook(Image &im){if(prepass::mode>0)prepass::read(im.source.serial);if(nrpres::mode)nrpres::touch(im,NRP_T_READ);if(pclear_n)pclear_flush_image(im,0);if(hist_on)hist_note_read(im,\'s\');}' in g, \
         'Z9 images: image_read_hook changed (img_hooks_off must name each of its notes)'
     assert 'void pass_prof_read(const Image &im){Slot &s=slots[slot_index];if(!s.prof || !im.gpu_written || !passval::on())return;' in g, 'Z9 images: pass_prof_read notes only under passval::on()'
-    idn = z[z.index('inline void img_done(nrdesc::Ent &e,bool hook,bool stood,const ImgSnap &z0,bool cont){'):z.index('void guard(bool on)')]
+    idn = z[z.index('inline void img_done(nrdesc::Ent &e,bool hook,bool stood,const ImgSnap &z0,bool cont){'):z.index('void guard(bool on,bool tw)')]
     assert idn.index('if(stood){++is.checked;') < idn.index('if(hook || !cont || !img_hooks_off() || !e.check_gen){') < idn.index('if(!nrz_rt_img_ok(&r)){') < idn.index('nrz_rtq_set(&e.rtq,'), 'Z9 images: the word is set only after every image passed'
     assert 'uint64_t seen=fo?frag_seq:barrier_seq;if(opbar::mode==1)seen=nb_ob_seen(seen,fo?im.opvis_frag:im.opvis_full);' in idn and 'r.written=uint8_t(nrrp::lw(im)>seen || (!as_storage && im.storage_write>seen));' in idn and \
         'uint64_t seen=read_frag_only?frag_seq:barrier_seq;if(opbar::mode==1)seen=nb_ob_seen(seen,read_frag_only?im.opvis_frag:im.opvis_full);' in pr and 'const bool written=nrrp::lw(im)>seen || (!as_storage && im.storage_write>seen);' in pr, \
@@ -3923,5 +3923,52 @@ def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md):
     assert (root / 'gfx/vulkan/engine/tests/nr_nrn_test.c').is_file(), 'NRN: the host test exists'
     return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 refused by both halves; off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
 print('PASS: '+nrn_check())
+def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
+    z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
+    h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')
+    r5 = (root / 'gfx/nr/nr_z5r.h').read_text(encoding='utf-8')
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    z5 = (root / 'gfx/vulkan/engine/xbg_nr_z5g.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    # a twin fragment shader: only NR-MAT / NR-SH-SURF's Guards make one; every other guard of the prologue stays a changed State
+    assert 'const bool z8tw=nmg.saved || nsg.saved;' in g and 'const bool z8g=ppg.on || nbpost::inside || lfg.fs || lfg.disc || lfg.mrt || lfg.nre || lfg.ov || ocg.saved;' in g and 'nrz8t::guard(z8g,z8tw);' in g, \
+        'Z11: a twin is only NR-MAT / NR-SH-SURF; LIGHTFUSE, ONCHIP, the pre-pass override, a post fusion stay a changed State'
+    assert 'struct Guard{Shader *saved=nullptr;~Guard(){if(saved)state.shader[4]=saved;}};' in (root / 'gfx/vulkan/engine/xbg_nr_mat.inc').read_text(encoding='utf-8') and \
+        'struct Guard{Shader *saved=nullptr;~Guard(){if(saved)state.shader[4]=saved;}};' in (root / 'gfx/vulkan/engine/xbg_nr_surf.inc').read_text(encoding='utf-8'), 'Z11: the twins\' Guards change the fragment shader and nothing else'
+    assert 'void guard(bool on,bool tw){guarded=on || (tw && !twin_ok);twin=tw && !guarded;}' in z and 'if(!nrz5t::r_have || nrz5t::r_done || guarded)return 0;' in z, 'Z11: DM_NR_Z8_TWIN=0 takes a twin for a changed State (the hook refuses it)'
+    assert 'inline int xbg_nr_z8_twin_default(){return 1;}' in pol and 'getenv("DM_NR_Z8_TWIN")' in z and 'xbg_nr_z8_twin_default()' in z and 'DM_NR_Z8_TWIN' not in (root / 'android/jni_android.c').read_text(encoding='utf-8'), \
+        'Z11: DM_NR_Z8_TWIN through the policy (1: it acts only while DM_NR_Z8 is on - 0 on every family), not set by the app'
+    assert 'if(!nrz8::same_shaders(pv.sh,state.shader,5)){++s.shaders;return 0;}' in z and 'const bool shs=nrz8::same_shaders(pv.sh,state.shader,5);' in z and \
+        'static inline bool prologue_ok(int pro, int twin) { return pro == PRO_NONE || (pro == PRO_TWIN && twin) || (NRZ8_MUTATE == 32 && pro == PRO_STATE); }' in h, 'Z11: an answer is taken (and compared) only under its own shaders'
+    # a vertex range is a value, not a word of the answer
+    m = h[h.index('template <class A> static inline int match('):h.index('// [NR-ZERO Z8 values, NR-ZERO.md section 31]')]
+    assert 'noval = true;' in m and 'return noval ? M_NOVAL : M_OK;' in m and m.index('if (a.tex(ns, slot) != q[1]) return M_TEX;') > m.index('noval = true;'), 'Z11: match - vertex ranges give values only; the rows are compared after them'
+    nd = z[z.index('    void nb_draw(uint8_t *rec,size_t n,bool top){'):z.index('// nvnQueueSubmitCommands, before the job of this recording is queued.')]
+    assert 'const nrz8::Look L=nrz8::look(tab,bk,site,fixid,h,Acc{},w,&v,off);' in nd and 'if(!nrz8::answered(L.m))g.wr.no_values();' in nd and 'if(L.m==nrz8::M_OK)mark=g.wr.draw(' in nd and 'else g.wr.no_values();' in nd, \
+        'Z11: the walk - an answer without values writes no packets (a head draw)'
+    assert 'mv.why=uint8_t(why);marks.put(rec,mv);' in nd and 'uint64_t(v.why) << 56' in h and 'o->why = uint8_t(w >> 56);' in h, 'Z11: the walker\'s outcome rides with the mark'
+    # the table: buckets, a head compare first, the seqlock with fences, the writer's way
+    assert 'enum { WAYS = 4 };' in h and '& ~uint32_t(WAYS - 1); }' in h and 'int find(uint32_t b, const nrz5_site *site, uint32_t fixid, uint64_t *w, uint32_t *ver, uint32_t *slot) const {' in h, 'Z11: buckets of four ways'
+    pr = h[h.index('    int probe(uint32_t i'):h.index('    int find(uint32_t b')]
+    assert pr.index('memcmp(w + 1, site->w, 6 * 8)') < pr.index('for (unsigned j = 7; j < nw; j++)') < pr.index('std::atomic_thread_fence(std::memory_order_acquire);') < pr.index('x.ver.load(std::memory_order_relaxed) != v0'), 'Z11: probe - the head first, the rest, the fence, the version again'
+    pu = h[h.index('    uint32_t put(uint32_t i, const uint64_t *w, unsigned nw) {'):h.index('    // reader: the template of slot i as one consistent block')]
+    assert pu.index('x.ver.store(v + 1, std::memory_order_relaxed); std::atomic_thread_fence(std::memory_order_release);') < pu.index('x.w[j].store(w[j], std::memory_order_relaxed);') < pu.index('x.ver.store(nv, std::memory_order_release);'), 'Z11: put - odd version, fence, words, even version'
+    pb = z[z.index('void publish(const nbd_hdr &rh'):z.index('void tick();')]
+    assert 'const uint32_t sl=nrz8g::tab.pick(hslot,w,used);used[sl]=++uclock;' in pb and pb.count('nrz8::none_of(d.site,d.fixid,z)') == 2, 'Z11: publish - the way by pick (LRU stamps), the template that says no carries its site'
+    # the census
+    assert 'if(z8 && rec)nrz8t::census_lane();' in z5 and 'if(z8 && r_have && !r_done)nrz8t::census_gone();' in z5 and z5.index('if(z8 && r_have && !r_done)nrz8t::census_gone();') < z5.index('if(r_have && !r_done && r_h._pad1){++s.missed;'), 'Z11: the census at the command section and for a record that never reached it'
+    # the writer: no values records for draw2 alone; no model copy when there is room
+    assert 'nrz8g::g.wr.side=!(m==1 && kmode==1);' in z and z.index('nrz8g::g.wr.side=!(m==1 && kmode==1);') < z.index('nrz8g::armed.store(2,std::memory_order_release);   // the walk answers from here on'), 'Z11: the side records are left out before the walk starts answering'
+    assert 'if (!s || side_at >= s->used) { *why = CUT_CHUNK; return false; }' in r5 and 'const bool roomy = cur.chunk->cap - u >= ROOM' in r5 and 'nrz5_cache_unknown(&model);' in r5[r5.index('if (roomy) {'):r5.index('} else {', r5.index('if (roomy) {'))], \
+        'Z11: Writer - a run without a side chunk is cut, a full chunk without a saved model forgets the model'
+    assert 'const bool timed=(++g.tn&63)==17;' in z and '&& !timed){Dg x;' in z, 'Z11: the clocked draw record never carries =2\'s digest'
+    # every line of the walk fits xbg_logf's 1 024 bytes (the phone cut "[nr] z8, translation thread" before its reasons): the format's text
+    # plus 10 characters a number
+    for mm in re.finditer(r'xbg_logf\("(\[nr\] z8[^"]*)"((?:\s*"[^"]*")*)', z):
+        fmt = mm.group(1) + ''.join(re.findall(r'"([^"]*)"', mm.group(2)))
+        est = len(re.sub(r'%[0-9.]*(llu|u|d|f|s|zu|p|x)', '', fmt)) + 10 * len(re.findall(r'%[0-9.]*(llu|u|d|f|zu|p|x)', fmt)) + 60 * fmt.count('%s')
+        assert est < 1000, 'Z11: the line "%s..." may not fit xbg_logf\'s 1 024 bytes (%d)' % (fmt[:40], est)
+    return 'NR-ZERO Z8 section 39: a twin fragment shader is answered under its own shaders (DM_NR_Z8_TWIN), every other guard is a changed State; a vertex range is a value, not a word of the answer; buckets of four ways, the head compared first, the seqlock with fences; the walker\'s outcome rides with the mark and is counted at the command section; no values records for draw2 alone; every z8 line fits the log buffer'
+print('PASS: '+nrz11_check())
 _bad=delimiter_gate()
 assert not _bad,_bad

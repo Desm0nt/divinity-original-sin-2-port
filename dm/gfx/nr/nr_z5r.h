@@ -138,40 +138,57 @@ struct Writer {
     // behind the writer finds the first runs of a recording published when it reaches them.
     uint32_t max_tails = 0; uint64_t splits = 0;
     uint32_t last_bytes = 0, last_cmds = 0;   // [NR-ZERO Z8 values] the packets the last draw() wrote into the run's chunk (0: a head draw)
+    // [NR-ZERO.md section 39, the walker's cost] side: write the values record of each tail draw into the run's side chunk (false: no side
+    // chunk at all - a reader that names every verdict itself, Reader::draw2 with Known, never reads it; a run it cannot name is cut at
+    // its first draw, CUT_CHUNK). A draw is written without saving the model first when the chunks have room for any draw (ROOM bytes):
+    // its packets cannot fail then; if they did anyway the model is forgotten (unknown) - the next draw is a head draw, nothing is wrong.
+    bool side = true; enum { ROOM = 4096 };
+    void reset_cur() { cur.chunk = cur.side = nullptr; cur.id = 0; cur.tails = 0; }   // (at_splice is written when a chunk is taken)
     // (The reader checks, per draw, that the real bind cache holds the run's model in every field the draw reads: a run that leans on the
     // one before it is taken only if that one's draws - taken, or recorded by the reader itself - left the same values.)
-    void split() { end_run(); in_run = true; cur = Run{}; ++splits; }
+    void split() { end_run(); in_run = true; reset_cur(); ++splits; }
     void head(const nrz5_vals &v) { nrz5_after(&model, &v); ++st.heads; }
-    void restart() { end_run(); nrz5_cache_unknown(&model); in_run = true; cur = Run{}; }
+    void restart() { end_run(); nrz5_cache_unknown(&model); in_run = true; reset_cur(); }
+    bool take(const nrz5_vals &v) {   // a slot of the ring and the run's chunks - or the draw stays the translation thread's (a head draw)
+        if (!ring->room()) { ++st.ring_full; head(v); return false; }
+        nbmtq::Chunk *c = q->take_spare(), *s = c && side ? q->take_spare() : nullptr;
+        if (!c || (side && !s)) { if (c) q->give_back_spare(c); ++st.no_chunk; head(v); return false; }
+        cur.chunk = c; cur.side = s; cur.id = next_id; next_id = next_id == ID_MAX ? 1 : next_id + 1; cur.tails = 0; cur.at_splice = model;
+        return true;
+    }
     // An engine draw record is being written and the thread has values for it (v). emit(chunk, model, vals) writes the draw's packets
     // into the chunk over the model (nrz5_emit with a sink on the chunk): the number of commands, 0 = the chunk is full. Returns the
     // record's mark word.
     template <class Emit> uint32_t draw(const nrz5_vals &v, Emit &&emit) {
         ++st.draws; last_bytes = last_cmds = 0;
-        if (!in_run) { nrz5_cache_unknown(&model); in_run = true; cur = Run{}; }
+        if (!in_run) { nrz5_cache_unknown(&model); in_run = true; reset_cur(); }
         if (!cur.chunk) {
             if (nrz5_reads_unknown(&model, &v)) { head(v); return 0; }
-            // the first tail draw: a slot of the ring and two spare chunks - or it stays the translation thread's, like a head draw
-            if (!ring->room()) { ++st.ring_full; head(v); return 0; }
-            nbmtq::Chunk *c = q->take_spare(), *s = c ? q->take_spare() : nullptr;
-            if (!s) { if (c) q->give_back_spare(c); ++st.no_chunk; head(v); return 0; }
-            cur.chunk = c; cur.side = s; cur.id = next_id; next_id = next_id == ID_MAX ? 1 : next_id + 1; cur.tails = 0; cur.at_splice = model;
+            if (!take(v)) return 0;   // the first tail draw: a slot of the ring and the spare chunks - or it stays the translation thread's, like a head draw
         } else if (nrz5_reads_unknown(&model, &v)) { restart(); head(v); return 0; }   // a new unknown field after the tail began: this draw is the head of the next run
         if (max_tails && cur.tails >= max_tails) {   // the limit: publish; this draw opens the next run (or stays a head draw when there is no room for one)
             split(); max_tails = max_tails >= 2048 ? 0 : max_tails * 2;
-            if (!ring->room()) { ++st.ring_full; head(v); return 0; }
-            nbmtq::Chunk *c = q->take_spare(), *s = c ? q->take_spare() : nullptr;
-            if (!s) { if (c) q->give_back_spare(c); ++st.no_chunk; head(v); return 0; }
-            cur.chunk = c; cur.side = s; cur.id = next_id; next_id = next_id == ID_MAX ? 1 : next_id + 1; cur.tails = 0; cur.at_splice = model;
+            if (!take(v)) return 0;
         }
-        const nrz5_cache saved = model; const uint32_t u = cur.chunk->used, cm = cur.chunk->cmds;
+        const uint32_t u = cur.chunk->used, cm = cur.chunk->cmds;
         uint32_t pvn = 0;
-        if (!emit(cur.chunk, &model, &v) || !(pvn = pv_put(cur.side->data() + cur.side->used, cur.side->cap - cur.side->used, &v))) {   // a chunk is full: the run ends before this draw
-            model = saved; cur.chunk->used = u; cur.chunk->cmds = cm; ++st.chunk_full;
-            if (!cur.tails) { q->give_back_spare(cur.chunk); q->give_back_spare(cur.side); cur.chunk = cur.side = nullptr; head(v); return 0; }   // (not even one draw fits)
-            restart(); head(v); return 0;
+        const bool roomy = cur.chunk->cap - u >= ROOM && (!cur.side || cur.side->cap - cur.side->used >= ROOM);
+        if (roomy) {   // (any draw fits: no copy of the model to undo with)
+            if (!emit(cur.chunk, &model, &v) || (cur.side && !(pvn = pv_put(cur.side->data() + cur.side->used, cur.side->cap - cur.side->used, &v)))) {
+                cur.chunk->used = u; cur.chunk->cmds = cm; ++st.chunk_full; nrz5_cache_unknown(&model);
+                if (!cur.tails) { q->give_back_spare(cur.chunk); q->give_back_spare(cur.side); reset_cur(); head(v); return 0; }
+                restart(); head(v); return 0;
+            }
+        } else {
+            const nrz5_cache saved = model;
+            if (!emit(cur.chunk, &model, &v) || (cur.side && !(pvn = pv_put(cur.side->data() + cur.side->used, cur.side->cap - cur.side->used, &v)))) {   // a chunk is full: the run ends before this draw
+                model = saved; cur.chunk->used = u; cur.chunk->cmds = cm; ++st.chunk_full;
+                if (!cur.tails) { q->give_back_spare(cur.chunk); q->give_back_spare(cur.side); reset_cur(); head(v); return 0; }   // (not even one draw fits)
+                restart(); head(v); return 0;
+            }
         }
-        cur.side->used += pvn; ++st.tails; st.tail_bytes += cur.chunk->used - u; st.side_bytes += pvn; last_bytes = cur.chunk->used - u; last_cmds = cur.chunk->cmds - cm;
+        if (cur.side) cur.side->used += pvn;
+        ++st.tails; st.tail_bytes += cur.chunk->used - u; st.side_bytes += pvn; last_bytes = cur.chunk->used - u; last_cmds = cur.chunk->cmds - cm;
         return mark_word(cur.tails++ ? MARK_COVERED : MARK_SPLICE, cur.id);
     }
     // An engine draw record the thread has no values for (its mark is 0): the run ends - what that draw leaves bound is not known.
@@ -181,9 +198,8 @@ struct Writer {
         if (in_run && cur.chunk) {
             if (cur.tails < min_tails) { q->give_back_spare(cur.chunk); q->give_back_spare(cur.side); cur.chunk = cur.side = nullptr; ++st.short_runs; st.short_tails += cur.tails; }   // (its records carry the id: the run is published, empty)
             ring->push(cur); ++st.runs;
-            cur.chunk = cur.side = nullptr;
         }
-        in_run = false; cur = Run{};
+        in_run = false; reset_cur();
     }
 };
 
@@ -231,7 +247,7 @@ struct Reader {
     // field a draw with these values reads, what the shadow says (the shadow's unknown fields are never read by a tail draw).
     template <class Holds, class IsDraw> bool step(const nrz5_vals &rv, Holds &&holds, IsDraw &&is_draw, int *why) {
         nbmtq::Chunk *c = run.chunk, *s = run.side;
-        if (side_at >= s->used) { *why = CUT_CHUNK; return false; }
+        if (!s || side_at >= s->used) { *why = CUT_CHUNK; return false; }   // (!s: the writer wrote no values records - Writer::side)
         const int d = pv_diff(s->data() + side_at, s->used - side_at, &rv);
         if (chk) { ++st.k_cmp; if (chk->d != d && d != 9) ++st.k_bad; }
         if (d) { ++st.diff[d]; *why = d == 9 ? CUT_CHUNK : CUT_VALUES; return false; }

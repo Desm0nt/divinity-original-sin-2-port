@@ -109,7 +109,7 @@ struct MS {
 };
 struct Sh : MS { uint64_t sprog[6]{}; };                 // the walk's copy
 struct TS : MS { const prog_t *tprog[6]{}; };            // the model's State: the program object of each stage
-static prog_t g_prog[12]; static dpool_t g_pool[4]; static pool_t g_mem[4];
+static prog_t g_prog[16]; static dpool_t g_pool[4]; static pool_t g_mem[4];
 static bool bind_sh(Sh &S, const prog_t *prog, int32_t stages) { if (prog && prog->nstage > 6) return false; const uint64_t w = prog ? prog->serial : 0; for (unsigned st = 0; st < 6; st++) if (stages & (1u << nvn_stage[st])) S.sprog[st] = w; return true; }
 static bool bind_ts(TS &S, const prog_t *prog, int32_t stages) { if (prog && prog->nstage > 6) return false; for (unsigned st = 0; st < 6; st++) if (stages & (1u << nvn_stage[st])) S.tprog[st] = prog; return true; }
 #define T_BIND_SH(S, pr, st) do { if (!bind_sh(*(S), reinterpret_cast<const prog_t *>(uintptr_t(pr)), (st))) return -1; } while (0)
@@ -156,7 +156,7 @@ struct Mem {
 // ---------------- the world ----------------
 struct Mat { uint32_t key; int vp, fp; uint64_t dsb; uint32_t poly, color; uint64_t blend0; uint32_t attr[3]; uint32_t stride0, stride1; };
 struct Mesh { uint64_t vb0, vb0s, vb1, vb1s, ibuf; int32_t count, base_vertex, first; bool indexed; int32_t itype; };
-struct Gens { uint32_t set_gen, pipe_gen; uint64_t ring_delta; };
+struct Gens { uint32_t set_gen, pipe_gen; uint64_t ring_delta; uint32_t cached = 0, warm = 0; };   // (PHONE) cached: the first shadow cascade is a cached layer this frame - its draws are dropped; warm: the frame counts in the shares
 struct Frame { std::vector<uint64_t> handles; Gens g; };
 struct World {
     Rng r; Rng q{1};   // q: the shape of a draw and its state - the same at the same place of every frame (now and then not)
@@ -418,8 +418,12 @@ static nrz5_cache conv(const BindCache &bc) {
 
 // ---------------- the submitting thread: the walk (the handler of xbg_nr_z8.inc) ----------------
 static nrz5r::Ring g_ring; static nrz8::Table g_tab;
+// BENCH (NR-ZERO.md section 39; ./nr_z8_test bench): parts of the walk left out to see what each costs - 1 the test's own checks
+// (digest, fresh fix id), 2 the template (look and all after it), 4 the packets, 8 the ranges' numbers, 16 the fix id, 32 everything of
+// a draw record after its binds.
+static unsigned g_bench = 0;
 struct Walk {
-    Sh S; nrz8::Fix fix; nrz8::Walker<Walk> W; nrz5r::Writer wr; bool bad = false; uint8_t stamp = 0; uint64_t draws = 0, values = 0, miss[nrz8::M_N] = {}, fix_stale = 0;
+    Sh S; nrz8::Fix fix; nrz8::Walker<Walk> W; nrz5r::Writer wr; bool bad = false; uint8_t stamp = 0; uint64_t draws = 0, values = 0, miss[nrz8::M_ALL] = {}, fix_stale = 0;
     std::vector<uint64_t> *dig = nullptr; nrz8::Marks *marks = nullptr;   // marks: the walk on its own thread - the words go there, not into the record
     nrz8::Ranges vr; uint64_t vw = 0;
     struct Acc { const Sh &S;
@@ -432,38 +436,47 @@ struct Walk {
     void nb_draw(uint8_t *rec, size_t n, bool top) {
         nbd_hdr h; const uint8_t *b = nullptr; if (nbd_view(rec, n, &h, &b) != 0) { bad = true; return; }
         unsigned ts = 0, bs = 0; if (nbd_apply(&h, b, S.tex, S.samp, S.img, reinterpret_cast<nbd_range (*)[16]>(S.ub), &ts, &bs) != 0) { bad = true; return; }
-        ++draws; if (dig) dig->push_back(digest(S));
-        nrd_tail t; const bool nr = nrd_tail_get(rec, n, &h, &t) != 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t ca = 0; vw = 0;
-        if (!top || !nr || !t.key || (h.flags & (NBD_F_REN | NBD_F_COND)) || h.count <= 0) wr.no_values();
+        ++draws; if (dig && !(g_bench & 1)) dig->push_back(digest(S));
+        if (g_bench & 32) { wr.no_values(); return; }
+        nrd_tail t; const bool nr = nrd_tail_get(rec, n, &h, &t) != 0; uint32_t mark = 0; int32_t slot1 = 0; uint64_t ca = 0; vw = 0; int why = nrz8::M_NOKEY;
+        if (!top || !nr || !t.key || (h.flags & (NBD_F_REN | NBD_F_COND)) || h.count <= 0) { wr.no_values(); if (!top) why = nrz8::M_CALLED; }
         else {
             nrz5_site site; nrz5_site_make(&site, t.key, h.draw == NBD_DRAW_IDX ? NRZ5S_IDX : NRZ5S_ARRAYS, h.prim, h.itype, h.count, h.base_vertex, h.base_instance, h.instances, h.first, h.ibuf, S.vb[0].address);
-            const uint32_t fixid = fix.get(S, S.sprog); if (fixid != fix.fresh(S, S.sprog)) ++fix_stale;
-            const uint32_t s = g_tab.slot_of(&site, fixid); slot1 = int32_t(s + 1); ca = fixid;
-            uint64_t w[nrz8::MAX_WORDS]; uint32_t ver = 0; nrz5_vals v; uint32_t off[nrz8::MAX_DYN];
-            if (!g_tab.get(s, w, &ver)) wr.no_values();
-            else { const int m = nrz8::match(w, &site, fixid, h.count, h.instances, h.first, h.base_vertex, h.base_instance, Acc{S}, &v, off);
-                if (m) { ++miss[m]; wr.no_values(); }
-                else { ++values; ca |= uint64_t(ver) << 32; mark = wr.draw(v, [](nbmtq::Chunk *ch, nrz5_cache *mm, const nrz5_vals *vv) { nbmt::Build bb{ch}; nbmt::Z5Sink sink{bb}; return nrz5_emit(sink, mm, vv); });
-                    vw = nrz8::ranges_word(vr, v.used, [this](uint32_t i, uint64_t *a, uint64_t *z) { *a = S.vb[i].address; *z = S.vb[i].size; return i < 16; }, h.draw == NBD_DRAW_IDX, h.ibuf, uint64_t(uint32_t(h.count)) << h.itype); } }
+            const uint32_t fixid = (g_bench & 16) ? 1u : fix.get(S, S.sprog); const uint32_t bk = g_tab.slot_of(&site, fixid); if (!(g_bench & 17) && fixid != fix.fresh(S, S.sprog)) ++fix_stale;
+            uint64_t w[nrz8::MAX_WORDS]; nrz5_vals v; uint32_t off[nrz8::MAX_DYN]; ca = fixid;
+            nrz8::Look L; if (!(g_bench & 2)) L = nrz8::look(g_tab, bk, site, fixid, h, Acc{S}, w, &v, off); slot1 = int32_t(L.slot + 1); ++miss[L.m]; why = L.m;   // (the engine's walk: xbg_nr_z8.inc Hnd::nb_draw)
+            if (!nrz8::answered(L.m)) wr.no_values();
+            else { ca |= uint64_t(L.ver) << 32;
+                if (L.m == nrz8::M_OK && !(g_bench & 4)) { ++values; mark = wr.draw(v, [](nbmtq::Chunk *ch, nrz5_cache *mm, const nrz5_vals *vv) { nbmt::Build bb{ch}; nbmt::Z5Sink sink{bb}; return nrz5_emit(sink, mm, vv); }); }
+                else wr.no_values();
+                if (!(g_bench & 8)) vw = nrz8::ranges_word(vr, v.used, [this](uint32_t i, uint64_t *a, uint64_t *z) { *a = S.vb[i].address; *z = S.vb[i].size; return i < 16; }, h.draw == NBD_DRAW_IDX, h.ibuf, uint64_t(uint32_t(h.count)) << h.itype); }
         }
-        if (marks) { nrz8::MarkVal mv; mv.ca = (h.flags & NBD_F_COND) ? 0 : ca; mv.mark = mark; mv.slot1 = slot1; mv.aux = digest(S) | 1; mv.vw = vw; mv.pk = mark ? uint64_t(wr.last_bytes) | uint64_t(wr.last_cmds) << 32 : 0; marks->put(rec, mv); return; }
+        if (marks) { nrz8::MarkVal mv; mv.ca = (h.flags & NBD_F_COND) ? 0 : ca; mv.mark = mark; mv.slot1 = slot1; mv.aux = (g_bench & 1) ? 1 : digest(S) | 1; mv.vw = vw; mv.pk = mark ? uint64_t(wr.last_bytes) | uint64_t(wr.last_cmds) << 32 : 0; mv.why = uint8_t(why); marks->put(rec, mv); return; }
         rec[offsetof(nbd_hdr, _pad0)] = stamp; memcpy(rec + offsetof(nbd_hdr, _pad1), &mark, 4); memcpy(rec + offsetof(nbd_hdr, _pad2), &slot1, 4);
         if (!(h.flags & NBD_F_COND)) memcpy(rec + offsetof(nbd_hdr, cond_addr), &ca, 8);
     }
-    uint64_t walk_ns = 0;
-    void submit(const Frame &f, uint64_t sub) { const uint64_t t0 = nbmtq::now_ns(); submit_(f, sub); walk_ns += nbmtq::now_ns() - t0; }
+    uint64_t walk_ns = 0, warm_ns = 0, warm_draws = 0, warm_records = 0;
+    void submit(const Frame &f, uint64_t sub) { const uint64_t t0 = nbmtq::now_ns(), d0 = draws, r0 = W.records; submit_(f, sub); const uint64_t dt = nbmtq::now_ns() - t0; walk_ns += dt;
+        if (f.g.warm) { warm_ns += dt; warm_draws += draws - d0; warm_records += W.records - r0; } }
     void submit_(const Frame &f, uint64_t sub) { stamp = nrz8::stamp_of(sub); vr.begin(); uint64_t budget = 0; for (uint64_t hd : f.handles) { if (!W.walk(reinterpret_cast<const uint8_t *>(uintptr_t(hd)), 0, budget, true)) bad = true; wr.end_run(); } }
 };
 
 // ---------------- the translation thread ----------------
-struct Priv { uint32_t ver = 0; Answer a; uint32_t set_gen = 0, pipe_gen = 0; };
-struct Tot { uint64_t described = 0, not_desc = 0, draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0, m_got = 0, m_not = 0, m_nobase = 0, m_desync = 0, m_resync = 0, waits = 0, splits = 0, walk_ns = 0, v_ask = 0, v_rep = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_N] = {}; } tot;
+struct Priv { uint32_t ver = 0; Answer a; uint32_t set_gen = 0, pipe_gen = 0; const prog_t *sh[2] = {}; };   // sh: the programs of the vertex / fragment stage the answer was resolved for (after the prologue)
+struct Tot { uint64_t described = 0, not_desc = 0, draws = 0, recorded = 0, valid = 0, answered = 0, stale = 0, a_cmp = 0, a_bad = 0, dig_cmp = 0, published = 0, m_got = 0, m_not = 0, m_nobase = 0, m_desync = 0, m_resync = 0, waits = 0, splits = 0, walk_ns = 0, v_ask = 0, v_rep = 0; nrz5r::RStats r; uint64_t w_draws = 0, w_values = 0, w_tails = 0, w_fix_stale = 0, w_miss[nrz8::M_ALL] = {};
+             uint64_t warm_ns = 0, warm_draws = 0, warm_records = 0, lane = 0, lane_ans = 0, lane_pro[3] = {}, lane_pro_ans[3] = {}, dropped = 0, warm = 0; } tot;   // (PHONE) lane: drawn draws whose words arrived, after the warm-up frames; lane_ans: of them answered; by the prologue's kind
+// [PHONE, NR-ZERO.md section 39] The prologue of the translation thread's draw() (xbg_game.cpp) in the model: 0 none; 1 a twin - only the
+// fragment program is swapped (NR-MAT / NR-SH-SURF: depth-only passes, a material class, a word of a uniform block now and then says no);
+// 2 the prologue changes State (LIGHTFUSE, the pre-pass override: here rasterizer discard). The walk's copy is the State BEFORE it.
+static bool g_phone = false;
+static int pro_ok(int pro) { return nrz8::prologue_ok(pro, 1); }   // the engine's rule (xbg_game.cpp z8g / z8tw, DM_NR_Z8_TWIN=1)
+static bool same_prog(const prog_t *const a[2], const TS &S) { const prog_t *const b[2] = {S.tprog[0], S.tprog[4]}; return nrz8::same_shaders(a, b, 2); }   // (the engine: same_shaders over the five stages, the fragment last)
 static nrz5r::Reader *g_R = nullptr;
 static void pre_hook() { if (g_R && g_R->holding) g_R->flush(nrz5r::CUT_WRITE); }
 static uint64_t sig() { const nbmtq::Stats &q = nbmt::q.st; return q.cmds * 8 + q.sync[nbmtq::NBMT_SY_PNEXT] + q.sync[nbmtq::NBMT_SY_ALLOC] + q.sync[nbmtq::NBMT_SY_CALLER]; }
 static bool is_draw(uint16_t op) { return op == nbmt::OP_Draw || op == nbmt::OP_DrawIndexed; }
 struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
-    TS S; nrz8::Def defs[NBS_KINDS][NBS_MAX_IDS] = {}; int mode = 0; nrz5r::Reader *R = nullptr; std::vector<Priv> priv; Gens g{}; uint8_t stamp = 0;
+    TS S; nrz8::Def defs[NBS_KINDS][NBS_MAX_IDS] = {}; int mode = 0; nrz5r::Reader *R = nullptr; std::vector<Priv> priv; std::vector<uint32_t> used; uint32_t uclock = 0; Gens g{}; uint8_t stamp = 0;
     VkCommandBuffer c{}; BindCache bc; const std::vector<uint64_t> *dig = nullptr; size_t dig_at = 0; std::string *outcome = nullptr;
     const nrz8::Marks *marks = nullptr; nrz8::MarkReader mr;   // the walk on its own thread: the record's words by its place
     struct RKey { uint64_t a, z; uint32_t tag; bool operator<(const RKey &o) const { return a != o.a ? a < o.a : z != o.z ? z < o.z : tag < o.tag; } bool operator==(const RKey &o) const { return a == o.a && z == o.z && tag == o.tag; } };
@@ -483,10 +496,14 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         if (op == OP_T_SILENT) { bc = BindCache{}; return; }
         if (op == OP_T_PASS) { nbmt::CmdEndRenderPass(c); VkRenderPassBeginInfo b{}; b.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; b.renderPass = hnd<VkRenderPass>(z & 7); b.renderArea.extent = {640, 360}; nbmt::CmdBeginRenderPass(c, &b, VK_SUBPASS_CONTENTS_INLINE); bc = BindCache{}; }
         else if (op == OP_T_OTHER) nbmt::CmdFillBuffer(c, hnd<VkBuffer>(0x77), z & 0xff0, 16, z); }
-    void publish(const nbd_hdr &h, uint32_t key, const Plan &p, const Answer &a, const nrz5_vals &v) {
+    void publish(const nbd_hdr &h, uint32_t key, const Plan &p, const Answer &a, const nrz5_vals &v, int pro) {
         if (mode == 0 || h._pad2 <= 0 || uint32_t(h._pad2 - 1) >= g_tab.n) return;
         nrz8::Desc d; nrz5_site_make(&d.site, key, h.draw == NBD_DRAW_IDX ? NRZ5S_IDX : NRZ5S_ARRAYS, h.prim, h.itype, h.count, h.base_vertex, h.base_instance, h.instances, h.first, h.ibuf, S.vb[0].address);
         d.fixid = uint32_t(h.cond_addr); d.first_index = 0; d.k = 0;
+        const uint32_t hs = uint32_t(h._pad2 - 1);   // (the engine's publish: the way of the bucket - nr_z8.h pick - and the template that says no)
+        auto put = [&](const uint64_t *w, unsigned nw) -> Priv & { const uint32_t sl = g_tab.pick(hs, w, used.data()); used[sl] = ++uclock;
+            Priv &x = priv[sl]; const uint32_t nv = g_tab.put(sl, w, nw); if (nv != x.ver) { x = Priv{}; x.ver = nv; ++tot.published; } return x; };
+        if (!pro_ok(pro)) { uint64_t z[nrz8::HEAD_WORDS]; put(z, nrz8::none_of(d.site, d.fixid, z)); return; }
         // the description is nr_z8.h's - the function the engine's publish calls - over the plan of the set and this thread's State
         uint32_t copy[NRD_MAX_UBO]; for (unsigned u = 0; u < p.dp.nubo; u++) { const nr_drow &r = p.dp.row[p.dp.ubo_row[u]]; const uint64_t z = S.ub[r.ns][r.slot].size; copy[u] = uint32_t(z < 256 ? z : 256); }
         struct A { const TS &S;
@@ -497,7 +514,7 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         CHECK(why == nrz8::P_OK, "phone: a recorded draw whose set binds %u ring blocks and %u support / c1 blocks as dynamic buffers is a template (not describable, reason %d - on the phone: \"a static uniform block\", every draw)", unsigned(p.dp.nubo), unsigned(p.dp.ndyn - p.dp.nubo), why);
         if (why) { ++tot.not_desc; return; }
         uint64_t w[nrz8::MAX_WORDS]; const unsigned nw = nrz8::pack(d, w); if (!nw) return;
-        Priv &pv = priv[h._pad2 - 1]; const uint32_t nv = g_tab.put(uint32_t(h._pad2 - 1), w, nw); if (nv != pv.ver) ++tot.published; pv.ver = nv; pv.a = a; pv.set_gen = g.set_gen; pv.pipe_gen = g.pipe_gen;
+        Priv &pv = put(w, nw); pv.a = a; pv.set_gen = g.set_gen; pv.pipe_gen = g.pipe_gen; pv.sh[0] = S.tprog[0]; pv.sh[1] = S.tprog[4];
     }
     void draw(const uint8_t *rec, size_t n) {
         nbd_hdr h; const uint8_t *b = nullptr; CHECK(nbd_view(rec, n, &h, &b) == 0, "record"); unsigned ts = 0, bs = 0; nbd_apply(&h, b, S.tex, S.samp, S.img, reinterpret_cast<nbd_range (*)[16]>(S.ub), &ts, &bs);
@@ -510,7 +527,15 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
             if (mine) { h._pad0 = stamp; h._pad1 = mv.mark; h._pad2 = mv.slot1; if (!(h.flags & NBD_F_COND)) h.cond_addr = mv.ca; cur_vw = mv.vw; cur_pk = mv.pk;
                 ++tot.dig_cmp; CHECK(mv.aux == (digest(S) | 1), "thread: the walk's copy is State at the draw record whose words arrived (record %u of its frame)", mr.ord - 1); } }
         const uint32_t mw = mine ? h._pad1 : 0u, ver = mine && !(h.flags & NBD_F_COND) ? uint32_t(h.cond_addr >> 32) : 0u; if (!mine) h._pad2 = 0;
-        Plan p; const bool dropped = !plan_of(S, p) || mix(key, S.tprog[4]->serial) % 37 == 0;   // the prologue of draw() drops it (a function of State)
+        Plan p; bool dropped = !plan_of(S, p) || mix(key, S.tprog[4]->serial) % 37 == 0;   // the prologue of draw() drops it (a function of State)
+        // [PHONE] the prologue: the shadow cache drops the draws of a cached cascade; a twin swaps the fragment program; LIGHTFUSE changes State
+        struct Undo { TS &S; const prog_t *fp; uint32_t rd; ~Undo() { S.tprog[4] = fp; S.rast_discard = rd; } } undo{S, S.tprog[4], S.rast_discard};
+        int pro = 0;
+        if (g_phone && !dropped) {
+            if (S.rt.n == 0 && S.rt.depth == reinterpret_cast<const tex_t *>(uintptr_t(0x9800)) && g.cached) dropped = true;
+            else if (S.rt.n == 0 && (S.tprog[4]->serial == 106 || S.tprog[4]->serial == 107) && (S.ub[0][0].address >> 8) % 64 != 0) { S.tprog[4] = &g_prog[S.tprog[4]->serial - 100 + 6]; pro = 1; dropped = !plan_of(S, p); }
+            else if (S.rt.n == 1 && S.tprog[4]->serial == 111 && key == 170 && g.cached) { S.rast_discard = 1; pro = 2; } }   // (LIGHTFUSE fuses in some frames: the same words of the walk, another State)
+        if (g_phone && dropped) ++tot.dropped;
         if (cur_vw && plan_of(S, p)) {   // the numbers the walker gave this draw's ranges name the ranges State binds (the lane's tail would ask for exactly these)
             unsigned k = 0; for (uint32_t m = p.used; m; m &= m - 1) { const uint32_t i = uint32_t(__builtin_ctz(m)); range(uint32_t(cur_vw >> (16 * k++)) & 0xffffu, RKey{S.vb[i].address, S.vb[i].size, 1}); }
             CHECK(k <= nrz8::VW_MAX_VB && (cur_vw >> (16 * k) & ((1ull << (48 - 16 * k)) - 1)) == 0, "ranges: a number for every used binding and no other");
@@ -519,14 +544,15 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
         if (dropped) { miss(); if (outcome) outcome->push_back('D'); return; }
         Answer a; bool answered = false;
         if (mode == 1 && ver && h._pad2 > 0 && priv[h._pad2 - 1].ver == ver) { const Priv &pv = priv[h._pad2 - 1];
-            if (pv.set_gen == g.set_gen && pv.pipe_gen == g.pipe_gen) { a = pv.a; answered = true; ++tot.answered; } else ++tot.stale; }   // (State is NOT asked: the answer must be right by itself)
+            if (pv.set_gen == g.set_gen && pv.pipe_gen == g.pipe_gen && pro_ok(pro) && same_prog(pv.sh, S)) { a = pv.a; answered = true; ++tot.answered; used[uint32_t(h._pad2 - 1)] = ++uclock; } else ++tot.stale; }   // (State is NOT asked: the answer must be right by itself; the programs after the prologue are the answer's)
         if (!answered) a = resolve(S, p, key);
-        if (mode == 2 && ver && h._pad2 > 0 && priv[h._pad2 - 1].ver == ver && priv[h._pad2 - 1].set_gen == g.set_gen && priv[h._pad2 - 1].pipe_gen == g.pipe_gen) { ++tot.a_cmp;
+        if (g_phone && mine && g.warm) { ++tot.lane; ++tot.lane_pro[pro]; const bool an = mode == 1 ? answered : ver && h._pad2 > 0 && priv[h._pad2 - 1].ver == ver && pro_ok(pro) && same_prog(priv[h._pad2 - 1].sh, S); if (an) { ++tot.lane_ans; ++tot.lane_pro_ans[pro]; } }
+        if (mode == 2 && ver && h._pad2 > 0 && priv[h._pad2 - 1].ver == ver && priv[h._pad2 - 1].set_gen == g.set_gen && priv[h._pad2 - 1].pipe_gen == g.pipe_gen && pro_ok(pro) && same_prog(priv[h._pad2 - 1].sh, S)) { ++tot.a_cmp;
             if (priv[h._pad2 - 1].a.did != a.did || priv[h._pad2 - 1].a.pent != a.pent) { ++tot.a_bad; CHECK(false, "verify: the walk's answer is the model's (key %u)", key); } }
         nrz5_vals v; uint32_t off[nrz8::MAX_DYN];
         if (!values(S, p, a, g, h, v, off)) { miss(); if (outcome) outcome->push_back('D'); return; }
         const bool foreign = key % 41 == 0;
-        if (!mode || nbmt::cur != c) { if (mode) R->abandon(mw); ref_tail(c, bc, v); ++tot.recorded; if (mode) publish(h, key, p, a, v); if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; } if (outcome) outcome->push_back('R'); return; }
+        if (!mode || nbmt::cur != c) { if (mode) R->abandon(mw); ref_tail(c, bc, v); ++tot.recorded; if (mode) publish(h, key, p, a, v, pro); if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; } if (outcome) outcome->push_back('R'); return; }
         auto holds = [&](const nrz5_cache &sh, const nrz5_vals &vv) { const nrz5_cache real = conv(bc); return nrz5r::cache_holds(&sh, &real, &vv); };
         char o = 'R';
         nrz5r::Reader::Known kn{}; const nrz5r::Reader::Known *kp = kmode && mw && known(h, ver, v, &kn) ? &kn : nullptr; R->chk = kmode == 2 || mode == 2 ? kp : nullptr;
@@ -536,9 +562,9 @@ struct Xl {   // one run of the model: mode 0 today, 1 apply, 2 verify
             ref_tail(c, bc, v); ++tot.recorded;
             nbmtq::Chunk *cc = c0 ? c0 : nbmt::q.cur; const uint32_t from = c0 ? u0 : 0; const bool readable = cc && cc == nbmt::q.cur && ch0 == nbmt::q.st.chunks;
             R->verify_end(readable ? cc->data() + from : nullptr, readable ? cc->used - from : 0, [](const uint8_t *x, uint32_t na, const uint8_t *y, uint32_t nb) { uint32_t at = 0; return nbmt::same_stream(x, na, y, nb, &at); }, sig());
-            publish(h, key, p, a, v);
+            publish(h, key, p, a, v, pro);
         } else if ((kmode == 1 ? R->draw2(mw, v, kp, holds, is_draw) : R->draw(mw, v, holds, is_draw)) == nrz5r::Reader::VALID) { leave(bc, v); ++tot.valid; o = 'V'; }
-        else { ref_tail(c, bc, v); ++tot.recorded; publish(h, key, p, a, v); }
+        else { ref_tail(c, bc, v); ++tot.recorded; publish(h, key, p, a, v, pro); }
         if (foreign) { const VkPipeline fp = hnd<VkPipeline>(0x1999); nbmt::CmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, fp); bc.pipe = fp; }
         if (outcome) outcome->push_back(o);
     }
@@ -585,12 +611,13 @@ static std::vector<std::vector<uint8_t>> run(const std::vector<Frame> &prog, int
     std::vector<std::vector<uint8_t>> logs(prog.size()); tot = Tot{}; if (!mode) wk = 0;
     nrz8::Marks marks; std::mutex jm; std::condition_variable jc; std::deque<size_t> jobs; bool jdone = false; std::map<size_t, std::unique_ptr<Sh>> ends; std::thread wt; size_t posted = 0;
     auto X = std::make_unique<Xl>(); X->mode = mode; X->outcome = outcome; nrz5r::Reader R; R.q = &nbmt::q; R.ring = &g_ring; X->R = &R; Rng r{seed * 31 + 3};
-    if (mode) { CHECK(g_tab.init(8192), "table"); X->priv.resize(g_tab.n); g_pre = mode == 1 ? pre_hook : nullptr; g_R = mode == 1 ? &R : nullptr; }
-    auto W = std::make_unique<Walk>(); Handoff h; std::thread gt;
+    if (mode) { CHECK(g_tab.init(8192), "table"); X->priv.resize(g_tab.n); X->used.assign(g_tab.n, 0); g_pre = mode == 1 ? pre_hook : nullptr; g_R = mode == 1 ? &R : nullptr; }
+    auto W = std::make_unique<Walk>(); Handoff h; std::thread gt; if (g_bench & 64) W->wr.side = false;
     auto walk_one = [&](size_t f) { Item it; it.f = f; if (mode) { W->dig = &it.dig; W->submit(prog[f], f + 1); W->dig = nullptr; it.end.reset(new Sh(W->S)); } return it; };
     if (mode) { CHECK(W->fix.init() && W->W.init(), "walk"); W->W.h = W.get(); W->wr.q = &nbmt::q; W->wr.ring = &g_ring; W->wr.min_tails = 1 + uint32_t(seed % 3); }
     if (wk) {
         CHECK(marks.init(wk == 1 && seed % 2 ? 256 : 65536), "marks"); W->marks = &marks; X->marks = &marks; X->kmode = mode == 2 ? 2 : 1 + int(seed / 7 % 2);   // (the verdict by draw2 / the old verdict compared with it)
+        W->wr.side = !(mode == 1 && X->kmode == 1);   // (the engine's init: no values records for a reader that names every verdict itself)
         wt = std::thread([&] { Rng wr{seed * 13 + 5};
             for (;;) { size_t f; { std::unique_lock<std::mutex> l(jm); jc.wait(l, [&] { return !jobs.empty() || jdone; }); if (jobs.empty()) return; f = jobs.front(); jobs.pop_front(); }
                 marks.begin(f + 1); W->wr.max_tails = wr.upto(3) ? 1 + wr.upto(6) : 0; W->submit(prog[f], f + 1);
@@ -623,7 +650,7 @@ static std::vector<std::vector<uint8_t>> run(const std::vector<Frame> &prog, int
     if (gt.joinable()) gt.join();
     if (wk) { { std::lock_guard<std::mutex> l(jm); jdone = true; } jc.notify_all(); wt.join(); tot.m_got = X->mr.got; tot.m_not = X->mr.not_there; tot.m_nobase = X->mr.no_base; tot.m_desync = X->mr.desync; tot.m_resync = X->mr.resync;
         tot.splits = W->wr.splits; CHECK(X->mr.desync == 0 && X->mr.resync == 0, "thread: both threads count the draw records alike (%llu / %llu)", (unsigned long long)X->mr.desync, (unsigned long long)X->mr.resync); marks.destroy(); }
-    if (mode) { R.drop(); g_R = nullptr; g_pre = nullptr; tot.r = R.st; tot.walk_ns = W->walk_ns; tot.w_draws = W->draws; tot.w_values = W->values; tot.w_tails = W->wr.st.tails; tot.w_fix_stale = W->fix_stale; memcpy(tot.w_miss, W->miss, sizeof tot.w_miss);
+    if (mode) { R.drop(); g_R = nullptr; g_pre = nullptr; tot.r = R.st; tot.walk_ns = W->walk_ns; tot.warm_ns = W->warm_ns; tot.warm_draws = W->warm_draws; tot.warm_records = W->warm_records; tot.w_draws = W->draws; tot.w_values = W->values; tot.w_tails = W->wr.st.tails; tot.w_fix_stale = W->fix_stale; memcpy(tot.w_miss, W->miss, sizeof tot.w_miss);
         CHECK(!W->bad, "the walk followed every record"); CHECK(W->fix_stale == 0, "the fix id is the id of the copy's bytes at every draw (%llu stale)", (unsigned long long)W->fix_stale);
         CHECK(nbmt::q.spare_out.load() == 0, "every spare chunk came back (%u out)", nbmt::q.spare_out.load()); CHECK(g_ring.front() == nullptr, "the ring is empty");
         W->fix.destroy(); W->W.destroy(); g_tab.destroy(); }
@@ -835,11 +862,132 @@ static void dict_test() {
     CHECK(d.clears > 0, "the dictionary filled up and was emptied (%llu times)", (unsigned long long)d.clears); d.destroy();
 }
 
+// ---------------- PHONE CENSUS (NR-ZERO.md section 39): the refusals of the phone series R8 in one world ----------------
+// Fort Joy, standing (R8_v1, Adreno 750, DM_NR_Z8=2, 40 s): 1 493 draw records a submission, the walk answered 41.5 %; not: slot empty
+// 22.5 %, vertex ranges differ 18.1 %, form 13.8 %, another site 3.8 %, texture handles 0.2 %. What the phone's other lines of the same
+// windows say these are:
+//   - "[nr] shcache ... skipped 403 a frame" and "[nr] draw: 1276542 draw records, 930411 asked nr_draw": the shadow cache drops 27 %
+//     of the records in the prologue of draw() - they never reach the lane and are never published (slot empty);
+//   - "[nr] mat ... swapped" +112 306 and "[nr] surf ... swapped" +64 676 in the window (Mali SIM: +397 710 / +61 408): NR-MAT and
+//     NR-SH-SURF swap the fragment shader of a depth-only / surface draw for a twin; xbg_game.cpp z8g took a twin for a changed State
+//     - never published (slot empty, or form when the slot held a template), never answered;
+//   - a second vertex stream that moves between frames under the same site words (vertex stream 0 is a site word);
+//   - about 1 500 distinct sites in a direct-mapped table of 8 192 slots: two sites of one slot overwrite each other (another site).
+// The world: 8 passes a frame, 180 draws each, every draw with its OP_X_NR_STATE; pass 0 a shadow cascade the shadow cache drops three
+// frames in four; passes 1-2 depth-only (fragment programs 106 / 107 have twins 112 / 113 there; a word of a uniform block says no
+// now and then - the NR-MAT gate); passes 3-7 colour, one draw of pass 7 LIGHTFUSE's (State changed: never answered); a quarter of the
+// meshes have a vertex stream 1 that moves every frame; two draws a frame get another mesh (first sight).
+struct PWorld {
+    Rng r; Mem mem; uint32_t fn = 0, head = 0; const uint64_t ring = 0x7300000000ull;
+    struct M { uint32_t key; int vp, fp; uint64_t dsb; uint32_t poly, color; uint64_t blend0; uint32_t attr[3], stride0, stride1; uint64_t tex[4], smp[4]; };
+    struct E { uint64_t vb0, vb0s, ibuf; int32_t count, base_vertex, itype; bool moves; };
+    std::vector<M> mats; std::vector<E> meshes; std::vector<std::pair<uint32_t, uint32_t>> order;   // (material, mesh) of each place of a frame
+    enum { PASSES = 8, PER = 180, MESHES = 720 };
+    explicit PWorld(uint64_t seed) : r{seed * 0x9E3779B97F4A7C15ull + 99} {
+        mem.r = &r; mats.resize(64); meshes.resize(MESHES);
+        for (uint32_t i = 0; i < mats.size(); i++) { M &m = mats[i];
+            m.key = 1 + (i * 37) % 160; m.vp = int(r.upto(6)); m.fp = i < 16 ? (i % 4 == 3 ? 8 + int(i % 2) : 6 + int(i % 2)) : 8 + int(r.upto(4));   // 0..15 depth-only (12 of them twin-able), 16..63 colour
+            m.dsb = r.upto(4) * 0x0101010101ull; m.poly = r.upto(3); m.color = r.upto(3) << 8; m.blend0 = uint64_t(r.upto(3)) << 3;
+            for (auto &a : m.attr) a = r.upto(4) << 8;
+            m.stride0 = 16 + 4 * r.upto(3); m.stride1 = 8 + 4 * r.upto(2);
+            for (int k = 0; k < 4; k++) { m.tex[k] = 0x100 + r.upto(400); m.smp[k] = 0x200 + r.upto(6); } }
+        mats[63].key = 170; mats[63].fp = 11;   // LIGHTFUSE's Light draw
+        for (uint32_t i = 0; i < MESHES; i++) { E &e = meshes[i]; e.vb0 = 0x7200000000ull + 0x10000ull * i; e.vb0s = 4096 * (1 + r.upto(4)); e.ibuf = 0x7100000000ull + 0x10000ull * i;
+            e.count = int32_t(3 * (1 + r.upto(800))); e.base_vertex = int32_t(r.upto(50)); e.itype = 1 + int32_t(r.upto(2)); e.moves = r.upto(4) == 0; }
+        for (uint32_t p = 0; p < PASSES; p++) for (uint32_t j = 0; j < PER; j++)
+            order.push_back({p < 3 ? (j / 4 * 7 + p) % 16 : p == 7 && j == 0 ? 63u : 16 + (j / 4 * 5 + p * 3) % 47, (p * PER + j * 13) % MESHES});   // (a material's draws in runs of four, as an engine sorts them)
+    }
+    void pass(uint32_t p) {
+        p_set_rt rt; memset(&rt, 0, sizeof rt); rt.n = p < 3 ? 0 : 1; rt.color[0] = p < 3 ? nullptr : reinterpret_cast<const tex_t *>(uintptr_t(0x9000 + 64 * (p & 3))); rt.depth = reinterpret_cast<const tex_t *>(uintptr_t(0x9800 + 64 * p));
+        mem.put(OP_SET_RT, rt); uint32_t z = p; mem.put(OP_T_PASS, z);
+        p_viewports v{}; v.first = 0; v.n = 1; v.v[0][2] = p < 3 ? 2048.f : 640.f; v.v[0][3] = p < 3 ? 2048.f : 360.f; mem.put(OP_VIEWPORTS, v);
+        p_scissor sc{0, 0, p < 3 ? 2048 : 640, p < 3 ? 2048 : 360}; mem.put(OP_SCISSOR, sc);
+        if (p == 0) { p_set_pool sp{&g_pool[0]}; mem.put(OP_SET_TEX_POOL, sp); sp.pool = &g_pool[2]; mem.put(OP_SET_SAMP_POOL, sp); }
+        last = nullptr; state_block(true);
+    }
+    // a state block of the pass (DEF at the pass, a REF before every draw: the phone walks 4.8 records a draw record) - vertex buffer 2,
+    // which no pipeline of the world reads (no fix group)
+    void state_block(bool def) {
+        const uint32_t sz = 8 + 8 + 16, content = def ? sz + 8 : 0;
+        uint8_t *sb = mem.rec(OP_X_NB_STATE, uint32_t(sizeof(nbs_hdr) + sizeof(nbs_blk) + content)); nbs_hdr h{NBS_VER, 1, 0, fn}; memcpy(sb, &h, sizeof h);
+        nbs_blk k{NBS_K_VB, uint8_t(def ? NBS_B_DEF : NBS_B_REF), 3, content}; memcpy(sb + 8, &k, sizeof k);
+        if (def) { uint8_t *c = sb + 16; Mem::hdr(c, OP_BIND_VBUF, sz); p_bind_vbuf vb{}; vb.first = 2; vb.n = 1; vb.r[0] = NVNbufferRange{0x7700000000ull, 4096}; memcpy(c + 8, &vb, 8 + 16); Mem::hdr(c + sz, OP_END, 8); }
+    }
+    const M *last = nullptr;
+    void material(const M &m, const E &e, uint32_t place) {   // (the material's state when it changes, the vertex buffers always - as the phone's 85-byte packets)
+        nr3_rec z; memset(&z, 0, sizeof z);
+        if (last == &m) { z.vb = 3; z.vba[0] = e.vb0; z.vbs[0] = e.vb0s; z.vba[1] = e.moves ? 0x7600000000ull + uint64_t(fn % 512) * 0x100000ull + uint64_t(place) * 256 : e.vb0 + 0x8000; z.vbs[1] = 4096; nr3_put(&z, mem.rec(OP_X_NR_STATE, nr3_size(&z))); return; }
+        last = &m; z.nprog = 2; z.prog[0] = uint64_t(uintptr_t(&g_prog[m.vp])); z.pstage[0] = 1; z.prog[1] = uint64_t(uintptr_t(&g_prog[m.fp])); z.pstage[1] = 2;
+        z.have = NR3_H_DS | NR3_H_POLY | NR3_H_COLOR | NR3_H_VATTR | NR3_H_VSTREAM; z.ds = m.dsb; z.poly = m.poly; z.color = m.color; z.blend = 1; z.blendb[0] = m.blend0;
+        z.nvattr = 3; memcpy(z.vattr, m.attr, sizeof m.attr); z.nstream = 2; z.vstream[0] = m.stride0; z.vstream[1] = m.stride1;
+        z.vb = 3; z.vba[0] = e.vb0; z.vbs[0] = e.vb0s; z.vba[1] = e.moves ? 0x7600000000ull + uint64_t(fn % 512) * 0x100000ull + uint64_t(place) * 256 : e.vb0 + 0x8000; z.vbs[1] = 4096;
+        nr3_put(&z, mem.rec(OP_X_NR_STATE, nr3_size(&z)));
+    }
+    void draw(const M &m, const E &e) {
+        nbd_shadow s; memset(&s, 0, sizeof s);
+        for (uint32_t i = 0; i < uint32_t(m.fp) % 4; i++) { const int slot = int((i * 5 + uint32_t(m.fp)) % 16); nbd_add(&s, NBD_B_TEX, 1, slot, m.tex[i], 0); nbd_add(&s, NBD_B_SAMP, 1, slot, m.smp[i], 0); }
+        for (uint32_t i = 0; i < 1 + uint32_t(m.vp) % 3; i++) { head = (head + 256 * (1 + r.upto(3))) & 0xffffff; nbd_add(&s, NBD_B_UBO, int(i & 1), int(i), ring + head, 256); }
+        s.h.engine_op = 36; s.h.flags = NBD_F_NR; s.h.prim = 4; s.h.count = e.count; s.h.draw = NBD_DRAW_IDX; s.h.itype = e.itype; s.h.base_vertex = e.base_vertex; s.h.instances = 1; s.h.ibuf = e.ibuf;
+        const uint32_t size = nbd_size(&s) + uint32_t(sizeof(nrd_tail)); uint8_t *rc = mem.rec(OP_X_NB_DRAW, size); nbd_pack(&s, rc, size); nrd_tail_put(rc, size, m.key, 1, 0, 3);
+    }
+    Frame frame() {
+        ++fn; Frame f; f.g = Gens{1, 1, ring - 4096}; f.g.cached = fn > 1 && fn % 4 != 1; f.g.warm = fn > 4;
+        for (int c = 0; c < 2; c++) order[r.upto(uint32_t(order.size()))].second = r.upto(MESHES);
+        for (uint32_t p = 0; p < PASSES; p++) {
+            if (p == 0 || p == 4) { if (p) mem.finish(); f.handles.push_back(uint64_t(uintptr_t(mem.begin()))); }
+            pass(p);
+            for (uint32_t j = 0; j < PER; j++) { const auto &o = order[p * PER + j]; state_block(false); material(mats[o.first], meshes[o.second], j); draw(mats[o.first], meshes[o.second]); }
+        }
+        mem.finish(); return f;
+    }
+};
+static void census_test(int frames) {
+    g_phone = true;
+    PWorld w(5); std::vector<Frame> prog; for (int i = 0; i < frames; i++) prog.push_back(w.frame());
+    setup(Cfg{0, 256, 64, 64, 0}); const auto ref = run(prog, 0, 1); finish(); const uint64_t ref_draws = tot.recorded, dropped = tot.dropped;
+    for (int wk : {0, 2}) {
+        setup(Cfg{1, 256, 64, 64, 0}); { const auto logs = run(prog, 1, 9, nullptr, wk != 0, wk);   /* (the submitting thread walks each frame right before it: the shares do not depend on timing) */ for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "census apply (%s): frame %zu's call log is today's", wk ? "own thread" : "submitting thread", f); }
+        const Tot t = tot; finish();
+        CHECK(t.valid + t.recorded == ref_draws, "census apply: every draw taken or recorded once (%llu + %llu of %llu)", (unsigned long long)t.valid, (unsigned long long)t.recorded, (unsigned long long)ref_draws);
+        const double sh = t.lane ? double(t.lane_ans) / double(t.lane) : 0.;
+        printf("census (%s, %d frames, %llu draw records, %llu dropped by the prologue): drawn after the warm-up %llu, answered %llu (%.1f%%; no prologue %llu of %llu, twin %llu of %llu, State changed %llu of %llu); "
+               "the walk: values for %llu of %llu records, not: site %llu fix %llu tex %llu vb (answered, no values) %llu ubo %llu form %llu empty %llu; packets taken %llu\n", wk ? "the walk on its own thread" : "the walk on the submitting thread", frames,
+               (unsigned long long)t.draws, (unsigned long long)dropped, (unsigned long long)t.lane, (unsigned long long)t.lane_ans, 100. * sh, (unsigned long long)t.lane_pro_ans[0], (unsigned long long)t.lane_pro[0],
+               (unsigned long long)t.lane_pro_ans[1], (unsigned long long)t.lane_pro[1], (unsigned long long)t.lane_pro_ans[2], (unsigned long long)t.lane_pro[2], (unsigned long long)t.w_values, (unsigned long long)t.w_draws,
+               (unsigned long long)t.w_miss[nrz8::M_SITE], (unsigned long long)t.w_miss[nrz8::M_FIX], (unsigned long long)t.w_miss[nrz8::M_TEX], (unsigned long long)t.w_miss[nrz8::M_NOVAL], (unsigned long long)t.w_miss[nrz8::M_UBO],
+               (unsigned long long)t.w_miss[nrz8::M_FORM], (unsigned long long)t.w_miss[nrz8::M_EMPTY], (unsigned long long)t.valid);
+        CHECK(t.lane > 0 && sh >= 0.95, "census: the walk answers at least 95%% of the drawn draws whose words arrived (%.1f%% of %llu) - the phone R8: 41.5%% of the records", 100. * sh, (unsigned long long)t.lane);
+        CHECK(t.lane_pro[1] > 0 && t.lane_pro_ans[1] * 10 >= t.lane_pro[1] * 9, "census: a twin draw is answered (%llu of %llu) - only its fragment program is not the walk's copy, and the answer names the twin", (unsigned long long)t.lane_pro_ans[1], (unsigned long long)t.lane_pro[1]);
+        CHECK(t.lane_pro[2] > 0 && t.lane_pro_ans[2] == 0, "census: a draw whose State the prologue changed is never answered (%llu of %llu)", (unsigned long long)t.lane_pro_ans[2], (unsigned long long)t.lane_pro[2]);
+        setup(Cfg{2, 256, 64, 64, 0}); { const auto logs = run(prog, 2, 11, nullptr, wk != 0, wk); for (size_t f = 0; f < prog.size(); f++) CHECK(logs[f] == ref[f], "census verify: frame %zu's call log is today's", f); }
+        const Tot v = tot; finish();
+        CHECK(v.a_bad == 0 && v.a_cmp > v.lane / 2 && v.r.v_bad == 0 && v.r.v_cmp == v.r.v_same, "census verify: answers compared %llu bad %llu, packets compared %llu bad %llu", (unsigned long long)v.a_cmp, (unsigned long long)v.a_bad,
+              (unsigned long long)v.r.v_cmp, (unsigned long long)v.r.v_bad);
+    }
+    g_phone = false;
+}
+
+// BENCH: the walk of the census world on one thread (no translation thread in between: the walk alone is clocked), warm frames only.
+static void bench() {
+    g_phone = true; PWorld w(5); std::vector<Frame> prog; for (int i = 0; i < 40; i++) prog.push_back(w.frame());
+    struct B { unsigned bits; const char *what; } bs[] = {{1, "the walk as the engine's (no test checks)"}, {1 | 4, "no packets"}, {1 | 8, "no range numbers"}, {1 | 2, "no template (look, values, packets, ranges)"},
+                                                       {1 | 2 | 16, "no template, no fix id"}, {1 | 32, "a draw record: its binds only"}, {1 | 64, "no values records (DM_NR_Z8_VAL=1)"}, {0, "with the test's own checks"}};
+    double base = 0;
+    for (const B &b : bs) { double best = 1e18, per_rec = 0; uint64_t d = 0, r = 0;
+        for (int rep = 0; rep < 3; rep++) { g_bench = b.bits; setup(Cfg{1, 256, 64, 64, 0}); run(prog, 1, 9, nullptr, false, 0); finish();
+            const double x = tot.warm_draws ? double(tot.warm_ns) / double(tot.warm_draws) : 0.; if (x < best) { best = x; per_rec = double(tot.warm_ns) / double(tot.warm_records); d = tot.warm_draws; r = tot.warm_records; } }
+        if (b.bits == 1) base = best;
+        printf("bench %-48s %7.0f ns a draw record (%5.0f ns a record; %.0f draw records and %.0f records a frame)%s", b.what, best, per_rec, double(d) / 36., double(r) / 36., b.bits == 1 ? "\n" : "");
+        if (b.bits != 1) printf("  -> %.0f ns\n", base - best); }
+    g_bench = 0; g_phone = false;
+}
+
 int main(int argc, char **argv) {
     const int frames = argc > 1 ? atoi(argv[1]) : 60;
-    for (int i = 0; i < 12; i++) { memset(&g_prog[i], 0, sizeof g_prog[i]); g_prog[i].nstage = 2; g_prog[i].serial = 100 + uint64_t(i); }
+    for (int i = 0; i < 16; i++) { memset(&g_prog[i], 0, sizeof g_prog[i]); g_prog[i].nstage = 2; g_prog[i].serial = 100 + uint64_t(i); }
     for (int i = 0; i < 4; i++) { memset(&g_mem[i], 0, sizeof g_mem[i]); g_pool[i].pool = &g_mem[i]; g_pool[i].off = 64 * i; g_pool[i].n = 100 + i; }
-    dict_test(); table_race(); marks_test(); ranges_test(); values_test(); phone_test();
+    if (argc > 1 && !strcmp(argv[1], "bench")) { bench(); return 0; }
+    dict_test(); table_race(); marks_test(); ranges_test(); values_test(); phone_test(); census_test(frames > 24 ? 24 : frames);
     uint64_t described = 0, not_desc = 0, taken = 0, answered = 0, draws = 0, vcmp = 0, th_answered = 0, th_taken = 0, th_got = 0, th_asked = 0, th_waits = 0, th_vcmp = 0, th_dig = 0, th_splits = 0, th_vask = 0, th_vrep = 0, th_known = 0, th_kcmp = 0;
     for (uint64_t seed = 1; seed <= 3; seed++) {
         World w(seed); std::vector<Frame> prog; for (int i = 0; i < frames; i++) prog.push_back(w.frame());
@@ -897,7 +1045,7 @@ int main(int argc, char **argv) {
                 "walk: values for %llu of %llu, misses site %llu fix %llu tex %llu vb %llu ubo %llu; verify: answers %llu bad %llu, packets %llu bad %llu, digests %llu\n", (unsigned long long)seed,
                 (unsigned long long)t.draws, (unsigned long long)ref_draws, (unsigned long long)t.answered, 100. * double(t.answered) / double(t.draws), (unsigned long long)t.valid, 100. * double(t.valid) / double(t.draws),
                 (unsigned long long)t.r.started, (unsigned long long)t.r.complete, (unsigned long long)t.r.cut[nrz5r::CUT_VALUES], (unsigned long long)t.r.cut[nrz5r::CUT_CACHE], (unsigned long long)t.w_values, (unsigned long long)t.w_draws,
-                (unsigned long long)t.w_miss[nrz8::M_SITE], (unsigned long long)t.w_miss[nrz8::M_FIX], (unsigned long long)t.w_miss[nrz8::M_TEX], (unsigned long long)t.w_miss[nrz8::M_VB], (unsigned long long)t.w_miss[nrz8::M_UBO],
+                (unsigned long long)t.w_miss[nrz8::M_SITE], (unsigned long long)t.w_miss[nrz8::M_FIX], (unsigned long long)t.w_miss[nrz8::M_TEX], (unsigned long long)t.w_miss[nrz8::M_NOVAL], (unsigned long long)t.w_miss[nrz8::M_UBO],
                 (unsigned long long)v.a_cmp, (unsigned long long)v.a_bad, (unsigned long long)v.r.v_cmp, (unsigned long long)v.r.v_bad, (unsigned long long)v.dig_cmp);
         }
     }

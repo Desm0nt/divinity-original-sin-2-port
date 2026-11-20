@@ -184,6 +184,10 @@ inline int xbg_nr_z8_img_default(){return 0;}
 inline int xbg_nr_z8_view_default(){return 0;}
 // DM_NR_Z8_VAL (section 31; with DM_NR_Z8_THREAD) - the verdict of a tail draw from the translation thread's own memory.
 inline int xbg_nr_z8_val_default(){return 0;}
+// DM_NR_Z8_TWIN (section 39) - a draw whose prologue swapped only the fragment shader for a twin (NR-MAT, NR-SH-SURF) is published and
+// answered. 1: it acts only while DM_NR_Z8 is on (0 on every family), and its answer is checked at the hook (the shaders are the
+// answer's) and by DM_NR_Z8=2 (the answer against the path's own); 0 is the rule before section 39.
+inline int xbg_nr_z8_twin_default(){return 1;}
 // [DOS2] NR-ZERO Z3b / Z3c / Z3d (docs/dos2/nr/NR-ZERO.md section 13): DM_NR_Z3B - an NR-08 entry whose images were all quiet is not walked
 // while the image epoch stands; DM_NR_Z3C - the vertex / index range of a draw from a table under the zero-copy / static-copy epochs;
 // DM_NR_Z3D - a ring block in place by one word. 0 on every family until the phone runs (=2 verify first: bad 0, then the A/B). The app
