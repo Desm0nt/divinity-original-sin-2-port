@@ -29,6 +29,9 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
                over the selected target as rect "hint3": a world tap there = X; --no-ohint = without);
         touch (hints + the HUD of UI mode TOUCH made from the player's PC movies: hotBar_p minimap_p statusConsole_p playerInfo_p combatLog_p dmSide_p,
                tools/dos2_pchud_touch.py, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"; every `hints` movie is byte for byte the same),
+        --kit-m0 / --kit (hints / touch sets; docs/dos2/TOUCH_UNIFIED.md M0 / M2): the type 0x8d movies (dmColumn_d, dmSide_p) get the M0 probe
+               (tools/dos2_touchkit.py m0_patch: the kit's input event names + a trace) or the whole dmTouch kit with their maps; without them
+               every movie is what it was,
         menu1 (mainMenu_t only), menu (11 menus + uiElements_t; no mainMenu_t: the owner keeps mainMenu_c, 15.11), hud, all (every registered `_t` movie, no journal_t), list (print the sets)
   every set but menu1 gets mainMenu_d.swf = the Switch mainMenu_c.swf with touch handlers (variant D, tools/dos2_mainmenu_touch.py) and tappable
   button hints (tools/dos2_hint_touch.py), made from
@@ -213,6 +216,11 @@ def main():
             if dos2_pchud_touch.check(psrc): sys.exit('touch HUD movies: static checks failed, package not written')
             clash = set(dos2_pchud_touch.OUT) & set(made); assert not clash, clash
             made.update(dos2_pchud_touch.build(psrc))
+        if which in ('hints', 'touch') and ('--kit-m0' in a or '--kit' in a):   # docs/dos2/TOUCH_UNIFIED.md M0 / M2 pilot (tools/dos2_touchkit.py): only on request
+            import dos2_touchkit
+            what = 'm0' if '--kit-m0' in a else 'kit'
+            for n in dos2_touchkit.pack(made, what):
+                print('%s: %s' % (n, 'the M0 probe (the kit\'s names in events + a trace of them)' if what == 'm0' else 'the dmTouch kit + its map (M2 pilot)'))
     files = [(GUI + n, made[n] if n in made else have[n]()) for n in sorted(list(names) + list(made), key=str.lower)]   # Larian's lists are sorted by name, case ignored (Game.pak, Engine.pak)
     for n, d in files:
         if d[:3] not in (b'CWS', b'FWS', b'ZWS'): sys.exit('%s is not a SWF (%r)' % (n, d[:3]))

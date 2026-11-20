@@ -399,11 +399,15 @@ static void dt_button(void *mgr, uint32_t id, int down) { if (g_cx >= 0) dt_curs
 static int dt_pc(void);
 enum { G_IDLE, G_PENDING, G_DRAG, G_HELD, G_TWO, G_WPROBE /* world: left is down, who took it? */, G_WTAP /* the same, finger already up */, G_WORLD /* the finger moves the character */,
        G_MAP /* map view: the finger pans the map (left stick) */, G_RADIAL /* dos2-touch7: a ZL / ZR wheel is open, the finger points its item (right stick) */,
-       G_TMULTI /* UI mode TOUCH: two / three world fingers (pinch / rotation / pan, 2f / 3f taps, 3f swipe) */ };
+       G_TMULTI /* UI mode TOUCH: two / three world fingers (pinch / rotation / pan, 2f / 3f taps, 3f swipe) */,
+       G_KIT /* DM_DOS2_TOUCH_KIT=1: a finger on a dmTouch movie's element / window (hle_dos2_touch_kit.c: its recogniser, its delivery) */ };
 static struct { int st, f0, f1; float sx, sy, x0, y0, x1, y1, d0, wy, wmx, lx, ly; uint64_t t0; uint32_t pulse; int pulse_frames, wact, wmoved, wplace;
-                int tg, dtap, wtip; uint64_t tup; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation, 5 TOUCH pan; wplace: a placement-mode finger (no mouse press)
+                int tg, dtap, wtip, tui; uint64_t tup, tui_t; } g;   // wact: 1 walk stick, 2 Actions..., 3 swipe rotation, 5 TOUCH pan; wplace: a placement-mode finger (no mouse press)
 // tg: this gesture runs the UI mode TOUCH rules (latched when its first finger lands); dtap: its first finger is the second tap of a double tap;
-// wtip: its short long press was reached (tooltip); tup: when a probing world finger was lifted (G_WTAP)
+// wtip: its short long press was reached (tooltip); tup: when a probing world finger was lifted (G_WTAP); tui (UI mode TOUCH, run 20.11 review):
+// 1 = its probe press was taken by a HUD movie and it has not moved (the hold rules of dt_tui_state apply), 3 = the long press let the left go
+// off the element (the right click follows at tui_t), 2 = the right click was sent (the release does nothing), 4 = as 1 on the hot bar
+// (0x28): no right click there - a hold keeps the press for a drag (the iPad: a slot's long press = drag), released still = tooltip only
 // ---- world gestures (pass 7): virtual sticks for hle_hid.c, the tap = walk + A ----
 #include <stdatomic.h>
 static int g_world, g_world_walk_ms = 1400, g_world_probe_ms = 250, g_ui_ok, g_in_game, g_rot_swap, g_swipe_rot = 1, g_place = 1;   // pass 9: DM_DOS2_TOUCH_SWIPE_ROT / _PLACE
@@ -578,6 +582,7 @@ static int dt_world_now(void) {   // may a new finger be the world's
     uint32_t ty = 0;
     if (!g_world || !g_in_game || (g_world == 1 && !dm_dos2_route_game())) return 0;
     if (!dm_dos2_route_world_ok(&ty)) { static uint32_t last = ~0u; if (g_dbg && last != ty) { last = ty; LOG("[touch] world gestures paused: a menu / panel / dialog / modal window is on screen (UI type %#x)", ty); } return 0; }
+    { int dm_dos2_kit_window_up(void); if (dm_dos2_kit_window_up()) return 0; }   // DM_DOS2_TOUCH_KIT=1 (K9): a kit movie reports a window: no world finger (0 when the kit is off)
     return 1;
 }
 // ---- map view (owner 15.11, run tw4 on pack 2z: "the map can't be dragged by finger"; the iPad's journal_csp_t drags it, pinches, taps markers) ----
@@ -747,6 +752,64 @@ static void dt_t_release_all(void *mgr, const char *why) {
     if (g_t_keys || g_t_tog) { static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: keys let go (%s): camera keys %#x, held toggles %#x", why, g_t_keys, g_t_tog); }
     g_t_keys = 0; g_t_tog = 0; g_t_bx = g_t_by = g_t_br = 0;
 }
+// ---- UI mode TOUCH: a key tap made by the host (review of the phone run 20.11, docs/dos2/TOUCH_MODES_PLAN.md "Прогон 20.11") ----
+// In TOUCH the mode byte is 0 and the bindings are Eoc/keyboard_1.json: the pad's records are filtered for most listeners (0x844014) and the
+// pad has no binding there (no c:a / c:b in keyboard_1.json), so every npad pulse of the host did nothing in that mode: a console hint tap of
+// the `_d` menus the main menu still makes (options, mods, save / load, message boxes), the deferred main menu press of pack 3n (run 20.11:
+// "deferred main menu press: A ..." at boot.log 3711 and nothing happened, the player tapped again). The live pad switch used to hide it (the
+// pulse itself flipped the UI to the controller set); c5957b6 took that switch out of TOUCH. A pulse in TOUCH is its keyboard twin now
+// (keyboard_1.json of the iPad, the Switch file = it minus the mouse buttons): A -> return (UIAccept), B -> escape (UICancel / ToggleInGameMenu),
+// d-pad -> the arrows (UIUp / Down / Left / Right), '-' -> m (ToggleMap). Raw key ids: the name table main+0x2974b10 from main.raw's .rela.dyn
+// (index - 2): return 0x00, escape 0x01, m 0x30, right 0x56, left 0x57, down 0x58, up 0x59 (dt_pad_key). Other buttons have no sure twin: nothing is sent.
+// One key at a time: down when its time comes, up 2 polls and DT_KP_MS later (the game's update sees press and release apart).
+enum { DT_KP_MS = 80 };
+#define DT_TUI_OFF -64.f   // window px: where a TOUCH HUD finger's left is let go when it must not click (no UI element is there)   // the twins: hle_dos2_touch_gesture.h dt_pad_key (host test)
+static _Atomic uint32_t g_kp_id;          // a key asked (raw id + 1), 0 = none; any thread (the Back comes from Java's UI thread)
+static _Atomic uint64_t g_kp_at;          // dt_ms() when it goes down
+static uint32_t g_kp_held; static uint64_t g_kp_t; static int g_kp_polls;   // game thread: the key down now (id + 1)
+static unsigned g_n_kp;
+static int dt_t_padswitch(void) { const char *ps = getenv("DM_DOS2_TOUCH_T_PADSWITCH"); return ps && atoi(ps) > 0; }   // owner 20.11: no live pad switch in TOUCH unless =1
+int dm_dos2_touch_key_pulse(uint32_t id, int delay_ms, const char *why);
+int dm_dos2_touch_key_pulse(uint32_t id, int delay_ms, const char *why) {
+    if (!dm_dos2_touch_on() || id > 0xff) return 0;
+    if (atomic_load(&g_kp_id)) { static unsigned n; if (n++ < 20) LOG("[touch] key %#x (%s) not sent: another key tap is waiting", id, why ? why : ""); return 0; }
+    atomic_store(&g_kp_at, dt_ms() + (uint64_t)(delay_ms > 0 ? delay_ms : 0));
+    atomic_store(&g_kp_id, id + 1);
+    if (g_dbg || g_n_kp++ < 40) LOG("[touch] key %#x tapped for the player (%s), in %d ms", id, why ? why : "", delay_ms);
+    return 1;
+}
+static int dt_state(void *mgr);
+void dm_dos2_kit_m0_key(uint32_t key, int down);   // hle_dos2_touch_kit.c (DM_DOS2_TOUCH_KIT_M0 bit 4, log only)
+static _Atomic uint64_t g_host_ms;   // when the host's last key tap / pad pulse went down (the kit's accept guard: "from the host")
+uint64_t dm_dos2_touch_host_ms(void);
+uint64_t dm_dos2_touch_host_ms(void) { return atomic_load(&g_host_ms); }
+static void dt_kp_poll(void *mgr) {   // dt_drain, every pad poll (also when no finger is down)
+    if (g_kp_held) {
+        if (++g_kp_polls >= 2 && dt_ms() - g_kp_t >= DT_KP_MS) { dt_key(mgr, g_kp_held - 1, 0); dm_dos2_kit_m0_key(g_kp_held - 1, 0); g_kp_held = 0; }
+        return;
+    }
+    const uint32_t id1 = atomic_load(&g_kp_id);
+    if (!id1 || dt_ms() < atomic_load(&g_kp_at)) return;
+    atomic_store(&g_kp_id, 0);
+    if (!dt_state(mgr)) { LOG("[touch] key %#x dropped: the raw-state array is not ready", id1 - 1); return; }   // a key's release needs the keyboard block
+    dt_key(mgr, id1 - 1, 1); g_kp_held = id1; g_kp_t = dt_ms(); g_kp_polls = 0;
+    atomic_store(&g_host_ms, g_kp_t); dm_dos2_kit_m0_key(id1 - 1, 1);
+}
+// hle_dos2_touchui_hud.c dmKey(2) (game thread): the minimap's tactical camera button pressed the same toggle key 'o' - the host's belief of the
+// camera (g_t_tac, what the three-finger swipe compares with) flips with it, else the next swipe down / up did nothing (run 20.11 review)
+void dm_dos2_touch_tac_toggled(void);
+void dm_dos2_touch_tac_toggled(void) { g_t_tac = !g_t_tac; }
+// DmActivity.dos2PadB (Java UI thread) through jni nativeDos2Back -> hle_dos2_touchui_hud.c: the Back gesture in UI mode TOUCH = the PC escape (close
+// the window / the pause menu / skip a video: SkipVideo <- escape in the Switch's keyboard_1.json). 1 = taken (also when it had to be dropped:
+// the pad's B does nothing in TOUCH), 0 = not TOUCH (Java sends the pad B). c5957b6 queued it in the touch HUD, which only ran it while its HUD
+// objects existed: in the main menu, a loading screen or a video the Back was swallowed and fired as an escape at the next level start.
+int dm_dos2_touch_back(void);
+int dm_dos2_touch_back(void) {
+    if (!dm_dos2_touch_on() || !g_t_cfg || dm_dos2_ui_mode_hud() != UI_TOUCH || !dt_pc()) return 0;
+    dm_dos2_touch_key_pulse(ID_KEY_ESCAPE, 0, "the Back gesture: escape (UI mode TOUCH)");
+    return 1;
+}
+void dm_dos2_touchui_hud_plate_off(const char *why);   // hle_dos2_touchui_hud.c: the action plate's screen point is stale
 // every pad poll (game thread, the raw-state array checked): the camera keys follow the owed hold times, timed / stale toggles are let go
 static void dt_t_poll(void *mgr) {
     const uint64_t now = dt_ms();
@@ -754,12 +817,20 @@ static void dt_t_poll(void *mgr) {
     g_t_tick = now;
     if (!dt_t_mode()) { dt_t_release_all(mgr, "not the TOUCH PC UI any more"); return; }
     const int st = atomic_load(&g_ui_state);
-    if (g_t_tog && (st & 4) && ((st & 1) || !(st & 2))) dt_t_release_all(mgr, (st & 1) ? "a menu / panel is on screen" : "out of game");
+    // run 20.11 review: every held key goes when a menu / panel / dialog comes up or the game is left, not only the toggles - a two-finger
+    // rotation holds `delete`, which is also UIDelete (keyboard_1.json), the pan holds w / a / s / d, the pinch pageup / pagedown (ZoomIn / Out)
+    if (dt_t_away(st)) {
+        if (dt_t_busy()) dt_t_release_all(mgr, (st & 1) ? "a menu / panel is on screen" : "out of game");
+        if (!(st & 2)) g_t_tac = 0;   // a load / the main menu starts with the normal camera
+        dm_dos2_touchui_hud_plate_off((st & 1) ? "a menu / panel is on screen" : "out of game");
+        return;
+    }
     for (int w = 0; w < 2; w++) if ((g_t_tog >> w & 1) && g_t_tog_until[w] && now >= g_t_tog_until[w]) { dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 0); g_t_tog &= ~(1u << w); }
     dt_hold_tick(&g_t_bx, dtm); dt_hold_tick(&g_t_by, dtm); dt_hold_tick(&g_t_br, dtm); dt_hold_tick(&g_t_bz, dtm);
     { const uint32_t zk = g_t_bz > 4.f ? ID_KEY_PAGEUP : g_t_bz < -4.f ? ID_KEY_PAGEDOWN : 0;   // the pinch's zoom key follows its owed hold
-      if (zk != g_t_zkey) { if (g_t_zkey) dt_key(mgr, g_t_zkey, 0); if (zk) dt_key(mgr, zk, 1); g_t_zkey = zk; } }
+      if (zk != g_t_zkey) { if (g_t_zkey) dt_key(mgr, g_t_zkey, 0); if (zk) { dt_key(mgr, zk, 1); dm_dos2_touchui_hud_plate_off("the camera zooms"); } g_t_zkey = zk; } }
     const unsigned want = dt_cam_keys(g_t_bx, g_t_by, g_t_br, g_t_pan_inv, g_rot_swap, 4.f);
+    if (want & ~g_t_keys) dm_dos2_touchui_hud_plate_off("the camera moves");   // the plate stays where it was put: over another spot once the view moved
     if (want != g_t_keys) {
         static const uint32_t kid[6] = {ID_KEY_W, ID_KEY_S, ID_KEY_A, ID_KEY_D, ID_KEY_DELETE, ID_KEY_END};
         for (int i = 0; i < 6; i++) if ((want ^ g_t_keys) >> i & 1) dt_key(mgr, kid[i], want >> i & 1);
@@ -904,18 +975,34 @@ static int g_pad_dev = -1;
 static float px_x(float nx) { return nx * g_win_w; }
 static float px_y(float ny) { return ny * g_win_h; }
 
+// ---- DM_DOS2_TOUCH_KIT=1 (hle_dos2_touch_kit.c): the kit's fingers; its mouse is only what the native code of the target needs (K2) ----
+int dm_dos2_kit_on(void); int dm_dos2_kit_down(float x, float y, uint64_t t, unsigned *mouse); void dm_dos2_kit_move(float x, float y, unsigned *mouse);
+void dm_dos2_kit_up(float x, float y, uint64_t t, int cancel, unsigned *mouse); void dm_dos2_kit_two(unsigned *mouse); void dm_dos2_kit_end(void);
+void dm_dos2_kit_poll(void); void dm_dos2_kit_m0_tap(float x, float y);
+static void dt_kit_do(void *mgr, unsigned m, float x, float y) {   // DK_DO_MOVE 1, DK_DO_PRESS 2, DK_DO_RELEASE 4 (hle_dos2_touch_kit.h)
+    if (m & 1) dt_move(mgr, x, y);
+    if (m & 2) dt_button(mgr, ID_LEFT, 1);
+    if (m & 4) dt_button(mgr, ID_LEFT, 0);
+}
+float dm_dos2_touch_win_w(void); float dm_dos2_touch_win_h(void);
+float dm_dos2_touch_win_w(void) { return g_win_w; }
+float dm_dos2_touch_win_h(void) { return g_win_h; }
 static void dt_step(void *mgr, const dt_ev *e) {
     const float x = px_x(e->x), y = px_y(e->y), slop = g_win_h * 0.025f;
+    unsigned km = 0;
     g_tx = e->x; g_ty = e->y;
     switch (e->ph) {
     case EV_DOWN:
         if (g.st == G_IDLE) {
             g_fmap = 0;
-            g.tg = dt_t_mode(); g.wtip = 0; g.tup = 0;   // UI mode TOUCH: latched for the whole gesture
+            g.tg = dt_t_mode(); g.wtip = 0; g.tup = 0; g.tui = 0;   // UI mode TOUCH: latched for the whole gesture
             g.dtap = g.tg && dt_is_dtap(g_t_tap_up, g_t_tap_x, g_t_tap_y, e->t, x, y, g_t_dtap_ms, 2 * slop);
         }
         if (g.st == G_IDLE && atomic_load(&g_rad_live)) {   // dos2-touch7: a ZL / ZR wheel is open: the finger points it
             g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; dt_world_stop(); g.st = G_RADIAL; dt_radial_finger(x, y);
+        }
+        else if (g.st == G_IDLE && dm_dos2_kit_on() && dm_dos2_kit_down(x, y, e->t, &km)) {   // DM_DOS2_TOUCH_KIT=1: a dmTouch movie's element / window (K1)
+            g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; dt_world_stop(); g.st = G_KIT; dt_kit_do(mgr, km, x, y);
         }
         else if (g.st == G_IDLE && g_map_live && !g.tg) {   // map view: drag = pan; a tap is decided on the release (click first, the map only if no button answered)
             g.f0 = e->id; g.sx = g.lx = x; g.sy = g.ly = y; g.t0 = e->t; g.wact = 0; dt_world_stop(); g_fmap = 1; g_mtap_t = 0;
@@ -940,8 +1027,9 @@ static void dt_step(void *mgr, const dt_ev *e) {
             dt_tm_start(e->id, x, y, e->t);
         }
         else if (g.st == G_TMULTI) { if (dt_tm_find(e->id) < 0) dt_tm_down(e->id, x, y); }
-        else if ((g.st == G_PENDING || g.st == G_DRAG || g.st == G_WPROBE || g.st == G_WORLD || g.st == G_MAP) && e->id != g.f0) {
+        else if ((g.st == G_PENDING || g.st == G_DRAG || g.st == G_WPROBE || g.st == G_WORLD || g.st == G_MAP || g.st == G_KIT) && e->id != g.f0) {
             if (g.st == G_DRAG || g.st == G_WPROBE) dt_button(mgr, ID_LEFT, 0);
+            if (g.st == G_KIT) { dm_dos2_kit_two(&km); dt_kit_do(mgr, km, g_cx, g_cy); }   // the kit's finger ends; the two fingers are its target's wheel
             if (g.st == G_WORLD && g.wact == 4) dt_pad_hold(0, "a second finger");
             if (g.st == G_WORLD || g.st == G_WPROBE || g.st == G_MAP) { dt_world_stop(); g.x0 = g.lx; g.y0 = g.ly; } else { g.x0 = g_cx; g.y0 = g_cy; }
             g.st = G_TWO; g.f1 = e->id; g.x1 = x; g.y1 = y; g.wmx = (g.x0 + g.x1) / 2;
@@ -983,6 +1071,8 @@ static void dt_step(void *mgr, const dt_ev *e) {
         } else if (g.st == G_TMULTI) {   // UI mode TOUCH: two / three world fingers
             const int i = dt_tm_find(e->id);
             if (i >= 0 && !tm.up[i]) dt_tm_move(mgr, i, x, y);
+        } else if (e->id == g.f0 && g.st == G_KIT) {   // DM_DOS2_TOUCH_KIT=1: the kit's recogniser (hover, native drag, one-finger scroll)
+            g.lx = x; g.ly = y; dm_dos2_kit_move(x, y, &km); dt_kit_do(mgr, km, x, y);
         } else if (e->id == g.f0 && g.st == G_RADIAL) {   // dos2-touch7: the highlight follows the finger
             g.lx = x; g.ly = y; dt_radial_finger(x, y);
         } else if (e->id == g.f0 && g.st == G_MAP) {   // map: pan
@@ -1007,11 +1097,14 @@ static void dt_step(void *mgr, const dt_ev *e) {
             }
         } else if (e->id == g.f0 && g.st != G_IDLE && g.st != G_WTAP) {
             if (g.st == G_PENDING && hypotf(x - g.sx, y - g.sy) > slop) { dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG; }   // press where it started
+            if (g.st == G_DRAG && (g.tui == 1 || g.tui == 4) && hypotf(x - g.sx, y - g.sy) > slop) g.tui = 0;   // TOUCH: a HUD finger that moved = a plain drag
             dt_move(mgr, x, y);
         }
         break;
     case EV_UP: case EV_CANCEL:
-        if (g.st == G_TWO) { if (e->id == g.f0 || e->id == g.f1) { g.st = G_IDLE; if (g.pulse_frames > 1) g.pulse_frames = 1; } break; }   // pinch over: zoom released on the next poll
+        if (e->ph == EV_UP && e->id == g.f0 && g.st != G_IDLE && g.st != G_TWO && g.st != G_TMULTI && hypotf(x - g.sx, y - g.sy) <= slop) dm_dos2_kit_m0_tap(x, y);   // DM_DOS2_TOUCH_KIT_M0 bit 1 (log only)
+        if (g.st == G_TWO) { if (e->id == g.f0 || e->id == g.f1) { g.st = G_IDLE; if (g.pulse_frames > 1) g.pulse_frames = 1; dm_dos2_kit_end(); } break; }   // pinch over: zoom released on the next poll
+        if (g.st == G_KIT) { if (e->id == g.f0) { dm_dos2_kit_up(x, y, e->t, e->ph == EV_CANCEL, &km); dt_kit_do(mgr, km, x, y); g.st = G_IDLE; } break; }   // DM_DOS2_TOUCH_KIT=1: the verb
         if (g.st == G_TMULTI) { const int i = dt_tm_find(e->id); if (i >= 0) { tm.x[i] = x; tm.y[i] = y; dt_tm_up(mgr, i, e); } break; }   // UI mode TOUCH: the last finger up decides the tap
         if (e->id != g.f0) break;
         if (g.st == G_WPROBE) { g.lx = x; g.ly = y; g.tup = e->t; if (e->ph == EV_UP) { g.st = G_WTAP; break; } dt_button(mgr, ID_LEFT, 0); g.st = G_IDLE; break; }   // up before the UI answered: dt_world_poll ends it
@@ -1051,8 +1144,13 @@ static void dt_step(void *mgr, const dt_ev *e) {
         }
         else if (g.st == G_PENDING && e->ph == EV_UP) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0);
             { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } }   // the iPad movies act on the input event "IE Tap", not on the click (hle_dos2_touchui_ie.c)
+        else if (g.st == G_DRAG && (g.tui == 2 || g.tui == 3)) {}   // TOUCH: its long press made the right click; the left went up off the element already
+        else if (g.st == G_DRAG && (g.tui == 1 || g.tui == 4) && e->ph == EV_UP && dt_tui_state(e->t - g.t0, g_t_slong_ms, g_t_long_ms) != DT_TUI_CLICK) {   // TOUCH: the short long press
+            dt_move(mgr, DT_TUI_OFF, DT_TUI_OFF); dt_button(mgr, ID_LEFT, 0); g_n_t_tip++;   // = the hover tooltip only: the release off the element, no click
+            if (g_dbg) LOG("[touch] TOUCH: HUD short long press over at %.0f,%.0f (%llu ms): tooltip only, released off the element (no click)", (double)x, (double)y, (unsigned long long)(e->t - g.t0));
+        }
         else if (g.st == G_DRAG) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 0); }
-        g.st = G_IDLE;
+        g.st = G_IDLE; g.tui = 0;
         break;
     }
 }
@@ -1130,7 +1228,9 @@ int dm_dos2_touch_ui_hud(int mode, int rebuild, uint64_t *us) {
     if (pc && !g_mode_ok) { LOG("【红】[touch] UI mode touch: main+%#x / +%#x differ: the mode byte is not set (the controller UI stays)", DT_MODE_INIT, DT_UISET); return 0; }
     if (g_mode_ok) *(volatile uint8_t *)(g_main->base + DT_MODE) = (uint8_t)ui_mode_byte(mode);
     dt_bind(pc && g_keys_pref);
-    g_live_ui = pc && g_live_ok; g_pcui = pc; g_live_wait = 0; g_live_t = dt_ms();   // the pad's live switch waits its hysteresis from here
+    // run 20.11 review: the same rule as at the start (owner 20.11, c5957b6): no live pad switch in TOUCH unless DM_DOS2_TOUCH_T_PADSWITCH=1 - a
+    // mode change that lands here (DM_DOS2_UI_LIVE, an old Java's nativeDos2UiMode) must not bring the rebuilds back
+    g_live_ui = pc && g_live_ok && dt_t_padswitch(); g_pcui = pc; g_live_wait = 0; g_live_t = dt_ms();   // the pad's live switch waits its hysteresis from here
     if (rebuild) {
         const uint64_t t0 = dt_us();
         ((void (*)(void *))(void *)(g_main->base + DT_UI_DESTROY))(ui);
@@ -1272,7 +1372,7 @@ static void dt_world_poll(void *mgr) {
             }
             else if (r != 1 && dt_swipe_zone() && g.wmoved) { if (g_dbg) LOG("[touch] world: a quick swipe (lifted before the UI answered): no tap"); }   // pass 9
             else if (r == 1) { g_n_wui++; { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } } else if (dt_hint_tap(g.lx, g.ly)) {} else if (dt_minimap_hit(g.lx, g.ly)) dt_minimap_tap(g.lx, g.ly); else if (g_w3) dt_w3_tap(mgr, g.lx, g.ly); else dt_world_tap(g.lx, g.ly);
-        } else if (r == 1) { g.st = G_DRAG; g_n_wui++; }   // a UI element has it: the finger drags / clicks as the mouse
+        } else if (r == 1) { g.st = G_DRAG; g_n_wui++; if (g.tg && !g.wmoved) g.tui = ty == 0x28 ? 4 : 1; }   // a UI element has it: the finger drags / clicks as the mouse (TOUCH: with the hold rules, dt_drain)
         else { dt_button(mgr, ID_LEFT, 0); g.st = G_WORLD;
                if (g.tg) { if (g.wmoved) dt_t_pan_start(g.lx, g.ly, "moved during the probe"); }   // UI mode TOUCH: the pan (dt_t1_state: a move before the long press)
                else if (dt_swipe_zone() && g.wmoved) { const int k = dt_gesture_move(hypotf(g.lx - g.sx, g.ly - g.sy), now - g.t0, g_win_h * 0.025f, g_world_hold_ms, 1);   // pass 9: moved during the probe
@@ -1316,6 +1416,14 @@ int dm_dos2_touch_pad_pulse(uint64_t mask, const char *why, int delay_ms);
 int dm_dos2_touch_pad_pulse(uint64_t mask, const char *why, int delay_ms) {
     if (!g_pp_on || !mask) return 0;
     const uint64_t now = dt_ms();
+    if (dt_t_mode()) {   // UI mode TOUCH: the pad's records are filtered and unbound there - the keyboard twin (dt_pad_key, the key tap section)
+        if (now - g_pp_asked < 250) return 0;
+        const uint32_t key = dt_pad_key(mask);
+        if (key == DT_PADKEY_NONE) { static unsigned n; if (n++ < 20) LOG("[touch] pad button %#llx (%s): UI mode TOUCH has no keyboard twin for it: nothing sent", (unsigned long long)mask, why ? why : ""); return 0; }
+        if (!dm_dos2_touch_key_pulse(key, delay_ms, why)) return 0;
+        g_pp_asked = now;
+        return 1;
+    }
     if (atomic_load(&g_pp_left) > 0 || now - g_pp_asked < 250) return 0;
     g_pp_asked = now; g_pp_t = now + (uint64_t)(delay_ms > 0 ? delay_ms : 0); atomic_store(&g_pp_mask, mask); atomic_store(&g_pp_left, g_pp_polls);
     { static unsigned n; if (n++ < 200 || g_dbg) LOG("[touch] pad button %#llx pressed for the player (%s), in %d ms, held %d npad reads", (unsigned long long)mask, why ? why : "", delay_ms, g_pp_polls); }
@@ -1347,6 +1455,7 @@ void dm_dos2_touch_pad_pump(uint64_t *buttons) {
     const uint64_t now = dt_ms();
     if (left > 0 && now >= g_pp_t) {   // (before g_pp_t: a delayed press, A after a tap: past the movies' "a tap is not accept" guards)
         *buttons |= atomic_load(&g_pp_mask);
+        if (left == g_pp_polls) atomic_store(&g_host_ms, now);   // the pulse's first read: "from the host" for the kit's accept guard
         if (left > 1 || now - g_pp_t >= 120) atomic_store(&g_pp_left, left - 1);   // at least g_pp_polls reads AND 120 ms (the npad may be read several times a frame)
     }
     if (*buttons & DM_BTN_A) atomic_store(&g_a_ms, now);   // pass 7: hle_dos2_touchui_route.c tells a real A from the "accept" a tap makes
@@ -1372,6 +1481,12 @@ static int dt_ei_padbtn(void *ctx, void *player, void *ui, const char *name, uns
     if (!btn) { if (nl++ < 40) LOG("[touch] dmPadBtn(%d): no pad button for that hint code", code); return 1; }
     if (!dm_dos2_touchui_may_press(ui)) { if (nl++ < 40) LOG("[touch] dmPadBtn(%d): refused, the window is not on top (a modal menu is over it)", code); return 1; }
     char why[40]; snprintf(why, sizeof why, "hint tap, BTN code %d", code);
+    {   // DM_DOS2_TOUCH_KIT_M0 bit 4 (hle_dos2_touch_kit.c, log only): the input events this pulse makes and who takes them
+        void dm_dos2_kit_m0_pulse(int code, uint64_t mask, int delay_ms, int key);
+        const int dl = n >= 2 && a[1].type == 4 && a[1].d >= 0 && a[1].d <= 2000 ? (int)a[1].d : btn == DM_BTN_A ? 750 : 0;
+        const uint32_t tw = dt_t_mode() ? dt_pad_key(btn) : DT_PADKEY_NONE;
+        dm_dos2_kit_m0_pulse(code, btn, dl, tw == DT_PADKEY_NONE ? -1 : (int)tw);
+    }
     // optional 2nd argument = the delay in ms the movie asks for (the title splash: 60 ms, its close is no guarded accept; pack 3f)
     if (n >= 2 && a[1].type == 4 && a[1].d >= 0 && a[1].d <= 2000) { dm_dos2_touch_pad_pulse(btn, why, (int)a[1].d); return 1; }
     // A = "accept": the console movies swallow an accept that comes within 400 / 700 ms of a mouse event (a click is also "IE UIAccept" on the phone:
@@ -1667,7 +1782,9 @@ static void dt_drain(void) {
     void *mgr = dt_mgr();
     if (!mgr || !g_on) return;
     { void dm_dos2_touchui_ie_poll(void); dm_dos2_touchui_ie_poll(); }   // touch input events of earlier polls (hle_dos2_touchui_ie.c)
+    dm_dos2_kit_poll();   // DM_DOS2_TOUCH_KIT / _M0 (hle_dos2_touch_kit.c): timed verbs, the addressed "IE dm*" deliveries, M0; nothing when both are 0
     { void dm_dos2_uimode_poll(void); dm_dos2_uimode_poll(); }   // the UI mode switch: a request from the gear, the HUD part at the next load (hle_dos2_uimode.c)
+    dt_kp_poll(mgr);   // UI mode TOUCH: a key tap of the host (the Back's escape, a pad pulse's keyboard twin)
     if (g_kbm) {   // controller mode: let keyboard / mouse records through the listener filter (main+0x84407c)
         volatile uint8_t *k = (volatile uint8_t *)mgr + DT_MGR_KBM;
         uint8_t want = 1;
@@ -1704,7 +1821,7 @@ static void dt_drain(void) {
     if (g_world) LOG("[touch] world (DM_DOS2_TOUCH_WORLD=%d): taps %u, stick holds %u, swipes %u, placement taps %u, presses the UI took %u, in game %d, sticks now %d,%d / rx %d", g_world, g_n_wtap,
                          g_n_wstick, g_n_swipe, g_n_place, g_n_wui, g_in_game, atomic_load(&g_w_lx), atomic_load(&g_w_ly), atomic_load(&g_w_rx));
     if (g_t_cfg && g_n_t_tap + g_n_t_tip + g_n_t_long + g_n_t_pan + g_n_t_pinch + g_n_t_rot + g_n_t_pan2 + g_n_t_tap2 + g_n_t_tap3 + g_n_t_sw3 + g_n_t_lp)
-        LOG("[touch] TOUCH gestures: taps %u (double %u), tooltips %u, long presses %u, pans %u | two fingers: wheel notches %u, rotation steps %u, pan steps %u, taps %u | "
+        LOG("[touch] TOUCH gestures: taps %u (double %u), tooltips %u, long presses %u, pans %u | two fingers: zoom steps %u, rotation steps %u, pan steps %u, taps %u | "
             "three fingers: taps %u, swipes %u | 2f / 3f long presses %u | camera keys %#x, toggles %#x, tactical camera %d (as the host believes)", g_n_t_tap, g_n_t_dtap, g_n_t_tip,
             g_n_t_long, g_n_t_pan, g_n_t_pinch, g_n_t_rot, g_n_t_pan2, g_n_t_tap2, g_n_t_tap3, g_n_t_sw3, g_n_t_lp, g_t_keys, g_t_tog, g_t_tac);
     if (g_rad_cfg && g_n_rad_open) LOG("[touch] radial (ZL / ZR wheels): opened %u, chosen by touch %u, npad reads with the left stick as the right one %u, open now %#x",
@@ -1714,7 +1831,7 @@ static void dt_drain(void) {
         else if (g_live_wait && g.st == G_IDLE && g_qh == g_qt) dt_live_switch(g_live_wait == 2, "deferred");   // DM_DOS2_TOUCH_LIVE=2: once the UI sets are gone
         g_pad_act = 0;
     }
-    if (g_qh == g_qt && !g.pulse_frames && g.st != G_PENDING && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until && !dt_t_busy()) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
+    if (g_qh == g_qt && !g.pulse_frames && g.st != G_PENDING && !(g.st == G_DRAG && (g.tui == 1 || g.tui == 3)) && g.st < G_WPROBE && !g_w_until && !g_w_rx_until && !g_w_ry_until && !g_mtap_t && !w3.ph && !w3.hover_until && !dt_t_busy()) { if (g_w3) dt_w3_sync(G_IDLE, 0); return; }
     dt_window();
     if (!dt_state(mgr)) { pthread_mutex_lock(&g_qm); g_qh = g_qt; pthread_mutex_unlock(&g_qm); g.st = G_IDLE; g.pulse_frames = 0; dt_world_stop(); atomic_store(&g_w_rx, 0); g_w_rx_until = 0;
                           if (g_w3) { memset(&w3, 0, sizeof w3); dt_w3_sync(G_IDLE, 0); } return; }
@@ -1735,6 +1852,17 @@ static void dt_drain(void) {
     if (g.st == G_PENDING && g_ui_press_ms > 0 && !dt_pc() && dt_ms() - g.t0 >= (uint64_t)g_ui_press_ms) {
         dt_button(mgr, ID_LEFT, 1); g.st = G_DRAG;
         if (g_log || (g_dbg && g_nlog < 64)) LOG("[touch] UI finger still %d ms at %.0f,%.0f: left press now (held until the finger is up)", g_ui_press_ms, (double)g_cx, (double)g_cy);
+    }
+    // UI mode TOUCH, run 20.11 review: a HUD finger (its probe press was taken by hotBar_p / playerInfo_p / minimap_p ...) held still for the long
+    // press: the iPad's LongPress = the right click (ContextMenu; a portrait's onRightClick = openCharInventory). The left is let go first with
+    // the cursor off the element (Slot::onClick / onIconUp would fire on a release there), the right click one poll later at the finger: the
+    // records of one poll are read with the cursor as it is at the end of the poll
+    if (g.st == G_DRAG && g.tui == 1 && dt_tui_state(dt_ms() - g.t0, g_t_slong_ms, g_t_long_ms) == DT_TUI_LONG) {
+        dt_move(mgr, DT_TUI_OFF, DT_TUI_OFF); dt_button(mgr, ID_LEFT, 0); g.tui = 3; g.tui_t = dt_ms();
+    } else if (g.st == G_DRAG && g.tui == 3 && dt_ms() - g.tui_t >= 30) {
+        dt_move(mgr, g.sx, g.sy); dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g.tui = 2; g_n_t_long++;
+        { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(1); }
+        static unsigned n; if (g_dbg || n++ < 40) LOG("[touch] TOUCH: long press on a HUD element at %.0f,%.0f = ContextMenu: the left let go off it, the right click there", (double)g.sx, (double)g.sy);
     }
     if (g.st == G_PENDING && dt_ms() - g.t0 >= (uint64_t)(g.tg ? g_t_long_ms : g_hold_ms)) {   // long press, still: right click (ContextMenu / FlashRightMouse); TOUCH: the iPad's long press time
         dt_button(mgr, ID_RIGHT, 1); dt_button(mgr, ID_RIGHT, 0); g.st = G_HELD;
@@ -1964,7 +2092,7 @@ void dm_dos2_touch_install(void) {
         if (g_t_slong_ms > g_t_long_ms) g_t_slong_ms = g_t_long_ms;   // a tooltip time past the long press: no separate tooltip
         LOG("[touch] UI mode TOUCH gestures%s (iPad touchscreen_1.json as PC records, while the TOUCH PC UI is up): tap = left click (double tap = a PC double click, %d ms), "
             "still %d ms = tooltip (hover, no click), %d ms = right click (ContextMenu); one / two-finger pan = keys w / a / s / d (%d ms per screen height%s), "
-            "two-finger rotation = keys delete / end (%d ms per radian%s), pinch = wheel; 2f tap = lalt (ShowWorldTooltips, %s), 3f tap = lshift (ShowSneakCones, %s), "
+            "two-finger rotation = keys delete / end (%d ms per radian%s), pinch = keys pageup / pagedown (DM_DOS2_TOUCH_T_PINCH_WHEEL=1: the wheel); 2f tap = lalt (ShowWorldTooltips, %s), 3f tap = lshift (ShowSneakCones, %s), "
             "3f swipe down / up = key o (ToggleTacticalCamera); world gestures %s", g_t_cfg ? "" : " OFF (DM_DOS2_TOUCH_T=0)", g_t_dtap_ms, g_t_slong_ms, g_t_long_ms, g_t_pan_ms,
             g_t_pan_inv ? ", inverted" : "", g_t_rot_ms, g_rot_swap ? ", swapped" : "", g_t_tips_ms ? "held for a time" : "toggled", g_t_cones_ms ? "held for a time" : "toggled",
             g_w3 ? "on (DM_DOS2_TOUCH_WORLD=3 hooks)" : "OFF: the world hooks (DM_DOS2_TOUCH_WORLD=3) are off - a TOUCH finger is the plain PC mouse");
@@ -2012,7 +2140,7 @@ void dm_dos2_touch_install(void) {
         if (ui_start == UI_TOUCH) {
             // owner 20.11: no live rebuilds in TOUCH (they broke the UI on the phone; the mode changes with a restart): a pad press does not
             // switch to the controller UI; DM_DOS2_TOUCH_T_PADSWITCH=1 = the pad's way back as before
-            { const char *ps = getenv("DM_DOS2_TOUCH_T_PADSWITCH"); g_live_ui = g_on && g_live_ok && ps && atoi(ps) > 0; }
+            g_live_ui = g_on && g_live_ok && dt_t_padswitch();
             LOG("[touch] UI mode touch at start: the PC UI from the start (as DM_DOS2_TOUCH_PCUI=1)%s", g_live_ui
                 ? "; a pad press brings the controller UI back, a touch the PC UI again (DM_DOS2_TOUCH_LIVE=1's switch)" : " - no live pad switch (owner 20.11: the mode changes with a restart; DM_DOS2_TOUCH_T_PADSWITCH=1 brings it back)");
         }

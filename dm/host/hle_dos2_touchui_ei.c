@@ -163,6 +163,10 @@ static void ei_note(int dir, const uint8_t *player, const char *name, unsigned n
 
 // ---- host handlers ----
 static int g_quiet;   // handlers only: no log, no invoke hooks (the default with DM_DOS2_TOUCHUI)
+// DM_DBG=1 with the quiet default (review of run 20.11: "[ei] table (touch HUD up): 0 distinct calls" - the log never said which calls the
+// `_p` movies made on a tap): every movie -> engine call is noted as with DM_DOS2_TOUCHUI_EI=1 (the first of each UI type / name, then at 10, 100 ...),
+// still without the invoke hooks; the periodic table dump stays off (DM_DOS2_TOUCHUI_EI_DUMP_S=<s> turns it on)
+static int g_note;
 enum { EI_MAXH = 96 };
 static struct { char name[44]; dm_ei_fn fn; void *ctx; } g_h[EI_MAXH]; static int g_nh;
 int dm_dos2_touchui_ei_register(const char *name, dm_ei_fn fn, void *ctx) {
@@ -174,6 +178,16 @@ int dm_dos2_touchui_ei_register(const char *name, dm_ei_fn fn, void *ctx) {
     if (k >= 0) { strcpy(g_h[k].name, name); g_h[k].fn = fn; g_h[k].ctx = ctx; }
     pthread_mutex_unlock(&g_lock);
     return k >= 0;
+}
+// hle_dos2_touch_kit.c dmAct (K5): run the host handler of another name as if the movie had called it (the old names are dmAct's aliases);
+// -1 = no handler for that name
+int dm_dos2_touchui_ei_host(const char *name, void *player, void *ui, unsigned n, const dm_ei_val *args);
+int dm_dos2_touchui_ei_host(const char *name, void *player, void *ui, unsigned n, const dm_ei_val *args) {
+    dm_ei_fn h = NULL; void *ctx = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int k = 0; k < g_nh; k++) if (!strcmp(g_h[k].name, name)) { h = g_h[k].fn; ctx = g_h[k].ctx; break; }
+    pthread_mutex_unlock(&g_lock);
+    return h ? h(ctx, player, ui, name, n, args) : -1;
 }
 static int ei_stub(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) { (void)ctx; (void)player; (void)ui; (void)name; (void)n; (void)a; return 1; }
 // ExternalInterface names of the iPad `_t` movies that are not a string of the Switch main at all (TOUCH_UI_PLAN.md 1 / 2.2)
@@ -222,7 +236,7 @@ static uint64_t ei_drain_hook(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3
         for (int k = 0; k < g_nh; k++) if (!strcmp(g_h[k].name, name)) { h = g_h[k].fn; ctx = g_h[k].ctx; break; }
         pthread_mutex_unlock(&g_lock);
         const int taken = h ? h(ctx, fp, ui, name, n, args) : 0;
-        if (!g_quiet) ei_note(0, fp, name, n, args, taken);
+        if (!g_quiet || g_note) ei_note(0, fp, name, n, args, taken);
         if (!taken) { void **vt = *(void ***)ui; ((void (*)(void *, const char *, uint32_t, void *))vt[0])(ui, name, n, args); }
     }
     *(volatile uint64_t *)(fp + FP_RECS_N) &= ~0x0000ffffff000000ull;   // all done: the original only cleans up (count 0 -> its tail main+0xd25e58)
@@ -313,7 +327,12 @@ void dm_dos2_touchui_ei_install(void) {
         done++;
     }
     g_on = done > 0;
-    if (g_quiet) { LOG("[ei] console touch: ExternalInterface drain main+%#x hooked for the host handlers only (%s; DM_DOS2_TOUCHUI_EI=1 = the full log)", EI_DRAIN, done ? "on" : "FAILED"); return; }
+    if (g_quiet) {
+        g_note = (v = getenv("DM_DBG")) && atoi(v) > 0;
+        if (g_note && !getenv("DM_DOS2_TOUCHUI_EI_DUMP_S")) g_dump_s = 0;
+        LOG("[ei] console touch: ExternalInterface drain main+%#x hooked for the host handlers only (%s; DM_DOS2_TOUCHUI_EI=1 = the full log)%s", EI_DRAIN, done ? "on" : "FAILED",
+            g_note ? "; DM_DBG: every movie -> engine call is noted (first per UI type and name, then at 10, 100, ...)" : "");
+        return; }
     LOG("[ei] DM_DOS2_TOUCHUI_EI=%s: %d of 9 hooks: ExternalInterface drain main+%#x (movie -> UIObject::OnFunctionCalled, base main+%#x), Invoke0..6 main+%#x.. and InvokeArgs main+%#x "
         "(engine -> movie); %d host handler(s)%s; table dump after %d s of no new names", e, done, EI_DRAIN, EI_BASE, EI_INV0, EI_INVN, g_nh,
         g_stubs ? " (iPad-only names are taken by a counting stub)" : " (log only)", g_dump_s);

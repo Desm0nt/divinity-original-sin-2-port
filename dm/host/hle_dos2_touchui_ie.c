@@ -65,6 +65,15 @@ static int g_on, g_dbg, g_delay = 2, g_use[IE_NEV] = {1, 1, 1};
 static ie_fn g_reg_orig;
 static struct { int ev, left; } g_pend[8]; static int g_npend;
 static unsigned g_nmovies, g_nsent, g_nreached;
+// the dmTouch kit's input events (hle_dos2_touch_kit.c: DM_DOS2_TOUCH_KIT / DM_DOS2_TOUCH_KIT_M0; docs/dos2/TOUCH_UNIFIED.md K4): names a kit movie
+// lists in `events` ("IE dmTap" ...) get a node with the kit's id; sent to ONE player (dm_dos2_touchui_ie_send_to), never to all. Empty by default.
+enum { IE_XMAX = 12 };
+static const char *g_x_name[IE_XMAX]; static uint32_t g_x_id[IE_XMAX]; static int g_nx;
+void dm_dos2_touchui_ie_extra(const char *const *names, int n, uint32_t id0);   // before the movies load (main.c host_preload order)
+void dm_dos2_touchui_ie_extra(const char *const *names, int n, uint32_t id0) {
+    for (int i = 0; i < n && g_nx < IE_XMAX; i++) { g_x_name[g_nx] = names[i]; g_x_id[g_nx] = id0 + (uint32_t)i; g_nx++; }
+}
+int dm_dos2_touchui_ie_on(void);
 
 static const char *ie_movie(const uint8_t *fp, uint32_t *type, char *buf, size_t n) {
     const uint8_t *ui = *(const uint8_t *const volatile *)(fp + FP_LISTENER);
@@ -109,15 +118,17 @@ static uint64_t ie_reg_hook(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, 
         if (val[8] & 1) { void *q; memcpy(&q, val + 0x10, 8); if (q) ((void (*)(void *))(void *)(g_main->base + IE_FREE_FN))(q); }      // main+0xd26b38
         if (!(r & 1)) break;
         if (ao + 48 < sizeof all) ao += (size_t)snprintf(all + ao, sizeof all - ao, "%s%s", idx ? ", " : "", name[0] ? name + (strncmp(name, "IE ", 3) ? 0 : 3) : "?");
-        for (int e = 0; e < IE_NEV; e++) {
-            if (!g_use[e] || strcmp(name, k_ev[e])) continue;
+        for (int e = 0; e < IE_NEV + g_nx; e++) {   // the iPad's three, then the dmTouch kit's names (dm_dos2_touchui_ie_extra; none by default)
+            const char *want_name = e < IE_NEV ? k_ev[e] : g_x_name[e - IE_NEV];
+            const uint32_t want_id = e < IE_NEV ? IE_ID0 + (uint32_t)e : g_x_id[e - IE_NEV];
+            if ((e < IE_NEV && !g_use[e]) || strcmp(name, want_name)) continue;
             want++;
-            ie_node *nd = ie_find(fp, IE_ID0 + (uint32_t)e);
+            ie_node *nd = ie_find(fp, want_id);
             if (nd) { nd->index = idx; continue; }
             if (!nb || !bk || nb > 0x10000) continue;   // no table (the engine made none): nothing to hang the node on
             nd = ((ie_node *(*)(uint64_t, void *))(void *)(g_main->base + IE_ALLOC))(0x10, NULL);                         // main+0xd26b50..0xd26b84
             if (!nd) continue;
-            nd->id = IE_ID0 + (uint32_t)e; nd->index = idx; nd->next = bk[nd->id % nb]; bk[nd->id % nb] = nd;
+            nd->id = want_id; nd->index = idx; nd->next = bk[nd->id % nb]; bk[nd->id % nb] = nd;
             *(volatile uint32_t *)(fp + FP_EV_N) += 1; added++;
         }
     }
@@ -149,6 +160,20 @@ static void ie_send(int e, int down) {
     g_nsent++; g_nreached += (unsigned)got;
     if (g_dbg) LOG("[ie] %s %s -> %d movie(s):%s", k_ev[e], down ? "down" : "up", got, got ? who : " none (no visible touch movie lists it)");
 }
+// hle_dos2_touch_kit.c (game thread, the pad poll): one input event to ONE movie (the kit's addressed delivery, K4). -1 = the player has no node
+// for that id (its `events` lacks the name), -2 = the hook is off; else the low byte of FlashPlayer::OnInputEvent (1 = the movie's
+// onEventDown / onEventUp ran through the node: main+0xd23458 found it)
+int dm_dos2_touchui_ie_send_to(const void *player, uint32_t id, int down, float value);
+int dm_dos2_touchui_ie_send_to(const void *player, uint32_t id, int down, float value) {
+    if (!g_on) return -2;
+    uint8_t *fp = (uint8_t *)(uintptr_t)player;
+    if (!fp || !ie_find(fp, id)) return -1;
+    uint8_t ev[0x80]; memset(ev, 0, sizeof ev);
+    memcpy(ev, &id, 4); memcpy(ev + 0x18, &value, 4); ev[0x20] = (uint8_t)(down != 0);
+    const uint64_t r = ((uint64_t (*)(void *, void *))(*(void ***)(void *)fp)[0x30 / 8])(fp, ev);
+    return (int)(r & 0xff);
+}
+int dm_dos2_touchui_ie_on(void) { return g_on; }
 // hle_dos2_touch.c: a gesture was recognised (game thread, in the pad poll). kind 0 = tap, 1 = long press
 void dm_dos2_touchui_ie_gesture(int kind);
 void dm_dos2_touchui_ie_gesture(int kind) {

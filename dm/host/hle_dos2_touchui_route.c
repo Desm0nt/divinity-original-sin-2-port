@@ -108,6 +108,10 @@ static uint32_t g_accept_id; static int g_names_done;
 static int g_modal_seen; static uint32_t g_modal_type;
 static uint64_t g_left_ms; static unsigned g_left_seq, g_seen_seq, g_taken_seq; static uint32_t g_taken_type;
 static unsigned g_n_pass, g_n_drop, g_n_modal, g_n_accept;
+// dmTouch kit (hle_dos2_touch_kit.c, DM_DOS2_TOUCH_KIT / DM_DOS2_TOUCH_KIT_M0): all NULL by default - the hook then behaves exactly as before
+static const void *volatile g_kit_obj;   // K2: the UI object of the kit gesture in flight (game thread)
+static int (*g_kit_accept)(const void *obj);   // K7: 1 = drop this UIAccept to obj
+static void (*g_kit_note)(const void *obj, uint32_t type, uint32_t id, int down, int pass1, unsigned ret, unsigned handled);   // M0-3: a non-mouse input event reached obj
 
 static uint64_t rt_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000ull + (uint64_t)t.tv_nsec / 1000000ull; }
 static const struct { const char *name; uint16_t ids[12]; } k_groups[] = {
@@ -194,17 +198,29 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
     // UI mode touch (mode byte main+0x2bb8918 = 0, hle_dos2_uimode.c): the PC movies are up and every one of them has the PC's own mouse code -
     // the engine's own routing stands (no allow list, no modal / accept guard: those are for the console movies); the bookkeeping below stays
     const int pcui = *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0;
-    const int routed = (g_game || !in_game) && !pcui;
+    // run 20.11 review: TOUCH still plays console `_d` menus (the main menu and what it makes by its own type: options, mods, save / load,
+    // message boxes, character creation, tutorial boxes) - an allow-listed type keeps the modal guard, the visibility test and the accept guard
+    // at the mode byte 0 too; only the PC movies (not in the list) stand on the engine's own routing
+    const int listed = type < 256 && g_allow[type];
+    const int routed = (g_game || !in_game) && (!pcui || listed);
+    // dmTouch kit (DM_DOS2_TOUCH_KIT=1, hle_dos2_touch_kit.c; TOUCH_UNIFIED K2): while a kit gesture is in flight the mouse goes to its target
+    // only - the other objects do not see it (0 = not handled, the walk goes on), the target gets it past the allow list and the modal guard
+    // (the kit chose it top-down with the modal rule already). g_kit_obj is NULL unless the kit is on and a kit finger is down.
+    const void *const kit_obj = g_kit_obj;
+    if (kit_obj && mouse && o != (const uint8_t *)kit_obj) { g_n_drop++; return 0; }
     int why = 0;
-    if (mouse && routed) {
+    if (kit_obj && mouse) {}
+    else if (mouse && routed) {
         if (g_modal && g_modal_seen) why = 2;
-        else if (type > 255 || !g_allow[type]) why = 1;
+        else if (!listed) why = 1;
         else if (!(fl & RT_F_VISIBLE) && !g_hidden) why = 3;
-    } else if (!mouse && !pcui && g_accept && g_accept_id && id == g_accept_id) {
+    } else if (!mouse && (!pcui || listed) && g_accept && g_accept_id && id == g_accept_id) {
         const uint64_t now = rt_ms();
         if (now - g_left_ms < (uint64_t)g_accept_ms && now - dm_dos2_touch_a_ms() > 300 && type != 0x48 && type != 0x57 && type != 0x17 &&
             (in_game || (type < 256 && g_allow[type]) || dm_dos2_touchui_is_block(type))) why = 4;
     }
+    // the kit's one accept guard (K7), both modes: UIAccept to the kit target soon after a touch press, not made by the pad's A or a host pulse
+    if (!why && !mouse && g_kit_accept && g_accept_id && id == g_accept_id && g_kit_accept(o)) why = 4;
     if ((fl & RT_F_VISIBLE) && (fl & RT_F_MODAL) && !g_modal_seen) { g_modal_seen = 1; g_modal_type = type; }   // for the objects below this one
     if (mouse || why) rt_say(o, type, fl, why, id);
     if (why) { if (why == 4) g_n_accept++; else if (why == 2) g_n_modal++; else g_n_drop++; return 0; }   // 0 = not handled, the walk goes on
@@ -231,6 +247,7 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
                 down ? "press" : "release", (double)cx, (double)cy, rt_movie(o, mv, sizeof mv), type, hr == DT_HR_IN ? "inside one of its HUD rects" : "no live HUD rects of it: its answer stands"); }
         }
     }
+    if (g_kit_note && !mouse) g_kit_note(o, type, id, down, (int)(pass & 1), (unsigned)(v & 0xff), a5 ? *(const volatile uint16_t *)(uintptr_t)a5 : 0xffff);   // M0-3 trace (kit)
     if (mouse) g_n_pass++;
     if (id == RT_EV_LEFT && down && !(pass & 1)) {   // pass 2 of a left press: [x5] = this object's answer (main+0xaea8d4)
         g_seen_seq = g_left_seq;
@@ -241,6 +258,20 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
     }
     return v;
 }
+// ---- for hle_dos2_touch_kit.c (game thread) ----
+void dm_dos2_route_kit_target(const void *obj);   // K2: the kit gesture's target (NULL = none)
+void dm_dos2_route_kit_target(const void *obj) { g_kit_obj = obj; }
+void dm_dos2_route_kit_hooks(int (*accept)(const void *), void (*note)(const void *, uint32_t, uint32_t, int, int, unsigned, unsigned));
+void dm_dos2_route_kit_hooks(int (*accept)(const void *), void (*note)(const void *, uint32_t, uint32_t, int, int, unsigned, unsigned)) { g_kit_accept = accept; g_kit_note = note; }
+uint32_t dm_dos2_route_event_id(const char *name);   // an input event id by name (0 = unknown / the input manager not up yet)
+uint32_t dm_dos2_route_event_id(const char *name) { return g_main ? rt_event_id(name) : 0; }
+const char *dm_dos2_route_event_name(uint32_t id);
+const char *dm_dos2_route_event_name(uint32_t id) { return g_main ? rt_event_name(id) : "?"; }
+// M0 experiment 2: UIManager's per-object dispatch main+0xaea7b0 itself (the original, past this hook) for one object; x4 = the manager's
+// per-player block (uimgr + 0x158 + player * 0x20, as main+0xae8450), x5 = the handled flag; NULL when the hook is not in (sites differ)
+typedef uint64_t (*dm_route_fn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+dm_route_fn dm_dos2_route_dispatch_orig(void);
+dm_route_fn dm_dos2_route_dispatch_orig(void) { return g_on ? g_orig : NULL; }
 // ---- for hle_dos2_touch.c (game thread) ----
 int dm_dos2_route_on(void);
 int dm_dos2_route_on(void) { return g_on; }
@@ -261,10 +292,19 @@ int dm_dos2_route_world_ok(uint32_t *type) {
     if (!m) return 1;
     const uint8_t *const *objs = *(const uint8_t *const *const volatile *)(m + RT_MGR_OBJS); const uint32_t n = *(const volatile uint32_t *)(m + RT_MGR_NOBJ);
     if (!objs || n > 0x10000) return 1;
+    // UI mode touch (the mode byte 0): the PC windows are menus for the gestures too (review of run 20.11). The lists above are the console's; a
+    // visible PC panel was "no menu", so a finger on it took the world's probe path: taken by the panel = a plain mouse drag (G_DRAG), and that
+    // path has no long press - a long press on an inventory item could never be the right click (ContextMenu) and the PC's item / skill context
+    // menu was out of reach. As a menu the finger is the UI's (hle_dos2_touch.c G_PENDING: tap = click, hold = right click, the short hold =
+    // the hover tooltip, a move = drag), the camera keys let go, and world taps / pans wait until the window is closed (the iPad's windows).
+    // inventory 0x74, character sheet 0x77, skills 0x29, crafting 0x66, journal / map 0x16, examine 0x68, trade 0x2e, waypoints 0x2f, dialog 0xe,
+    // reward 0x88, item splitter 0x15, the PC context menus 0xa / 0xb (containers 9 / 0x25 are in the console's list already): dt_pc_menu_type
+    const int pcui = *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0;
     for (uint32_t i = 0; i < n; i++) {
         const uint8_t *o = objs[i]; if (!o) continue;
         const uint32_t fl = *(const volatile uint32_t *)(o + RT_OBJ_FLAGS), ty = *(const volatile uint32_t *)(o + RT_OBJ_TYPE);
         if (!(fl & RT_F_VISIBLE)) continue;
+        if (pcui && dt_pc_menu_type(ty)) { if (type) *type = ty; return 0; }
         // pack 3h (owner, run t3g: "after a save the controls died"): the pause menu's save left tutorialBox_d (0x5e, non-modal, flags 0x2600a)
         // flagged visible with nothing on screen; as a "menu" it turned the floating sticks off and kept every tap from the world. A non-modal
         // tutorial box is an overlay (its own hold-A prompt has tools/dos2_taps_touch.py taps): the world stays the finger's.
