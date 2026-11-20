@@ -42,6 +42,7 @@ void dm_vkn_exec_register(void) __attribute__((weak));     // hle_dos2_vkn_exec.
 void dm_vkn_draw_register(void) __attribute__((weak));     // hle_dos2_vkn_draw.c: constant / texture flushes, draws
 void dm_vkn_imm_register(void) __attribute__((weak));      // hle_dos2_vkn_imm.c: immediate draws
 void dm_vkn_ui_register(void) __attribute__((weak));       // hle_dos2_vkn_ui.c: the UI entries
+void dm_vkn_cmd_register(void) __attribute__((weak));      // hle_dos2_vkn_cmd.c: the game's NVN table repointed (direct NVN calls left in a frame)
 // ---- the frame tick: once a presented frame. Census every 10 s; `own` = nobody records frames (mode 2, or mode 1 without the
 // frame part): then frames advance here (deferred destruction) and queued uploads are flushed by an own submission. ----
 static vkn_fn g_o_endframe; static uint64_t g_census_t;
@@ -94,6 +95,7 @@ void dm_dos2_vkn_install(void) {
     if (dm_vkn_draw_register) dm_vkn_draw_register();
     if (dm_vkn_imm_register) dm_vkn_imm_register();
     if (dm_vkn_ui_register) dm_vkn_ui_register();
+    if (dm_vkn_cmd_register) dm_vkn_cmd_register();
     int in = 0, want = 0;
     for (int i = 0; i < g_nsite; i++) {
         vkn_site *s = &g_site[i];

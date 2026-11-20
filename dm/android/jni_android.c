@@ -31,7 +31,6 @@
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
-#include <sys/syscall.h>   // [DOS2] PadSurface.nativePinLittle
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -586,7 +585,15 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
         {"DM_NR_TRX_STICKY", "1"}, {"DM_NR_TRX_ZC", "1"}, {"DM_NR_TAPSET", "1"}, {"DM_NR_TEX", "1"}, {"DM_NR_TEXSTREAM", "1"},
         {"DM_NB_POST_AA_OUTLINE", "1"},
     };
-    for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) setenv(k_nb_on[i][0], k_nb_on[i][1], 0);
+    // [DOS2] VK-NATIVE: with DM_VK_NATIVE=1 (launch env or dm/env, both read above) the NB / NR rows are not applied: the presenter's
+    // and the translator's init read some of them before host_preload's dm_dos2_vkn_pre (hle_dos2_vkn_exec.c) forces them to 0. The
+    // other rows (present thread, particles) are no NVN-stream features and stay.
+    const char *vkn = getenv("DM_VK_NATIVE"); const int vk_native = vkn && atoi(vkn) == 1;
+    for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) {
+        if (vk_native && (!strncmp(k_nb_on[i][0], "DM_NB", 5) || !strncmp(k_nb_on[i][0], "DM_NR", 5))) continue;
+        setenv(k_nb_on[i][0], k_nb_on[i][1], 0);
+    }
+    if (vk_native) LOG("boot: DM_VK_NATIVE=1: the NB / NR rows of the app defaults are not applied");
 #endif
 #else
     setenv("DM_GFX_DEFER_EVENTS", "2", 0);
@@ -756,19 +763,6 @@ JNIEXPORT jobject JNICALL Java_com_xiaoboluo_d2r_PadSurface_nativeWrap(JNIEnv *e
     jobject out = ANativeWindow_toSurface(env, w);   // holds its own reference
     ANativeWindow_release(w);
     return out;
-}
-
-// [DOS2] PadSurface's draw thread on the little cores (owner 20.11, Fort Joy: "dm-pad-draw" took 4-6 ms of CPU a frame, 55-66 % of it on the
-// prime core, while the game's threads waited ~21 ms a frame for a core). Pins the CALLING thread to the cpu-place plan's little cluster;
-// returns the mask (0 = no little cluster known: nothing changed). Raw syscall: no _GNU_SOURCE needed for CPU_SET in this C file.
-JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_PadSurface_nativePinLittle(JNIEnv *env, jclass cls) {
-    (void)env; (void)cls;
-    const dm_cpu_plan_t *p = dm_cpu_plan();
-    uint32_t m = p ? p->little : 0;
-    if (!m) return 0;
-    unsigned long mask = m;
-    if (syscall(__NR_sched_setaffinity, 0, sizeof mask, &mask) != 0) return -1;
-    return (jint)m;
 }
 
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeTouch(JNIEnv *env, jclass cls, jint n, jintArray ids, jfloatArray xs, jfloatArray ys) {

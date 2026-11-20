@@ -2935,6 +2935,24 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
 }
+#ifdef DM_GAME_DOS2
+// [DOS2] VK-NATIVE: the frame boundary of DM_VK_NATIVE=1 (dm/host/hle_dos2_vkn_frame.c calls it, weak there, once a presented native
+// frame): what nvnQueuePresentTexture above does for the rest of the port, minus the present (the native backend presents), minus every
+// translator job and wait (no XJ_FRAME push: x_push would start the translation thread and can block on its queue), minus the pacing
+// (the frame part paces itself) and minus the translator / Metal-layer readings (stats rows, long-frame log, timing summary). Kept:
+// the on-screen frame counter (fstat_present: jni nativeFrameStats), the frame interval row (@frame_ms, DM_NVN_TSV only) and
+// dump_frame: g_frame / dm_nvn_frame_count (hle_oe.c dynamic 3D scale, hle_dos2_quality.c, hle_dos2_nr.c windows, diag.c, hle_cpuprof.c
+// rates), the per-frame NVN call counts (in mode 1: the creation-time entries HLE NVN still serves), the deterministic guest clock tick.
+void dm_nvn_vkn_frame(void);
+void dm_nvn_vkn_frame(void) {
+    static uint64_t prev;
+    const uint64_t t = now_ns();
+    if (prev) trow(g_frame, "@frame_ms", (t - prev) / 1e6);
+    prev = t;
+    fstat_present();
+    dump_frame();
+}
+#endif
 
 #ifdef DM_GAME_DOOM
 // ---------- DOOM: NVN entry points the D2R renderer never used ----------
