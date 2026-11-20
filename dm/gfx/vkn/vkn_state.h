@@ -125,7 +125,10 @@ void vkn_fb_forget_view(VkImageView v);
 
 // ---- pipelines. The key is a few small integers packed in three words (vkn_pipe_key_pack). On a miss the caller's sources build
 // it; failures are cached (no rebuild storm) and counted. Dynamic state: viewport and scissor only (one each). Single VkPipelineCache
-// of this piece (no file yet). ----
+// of this piece; with the warm-up on (vkn_warm.h) it is created from vkn-pipeline-cache.bin by the warm-up worker and saved by it.
+// Threads (stage 4): the render thread looks up and builds; the warm-up worker builds into its own table (vkn_warm.c), which a miss
+// asks before building (vkn_warm_take: a pipeline the worker is building right now is waited for, never built twice). No build runs
+// under this piece's table mutex, so a hit never waits for a build. ----
 typedef struct vkn_pipe_key { uint64_t w[3]; } vkn_pipe_key;
 typedef struct vkn_pipe_desc {
     uint32_t shader;                   // the shader piece's small id (1..2^24-1)
@@ -144,6 +147,13 @@ typedef struct vkn_pipe_src {
     VkPipelineLayout layout;
     VkRenderPass pass;                 // VK_NULL_HANDLE = vkn_rp_compat_pass(key's pass)
     uint16_t vs_inputs;                // locations the vertex module reads (0 = unknown: no null-stream fill)
+    // [DOS2] VK-NATIVE stage 4 (pipeline warm-up, vkn_warm.h): what makes a build replayable in a later run without a draw. Zero
+    // (memset) = not given: the build is not listed. shader: the vkn_shader the modules belong to (vkn_shader.h; its stage keys);
+    // retype: the vertex variant's code; alpha_func / alpha_ref: the fragment variant (0 = base module).
+    const void *shader;
+    uint64_t retype;
+    uint32_t alpha_func;
+    float alpha_ref;
 } vkn_pipe_src;
 // VK_NULL_HANDLE: the primitive needs a rewrite (counted), or the build failed (counted, cached), or no device. src may be NULL on
 // a lookup that must not build (returns VK_NULL_HANDLE on a miss).
@@ -163,6 +173,29 @@ typedef struct vkn_state_stats {
     uint64_t hits, misses, failures, rewrites, build_ns;
 } vkn_state_stats;
 void vkn_state_stats_get(vkn_state_stats *s);
+
+// ==== [DOS2] VK-NATIVE stage 4: pipeline warm-up support (callers: vkn_warm.c) ====
+// The VkPipelineCache: created once, from `data` (a vkGetPipelineCacheData blob the caller validated; NULL / 0 = empty). 0 = created
+// by this call, 1 = it existed already (data ignored), -1 = no device / failed. Without the warm-up the first lookup creates it empty.
+int vkn_pipe_cache_init(const void *data, size_t bytes);
+VkPipelineCache vkn_pipe_cache_get(void);          // VK_NULL_HANDLE until created
+uint64_t vkn_pipe_compiles(void);                  // builds of >= 2 ms so far (render thread + worker): real compiles, the cache grew
+// A build outside the table (the warm-up worker; any thread). VK_NULL_HANDLE: the primitive needs a rewrite / no device / failed.
+// *ns (non-NULL) gets the build time. Counted as a worker build, not as a miss.
+VkPipeline vkn_pipe_build(const vkn_pipe_desc *d, const vkn_pipe_src *src, uint64_t *ns);
+uint32_t vkn_pipe_forget_gen(void);                // + 1 at every vkn_pipe_forget_shader (a build that saw it change may be stale)
+// Engine argument tuples behind a content id (what the state was created with, normalised: re-putting them gives the same id).
+// blend: src_rgb, dst_rgb, src_a, dst_a, alpha_op, flags; ds: the 8 arguments of vkn_ds_put; raster: the 5 of vkn_raster_put. 0 = ok.
+int vkn_blend_args(uint16_t id, uint8_t out[6]);
+int vkn_ds_args(uint16_t id, uint8_t out[8]);
+int vkn_raster_args(uint16_t id, uint8_t out[5]);
+const uint8_t *vkn_vfmt_elems(uint16_t id, uint32_t *count);   // the 6-byte engine elements (immutable), NULL = no such id
+// Render pass compatibility class: its content (VkFormats per colour slot, colour slot count, depth VkFormat, samples), and the class
+// of a content (an existing one, else made through a pass with LOAD / STORE ops). 0 = ok / 0 = failure.
+int vkn_rp_compat_info(uint16_t compat, uint32_t color[8], uint8_t *ncolor, uint32_t *depth, uint8_t *samples);
+uint16_t vkn_rp_compat_make(const uint32_t color[8], uint8_t ncolor, uint32_t depth, uint8_t samples);
+typedef struct vkn_state_wstats { uint64_t warm_hits, warm_builds, warm_build_ns, stale_builds, compiles; } vkn_state_wstats;
+void vkn_state_wstats_get(vkn_state_wstats *s);
 
 #ifdef __cplusplus
 }

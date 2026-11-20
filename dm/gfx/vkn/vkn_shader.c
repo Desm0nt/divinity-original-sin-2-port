@@ -432,4 +432,35 @@ void vkn_shader_census(void) {
                       (unsigned long long)(s.bind_kind[VKN_BK_OTHER] + s.bind_kind[0]));
     if (s.stage_mismatch || s.ubo_no_block) vkn_logf(RED "shaders: %llu stages whose bundle is of another stage, %llu uniform bindings without an engine block", (unsigned long long)s.stage_mismatch, (unsigned long long)s.ubo_no_block);
 }
+// ==== [DOS2] VK-NATIVE stage 4 (pipeline warm-up, vkn_warm.c): lookups the replay of the pipeline list needs ====
+uint32_t vkn_shader_each(int (*fn)(const vkn_shader *s, void *ctx), void *ctx) {
+    uint32_t n = 0;
+    if (!fn) return 0;
+    pthread_mutex_lock(&g_mu);
+    if (g_tab_ok > 0)
+        for (uint32_t i = 0; i < g_tab.n; i++) {
+            if (!g_tab.handle[i]) continue;
+            sh_rec **p = (sh_rec **)vkn_tab_at(&g_tab, i);
+            if (!p || !*p) continue;
+            n++;
+            if (fn(&(*p)->pub, ctx)) break;
+        }
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+typedef struct { const char *vs, *fs; const vkn_shader *hit; } keys_q;
+static int keys_match(const vkn_shader *s, void *ctx) {
+    keys_q *q = (keys_q *)ctx;
+    if (strcmp(s->key[VKN_SRC_VS], q->vs) || strcmp(s->key[VKN_SRC_FS], q->fs)) return 0;
+    q->hit = s; return 1;
+}
+const vkn_shader *vkn_shader_find_keys(const char *vs_key, const char *fs_key) {
+    keys_q q = {vs_key ? vs_key : "", fs_key ? fs_key : "", NULL};
+    vkn_shader_each(keys_match, &q);
+    return q.hit;
+}
+uint64_t vkn_shader_epoch(void) {
+    pthread_mutex_lock(&g_mu); const uint64_t e = g_st.created + g_st.replaced; pthread_mutex_unlock(&g_mu);
+    return e;
+}
 #endif

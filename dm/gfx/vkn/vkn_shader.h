@@ -104,6 +104,14 @@ typedef struct vkn_shader_stats {
 void vkn_shader_stats_get(vkn_shader_stats *out);
 void vkn_shader_census(void);   // one line (and red lines for what is wrong), through vkn_logf
 
+// ==== [DOS2] VK-NATIVE stage 4 (pipeline warm-up, vkn_warm.c): lookups the replay of the pipeline list needs ====
+// fn(record, ctx) for every live record, under this module's mutex (fn must be quick and must not call into this module); a non-zero
+// return stops the walk. Returns the records visited. A record pointer stays valid at least 3 frames after its destroy (vkn_retire).
+uint32_t vkn_shader_each(int (*fn)(const vkn_shader *s, void *ctx), void *ctx);
+// The live record whose vertex / fragment program keys are these ("" = no such stage), NULL = none (a walk of the table).
+const vkn_shader *vkn_shader_find_keys(const char *vs_key, const char *fs_key);
+uint64_t vkn_shader_epoch(void);   // + 1 for every record that entered the table (a new shader may be there)
+
 #ifdef __cplusplus
 }
 #endif

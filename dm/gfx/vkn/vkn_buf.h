@@ -73,6 +73,18 @@ typedef struct vkn_buf_stats {
 void vkn_buf_stats_get(vkn_buf_stats *s);
 void vkn_buf_count_copy(unsigned kind, uint64_t bytes, int ok);   // the hooks count every staged copy here (kind > 2 counted as 2)
 
+// ==== [DOS2] VK-NATIVE stage 4: the engine's staged updates (0x9218c0) without GPU hazards ====
+// vkn_buf_get / vkn_buf_lookup mark the buffer "used in frame vkn_frame()" (the draw paths bind what they return). An update of `size`
+// bytes at dst_off from src: when no recording of the last 3 frames can read the block (never handed out, or handed out >= 3 presented
+// frames ago) the bytes are copied in place; otherwise the buffer is RENAMED - a new block (every old byte outside the update copied,
+// then the update), the old block retired (vkn_retire_block): draws recorded before keep the old block, later ones get the new one,
+// the order NVN's copy in the command buffer gives. *cpu / *va (non-NULL) receive the new block's CPU pointer / pseudo address on a
+// rename (the caller writes them into the engine record, +0x10 / +8). 0 = in place, 1 = renamed, -1 = not ours / no block, -2 = out
+// of range (nothing copied), -3 = no memory for a new block (copied in place: the old hazard, counted).
+int vkn_buf_update(int kind, uint64_t handle, uint64_t dst_off, const void *src, uint64_t size, void **cpu, uint64_t *va);
+typedef struct vkn_buf_ustats { uint64_t inplace, renamed, rename_fail, bytes, rest_bytes; } vkn_buf_ustats;
+void vkn_buf_ustats_get(vkn_buf_ustats *s);
+
 #ifdef __cplusplus
 }
 #endif

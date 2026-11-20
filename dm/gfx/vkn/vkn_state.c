@@ -530,10 +530,21 @@ void vkn_fb_forget_view(VkImageView v) {
 
 // ================================================================ pipelines ====================================================
 
+// The warm-up module (vkn_warm.c; weak: absent in host tests that do not link it). take: a pipeline the worker built for this
+// key's content (waits while the worker builds it), 1 = *out filled, ownership passes to this table. note: the render thread built
+// one (listed for the next run). forget: a shader id died. owns_cache: the worker creates the VkPipelineCache (from its file).
+extern int vkn_warm_take(const vkn_pipe_key *k, const vkn_pipe_src *src, VkPipeline *out) __attribute__((weak));
+extern void vkn_warm_note(const vkn_pipe_desc *d, const vkn_pipe_src *src) __attribute__((weak));
+extern void vkn_warm_forget(uint32_t shader) __attribute__((weak));
+extern int vkn_warm_owns_cache(void) __attribute__((weak));
+
 static pthread_mutex_t g_pipe_mu = PTHREAD_MUTEX_INITIALIZER;
-static otab g_pipe_tab; static int g_pipe_ok; static VkPipelineCache g_pcache;
+static otab g_pipe_tab; static int g_pipe_ok; static VkPipelineCache g_pcache;   // g_pcache: atomic (set once by vkn_pipe_cache_init)
 static uint64_t g_hits, g_misses, g_fails, g_rewrites, g_build_ns; static uint32_t g_ncompute;
+static uint64_t g_warm_hits, g_stale;                                            // under g_pipe_mu
+static uint64_t g_wbuilds, g_wbuild_ns, g_compiles; static uint32_t g_forget_gen;  // atomics
 static const uint64_t k_compute_w2 = ~0ull;   // w[2] of a compute key (a graphics key has its upper 24 bits zero)
+enum { COMPILE_NS = 2000000 };                // a build under 2 ms came from the driver's cache (the translator's rule, xbg_game.cpp)
 
 // w0: shader (24) | vs variant (8) << 24 | fs variant (8) << 32 | vertex format (16) << 40 | primitive (8) << 56
 // w1: blend (16) | depth-stencil (16) << 16 | raster (16) << 32 | pass compatibility (16) << 48
@@ -559,27 +570,56 @@ void vkn_pipe_key_unpack(const vkn_pipe_key *k, vkn_pipe_desc *d) {
     for (uint32_t i = 0; i < 8; i++) d->write_mask[i] = (uint8_t)((k->w[2] >> (4 * i)) & 0xf);
     d->stencil_ref = (uint8_t)(k->w[2] >> 32);
 }
+VkPipelineCache vkn_pipe_cache_get(void) { return __atomic_load_n(&g_pcache, __ATOMIC_ACQUIRE); }
+static pthread_mutex_t g_pcache_mu = PTHREAD_MUTEX_INITIALIZER;   // serialises the one creation of the cache
+int vkn_pipe_cache_init(const void *data, size_t bytes) {
+    if (vkn_pipe_cache_get()) return 1;
+    const vkn_dev *d = vkn_device();
+    if (!d) return -1;
+    // Under its own mutex, not the table's: a seeded cache of ~20 MB takes a while and lookups must not wait for it. Only the
+    // warm-up worker creates it while the warm-up is on (pipe_ready then leaves it), so nobody waits here in practice.
+    int rc = 1;
+    pthread_mutex_lock(&g_pcache_mu);
+    if (!vkn_pipe_cache_get()) {
+        VkPipelineCacheCreateInfo ci; memset(&ci, 0, sizeof ci); ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+        ci.initialDataSize = data ? bytes : 0; ci.pInitialData = data && bytes ? data : NULL;
+        VkPipelineCache c = VK_NULL_HANDLE;
+        VkResult r = vkCreatePipelineCache(d->dev, &ci, NULL, &c);
+        if (r != VK_SUCCESS && ci.initialDataSize) {
+            vkn_logf(VKN_RED "pipelines: vkCreatePipelineCache %d with %zu bytes of saved data: starting empty", (int)r, bytes);
+            ci.initialDataSize = 0; ci.pInitialData = NULL;
+            r = vkCreatePipelineCache(d->dev, &ci, NULL, &c);
+        }
+        if (r == VK_SUCCESS) { __atomic_store_n(&g_pcache, c, __ATOMIC_RELEASE); rc = 0; } else rc = -1;
+    }
+    pthread_mutex_unlock(&g_pcache_mu);
+    return rc;
+}
 static int pipe_ready(void) {   // under g_pipe_mu
     if (g_pipe_ok) return g_pipe_ok > 0;
     const vkn_dev *d = vkn_device();
     if (!d) return 0;   // try again later
     g_pipe_ok = ot_init(&g_pipe_tab, 1024, sizeof(vkn_pipe_key)) ? -1 : 1;
     if (g_pipe_ok > 0) {
-        VkPipelineCacheCreateInfo ci; memset(&ci, 0, sizeof ci); ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-        if (vkCreatePipelineCache(d->dev, &ci, NULL, &g_pcache) != VK_SUCCESS) g_pcache = VK_NULL_HANDLE;   // builds still work without
+        // With the warm-up the worker creates the cache from its file; builds before that go without one (they still work).
+        if (!(vkn_warm_owns_cache && vkn_warm_owns_cache())) vkn_pipe_cache_init(NULL, 0);
     } else vkn_logf(VKN_RED "pipelines: cache table: out of memory");
     return g_pipe_ok > 0;
 }
 // Colour formats the device cannot blend (integer formats; some float ones on some GPUs): blending off there, as NVN ignores it.
-static int fmt_blendable(VkFormat f) {   // under g_pipe_mu
+static pthread_mutex_t g_blendable_mu = PTHREAD_MUTEX_INITIALIZER;   // builds run on the render thread and the warm-up worker
+static int fmt_blendable(VkFormat f) {
     static struct { VkFormat f; uint8_t ok; } cache[64]; static uint32_t n;
-    for (uint32_t i = 0; i < n; i++) if (cache[i].f == f) return cache[i].ok;
+    pthread_mutex_lock(&g_blendable_mu);
+    for (uint32_t i = 0; i < n; i++) if (cache[i].f == f) { const int ok = cache[i].ok; pthread_mutex_unlock(&g_blendable_mu); return ok; }
     const vkn_dev *d = vkn_device(); VkFormatProperties p; memset(&p, 0, sizeof p);
     if (d) vkGetPhysicalDeviceFormatProperties(d->phys, f, &p);
     const uint8_t ok = (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
     if (n < 64) { cache[n].f = f; cache[n].ok = ok; n++; }
+    pthread_mutex_unlock(&g_blendable_mu);
     return ok;
 }
+// Thread safe (no table access): every input is immutable content (state ids, compatibility classes) or the caller's.
 static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, const vkn_pipe_src *src) {
     const vkn_dev *dv = vkn_device(); const compat_e *c = compat_get(k->pass);
     if (!dv || !c || !src->vs || !src->layout) return VK_NULL_HANDLE;
@@ -614,7 +654,7 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     if (r0) rs = *r0;
     pthread_mutex_unlock(&g_st_mu);
     if (rs.polygonMode != VK_POLYGON_MODE_FILL && !dv->feat.fillModeNonSolid) {
-        static int noted; if (!noted++) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
+        static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
         rs.polygonMode = VK_POLYGON_MODE_FILL;
     }
     VkPipelineMultisampleStateCreateInfo ms; memset(&ms, 0, sizeof ms);
@@ -646,39 +686,72 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     ci.pRasterizationState = &rs; ci.pMultisampleState = &ms; ci.pDepthStencilState = c->k.depth ? &ds : NULL; ci.pColorBlendState = &cbs;
     ci.pDynamicState = &dy; ci.layout = src->layout; ci.renderPass = src->pass ? src->pass : c->pass; ci.subpass = 0; ci.basePipelineIndex = -1;
     VkPipeline p = VK_NULL_HANDLE;
-    const VkResult r = vkCreateGraphicsPipelines(dv->dev, g_pcache, 1, &ci, NULL, &p);
+    // The default VkPipelineCache is internally synchronised (created without EXTERNALLY_SYNCHRONIZED): both builders share it.
+    const VkResult r = vkCreateGraphicsPipelines(dv->dev, vkn_pipe_cache_get(), 1, &ci, NULL, &p);
     if (r != VK_SUCCESS) {
         static int noted;
-        if (noted++ < 16) vkn_logf(VKN_RED "pipelines: vkCreateGraphicsPipelines %d (shader %u vs %u fs %u, blend %u ds %u raster %u vfmt %u, prim %u, pass %u)", (int)r,
-                                   k->shader, k->vs_variant, k->fs_variant, k->blend, k->ds, k->raster, k->vfmt, k->prim, k->pass);
+        if (__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED) < 16)
+            vkn_logf(VKN_RED "pipelines: vkCreateGraphicsPipelines %d (shader %u vs %u fs %u, blend %u ds %u raster %u vfmt %u, prim %u, pass %u)", (int)r,
+                     k->shader, k->vs_variant, k->fs_variant, k->blend, k->ds, k->raster, k->vfmt, k->prim, k->pass);
         return VK_NULL_HANDLE;
     }
     __atomic_add_fetch(&g_bias_pipes, 1, __ATOMIC_RELAXED);
     return p;
 }
+static void pipe_destroy(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroyPipeline(d->dev, (VkPipeline)ctx, NULL); }
+// Render thread. The table mutex is held only for the find and the insert: a build (or the wait for the warm-up worker's build of
+// the same content) runs outside it, so vkn_pipe_forget_shader (shader threads) never waits for a build and there is no lock order
+// between this mutex and the worker's.
 VkPipeline vkn_pipe_get(const vkn_pipe_key *k, const vkn_pipe_src *src) {
-    VkPipeline p = VK_NULL_HANDLE;
+    VkPipeline p = VK_NULL_HANDLE; int found = 0;
     pthread_mutex_lock(&g_pipe_mu);
-    if (pipe_ready()) {
-        const ot_hdr *h = ot_find(&g_pipe_tab, k);
-        if (h) { g_hits++; p = (VkPipeline)(uintptr_t)h->val; }
-        else if (src) {
-            vkn_pipe_desc d; vkn_pipe_key_unpack(k, &d);
-            VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-            if (vkn_prim_topology(d.prim, &topo)) g_rewrites++;   // the draw path rewrites the indices and asks again
-            else {
-                g_misses++;
-                const uint64_t t0 = vkn_now_ns();
-                p = pipe_build(&d, topo, src);
-                g_build_ns += vkn_now_ns() - t0;
-                if (!p) g_fails++;
-                if (!ot_insert(&g_pipe_tab, k, (uint64_t)(uintptr_t)p)) vkn_logf(VKN_RED "pipelines: cache table: out of memory");   // a failure is cached too
-            }
-        }
-    }
+    const int ok = pipe_ready();
+    if (ok) { const ot_hdr *h = ot_find(&g_pipe_tab, k); if (h) { g_hits++; p = (VkPipeline)(uintptr_t)h->val; found = 1; } }
+    const uint32_t gen = __atomic_load_n(&g_forget_gen, __ATOMIC_ACQUIRE);
     pthread_mutex_unlock(&g_pipe_mu);
+    if (found || !ok || !src) return p;
+    vkn_pipe_desc d; vkn_pipe_key_unpack(k, &d);
+    VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    if (vkn_prim_topology(d.prim, &topo)) { pthread_mutex_lock(&g_pipe_mu); g_rewrites++; pthread_mutex_unlock(&g_pipe_mu); return VK_NULL_HANDLE; }   // the draw path rewrites the indices and asks again
+    int warm = 0; uint64_t ns = 0;
+    if (vkn_warm_take && vkn_warm_take(k, src, &p) && p) warm = 1;   // built by the warm-up worker (this content, these modules)
+    else {
+        p = VK_NULL_HANDLE;
+        const uint64_t t0 = vkn_now_ns();
+        p = pipe_build(&d, topo, src);
+        ns = vkn_now_ns() - t0;
+        if (p && ns >= COMPILE_NS) __atomic_add_fetch(&g_compiles, 1, __ATOMIC_RELAXED);
+    }
+    int keep = 1;
+    pthread_mutex_lock(&g_pipe_mu);
+    if (warm) g_warm_hits++;
+    else { g_misses++; g_build_ns += ns; if (!p) g_fails++; }
+    const ot_hdr *h = ot_find(&g_pipe_tab, k);   // only this thread inserts graphics keys; checked anyway
+    if (h) { if (p) vkn_retire(pipe_destroy, (void *)(uintptr_t)p); p = (VkPipeline)(uintptr_t)h->val; keep = 0; }
+    else if (__atomic_load_n(&g_forget_gen, __ATOMIC_ACQUIRE) != gen) {
+        // A shader died while this was built: if it was this one, its id may be reused - never cache that. The pipeline still
+        // serves this draw (the modules live 3 more frames, so does a retired pipeline).
+        g_stale++; keep = 0;
+        if (p) vkn_retire(pipe_destroy, (void *)(uintptr_t)p);
+    } else if (!ot_insert(&g_pipe_tab, k, (uint64_t)(uintptr_t)p)) vkn_logf(VKN_RED "pipelines: cache table: out of memory");   // a failure is cached too
+    pthread_mutex_unlock(&g_pipe_mu);
+    if (keep && !warm && p && vkn_warm_note) vkn_warm_note(&d, src);   // listed for the next run (only queued on this thread)
     return p;
 }
+VkPipeline vkn_pipe_build(const vkn_pipe_desc *d, const vkn_pipe_src *src, uint64_t *ns) {
+    if (ns) *ns = 0;
+    VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    if (!d || !src || vkn_prim_topology(d->prim, &topo) || !vkn_device()) return VK_NULL_HANDLE;
+    const uint64_t t0 = vkn_now_ns();
+    const VkPipeline p = pipe_build(d, topo, src);
+    const uint64_t dt = vkn_now_ns() - t0;
+    __atomic_add_fetch(&g_wbuilds, 1, __ATOMIC_RELAXED); __atomic_add_fetch(&g_wbuild_ns, dt, __ATOMIC_RELAXED);
+    if (p && dt >= COMPILE_NS) __atomic_add_fetch(&g_compiles, 1, __ATOMIC_RELAXED);
+    if (ns) *ns = dt;
+    return p;
+}
+uint64_t vkn_pipe_compiles(void) { return __atomic_load_n(&g_compiles, __ATOMIC_RELAXED); }
+uint32_t vkn_pipe_forget_gen(void) { return __atomic_load_n(&g_forget_gen, __ATOMIC_ACQUIRE); }
 VkPipeline vkn_pipe_compute(uint32_t shader, VkShaderModule module, VkPipelineLayout layout) {
     const vkn_pipe_key k = {{shader, 0, k_compute_w2}};
     VkPipeline p = VK_NULL_HANDLE;
@@ -686,13 +759,13 @@ VkPipeline vkn_pipe_compute(uint32_t shader, VkShaderModule module, VkPipelineLa
     if (pipe_ready()) {
         const ot_hdr *h = ot_find(&g_pipe_tab, &k);
         if (h) { g_hits++; p = (VkPipeline)(uintptr_t)h->val; }
-        else if (module && layout) {
+        else if (module && layout) {   // compute pipelines are few (5 bundles): built under the mutex, never listed
             g_misses++;
             const uint64_t t0 = vkn_now_ns();
             VkComputePipelineCreateInfo ci; memset(&ci, 0, sizeof ci);
             ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; ci.layout = layout; ci.basePipelineIndex = -1;
             ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = module; ci.stage.pName = "main";
-            const VkResult r = vkCreateComputePipelines(vkn_device()->dev, g_pcache, 1, &ci, NULL, &p);
+            const VkResult r = vkCreateComputePipelines(vkn_device()->dev, vkn_pipe_cache_get(), 1, &ci, NULL, &p);
             g_build_ns += vkn_now_ns() - t0;
             if (r != VK_SUCCESS) { p = VK_NULL_HANDLE; g_fails++; static int noted; if (noted++ < 8) vkn_logf(VKN_RED "pipelines: vkCreateComputePipelines %d (shader %u)", (int)r, shader); }
             if (ot_insert(&g_pipe_tab, &k, (uint64_t)(uintptr_t)p)) g_ncompute++;
@@ -701,9 +774,9 @@ VkPipeline vkn_pipe_compute(uint32_t shader, VkShaderModule module, VkPipelineLa
     pthread_mutex_unlock(&g_pipe_mu);
     return p;
 }
-static void pipe_destroy(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroyPipeline(d->dev, (VkPipeline)ctx, NULL); }
 void vkn_pipe_forget_shader(uint32_t shader) {
     pthread_mutex_lock(&g_pipe_mu);
+    __atomic_add_fetch(&g_forget_gen, 1, __ATOMIC_ACQ_REL);
     if (g_pipe_ok > 0)
         for (uint32_t i = 0; i < g_pipe_tab.cap; i++) {
             ot_hdr *h = ot_at(&g_pipe_tab, i);
@@ -716,6 +789,62 @@ void vkn_pipe_forget_shader(uint32_t shader) {
             ot_remove(&g_pipe_tab, h);
         }
     pthread_mutex_unlock(&g_pipe_mu);
+    if (vkn_warm_forget) vkn_warm_forget(shader);   // the worker's pipelines of this id (outside this mutex: no lock order)
+}
+
+// ---- stage 4: what the warm-up lists (engine argument tuples behind the content ids, compatibility classes) ----
+// Inverse of stencil_op (VkStencilOp -> the engine's 0..7).
+static uint8_t stencil_op_engine(uint8_t vk) { static const uint8_t t[8] = {0, 1, 2, 6, 7, 3, 4, 5}; return vk < 8 ? t[vk] : 0; }
+int vkn_blend_args(uint16_t id, uint8_t out[6]) {
+    if (!id || id > __atomic_load_n(&g_nblend, __ATOMIC_ACQUIRE)) return -1;
+    memcpy(out, g_blend[id - 1].args, 6);   // src_rgb, dst_rgb, src_a, dst_a, alpha_op, separate bit (= the flags argument)
+    return 0;
+}
+int vkn_ds_args(uint16_t id, uint8_t out[8]) {
+    if (!id || id > __atomic_load_n(&g_nds, __ATOMIC_ACQUIRE)) return -1;
+    const uint8_t *a = g_ds[id - 1].args;   // compare ops are stored as the engine's values (0..7 identity), stencil ops as VkStencilOp
+    out[0] = a[0]; out[1] = a[1]; out[2] = a[2]; out[3] = a[3]; out[4] = a[4]; out[5] = a[5]; out[6] = stencil_op_engine(a[6]); out[7] = stencil_op_engine(a[7]);
+    return 0;
+}
+int vkn_raster_args(uint16_t id, uint8_t out[5]) {
+    if (!id || id > __atomic_load_n(&g_nraster, __ATOMIC_ACQUIRE)) return -1;
+    memcpy(out, g_raster[id - 1].args, 5);   // normalised cull / fill / flags / polygon offset: vkn_raster_put maps them to themselves
+    return 0;
+}
+const uint8_t *vkn_vfmt_elems(uint16_t id, uint32_t *count) {
+    if (!id || id > __atomic_load_n(&g_nvfmt, __ATOMIC_ACQUIRE)) return NULL;
+    if (count) *count = g_vfmt[id - 1].count;
+    static const uint8_t none[6];
+    return g_vfmt[id - 1].el ? g_vfmt[id - 1].el : none;
+}
+int vkn_rp_compat_info(uint16_t compat, uint32_t color[8], uint8_t *ncolor, uint32_t *depth, uint8_t *samples) {
+    const compat_e *c = compat_get(compat);
+    if (!c) return -1;
+    if (color) memcpy(color, c->k.color, sizeof c->k.color);
+    if (ncolor) *ncolor = c->k.ncolor;
+    if (depth) *depth = c->k.depth;
+    if (samples) *samples = c->k.samples;
+    return 0;
+}
+uint16_t vkn_rp_compat_make(const uint32_t color[8], uint8_t ncolor, uint32_t depth, uint8_t samples) {
+    compat_k ck; memset(&ck, 0, sizeof ck);
+    if (ncolor > 8) return 0;
+    for (uint32_t i = 0; i < ncolor; i++) ck.color[i] = color[i];
+    ck.depth = depth; ck.ncolor = ncolor; ck.samples = samples ? samples : VK_SAMPLE_COUNT_1_BIT;
+    const uint32_t n = __atomic_load_n(&g_ncompat, __ATOMIC_ACQUIRE);
+    for (uint32_t i = 0; i < n; i++) if (!memcmp(&g_compat[i].k, &ck, sizeof ck)) return (uint16_t)(i + 1);
+    vkn_rp_key k; vkn_rp_key_init(&k);
+    for (uint32_t i = 0; i < ncolor; i++) { k.color[i] = color[i]; k.load[i] = VK_ATTACHMENT_LOAD_OP_LOAD; k.store[i] = VK_ATTACHMENT_STORE_OP_STORE; }
+    k.ncolor = ncolor; k.depth = depth; k.samples = ck.samples;
+    k.depth_load = k.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD; k.depth_store = k.stencil_store = VK_ATTACHMENT_STORE_OP_STORE;
+    uint16_t cid = 0;
+    return vkn_rp_get(&k, NULL, &cid) ? cid : 0;
+}
+void vkn_state_wstats_get(vkn_state_wstats *s) {
+    memset(s, 0, sizeof *s);
+    pthread_mutex_lock(&g_pipe_mu); s->warm_hits = g_warm_hits; s->stale_builds = g_stale; pthread_mutex_unlock(&g_pipe_mu);
+    s->warm_builds = __atomic_load_n(&g_wbuilds, __ATOMIC_RELAXED); s->warm_build_ns = __atomic_load_n(&g_wbuild_ns, __ATOMIC_RELAXED);
+    s->compiles = __atomic_load_n(&g_compiles, __ATOMIC_RELAXED);
 }
 
 // ================================================================ census =======================================================

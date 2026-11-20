@@ -28,7 +28,8 @@
 //                   use). So the pending tables r+0xf40 / r+0x1000 stay empty and 0x91ad20 stays the original: its VB / IB loops find
 //                   nothing, its shader / r+0xe80 / third-kind loops are untouched. A record that is not ours (created before the
 //                   hooks or by a failed install) goes to the original destroy.
-//                   0x9218c0 (staged copy) becomes a memcpy into the native block at the same point of the frame.
+//                   0x9218c0 (staged copy): vkn_buf_update at the same point of the frame (in place, or the buffer renamed when a
+//                   recording may still read it - see the hook).
 //   DM_NR hooks on the same four functions (hle_dos2_nr.c) are chained under these: in mode 1 they no longer see VB / IB events.
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -159,9 +160,20 @@ VKN_HOOK vb_h_dib(VKN_A) {   // 0x91d890 DestroyIndexBuffer(r, handle)
 }
 
 // ---- staged copy ----
-// 0x9218c0 CopyStagedBufferData(r, desc): callers 0x93d9f0 (start of the window's frame: every queued update), packet 0x30 in 0x93e5f0
-// and 0x941490 (one update, only while r+0x18c0 "frame recording" is set). Original: two temporary NVNbuffers over (target A.pool,
-// A.offset + desc+0xc) and (desc+0x20 pool, desc+0x18), CopyBufferToBuffer of desc+0x28 bytes in the current command buffer.
+// 0x9218c0 CopyStagedBufferData(r, desc): callers 0x93d9f0 (start of the window's frame: every queued update), packet 0x30 in 0x93e5f0,
+// 0x921dc0 (packet 0x32 / 0x9414e0), 0x941490, and nine engine functions that lock / fill / unlock a dynamic buffer inline (0xaab5e0
+// 0xc69520 0xc7d430 0xc9d5c0 0xd55120 0x10e2900 0x12b03b0 0x12dbd50 0x1406ed0: list recording -> packet 0x2e with the data in the
+// packet, then packet 0x30; immediate -> the data straight into the staged ring r+0x1870, then 0x9218c0 at once when r+0x18c0 "frame
+// recording" is set, else left for BeginRender). Original: two temporary NVNbuffers over (target A.pool, A.offset + desc+0xc) and
+// (desc+0x20 pool, desc+0x18), CopyBufferToBuffer of desc+0x28 bytes in the current command buffer - ordered with the draws around it.
+// So a lock / unlock pair between draws of the same frame (packet 0x2e then 0x30, inside one executed list) is the normal case, and
+// draws recorded before it must keep the old bytes. Mode 1: vkn_buf_update - in place when no recording of the last 3 frames can read
+// the block, else the buffer is renamed (new block, old one retired; the record's +0x10 CPU pointer and +8 pseudo address follow).
+// Kind 2 (the third buffer table r+0x300) is dead in DOS2: no engine function creates such a record (the only NVN buffer initialisers
+// are 0x917630 / 0x9179d0 / 0x9218c0's temporaries / device and context setup 0x938330 / 0x939850 / Iggy 0x1bf1xxx; none fills the
+// r+0x300 table), and every writer of a pending node stores kind 0 (packet 0x2e and the nine inline lockers) or 1 (0x921c60). In mode 1
+// a kind-2 (or unknown) descriptor is dropped and counted, never handed to NVN.
+static uint64_t g_kind2, g_kind_bad;
 VKN_HOOK vb_h_copy(VKN_A) {
     const uint64_t d = a1;
     const unsigned kind = d ? vkn_rd8(d + SC_KIND) : 3;
@@ -169,18 +181,26 @@ VKN_HOOK vb_h_copy(VKN_A) {
     if (vkn_mode() == VKN_NATIVE && kind <= 1) {
         const uint64_t h = vkn_rd64(d + SC_HANDLE);
         const int k = kind == 0 ? VKN_BUF_VB : VKN_BUF_IB;
-        if (!(h & 0x3fffff00000000ull) || !vkn_rec(a0, kind == 0 ? R_VB : R_IB, kind == 0 ? VB_REC : IB_REC, h)) { vkn_buf_count_copy(kind, 0, 1); return 0; }   // the original returns
-        if (vkn_buf_get(k, h)) {
-            // CPU copy at the same point of the frame (the native block is mapped). [guess] good enough while the native frame records
-            // and submits once per frame: see the report - a mid-frame packet 0x30 would want a GPU copy.
-            const int rc = vkn_buf_copy_in(k, h, vkn_rd32(d + SC_DST), (const void *)(uintptr_t)vkn_rd64(d + SC_SRC), size);
-            vkn_buf_count_copy(kind, size, rc == 0);
-            if (rc) vkn_logf(VB_RED "staged copy into %s %#llx: offset %u + %llu bytes outside the buffer or no source: skipped", kind ? "IB" : "VB", (unsigned long long)h, vkn_rd32(d + SC_DST), (unsigned long long)size);
+        const uint64_t rec = (h & 0x3fffff00000000ull) ? vkn_rec(a0, kind == 0 ? R_VB : R_IB, kind == 0 ? VB_REC : IB_REC, h) : 0;
+        if (!rec) { vkn_buf_count_copy(kind, 0, 1); return 0; }   // the original returns
+        void *cpu = NULL; uint64_t va = 0;
+        const int rc = vkn_buf_update(k, h, vkn_rd32(d + SC_DST), (const void *)(uintptr_t)vkn_rd64(d + SC_SRC), size, &cpu, &va);
+        if (rc != -1) {
+            if (rc == 1) { wr64(rec + (kind == 0 ? VB_CPU : IB_CPU), (uint64_t)(uintptr_t)cpu); wr64(rec + (kind == 0 ? VB_VA : IB_VA), va); }
+            vkn_buf_count_copy(kind, size, rc >= 0);
+            if (rc == -2) vkn_logf(VB_RED "staged copy into %s %#llx: offset %u + %llu bytes outside the buffer or no source: skipped", kind ? "IB" : "VB", (unsigned long long)h, vkn_rd32(d + SC_DST), (unsigned long long)size);
+            if (rc == -3) { static int n; if (n++ < 16) vkn_logf(VB_RED "staged copy into %s %#llx: no memory for a new version, copied in place (draws of this frame may see it)", kind ? "IB" : "VB", (unsigned long long)h); }
             return 0;
         }
+    } else if (vkn_mode() == VKN_NATIVE) {
+        const uint64_t n = kind == 2 ? __atomic_add_fetch(&g_kind2, 1, __ATOMIC_RELAXED) : __atomic_add_fetch(&g_kind_bad, 1, __ATOMIC_RELAXED);
+        if (n <= 16) vkn_logf(VB_RED "staged copy of buffer kind %u (handle %#llx, %llu bytes): %s - dropped", kind, d ? (unsigned long long)vkn_rd64(d + SC_HANDLE) : 0ull,
+                              (unsigned long long)size, kind == 2 ? "the third buffer kind was thought dead in DOS2" : "not a kind the engine has");
+        vkn_buf_count_copy(kind, size, 0);
+        return 0;
     }
     vkn_buf_count_copy(kind, size, 1);
-    return g_o_copy(VKN_F);   // mode 2, the third kind, or a buffer that is not ours
+    return g_o_copy(VKN_F);   // mode 2, or a buffer that is not ours
 }
 
 // ---- census ----
@@ -202,10 +222,19 @@ static void vb_census(void) {
              (unsigned long long)s.copies[0], s.copy_bytes[0] / M, (unsigned long long)s.copies[1], s.copy_bytes[1] / M, (unsigned long long)s.copies[2], s.copy_bytes[2] / M,
              (unsigned long long)s.copy_fail, (unsigned long long)s.ring_allocs, s.ring_bytes / M, (unsigned long long)s.ring_wraps, (unsigned long long)s.ring_fail,
              (unsigned long long)__atomic_load_n(&g_bad_handle, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_not_ours, __ATOMIC_RELAXED));
+    if (vkn_mode() == VKN_NATIVE) {
+        vkn_buf_ustats u; vkn_buf_ustats_get(&u);
+        vkn_logf("buffers staged updates: %llu in place, %llu renamed (old block busy; %.2f MB carried over), %llu without memory (in place), %.2f MB updated; kind 2 dropped %llu, bad kind %llu",
+                 (unsigned long long)u.inplace, (unsigned long long)u.renamed, u.rest_bytes / M, (unsigned long long)u.rename_fail, u.bytes / M,
+                 (unsigned long long)__atomic_load_n(&g_kind2, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_kind_bad, __ATOMIC_RELAXED));
+    }
 }
 
+// [DOS2] VK-NATIVE stage 4: the pipeline warm-up part (hle_dos2_vkn_warm.c) has no slot of its own in hle_dos2_vkn.c; registered here.
+void dm_vkn_warm_register(void) __attribute__((weak));
 void dm_vkn_buf_register(void);
 void dm_vkn_buf_register(void) {
+    if (dm_vkn_warm_register) dm_vkn_warm_register();
     // First four words of each function (none PC-relative).
     static const uint32_t k_cvb[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xf90023f7, 0xa90557f6, 0xa9064ff4};
     static const uint32_t k_cib[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xf90023f7, 0xa90557f6, 0xa9064ff4};

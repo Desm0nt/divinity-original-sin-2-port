@@ -10436,6 +10436,12 @@ extern "C" VkShaderModule xbg_vkn_alpha_module(void *shader,uint32_t func,float 
 extern "C" VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code){
     if(!shader)return VK_NULL_HANDLE;std::lock_guard<std::recursive_mutex> lock(mutex);Shader &s=*static_cast<Shader*>(shader);
     if(!initialized || failed || !s.unusable.empty() || s.stage!=0 || !code)return s.module;return vtx_retype_module(s,code);}
+// [DOS2] VK-NATIVE stage 4 (pipeline warm-up, dm/gfx/vkn/vkn_warm.c): the directory of vk-pipeline-cache.bin (pipeline_cache_path:
+// the parent of cfg.shader_directory), where the backend keeps vkn-pipeline-cache.bin and vkn-pipeline-list.bin. 0 = written.
+extern "C" int xbg_vkn_cache_dir(char *out,size_t bytes){
+    if(!out || !bytes)return -1;out[0]=0;std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || !cfg.shader_directory)return -1;
+    std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');if(cut!=std::string::npos)dir.resize(cut);
+    if(dir.size()+1>bytes)return -1;memcpy(out,dir.c_str(),dir.size()+1);return 0;}
 #endif
 #define XBG_NR_Z5G_BRIDGE
 #include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5: the game thread's entry points (called by the NVN tap)

@@ -537,6 +537,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             src.vs = vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);
             src.fs = (s->stages & (1u << VKN_SRC_FS)) ? vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0) : VK_NULL_HANDLE;
             src.layout = s->layout; src.pass = pi->pass; src.vs_inputs = vs_inputs;
+            src.shader = s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable
             if (src.vs && (src.fs || !(s->stages & (1u << VKN_SRC_FS)))) p = vkn_pipe_get(&key, &src);
         }
         if (!p) {
