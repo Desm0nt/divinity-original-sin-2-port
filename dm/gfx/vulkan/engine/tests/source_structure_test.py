@@ -4149,6 +4149,70 @@ def nrnd_check():   # [DOS2] NR-NATIVE step D (docs/dos2/nr/NR-NATIVE-D.md): DM_
     assert dr.count('NRND_TJ') == 6 and '#define NRND_TJ0(timed) do { if (__builtin_expect(g_nrnd_rec == 2, 0) && (timed))' in fn, 'NRN-D: the timers of the big-stack call run in =2 only'
     return "NR-NATIVE step D: DM_NRN_LIST / DM_NRN_REC default 0 by the policy functions / safe-mode step 2 / not set by the app; the note packet is put into the list of the context argument by the engine's AllocCommand and leaves the ExecuteRenderCommand hook before any handler; the run sees every packet; =2 hashes the cache at every draw and compares, =1 audits 1 in 64; the composer writes only records with a card (=2: after the old writers, compared before anything patches the record)"
 print('PASS: '+nrnd_check())
+def nrnb_check():   # [DOS2] NR-NATIVE step D half b (docs/dos2/nr/NR-NATIVE-D.md section 12): DM_NRN_NOBODY (the binds of a card draw folded without the NVN bodies)
+    import subprocess, sys as _sys
+    nv = (root / 'gfx/nvn/nvn_nrn_b.inc').read_text(encoding='utf-8')
+    hn = (root / 'gfx/nvn/hle_nvn.c').read_text(encoding='utf-8')
+    f = (root / 'host/hle_dos2_nrn_b.inc').read_text(encoding='utf-8')
+    dr = (root / 'host/hle_dos2_nr_direct.inc').read_text(encoding='utf-8')
+    nr = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    safe = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    assert 'inline int xbg_nrn_nobody_default(){return 0;}' in pol and 'add("DM_NRN_NOBODY","0");' in safe, 'NRN-B: default 0 by the policy function, safe-mode step 2 forces 0'
+    assert f.count('getenv("DM_NRN_NOBODY")') == 1 and 'const int v = e && *e ? atoi(e) : 0;' in f, 'NRN-B: unset = 0'
+    for sub in ('android/app', 'android/dos2'):
+        d = root / sub
+        if d.exists():
+            for q in d.rglob('*'):
+                if q.is_file() and q.suffix in ('.java', '.kt', '.json', '.xml', '.txt', '.env', '.properties'):
+                    assert 'DM_NRN_NOBODY' not in q.read_text(encoding='utf-8', errors='ignore'), 'NRN-B: the app does not set the switch (%s)' % q
+    # the gate decides before anything is written: nvn_nrnb_binds touches no state ahead of nrnb_can's answer
+    binds = nv[nv.index('int nvn_nrnb_binds('):nv.index('// ---- =2: the fold on copies')]
+    assert binds.index('nrnb_can(c, ub, nub, ntb, &e.tap)') < binds.index('return 0; }') < binds.index('nrnb_fold(&e, c, ub, nub, tb, ntb);'), 'NRN-B: refused = nothing touched'
+    can = nv[nv.index('static int nrnb_can('):nv.index('// The binds, in call order.')]
+    for w in ('nvn_nrd_can(', 'g_nru_cap || Z5G_ON() || g_nrub == 2 || g_nrd_texf == 2', 't_nbd.s.h.nbind', 'g_nbt.cb != (const void *)c', 'g_nrdm.owner != (const void *)&t_nrd_wf',
+              'g_nrub_m.owner != (const void *)&t_nrub_scope', 'nub + ntb > NBD_MAX_BINDS', 'o->cur + NRNB_ROOM + OP_RESERVE > o->end'):
+        assert w in can, 'NRN-B: the gate asks %s' % w
+    assert '=' not in ''.join(l.split('//')[0] for l in can.split('\n') if 'g_nbt.' in l or 't_nbd.' in l).replace('==', '').replace('!=', ''), 'NRN-B: the gate only reads'
+    # the verify mode's capture is the first line of bind_handles; each of its paths marks the handles used once
+    bh = hn[hn.index('static void bind_handles('):hn.index('NVN(nvnCommandBufferBindImages')]
+    assert bh.index('NRNB_CAP_WT(op, h, n);') < bh.index('NBT(nbt_bind(c, op, st, first, n, h));') and bh.count('wt_use_ids(h, n)') == 4, 'NRN-B: the capture line and the four use marks of bind_handles'
+    assert hn.index('#define NVN_NRNB_PART 1') < hn.index('static void bind_handles(') < hn.index('#define NVN_NRNB_PART 2'), 'NRN-B: the state ahead of bind_handles, the fold at the end'
+    # the front end: the decision ahead of the big-stack call, the yardstick, the job untouched for a draw that is not taken
+    take = dr[dr.index('static int nrd_draw_take('):dr.index('static void nrd_draw_after(')]
+    assert take.index('nrnc_flush_plan(R, &p)') < take.index('const int nb_why = nrnb_front(R, &j);') < take.index('nb_path = nrnb_take(R, &j);') < take.index('if (nb_path != 1) {') < take.index('nvn_on_bigstack(nrd_job, &j);'), 'NRN-B: plan, front gate, fold, else the job'
+    assert 'if (__builtin_expect(g_nrnb, 0)) {   // [DOS2] NR-NATIVE step D half b' in take and "else if (timed && !(++t_nrnb_ty & 7)) { nb_path = 2;" in take, 'NRN-B: one load while off; the yardstick'
+    fr = f[f.index('static int nrnb_front('):f.index('// =1. 1 = the draw is recorded')]
+    for w in ('!j->p', '!t_nk.idp', '!t_nrn_pre.valid', '!t_nrn_r', 'R[NRNC_R_REN_OFF] && R[NRNC_R_REN_NEED]', 'j->d->ubo && !j->ub', 'j->cb != j->d->cb'):
+        assert w in fr, 'NRN-B: the front gate asks %s' % w
+    tk = f[f.index('static int nrnb_take('):f.index('#define NRNB_V_SNAP')]
+    assert tk.index('nvn_nrnb_binds(') < tk.index('nrnc_flush_reset(R, s)') < tk.index('nrnc_draw_tail(R, j->d, g_nrd_isz, &k_nrd_ops, j);'), 'NRN-B: fold, the stores of the flush, the tail of the draw function'
+    job = dr[dr.index('static void *nrd_job('):dr.index('// The native handler of the shared draw hook')]
+    assert job.index('NRNB_V_SNAP(j);') < job.index('nru_job_calls(j->ub)') < job.index('nrnc_flush_run(') < job.index('NRNB_V_CHECK(j);') < job.index('nrnc_draw_tail('), 'NRN-B: =2 snaps before the first body and checks after the last bind'
+    assert nr.index('nrub_install(g_nrd, g_nrd_parts);') < nr.index('nrnb_arm();'), 'NRN-B: armed after NR-09R / NR-09U / NR-UBD'
+    # the bodies the fold stands for: a changed body means "read nvn_nrn_b.inc again, run nr_nrn_b_test, then update this pin"
+    out = subprocess.run([_sys.executable, str(root.parent / 'tools' / 'dos2_nrnb_bodies.py'), '--hash'], capture_output=True, text=True)
+    assert out.returncode == 0, 'NRN-B: tools/dos2_nrnb_bodies.py --hash failed: ' + out.stderr
+    got = {l.split(': ', 1)[1]: l.split(' ', 1)[0] for l in out.stdout.strip().split('\n')}
+    for k, v in NRNB_PINS.items():
+        assert got.get(k) == v, 'NRN-B: the body "%s" changed (%s, pinned %s): check the fold of nvn_nrn_b.inc against it, run nr_nrn_b_test, update NRNB_PINS' % (k, got.get(k), v)
+    return 'NR-NATIVE step D half b: DM_NRN_NOBODY default 0 by the policy function / safe-mode step 2 / not set by the app; the gate reads only and decides before anything is written; the capture line of the verify mode and the four use marks of bind_handles; the front end decides ahead of the big-stack call and keeps the yardstick; =2 snaps before the first body and checks after the last bind; %d body texts pinned' % len(NRNB_PINS)
+NRNB_PINS = {
+    'static nb_frame *nbt_f(NVNcommandBuffer *c) {': '1238114c641f0d56',
+    '#define NBD_TEXGEN() do': '06cf6bf45229433d',
+    '#define NRD_SIG(w, st, s, was, now) do': '46a430acad81c806',
+    'static void nbt_bind(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {': '0abfd3bf74bc7e18',
+    'static void nbd_cb(NVNcommandBuffer *c) {': 'a60ec230df8020cd',
+    'static int nbd_take_bind(NVNcommandBuffer *c, unsigned kind, int stage, int slot, uint64_t a, uint64_t b) {': '887363d714d07ac6',
+    'static int nrdm_bind_hook(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {': '5f281c31cda4c435',
+    'static int nrub_bind_hook(NVNcommandBuffer *c, int st, int first, int n, const uint64_t *a, const uint64_t *sz, int filt) {': '9262cbc9cd76f517',
+    'int nvn_nrd_can(uint64_t cb) {': '2121037c4c765499',
+    'NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp)': 'cdd69099300dc477',
+    'NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {': 'dc7ab7651b5f7559',
+    'static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {': '4f6d3018fa95b8bf',
+    'void nvn_nrd_bind(uint64_t cb, int stage, int slot, int32_t tex, int32_t smp) {': '70fc9d3ed2ba1d23',
+}
+print('PASS: '+nrnb_check())
 def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
     z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
     h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')

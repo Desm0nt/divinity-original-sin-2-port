@@ -1591,6 +1591,9 @@ static int condr_rec(void) {
 }
 static void condr_write(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) { *REC(c, OP_X_RENDER_COND, p_render_cond) = (p_render_cond){kind, mode, addr}; }
 #include "nvn_nrn_d.inc"   // [DOS2] NR-NATIVE step D: DM_NRN_REC (the record of a card draw composed directly; nothing while it is 0)
+#define NVN_NRNB_PART 1
+#include "nvn_nrn_b.inc"   // [DOS2] NR-NATIVE step D half b: DM_NRN_NOBODY (the state and the capture line of its verify mode; nothing while it is 0)
+#undef NVN_NRNB_PART
 #include "nvn_nb_draw.inc"   // [DOS2] DM_NB_OPS (NB-09): one engine draw = one OP_X_NB_DRAW (shadow, flush, pack)
 #ifdef DM_GAME_DOS2
 #define NVN_NRN_PART 2
@@ -1689,6 +1692,7 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 }
 static void bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("【红】绑定句柄数 %d", n); return; }
+    NRNB_CAP_WT(op, h, n);   // [DOS2] NR-NATIVE step D half b DM_NRN_NOBODY=2: the handles this call marks used (one thread-local load without the switch)
     NBT(nbt_bind(c, op, st, first, n, h));   // [DOS2] DM_NB: BindTexture(s) / BindSeparateTexture(s) / BindImage(s) all come here
     const int nrd_same = NRD_BT(c, op, st, first, n, h);   // [DOS2] NR-09R DM_NR_DIRECT: the backend's table already holds this handle (0 without the switch)
     if (nrd_same == 2) { wt_use_ids(h, n); return; }   // [DOS2] NR-09R =1: not sent (the use mark of DM_NVN_WT_DRAIN stays)
@@ -3679,6 +3683,9 @@ NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, int, const NVNtextureBuilder *b
 #include "nvn_nr_nocall.inc"   // [DOS2] NR-23 DM_NR_NOCALL: the direct entries of the five entry points the draw code of the engine calls
 #define NVN_NRD_ENTRIES 1
 #include "nvn_nr_direct.inc"   // [DOS2] NR-09R DM_NR_DIRECT: the binding mirror's hooks and the direct recorder (second part)
+#define NVN_NRNB_PART 2
+#include "nvn_nrn_b.inc"   // [DOS2] NR-NATIVE step D half b: DM_NRN_NOBODY (the fold of a card draw's binds without the bodies of the entry points)
+#undef NVN_NRNB_PART
 #define NVN_NRS_ENTRIES 1
 #include "nvn_nr_state.inc"   // [DOS2] NR-09S DM_NR_STATE: the executor of the native opcode-21 packet (second part)
 #define NVN_NRU_ENTRIES 1

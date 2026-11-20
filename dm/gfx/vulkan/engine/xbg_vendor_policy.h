@@ -194,6 +194,10 @@ inline int xbg_nrn_ev_default(){return 0;}
 // NVN entry points. Both read by the front end (dm/host/hle_dos2_nrn_d.inc, dm/gfx/nvn/nvn_nrn_d.inc); 0 on every device unless asked.
 inline int xbg_nrn_list_default(){return 0;}
 inline int xbg_nrn_rec_default(){return 0;}
+// [DOS2] NR-NATIVE step D half b (docs/dos2/nr/NR-NATIVE-D.md section 12): DM_NRN_NOBODY - the binds of a card draw folded in place, without the
+// bodies of the NVN entry points and without the big stack. Read by the front end (dm/host/hle_dos2_nrn_b.inc, dm/gfx/nvn/nvn_nrn_b.inc);
+// 0 on every device unless asked: =2 (the fold against the bodies, word for word) has not run on a phone.
+inline int xbg_nrn_nobody_default(){return 0;}
 // [DOS2] NR-ZERO Z8, the parts of section 28 on (each its own switch; all 0 on every family until the phone runs; the app sets none;
 // safe-mode step 2 forces 0): DM_NR_Z8_THREAD - the walk on a thread of its own instead of the submitting thread.
 inline int xbg_nr_z8_thread_default(){return 0;}

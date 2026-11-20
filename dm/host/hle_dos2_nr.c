@@ -986,6 +986,7 @@ void dm_dos2_nr_install(void) {
     nrd_install();   // NR-09R: after DM_NR_DRAW and NR-23 (needs the identity; =1 takes the draw hook's native handler)
     nru_install(g_nrd, g_nrd_parts);   // NR-09U: inside NR-09R's native draw handler
     nrub_install(g_nrd, g_nrd_parts);   // NR-UBD: the uniform-buffer mirror of NR-09R's served direct draws
+    nrnb_arm();   // [DOS2] NR-NATIVE step D half b: DM_NRN_NOBODY (after NR-09R / NR-09U / NR-UBD: it stands in for their bodies' calls)
     nrs_install();   // NR-09S: the native opcode-21 handler (after the ExecuteRenderCommand handlers of NB / NR are registered)
     if (g_nr_pipe) LOG("[nr] DM_NR_PIPE=%d (NR-07): the pack key of every program the game sets up (nvnProgramSetShaders, inside or outside an engine call) goes to the warm-up as a hint", g_nr_pipe);
 }

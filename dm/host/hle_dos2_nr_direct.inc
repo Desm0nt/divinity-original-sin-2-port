@@ -150,7 +150,7 @@ static inline int nrd_live(void) {
 }
 
 // ---- the model's NVN calls = the recorder ----
-typedef struct { uint8_t *R; const nrnc_plan *p; uint64_t cb; const nrnc_draw *d; int timed; const nru_run *ub; } nrd_job_t;   // ub: NR-09U's calls
+typedef struct { uint8_t *R; const nrnc_plan *p; uint64_t cb; const nrnc_draw *d; int timed; const nru_run *ub; int nbv; } nrd_job_t;   // ub: NR-09U's calls; nbv: [DOS2] NR-NATIVE step D half b, DM_NRN_NOBODY=2 compares this draw
 static void nrd_op_bind(void *u, uint64_t cb, int stage, int slot, int32_t tex, int32_t smp) { (void)u; nvn_nrd_bind(cb, stage, slot, tex, smp); }
 static void nrd_op_ren(void *u, uint64_t cb) { (void)u; nvn_nc_ren(cb); }   // SetRenderEnable(cb, 1): the body of the entry point (rare: after a culled draw)
 static void nrd_op_draw(void *u, uint64_t cb, int32_t prim, uint32_t itype, int32_t count, uint64_t ib, int32_t instances) {
@@ -158,13 +158,16 @@ static void nrd_op_draw(void *u, uint64_t cb, int32_t prim, uint32_t itype, int3
     nvn_nrd_draw(cb, prim, itype, count, ib, instances, ((const nrd_job_t *)u)->timed);
 }
 static const nrnc_ops k_nrd_ops = {nrd_op_bind, nrd_op_ren, nrd_op_draw};
+#include "hle_dos2_nrn_b.inc"   // [DOS2] NR-NATIVE step D half b: DM_NRN_NOBODY (a card draw without the NVN bodies; nothing while it is 0)
 static void *nrd_job(void *a) {   // on the big stack: [the flush], SetRenderEnable, the draw, the flag byte - in the machine code's order
     const nrd_job_t *j = (const nrd_job_t *)a;
     NRND_TJ(1);   // [DOS2] NR-NATIVE step D DM_NRN_REC=2: the parts of this call, timed (nothing without the switch)
+    NRNB_V_SNAP(j);   // [DOS2] NR-NATIVE step D half b DM_NRN_NOBODY=2: the state the fold would start from, before the first body
     if (j->ub) nru_job_calls(j->ub);   // NR-09U DM_NR_UBO=1: the uniform blocks' BindUniformBuffer calls (the engine made them before the flush)
     NRND_TJ(2);   // [DOS2] NR-NATIVE step D
     if (j->p) nrnc_flush_run(j->R, j->p, j->cb, &k_nrd_ops, a);
     NRND_TJ(3);   // [DOS2] NR-NATIVE step D
+    NRNB_V_CHECK(j);   // [DOS2] NR-NATIVE step D half b DM_NRN_NOBODY=2: the fold on the copies against what the bodies of the binds left
     nrnc_draw_tail(j->R, j->d, g_nrd_isz, &k_nrd_ops, a);
     NRND_TJ(4);   // [DOS2] NR-NATIVE step D
     return NULL;
@@ -176,7 +179,7 @@ static int nrd_draw_take(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint
     uint8_t *R = (uint8_t *)(uintptr_t)r;
     const int32_t first = op == 36 ? (int32_t)a1 : 0, count = op == 36 ? (int32_t)a2 : (int32_t)a4, inst = op == 36 ? -1 : (int32_t)a2;
     const int timed = !(t_nrd.n++ & 63);
-    if (timed) nrd_count_flush();
+    if (timed) { nrd_count_flush(); if (__builtin_expect(g_nrnb, 0)) nrnb_count_flush(); }   // [DOS2] NR-NATIVE step D half b: its counters go with these
     if (!nrd_live()) { t_nrd.c[NRDC_NOTLIVE]++; return 0; }
     nrnc_draw d;
     if (!nrnc_draw_pre(R, (int)op, first, count, inst, &d)) { t_nrd.c[NRDC_NOREC]++; return 0; }
@@ -197,13 +200,24 @@ static int nrd_draw_take(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint
     if (fcb && nrnc_flush_plan(R, &p)) { j.p = &p; j.cb = fcb; t_nrd.c[NRDC_BINDS] += (uint64_t)p.n; }
     else { g_o_tf(r, NC_Z); t_nrd.c[NRDC_FLUSH_ENGINE]++; }                              // the engine's flush (the original, past the hook)
     if (R[NRNC_R_REN_OFF] && R[NRNC_R_REN_NEED]) t_nrd.c[NRDC_REN]++;
+    int nb_path = 0;   // [DOS2] NR-NATIVE step D half b (DM_NRN_NOBODY): 0 = the bodies on the big stack, 1 = folded in place, 2 = the bodies as the yardstick
+    if (__builtin_expect(g_nrnb, 0)) {   // [DOS2] NR-NATIVE step D half b
+        const int nb_why = nrnb_front(R, &j);
+        if (nb_why) t_nrnbc[nb_why]++;
+        else if (g_nrnb == 2) { j.nbv = 1; t_nrnbc[NRNBC_VERIFY]++; }
+        else if (timed && !(++t_nrnb_ty & 7)) { nb_path = 2; t_nrnbc[NRNBC_YARD]++; }
+        else nb_path = nrnb_take(R, &j);
+    }
+    if (nb_path != 1) {   // [DOS2] NR-NATIVE step D half b: a folded draw is recorded already
     NRND_TJ0(timed);   // [DOS2] NR-NATIVE step D DM_NRN_REC=2: the stack switch and the parts of the call
     nvn_on_bigstack(nrd_job, &j);
+    }   // [DOS2] NR-NATIVE step D half b
     NRND_TJ5();   // [DOS2] NR-NATIVE step D
     NRN_POST();   // NR-NATIVE step B part 2: the record of the draw took the short flag (red line if it did not)
     if (g_nrd_ubd) nvn_nrub_scope(0);   // NR-UBD
     t_nrd.c[op == 37 ? NRDC_D37 : NRDC_D36]++;
-    if (timed) { const uint64_t t3 = nr_now(); t_nrd.c[NRDC_TIMED]++; t_nrd.c[NRDC_NS] += t3 - t0; t_nrd.c[NRDC_NS_UBO] += t1 - t0; t_nrd.c[NRDC_NS_ID] += t2 - t1; t_nrd.c[NRDC_NS_REC] += t3 - t2; }
+    if (timed) { const uint64_t t3 = nr_now(); t_nrd.c[NRDC_TIMED]++; t_nrd.c[NRDC_NS] += t3 - t0; t_nrd.c[NRDC_NS_UBO] += t1 - t0; t_nrd.c[NRDC_NS_ID] += t2 - t1; t_nrd.c[NRDC_NS_REC] += t3 - t2;
+        if (nb_path) { const int nb_k = nb_path == 1 ? NRNBC_T_FAST : NRNBC_T_BODY; t_nrnbc[nb_k]++; t_nrnbc[nb_k + 1] += t3 - t0; t_nrnbc[nb_k + 2] += t3 - t2; } }   // [DOS2] NR-NATIVE step D half b: the two paths of a card draw, timed alike
     return 1;
 }
 static void nrd_draw_after(unsigned op, uint64_t r) { (void)op; (void)r; }
@@ -267,6 +281,7 @@ static void nrd_report(uint64_t frames) {
             n[NVN_NRD_UB_SCOPE] ? 100. * (double)n[NVN_NRD_UB_WOULD] / (double)n[NVN_NRD_UB_SCOPE] : 0., (double)n[NVN_NRD_UB_FLAG] / f, NRD_X_BITS,
             (double)n[NVN_NRD_UB_PAST] / f, (double)n[NVN_NRD_UB_SEEN] / f, (double)n[NVN_NRD_UB_ADOPT] / f, (unsigned long long)n[NVN_NRD_UB_FORGET]);
     if (g_nru) nru_report(frames);   // NR-09U
+    nrnb_report(frames);   // [DOS2] NR-NATIVE step D half b
 }
 
 // NR-UBD (DM_NR_UBD): after nrd_install / nru_install. Needs the served direct draws of NR-09R (DM_NR_DIRECT=1 with its draw part, which
