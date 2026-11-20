@@ -1,5 +1,6 @@
 // [DOS2] VK-NATIVE shaders (vkn_shader.c): one native object per engine shader handle (CreateShader). Its stage modules come from OUR
-// SPIR-V packs through the translator's narrow door (xbg_vkn_shader, xbg_game.h: the bundle with every load-time rewrite applied);
+// SPIR-V packs through a narrow door (the bundle with every load-time rewrite applied, xbg_vkn_stage of xbg_game.h): in mode 1 the backend's
+// shader library (vkn_shlib.h, DM_VK_NATIVE_SHLIB, default on there), otherwise the translator's xbg_vkn_shader;
 // this module adds the descriptor-set layout, the pipeline layout and a compact binding table for the draw path. No game addresses:
 // dm/host/hle_dos2_vkn_shader.c reads the engine's records and passes plain pointers.
 //
@@ -62,8 +63,8 @@ typedef struct vkn_shader {
     uint8_t dyn_policy;
     VkDescriptorSetLayout set_layout;
     VkPipelineLayout layout;
-    VkShaderModule module[VKN_SRCS];   // base modules (owned by the translator, live until its shutdown)
-    void *xs[VKN_SRCS];         // the translator's shader objects (variant getters)
+    VkShaderModule module[VKN_SRCS];   // base modules (owned by the loader, live until the process ends)
+    void *xs[VKN_SRCS];         // the loader's shader objects (variant getters)
     char key[VKN_SRCS][17];     // program keys ("" = no stage / no key)
     const vkn_bind *bind; uint16_t nbind, ndyn;
     uint8_t ninputs; uint8_t inputs[16], input_classes[16];   // vertex: input locations, scalar class (0 float, 1 sint, 2 uint)
@@ -82,7 +83,7 @@ void vkn_shader_sync(void);   // waits until every queued creation is done
 // The module for a pipeline: stage VKN_STAGE_VS / FS / CS. alpha_func: NVN compare func 1 NEVER .. 8 ALWAYS (0 or 8 = no test) with
 // alpha_ref: the fragment variant with the alpha test ("#at"); retype: the vertex variant for this retype code ("#vi": low 32 bits
 // 2 bits per input location, 0 keep / 1 float / 2 sint / 3 uint; high 32 bits 1 = SSCALED fed as SINT, 2 = USCALED fed as UINT; 0 = none).
-// Variants are built once by the translator and cached there. VK_NULL_HANDLE = no such stage / unusable / missing.
+// Variants are built once by the loader and cached there. VK_NULL_HANDLE = no such stage / unusable / missing.
 VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype);
 // The engine destroyed the shader (DestroyShaderIfOld returned true): the record leaves the table, its objects go through vkn_retire.
 void vkn_shader_destroy(uint64_t handle);

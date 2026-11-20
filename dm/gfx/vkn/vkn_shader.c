@@ -1,8 +1,11 @@
 // [DOS2] VK-NATIVE shaders (vkn_shader.h): engine shader handle -> stage modules of our packs + descriptor-set layout + pipeline layout +
 // binding table. No game addresses (dm/host/hle_dos2_vkn_shader.c passes the control / code pointers of each stage).
-// The modules and their variants come from the translator (xbg_vkn_shader / xbg_vkn_alpha_module / xbg_vkn_retype_module, xbg_game.h):
-// the same bundle bytes, the same load-time SPIR-V rewrites, the same "#at" / "#vi" variants the old path draws with. They are owned by
-// the translator (its shader map lives until xbg_game_shutdown), so this module never destroys a VkShaderModule.
+// The modules and their variants come from a shader loader with the translator's contract (xbg_vkn_stage, xbg_game.h): in mode 1 with
+// DM_VK_NATIVE_SHLIB on (the default there) the backend's own library (vkn_shlib_shader / _alpha_module / _retype_module, vkn_shlib.h:
+// the translator is not initialised), otherwise the translator's doors (xbg_vkn_shader / xbg_vkn_alpha_module / xbg_vkn_retype_module).
+// Both give the same bundle bytes, the same load-time SPIR-V rewrites, the same "#at" / "#vi" variants the old path draws with (host test
+// vkn_shlib_test.cpp: word for word over the whole pack). The loader owns the modules (they live until the process ends), so this module
+// never destroys a VkShaderModule.
 // Set layouts are shared by content (a cache that only grows: distinct binding lists are a few hundred); a shader whose list does not
 // fit the cache owns its layouts. Everything a record owns (binding table, c1 blocks, own layouts, its id) goes through vkn_retire.
 // Threads: one mutex (g_mu) for the table, the id list, the layout cache and the counters. Every translator call runs on a private
@@ -22,6 +25,27 @@ extern int xbg_shader_program_key(const void *control, const void *code, char ou
 extern int xbg_vkn_shader(const char *key, const void *control, const void *code, xbg_vkn_stage *out) __attribute__((weak));
 extern VkShaderModule xbg_vkn_alpha_module(void *shader, uint32_t func, float ref) __attribute__((weak));
 extern VkShaderModule xbg_vkn_retype_module(void *shader, uint64_t code) __attribute__((weak));
+// The backend's shader library (vkn_shlib.cpp; weak: host tests mock it or leave it out)
+extern int vkn_shlib_on(void) __attribute__((weak));
+extern int vkn_shlib_shader(const char *key, const void *control, const void *code, xbg_vkn_stage *out) __attribute__((weak));
+extern VkShaderModule vkn_shlib_alpha_module(void *shader, uint32_t func, float ref) __attribute__((weak));
+extern VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) __attribute__((weak));
+// The loader in effect (chosen once: the switch is read once by vkn_shlib_on)
+typedef struct sh_loader {
+    int (*shader)(const char *key, const void *control, const void *code, xbg_vkn_stage *out);
+    VkShaderModule (*alpha)(void *shader, uint32_t func, float ref);
+    VkShaderModule (*retype)(void *shader, uint64_t code);
+    const char *name;
+} sh_loader;
+static const sh_loader *loader(void) {
+    static sh_loader l; static int picked;   // (a race picks the same values twice)
+    if (!__atomic_load_n(&picked, __ATOMIC_ACQUIRE)) {
+        if (vkn_shlib_on && vkn_shlib_on()) l = (sh_loader){vkn_shlib_shader, vkn_shlib_alpha_module, vkn_shlib_retype_module, "the backend's shader library"};
+        else l = (sh_loader){xbg_vkn_shader, xbg_vkn_alpha_module, xbg_vkn_retype_module, "the translator"};
+        __atomic_store_n(&picked, 1, __ATOMIC_RELEASE);
+    }
+    return &l;
+}
 extern void xbg_support_defaults(void *bytes1392, float width, float height) __attribute__((weak));   // xbg_vulkan.cpp (stateless)
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
@@ -204,7 +228,7 @@ static int cmp_bind(const void *a, const void *b) { const vkn_bind *x = (const v
 static void create_job(void *arg) {
     sh_job *j = (sh_job *)arg; j->rc = -1;
     const vkn_dev *d = vkn_device();
-    if (!d || !xbg_vkn_shader) return;
+    if (!d || !loader()->shader) return;
     xbg_vkn_stage *st = (xbg_vkn_stage *)calloc(VKN_SRCS, sizeof *st);
     sh_rec *r = (sh_rec *)calloc(1, sizeof *r);
     vkn_bind *tb = (vkn_bind *)calloc(VKN_SRCS * 256, sizeof *tb);
@@ -217,8 +241,8 @@ static void create_job(void *arg) {
         s->stages |= (uint8_t)(1u << k); n_stages++;
         if (!(j->keyed >> k & 1)) { s->missing |= (uint8_t)(1u << k); n_miss++; continue; }
         memcpy(s->key[k], j->key[k], 17);
-        const int lr = xbg_vkn_shader(s->key[k], j->ctl[k], j->code[k], &st[k]);
-        if (lr < 0) { free(st); free(r); free(tb); free(lb); return; }   // the translator is not up: nothing to build from
+        const int lr = loader()->shader(s->key[k], j->ctl[k], j->code[k], &st[k]);
+        if (lr < 0) { free(st); free(r); free(tb); free(lb); return; }   // the loader is not up: nothing to build from
         if (lr > 0) {
             s->missing |= (uint8_t)(1u << k); n_miss++;
             pthread_mutex_lock(&g_mu); const int red = g_miss_reds < MISS_REDS ? ++g_miss_reds : 0; pthread_mutex_unlock(&g_mu);
@@ -327,7 +351,7 @@ static void create_drop(void *arg) {   // cancelled before it ran (the engine de
     free(arg);
 }
 int vkn_shader_create(uint64_t handle, const vkn_stage_src src[VKN_SRCS]) {
-    if (!handle || !src || !vkn_device() || !xbg_vkn_shader || !xbg_shader_program_key) return -1;
+    if (!handle || !src || !vkn_device() || !loader()->shader || !xbg_shader_program_key) return -1;
     sh_job *j = (sh_job *)calloc(1, sizeof *j); if (!j) return -1;
     const uint64_t t0 = vkn_now_ns(); j->handle = handle;
     for (int k = 0; k < VKN_SRCS; k++) {
@@ -370,12 +394,13 @@ void vkn_shader_destroy(uint64_t handle) {
 
 void vkn_shader_set_dead_fn(void (*fn)(uint32_t id, uint64_t handle)) { g_dead = fn; }
 
-// ---- module variants (translator calls, on the big-stack thread) ----
+// ---- module variants (loader calls, on the big-stack thread) ----
 typedef struct var_job { void *xs; int kind; uint32_t func; float ref; uint64_t code; VkShaderModule out; } var_job;
 static void var_run(void *arg) {
     var_job *v = (var_job *)arg;
-    if (v->kind == 1) v->out = xbg_vkn_alpha_module ? xbg_vkn_alpha_module(v->xs, v->func, v->ref) : VK_NULL_HANDLE;
-    else v->out = xbg_vkn_retype_module ? xbg_vkn_retype_module(v->xs, v->code) : VK_NULL_HANDLE;
+    const sh_loader *l = loader();
+    if (v->kind == 1) v->out = l->alpha ? l->alpha(v->xs, v->func, v->ref) : VK_NULL_HANDLE;
+    else v->out = l->retype ? l->retype(v->xs, v->code) : VK_NULL_HANDLE;
 }
 VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype) {
     if (!s) return VK_NULL_HANDLE;
@@ -417,10 +442,10 @@ void vkn_shader_stats_get(vkn_shader_stats *out) {
 }
 void vkn_shader_census(void) {
     vkn_shader_stats s; vkn_shader_stats_get(&s);
-    vkn_logf("shaders: %llu alive (created %llu, replaced %llu, destroyed %llu, failed %llu, queued %llu, cancelled %llu); stages %llu: with a bundle %llu, without %llu, unusable %llu; "
+    vkn_logf("shaders (from %s): %llu alive (created %llu, replaced %llu, destroyed %llu, failed %llu, queued %llu, cancelled %llu); stages %llu: with a bundle %llu, without %llu, unusable %llu; "
              "layouts %llu shared + %llu own; binding tables %.1f KB, c1 %.1f KB; dynamic all / engine blocks / none: %llu / %llu / %llu; "
              "bindings uniform %llu, support %llu, c1 %llu, texture %llu, image %llu; %.1f ms creating",
-             (unsigned long long)s.alive, (unsigned long long)s.created, (unsigned long long)s.replaced, (unsigned long long)s.destroyed, (unsigned long long)s.failed, (unsigned long long)s.queued, (unsigned long long)s.cancelled,
+             loader()->name, (unsigned long long)s.alive, (unsigned long long)s.created, (unsigned long long)s.replaced, (unsigned long long)s.destroyed, (unsigned long long)s.failed, (unsigned long long)s.queued, (unsigned long long)s.cancelled,
              (unsigned long long)s.stages, (unsigned long long)s.stages_bundle, (unsigned long long)s.stages_missing, (unsigned long long)s.stages_unusable,
              (unsigned long long)s.layouts, (unsigned long long)s.layouts_own, s.table_bytes / 1024.0, s.c1_bytes / 1024.0,
              (unsigned long long)s.dyn_policy[1], (unsigned long long)s.dyn_policy[2], (unsigned long long)s.dyn_policy[0],

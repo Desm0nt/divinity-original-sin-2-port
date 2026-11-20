@@ -12,8 +12,11 @@
 #include <sys/resource.h>
 #include <time.h>
 
-// The translator's door to the directory of its own vk-pipeline-cache.bin (xbg_game.cpp, [DOS2] VK-NATIVE export; weak: host tests).
+// The directory of the cache files (the parent of the shader directory): the backend's shader library in mode 1 with DM_VK_NATIVE_SHLIB on
+// (vkn_shlib.h: the translator is not initialised), else the translator's door (xbg_game.cpp, [DOS2] VK-NATIVE export). Weak: host tests.
 extern int xbg_vkn_cache_dir(char *out, size_t bytes) __attribute__((weak));
+extern int vkn_shlib_on(void) __attribute__((weak));
+extern int vkn_shlib_cache_dir(char *out, size_t bytes) __attribute__((weak));
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 enum { VEL_MAX = 16, NOTE_Q = 256, WBUCKETS = 1024, DEDUP = 8192, DIR_BYTES = 512, DIR_WAIT_MS = 60000, TICK_MS = 100, REDS = 16 };
@@ -166,8 +169,9 @@ static char g_dir[DIR_BYTES]; static int g_files;   // worker only
 static void path_of(char *out, size_t n, const char *name) { snprintf(out, n, "%s/%s", g_dir, name); }
 static int get_dir(void) {
     char d[DIR_BYTES];
-    if (xbg_vkn_cache_dir && !xbg_vkn_cache_dir(d, sizeof d) && d[0]) { snprintf(g_dir, sizeof g_dir, "%s", d); return 0; }
-    if (!xbg_vkn_cache_dir) { const char *e = getenv("DM_FILES_DIR"); if (e && *e) { snprintf(g_dir, sizeof g_dir, "%s", e); return 0; } }
+    int (*door)(char *, size_t) = vkn_shlib_on && vkn_shlib_on() ? vkn_shlib_cache_dir : xbg_vkn_cache_dir;
+    if (door && !door(d, sizeof d) && d[0]) { snprintf(g_dir, sizeof g_dir, "%s", d); return 0; }
+    if (!door) { const char *e = getenv("DM_FILES_DIR"); if (e && *e) { snprintf(g_dir, sizeof g_dir, "%s", e); return 0; } }
     return -1;
 }
 static uint8_t *read_all(const char *path, size_t *n, size_t max) {

@@ -16,9 +16,10 @@
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 #define READ_CHUNK (256u << 10)   // the bounce buffer of NR-18 (XBG_AC_READ_CHUNK): small enough for L2
 
-// xbg_game.cpp (dos2 builds, DM_ASTC_LAZY): CRC-32 + Adler-32 of guest storage, the key function of the NR-05 worker. Weak: the host
-// tests of the other stages link vkn_tex.c without it (then the pack reports NONE).
-extern int xbg_astc_storage_key(const void *mem, uint64_t size, uint32_t *crc, uint32_t *adler) __attribute__((weak));
+// CRC-32 + Adler-32 of guest storage (the pack key; the same function as xbg_game.cpp's xbg_astc_storage_key of the NR-05 worker, moved
+// into the backend's shader library vkn_shlib.cpp so no mode calls xbg_game.cpp for it). Weak: the host tests of the other stages link
+// vkn_tex.c without it (then the pack reports NONE).
+extern int vkn_shlib_astc_key(const void *mem, uint64_t size, uint32_t *crc, uint32_t *adler) __attribute__((weak));
 
 // ---- pure pieces ----
 int vkn_astc_header_check(const vkn_astc_hdr *h, uint64_t file_bytes, const char **why) {
@@ -124,7 +125,7 @@ static int open_locked(void) {
     const char *sw = getenv("DM_VK_NATIVE_ASTC");
     const char *none = NULL;
     if (sw && *sw == '0') none = "DM_VK_NATIVE_ASTC=0";
-    else if (!xbg_astc_storage_key) none = "no key function in this build";
+    else if (!vkn_shlib_astc_key) none = "no key function in this build";
     if (!none) for (int k = 0; k < 3; k++) g_st.block_ok[k] = (uint8_t)block_usable((uint8_t)(4 + k));
     if (!none && !g_st.block_ok[0] && !g_st.block_ok[1] && !g_st.block_ok[2]) none = "the device samples no ASTC 4x4 / 5x5 / 6x6 (UNORM + sRGB, linear filter)";
     if (none) { vkn_logf("astc: pack not used (%s): BC textures are decoded on the CPU", none); return VKN_ASTC_NONE; }
@@ -183,7 +184,7 @@ int vkn_astc_lookup(const void *storage, uint64_t bytes, uint32_t nvn, uint32_t 
     count(&g_st.lookups, 1);
     if (!shape_known(shape_of((uint32_t)bytes, (uint16_t)nvn, (uint16_t)levels, (uint16_t)w, (uint16_t)h))) { count(&g_st.miss_shape, 1); *why = "shape"; return 0; }
     uint32_t crc = 0, adler = 0; const uint64_t t0 = vkn_now_ns();
-    xbg_astc_storage_key(storage, bytes, &crc, &adler);
+    vkn_shlib_astc_key(storage, bytes, &crc, &adler);
     count(&g_st.hash_ns, vkn_now_ns() - t0); count(&g_st.hash_bytes, bytes);
     const int64_t i = vkn_astc_find(g_idx, g_n, crc, adler, (uint32_t)bytes, (uint16_t)nvn, (uint16_t)levels, (uint16_t)w, (uint16_t)h);
     if (i < 0) { count(&g_st.miss_key, 1); *why = "key"; return 0; }

@@ -181,6 +181,16 @@ list(APPEND ANDROID_SRCS
 endif()
 
 add_library(dmcore STATIC ${HOST_SRCS} ${HLE_SRCS} ${GFX_SRCS} ${LIBDEFLATE_SRCS} ${ASM_SRCS} ${ANDROID_SRCS})
+# [DOS2] VK-NATIVE shader library (dm/gfx/vkn/vkn_shlib.h): the backend's C++ files (the vkn glob above takes *.c only). In dmcore, which
+# is whole-archived into libdm.so, not in the engine archive: their callers (vkn_shader.c, vkn_bcgpu.c, vkn_warm.c, vkn_astc.c, nvn_vk.c)
+# reference them weakly, and a weak reference pulls no archive member. C++17 and the engine's include directories come with
+# dm_vulkan_engine (PUBLIC); DM_SPVOPT=1 as the engine is built with it (the same xbg_spvopt lookup as the translator's bundle_module).
+if(DM_GAME STREQUAL "dos2")
+  set(VKN_CXX_SRCS ${DM}/gfx/vkn/vkn_shlib.cpp ${DM}/gfx/vkn/vkn_shlib_bc.cpp)
+  target_sources(dmcore PRIVATE ${VKN_CXX_SRCS})
+  set_source_files_properties(${VKN_CXX_SRCS} PROPERTIES COMPILE_OPTIONS "-O2;-Wall;-Wextra;-Wno-missing-field-initializers;-fno-strict-aliasing"
+                              COMPILE_DEFINITIONS "DM_SPVOPT=1")
+endif()
 list(REMOVE_DUPLICATES HOST_SRCS)
 target_include_directories(dmcore PUBLIC ${HOST} ${DM}/gfx/nvn/include ${CMAKE_CURRENT_SOURCE_DIR}/compat/include ${DM_GEN_DIR})
 target_include_directories(dmcore PUBLIC ${DM}/ios/Sources)

@@ -7,7 +7,7 @@
 //                     SPIR-V and the NR-06 static copies (asked: the next submission frees them, nrbuf::trim); 3 + the warm pipelines
 //                     not taken. The NR-05 / NR-22 objects not taken are the front end's (its table): freed there.
 // Lock order as the translation thread's: the engine mutex, then warm::mu / nrts::mu / the encoder's.
-extern "C" void xbg_nr_mem_usage(uint64_t *u){
+extern "C" void xbg_nr_mem_usage(uint64_t *u){XBG_VKN_ENTERED(XBG_VKN_E_STATS);
     for(int i=NRM_U_TS_IMG;i<NRM_U_N;i++)u[i]=0;
     u[NRM_U_TS_IMG]=nrts::out_img.load(std::memory_order_relaxed);
     {std::lock_guard<std::mutex> l(nrts::mu);u[NRM_U_TS_FREE]=nrts::free_bytes;}
@@ -17,7 +17,7 @@ extern "C" void xbg_nr_mem_usage(uint64_t *u){
 #endif
     {std::lock_guard<std::mutex> l(warm::mu);u[NRM_U_SPIRV]=warm::rewritten_bytes;u[NRM_U_PIPES]=warm::ready.size();}
 }
-extern "C" void xbg_nr_mem_trim(int tier,uint64_t *f){
+extern "C" void xbg_nr_mem_trim(int tier,uint64_t *f){XBG_VKN_ENTERED(XBG_VKN_E_STATS);
     for(int i=NRM_U_TS_IMG;i<NRM_U_N;i++)f[i]=0;
     std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized)return;   // the device lives while this is held
     if(tier>=NRM_TRIM_1){

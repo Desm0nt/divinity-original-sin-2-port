@@ -32,10 +32,44 @@ static uint64_t g_time_ids[1024];
 static uint64_t g_cnt_report[32],g_cnt_reset[32];
 int xbg_evguard_fault(void *addr,int is_write,void *uc);   // xbg_game.cpp: diagnostic marker gfx-event-guard
 static int vk_wtrack_fault(void *addr,int is_write,void *uc){(void)is_write;(void)uc;return xbg_wtrack_fault(addr);}
+#ifdef DM_GAME_DOS2
+#include "../vkn/vkn_shlib.h"   // [DOS2] VK-NATIVE shader library: vkn_shlib_on / vkn_shlib_init (weak: builds without it run the translator)
+#pragma weak vkn_shlib_on
+#pragma weak vkn_shlib_init
+// the presenter's present thread (android/vulkan_present.cpp; weak as in xbg_present_thread.inc)
+extern void dm_present_thread_set(int mode) __attribute__((weak));
+extern int dm_present_async(VkImage source,VkFormat format,uint32_t width,uint32_t height,const int32_t crop[4],int32_t interval) __attribute__((weak));
+extern uint64_t dm_present_wait_submitted(void) __attribute__((weak));
+extern uint64_t dm_present_drain(void) __attribute__((weak));
+extern int dm_present_last_error(void) __attribute__((weak));
+extern void dm_present_queue_lock(void) __attribute__((weak));
+extern void dm_present_queue_unlock(void) __attribute__((weak));
+#endif
 static uint64_t vk_now_ns(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec;}
 int dm_vk_initialize(const dm_vk_config *config,char *error,size_t bytes){
     if(!config||config->size!=sizeof(*config)||!config->game.present){if(error&&bytes)snprintf(error,bytes,"Invalid Android Vulkan config/present callback");return -1;}
     if(g_ready){if(error&&bytes)snprintf(error,bytes,"Vulkan adapter already initialized");return -1;}
+#ifdef DM_GAME_DOS2
+    // [DOS2] VK-NATIVE shader library (dm/gfx/vkn/vkn_shlib.h): DM_VK_NATIVE=1 with DM_VK_NATIVE_SHLIB != 0 (the default there) runs nothing of
+    // the translator: its initialise is replaced by the backend's shader library on the same config (device facts, switches, the d3-perf
+    // self-test: at the same moment, nothing else on the queue yet), plus the one thing of the translator's initialise the presenter reads,
+    // the present-thread mode (xbg_present_thread.inc ptq::init: DM_GFX_PRESENT_THREAD 0..2, set only where the presenter has the thread).
+    // No write-tracking / event-guard fault hooks (inert without their markers, translator state), no sampler setters (translator state).
+    // g_config / g_ready as before: mtl_has_window / mtl_display_refresh (the frame part's pacing) read them.
+    if(vkn_shlib_on && vkn_shlib_on()){
+        if(!vkn_shlib_init){if(error&&bytes)snprintf(error,bytes,"DM_VK_NATIVE_SHLIB: no shader library in this build");return -1;}
+        vkn_shlib_config sc;memset(&sc,0,sizeof sc);sc.physical=config->game.physical;sc.device=config->game.device;sc.queue=config->game.queue;
+        sc.queue_family=config->game.queue_family;sc.enabled_core=config->game.enabled_core;sc.enabled_shader_draw_parameters=config->game.enabled_shader_draw_parameters;
+        sc.shader_directory=config->game.shader_directory;
+        int r=vkn_shlib_init(&sc,error,bytes);if(r)return r;
+        {const char *e=getenv("DM_GFX_PRESENT_THREAD");int m=e&&*e?atoi(e):0;if(m<0||m>2)m=0;
+         const int have=dm_present_thread_set&&dm_present_async&&dm_present_wait_submitted&&dm_present_drain&&dm_present_last_error&&dm_present_queue_lock&&dm_present_queue_unlock;
+         if(m&&!have)m=0;
+         if(have)dm_present_thread_set(m);
+         VLOG("DM_VK_NATIVE=1, DM_VK_NATIVE_SHLIB: the translator is NOT initialised (shaders from the backend's library); present thread mode %d",m);}
+        g_config=*config;g_ready=1;return 0;
+    }
+#endif
     int r=xbg_game_initialize(&config->game,error,bytes);if(r)return r;
     // 写跟踪的存储快照（xbg_game.cpp wtrack，gfx-wtrack 开启）：缺页与宿主写客体内存都走 crash.c 的钩子，引擎不另装信号处理
     // Write-tracked storage snapshots (xbg_game.cpp wtrack, opt-in gfx-wtrack): faults and host writes into guest memory go through crash.c's hooks; the engine installs no handler of its own

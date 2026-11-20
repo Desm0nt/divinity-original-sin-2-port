@@ -16,6 +16,12 @@
 //          exists of the translator in mode 1: its command pool (one object), the shader objects / modules the backend asked for, the
 //          xpack index, the inert wtrack / event-guard fault hooks of nvn_vk.c, hle_nvn.c's constructors (static tables).
 //   D (4)  the frame counter and the on-screen frame statistics come from this file (below, "D").
+//          With DM_VK_NATIVE_SHLIB on (mode 1's default; the shader library piece, dm/gfx/vkn/vkn_shlib.h) C is superseded: the translator
+//          is NOT initialised at all (nvn_vk.c dm_vk_initialize runs vkn_shlib_init instead of xbg_game_initialize, plus the presenter's
+//          present-thread mode), the backend takes shaders, variants, the cache directory, the ASTC key and the GPU BC data from its own
+//          library, and nothing of xbg_game.cpp runs: its extern "C" entry points count their calls into the library (XBG_VKN_ENTERED), the
+//          boot line says "translator not initialised" and names any entry reached in a red line (then every 10 s while the count grows).
+//          DM_VK_NATIVE_SHLIB=0: the doors into the translator and the library-only initialise of C, as before this piece.
 //   Bisect on the phone: 0 = before this part; 9 = B only; 2 = C only; 4 = D only; 3 / 5 / 6 = pairs; unset = all. A wrong B shows at
 //   launch (black screen / crash in device init) and in the line "nonvn: B: ..." after device init; C in the translator's log lines and
 //   the boot line; D in the on-screen fps and the DRS lines.
@@ -58,10 +64,12 @@
 //                   settings queries, no translator state; kept), mtl_res_snapshot (this file's boot line: pools the translator knows)
 //     nvn_tex.c     nvn_tex_layout, nvn_fmt_bpb (format tables of the creation / read-back / ASTC parts; not HLE: kept)
 //     nvn_pace.h    nvn_pace*, nvn_fps_* (inline pacing math; kept)
-//     xbg_game.cpp  xbg_vkn_shader / xbg_vkn_alpha_module / xbg_vkn_retype_module (vkn_shader.c: load_shader_key with every SPIR-V
-//                   rewrite and its variants, once per stage / variant), xbg_vkn_cache_dir (vkn_warm.c), xbg_astc_storage_key
-//                   (vkn_astc.c, a pure hash), this part's xbg_vkn_lib_report; xbg_shader_key.c xbg_shader_program_key and
-//                   xbg_vulkan.cpp xbg_support_defaults (pure functions)
+//     xbg_game.cpp  (before the shader library piece) xbg_vkn_shader / xbg_vkn_alpha_module / xbg_vkn_retype_module (vkn_shader.c:
+//                   load_shader_key with every SPIR-V rewrite and its variants, once per stage / variant), xbg_vkn_cache_dir (vkn_warm.c),
+//                   xbg_astc_storage_key (vkn_astc.c, a pure hash), xbg_vkn_bc_* (vkn_bcgpu.c), this part's xbg_vkn_lib_report. With
+//                   DM_VK_NATIVE_SHLIB on: none (vkn_shlib_* of dm/gfx/vkn; the GPU BC data and the ASTC key in every mode). Pure units
+//                   kept: xbg_shader_key.c xbg_shader_program_key, xbg_vulkan.cpp xbg_support_defaults, the rewrite units xbg_spirv_*.cpp,
+//                   xbg_vertex.c, xbg_spvopt.cpp, xbg_selftest.cpp (the d3-perf self-test off Adreno), nr_ubodyn.c
 //     (No other dm_nvn_* / mtl_* / xbg_* call from the backend; the HLE NVN object layouts of nvn_obj.h are headers, not code.)
 // (iii) What HLE NVN and the translator initialise and run at boot in mode 1 (before this part):
 //     hle_nvn.c   constructors at load: nvn_nops_register (nvn_init_slots: the 523-slot table from the swnvn section, one log line),
@@ -545,7 +553,9 @@ void dm_vkn_nonvn_after_init(void) {
                  "Vulkan's conventions, VK-NATIVE.md section 0), context fences answered here %llu", (unsigned long long)g_boot_n, (unsigned long long)g_gpa_n,
                  (unsigned long long)g_gpa_unknown, (int)g_dev_origin, (int)g_dev_depth, (unsigned long long)g_fence_n);
         if (mism) vkn_logf(NV_RED "nonvn: B: %d slots of the game's table do not hold what GetProcAddress gave them:%s", mism, ml);
-        if (g_gpa_n != 2 * NV_SLOTS) vkn_logf(NV_RED "nonvn: B: GetProcAddress was called %llu times, not 2 x %d (0x934d70 twice): the device start went another way",
+        // (the game asks for names outside its 515-slot table too: nvnCommandBufferSetStencilCullCriteria, once a fill - phone run V5_a:
+        // 1032 = 2 x 515 + 2; they get the counting stub and are never called)
+        if (g_gpa_n != 2 * NV_SLOTS + g_gpa_unknown) vkn_logf(NV_RED "nonvn: B: GetProcAddress was called %llu times, not 2 x %d (0x934d70 twice): the device start went another way",
                                               (unsigned long long)g_gpa_n, NV_SLOTS);
         if (g_dev_origin != 1 || g_dev_depth != 1) vkn_logf(NV_RED "nonvn: B: the device modes are not (1, 1): origin %d depth %d", (int)g_dev_origin, (int)g_dev_depth);
     }
@@ -570,7 +580,20 @@ static int by_entry(const uint64_t *cnt, const uint64_t *ras, uint64_t *prev, un
 // ======== E. The boot line (the first census after device init: the first presented frames are behind it) ========
 // `[vkn] no-NVN path: game table 515 of 515 entries native, HLE NVN calls since start N, translator thread not started, ...` and one
 // red line naming every item that is not as it should be in a full no-NVN run (expected red items when a step is switched off).
-unsigned xbg_vkn_lib_report(unsigned *warm) __attribute__((weak));   // xbg_game.cpp (VK-NATIVE export block)
+unsigned xbg_vkn_lib_report(unsigned *warm) __attribute__((weak));   // xbg_game.cpp (VK-NATIVE export block; only with DM_VK_NATIVE_SHLIB=0)
+// The backend's shader library (dm/gfx/vkn/vkn_shlib.h): with DM_VK_NATIVE_SHLIB on (mode 1's default) the translator is not initialised at
+// all and every extern "C" entry point of xbg_game.cpp reports a call to it (XBG_VKN_ENTERED): the boot line names them, red.
+int vkn_shlib_on(void) __attribute__((weak));
+int vkn_shlib_report(char *out, size_t bytes) __attribute__((weak));
+uint64_t vkn_shlib_translator_calls(uint64_t out[]) __attribute__((weak));
+const char *vkn_shlib_translator_entry_name(int which) __attribute__((weak));
+enum { NV_XN = 10 };   // VKN_SHLIB_X_N
+static int shlib_on(void) { return vkn_shlib_on && vkn_shlib_on() && vkn_shlib_translator_calls; }
+static int translator_calls(char *by, int cap, uint64_t *tot) {   // "name x N, ..." of the entries reached; returns the length
+    uint64_t n[NV_XN] = {0}; *tot = vkn_shlib_translator_calls(n); int k = 0; by[0] = 0;
+    for (int i = 0; i < NV_XN; i++) if (n[i] && k < cap - 96) k += snprintf(by + k, (size_t)(cap - k), "%s%s x %llu", k ? ", " : "", vkn_shlib_translator_entry_name ? vkn_shlib_translator_entry_name(i) : "?", (unsigned long long)n[i]);
+    return k;
+}
 static int threads_named(const char *want) {   // threads of this process whose name (comm) is `want`; -1 = /proc unreadable
     DIR *d = opendir("/proc/self/task");
     if (!d) return -1;
@@ -592,24 +615,36 @@ static void nv_boot_line(void) {
     for (unsigned i = 0; i < NV_SLOTS; i++) { const uint64_t cur = __atomic_load_n(&tab[i], __ATOMIC_ACQUIRE); if (cur && is_ours(i, cur)) native++; }
     const uint64_t hle = hle_calls();
     const int xt = threads_named("nvn-translate");
-    unsigned warm = 0; const unsigned lib = xbg_vkn_lib_report ? xbg_vkn_lib_report(&warm) : 0xffffffffu;
+    const int shl = shlib_on();
+    unsigned warm = 0; const unsigned lib = shl ? 0 : xbg_vkn_lib_report ? xbg_vkn_lib_report(&warm) : 0xffffffffu;   // (no call into xbg_game.cpp with the library)
+    char shrep[400] = "", xby[400] = ""; uint64_t xtot = 0;
+    if (shl) { if (vkn_shlib_report) vkn_shlib_report(shrep, sizeof shrep); translator_calls(xby, (int)sizeof xby, &xtot); }
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     uint64_t mpc = 0, mpp = 0, mpn = 0; nvn_dirty_mp_stats(&mpc, &mpp, &mpn);
     mtl_res_count rc; memset(&rc, 0, sizeof rc); mtl_res_snapshot(&rc);
-    vkn_logf("no-NVN path: game table %d of %d entries native, HLE NVN calls since start %llu, translator thread %s, translator %s (pipeline cache %s, "
-             "warm-up threads %u, pool reset thread %s, gfx worker %s), dirty-tracked pool ranges %d (peak %d, mprotect calls %llu), pools known to the "
-             "translator %u, frame source %s, device bootstrap %s (DM_VK_NATIVE_NONVN steps %#x)",
-             native, NV_SLOTS, (unsigned long long)hle, xt < 0 ? "unknown (/proc unreadable)" : xt ? "STARTED" : "not started",
-             lib == 0xffffffffu ? "?" : lib & 1 ? "library-only" : "fully initialised", lib != 0xffffffffu && lib & 2 ? "loaded" : "none", warm,
-             lib != 0xffffffffu && lib & 8 ? "on" : "off", lib != 0xffffffffu && lib & 16 ? "on" : "off", live, peak, (unsigned long long)mpc, rc.pools,
-             g_d ? "the backend" : "hle_nvn.c", g_b ? "the backend" : "HLE NVN", dm_vkn_nonvn_mask());
+    if (shl)
+        vkn_logf("no-NVN path: game table %d of %d entries native, HLE NVN calls since start %llu, translator thread %s, translator not initialised "
+                 "(DM_VK_NATIVE_SHLIB: its entry points reached %llu times%s%s; %s), dirty-tracked pool ranges %d (peak %d, mprotect calls %llu), pools "
+                 "known to the translator %u, frame source %s, device bootstrap %s (DM_VK_NATIVE_NONVN steps %#x)",
+                 native, NV_SLOTS, (unsigned long long)hle, xt < 0 ? "unknown (/proc unreadable)" : xt ? "STARTED" : "not started", (unsigned long long)xtot,
+                 xtot ? ": " : "", xby, shrep[0] ? shrep : "no shader library report", live, peak, (unsigned long long)mpc, rc.pools,
+                 g_d ? "the backend" : "hle_nvn.c", g_b ? "the backend" : "HLE NVN", dm_vkn_nonvn_mask());
+    else
+        vkn_logf("no-NVN path: game table %d of %d entries native, HLE NVN calls since start %llu, translator thread %s, translator %s (pipeline cache %s, "
+                 "warm-up threads %u, pool reset thread %s, gfx worker %s), dirty-tracked pool ranges %d (peak %d, mprotect calls %llu), pools known to the "
+                 "translator %u, frame source %s, device bootstrap %s (DM_VK_NATIVE_NONVN steps %#x; DM_VK_NATIVE_SHLIB=0: shaders through the translator)",
+                 native, NV_SLOTS, (unsigned long long)hle, xt < 0 ? "unknown (/proc unreadable)" : xt ? "STARTED" : "not started",
+                 lib == 0xffffffffu ? "?" : lib & 1 ? "library-only" : "fully initialised", lib != 0xffffffffu && lib & 2 ? "loaded" : "none", warm,
+                 lib != 0xffffffffu && lib & 8 ? "on" : "off", lib != 0xffffffffu && lib & 16 ? "on" : "off", live, peak, (unsigned long long)mpc, rc.pools,
+                 g_d ? "the backend" : "hle_nvn.c", g_b ? "the backend" : "HLE NVN", dm_vkn_nonvn_mask());
     char bad[400]; int k = 0; bad[0] = 0;
 #define NV_BAD(cond, ...) do { if ((cond) && k < (int)sizeof bad - 80) k += snprintf(bad + k, sizeof bad - (size_t)k, __VA_ARGS__); } while (0)
     NV_BAD(native != NV_SLOTS, " table %d of %d native;", native, NV_SLOTS);
     NV_BAD(hle != 0, " %llu HLE NVN calls;", (unsigned long long)hle);
     NV_BAD(xt != 0, " translator thread %s;", xt < 0 ? "unknown" : "started");
-    NV_BAD(lib == 0xffffffffu || !(lib & 1), " translator not library-only;");
-    NV_BAD(lib != 0xffffffffu && (lib & 0x1e), " translator runs:%s%s%s%s;", lib & 2 ? " pipeline cache" : "", lib & 4 ? " warm-up threads" : "",
+    NV_BAD(shl && xtot, " translator entry points reached %llu times (%s);", (unsigned long long)xtot, xby);
+    NV_BAD(!shl && (lib == 0xffffffffu || !(lib & 1)), " translator not library-only;");
+    NV_BAD(!shl && lib != 0xffffffffu && (lib & 0x1e), " translator runs:%s%s%s%s;", lib & 2 ? " pipeline cache" : "", lib & 4 ? " warm-up threads" : "",
            lib & 8 ? " pool reset" : "", lib & 16 ? " gfx worker" : "");
     NV_BAD(live || mpc, " write tracking armed (%d ranges, %llu mprotect calls);", live, (unsigned long long)mpc);
     NV_BAD(rc.pools != 0, " %u pools registered with the translator;", rc.pools);
@@ -622,6 +657,10 @@ static void nv_census(void) {
     if (!g_nv.on || !g_nv.after_init) return;
     static int booted;
     if (!booted) { booted = 1; nv_boot_line(); }
+    if (shlib_on()) {   // a translator entry point reached after the boot line (DM_VK_NATIVE_SHLIB): one red line a window, with the entries
+        static uint64_t seen; char xby[400]; uint64_t xtot = 0; translator_calls(xby, (int)sizeof xby, &xtot);
+        if (xtot != seen) { vkn_logf(NV_RED "nonvn: translator entry points reached although it is not initialised: %llu calls since start (%s)", (unsigned long long)xtot, xby); seen = xtot; }
+    }
     uint64_t tot, win; char by[640];
     const int k = by_entry(dm_vkn_nv_fw_cnt, dm_vkn_nv_fw_ra, g_fw_prev, NV_SLOTS, &tot, &win, by, (int)sizeof by);
     const uint64_t h = hle_calls();
@@ -632,7 +671,7 @@ static void nv_census(void) {
     const int u = by_entry(dm_vkn_nv_un_cnt, dm_vkn_nv_un_ra, g_un_prev, NV_SLOTS + 1, &tot, &win, by, (int)sizeof by);
     char un[200]; int j = 0; un[0] = 0;
     for (unsigned i = 0; i < 8 && i < g_gpa_unknown; i++) if (g_unknown_name[i] && j < (int)sizeof un - 64) j += snprintf(un + j, sizeof un - (size_t)j, " %.48s", g_unknown_name[i]);
-    if (tot || g_gpa_unknown)
+    if (tot)   // (names outside the table that nobody calls are not an error: the boot line counts them)
         vkn_logf(NV_RED "nonvn: B: unexpected NVN entries called %llu (%llu in this window; by entry: %s); names outside the table %llu:%s", (unsigned long long)tot,
                  (unsigned long long)win, u ? by : "none", (unsigned long long)g_gpa_unknown, j ? un : " none");
 }

@@ -108,7 +108,9 @@ typedef struct xbg_shader_binding {
     uint32_t binding,type,count,bytes,source,slot,sampler_slot,flags;
 } xbg_shader_binding; /* flags: bit0/1 formatless write/read; bit31 image shape present,
                        * dim in bits8..10, array12, MS13, depth14, scalar16..17 */
-/* [DOS2] VK-NATIVE export (xbg_game.cpp, end of file; caller dm/gfx/vkn/vkn_shader.c): one stage bundle of the packs as the translator
+/* [DOS2] VK-NATIVE export (xbg_game.cpp, end of file; caller dm/gfx/vkn/vkn_shader.c in mode 2 and in mode 1 with DM_VK_NATIVE_SHLIB=0;
+ * mode 1's default is the backend's own shader library dm/gfx/vkn/vkn_shlib.h, which fills the same xbg_vkn_stage word for word - host test
+ * engine/tests/vkn_shlib_test.cpp - and the GPU BC data doors moved to dm/gfx/vkn/vkn_shlib_bc.cpp): one stage bundle of the packs as the translator
  * loads it (load_shader_key: every load-time SPIR-V rewrite applied), by its program key (xbg_shader_program_key of control + code).
  * The module and the shader object belong to the translator and live until xbg_game_shutdown; bindings / inputs are copies; c1 points
  * into the shader object (immutable after load). Each call takes the engine mutex. */

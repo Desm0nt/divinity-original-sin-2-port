@@ -83,6 +83,16 @@ extern "C" int xbg_completion_wait_selftest(char *report,size_t bytes);
 #include "xbg_spirv_pos.h"   // [DOS2] DM_NR_COVER (NR-10b)
 #include "xbg_spirv_gspass.h"
 #include "xbg_spirv_alpha.h"     // [DOS2] NVN fixed-function alpha test in the fragment shader (DM_GFX_ALPHA_TEST)
+#ifdef DM_GAME_DOS2
+// [DOS2] VK-NATIVE shader library (dm/gfx/vkn/vkn_shlib.cpp): every extern "C" entry point of this engine that the port reaches tells the
+// library (which counts only in mode 1 with DM_VK_NATIVE_SHLIB on: then none may be reached; hle_dos2_vkn_nonvn.c names them in a red
+// line). Weak: builds and host tests without the library.
+extern "C" void vkn_shlib_translator_entered(int which) __attribute__((weak));
+#define XBG_VKN_ENTERED(which) do{if(vkn_shlib_translator_entered)vkn_shlib_translator_entered(which);}while(0)
+#else
+#define XBG_VKN_ENTERED(which) do{}while(0)
+#endif
+enum{XBG_VKN_E_INIT,XBG_VKN_E_SHADER,XBG_VKN_E_ALPHA,XBG_VKN_E_RETYPE,XBG_VKN_E_CACHE_DIR,XBG_VKN_E_LIB_REPORT,XBG_VKN_E_SUBMIT,XBG_VKN_E_PRESENT,XBG_VKN_E_SHUTDOWN,XBG_VKN_E_STATS};   // vkn_shlib.h VKN_SHLIB_X_*
 #include "xbg_spirv_gather.h"    // [DOS2] textureGather at the Switch footprint (DM_GFX_GATHER_SNAP)
 #include "xbg_spirv_poolidx.h"   // [ETERNAL] bindless residency: pool indices a draw can take
 #include "../../nvn/nvn_cover.h"
@@ -9890,6 +9900,7 @@ extern "C" unsigned dm_vkn_nonvn_mask(void) __attribute__((weak));
 namespace vknlib{bool on=false;}
 #endif
 extern "C" int xbg_game_initialize(const xbg_game_config *c,char *error,size_t bytes){
+    XBG_VKN_ENTERED(XBG_VKN_E_INIT);
     if(!c || c->size!=sizeof(*c) || !c->physical || !c->device || !c->queue || !c->shader_directory || !c->fence_timeout_ns){if(error&&bytes)snprintf(error,bytes,"Invalid xbg_game_config");return -1;}
     std::lock_guard<std::recursive_mutex> lock(mutex);if(initialized){if(error&&bytes)snprintf(error,bytes,"Game graphics already initialized");return -1;}
 #ifdef DM_COMPLETION_WAIT_SELFTEST
@@ -10253,7 +10264,7 @@ extern "C" int xbg_game_profile_cpu(uint64_t first_frame,uint32_t frame_count){
 extern "C" void xbg_nr_pipe_hint(const char *key,unsigned len){warm::nr::hint(key,len);}   // [DOS2] NR-07 (hle_dos2_nr.c): a program the game set up
 extern "C" void xbg_nr_pipe_source(int on){warm::nr::source=on;}
 #include "xbg_nr_mem.inc"   // [DOS2] NR-29 DM_NR_MEM: usage and trims of the engine's NR caches (extern "C" xbg_nr_mem_usage / xbg_nr_mem_trim)
-extern "C" int xbg_game_shutdown(){gfx_drain();gfx_async_stop();std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized)return 0;timing_report("shutdown-partial");provenance_close("SHUTDOWN");resolve_pending();submit_slots(true);save_pipeline_cache();pending_writebacks.clear();pending_reports.clear();++hit_pend_gen;condr::reports_dropped();pending_events.clear();recording_events.clear();epochs.clear();ptq::drain();VkResult r=ptq::wait_idle(cfg.queue);if(r!=VK_SUCCESS)return r;wtrack::release();nrsort::release();nrdraw::release();nrdesc::release();nrbuf::release();nrpo::release();nrps::release();destroy_slots();clear_pipeline_objects();cache_save_join();warm::shutdown();bright::shutdown();passval::shutdown();
+extern "C" int xbg_game_shutdown(){XBG_VKN_ENTERED(XBG_VKN_E_SHUTDOWN);gfx_drain();gfx_async_stop();std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized)return 0;timing_report("shutdown-partial");provenance_close("SHUTDOWN");resolve_pending();submit_slots(true);save_pipeline_cache();pending_writebacks.clear();pending_reports.clear();++hit_pend_gen;condr::reports_dropped();pending_events.clear();recording_events.clear();epochs.clear();ptq::drain();VkResult r=ptq::wait_idle(cfg.queue);if(r!=VK_SUCCESS)return r;wtrack::release();nrsort::release();nrdraw::release();nrdesc::release();nrbuf::release();nrpo::release();nrps::release();destroy_slots();clear_pipeline_objects();cache_save_join();warm::shutdown();bright::shutdown();passval::shutdown();
 #ifdef DM_GAME_ETERNAL
     bindless::destroy();
 #endif
@@ -10438,11 +10449,13 @@ extern "C" void xbg_texture_invalidate(const tex_t *t){if(!t)return;if(!gfx_asyn
 #include "xbg_nr_z8.inc"   // [DOS2] NR-ZERO Z8: the entry points of the NVN front (the submit walk, the number of the submission being executed)
 #undef XBG_NR_Z8_PART
 extern "C" void xbg_submit(int n,const uint64_t *handles){
+    XBG_VKN_ENTERED(XBG_VKN_E_SUBMIT);
     const uint64_t z8s=nrz8_next_sub;nrz8_next_sub=0;   // [DOS2] NR-ZERO Z8: the number the front announced for this submission (0: none - nothing of the walk is taken)
     if(!gfx_async){nrz8t::cur_sub=z8s;xbg_submit_now(n,handles);nrz8t::cur_sub=0;return;}
     std::vector<uint64_t> list(handles,handles+n);++gfx_enqueued;
     gfx_enqueue([list,z8s]{nrz8t::cur_sub=z8s;xbg_submit_now(int(list.size()),list.data());nrz8t::cur_sub=0;gfx_executed.store(submitted);});}
 extern "C" void xbg_present_texture(const win_t *window,const tex_t *texture){
+    XBG_VKN_ENTERED(XBG_VKN_E_PRESENT);
     if(!gfx_async){xbg_present_texture_now(window,texture);return;}
     // At most two frames queued ahead of the graphics thread.
     {uint64_t t0=uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());std::unique_lock<std::mutex> l(gfx_job_mutex);gfx_idle_cv.wait(l,[]{return gfx_presents_queued.load()<2;});gfx_pace_ns+=uint64_t(std::chrono::steady_clock::now().time_since_epoch().count())-t0;}
@@ -10456,6 +10469,7 @@ extern "C" void xbg_legacy_register_sampler(int id,const samp_par *s){std::lock_
 // module variants (alpha_module "#at", vtx_retype_module "#vi"), under the engine mutex like every entry point. No state of its own.
 #ifdef DM_GAME_DOS2
 extern "C" int xbg_vkn_shader(const char *key,const void *control,const void *code,xbg_vkn_stage *out){
+    XBG_VKN_ENTERED(XBG_VKN_E_SHADER);
     if(!key || !out)return -1;out->shader=nullptr;out->module=VK_NULL_HANDLE;out->binding_count=out->input_count=out->c1_bytes=0;out->c1=nullptr;
     std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || failed)return -1;
     Shader *s=load_shader_key(std::string(key),control,code);if(!s)return 1;
@@ -10464,9 +10478,11 @@ extern "C" int xbg_vkn_shader(const char *key,const void *control,const void *co
     out->input_count=uint32_t(std::min<size_t>(s->inputs.size(),16));for(uint32_t i=0;i<out->input_count;i++){out->inputs[i]=s->inputs[i];out->input_classes[i]=i<s->input_classes.size()?s->input_classes[i]:0;}
     out->c1=s->c1.empty()?nullptr:s->c1.data();out->c1_bytes=uint32_t(s->c1.size());return 0;}
 extern "C" VkShaderModule xbg_vkn_alpha_module(void *shader,uint32_t func,float ref){
+    XBG_VKN_ENTERED(XBG_VKN_E_ALPHA);
     if(!shader)return VK_NULL_HANDLE;std::lock_guard<std::recursive_mutex> lock(mutex);Shader &s=*static_cast<Shader*>(shader);
     if(!initialized || failed || !s.unusable.empty() || s.stage!=4 || func==8 || !alpha_test_on())return s.module;return alpha_module(s,func,ref);}
 extern "C" VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code){
+    XBG_VKN_ENTERED(XBG_VKN_E_RETYPE);
     if(!shader)return VK_NULL_HANDLE;std::lock_guard<std::recursive_mutex> lock(mutex);Shader &s=*static_cast<Shader*>(shader);
     if(!initialized || failed || !s.unusable.empty() || s.stage!=0 || !code)return s.module;return vtx_retype_module(s,code);}
 // [DOS2] VK-NATIVE stage 4 (pipeline warm-up, dm/gfx/vkn/vkn_warm.c): the directory of vk-pipeline-cache.bin (pipeline_cache_path:
@@ -10475,74 +10491,15 @@ extern "C" VkShaderModule xbg_vkn_retype_module(void *shader,uint64_t code){
 // initialise (step C), 2 a translator pipeline cache exists, 4 warm-up threads exist, 8 the pool reset thread, 16 the gfx worker; *warm =
 // the number of warm-up threads. No lock: every one of these is written by xbg_game_initialize / shutdown only (read after the init).
 extern "C" unsigned xbg_vkn_lib_report(unsigned *warm){
+    XBG_VKN_ENTERED(XBG_VKN_E_LIB_REPORT);
     unsigned m=0;if(vknlib::on)m|=1;if(pipeline_cache)m|=2;const size_t w=warm::threads.size();if(w)m|=4;if(poolreset::worker)m|=8;if(gfx_worker.joinable())m|=16;
     if(warm)*warm=unsigned(w);return m;}
 extern "C" int xbg_vkn_cache_dir(char *out,size_t bytes){
+    XBG_VKN_ENTERED(XBG_VKN_E_CACHE_DIR);
     if(!out || !bytes)return -1;out[0]=0;std::lock_guard<std::recursive_mutex> lock(mutex);if(!initialized || !cfg.shader_directory)return -1;
     std::string dir=cfg.shader_directory;size_t cut=dir.find_last_of('/');if(cut!=std::string::npos)dir.resize(cut);
     if(dir.size()+1>bytes)return -1;memcpy(out,dir.c_str(),dir.size()+1);return 0;}
-// [DOS2] VK-NATIVE stage 4 (GPU BC route of dm/gfx/vkn/vkn_bcgpu.c, KB TEX-01 / TEX-02 / TEX-18): what the backend takes from the GPU BC
-// decoder (xbg_bc_decode.comp, bcgpu) and from port-common bc-astc-gpu (xbg_bc_astc_encode.comp, bcastc) to run them on its OWN pipelines,
-// descriptor sets and scratch buffers: the SPIR-V, the encoder tables, both self-test sets in their batch layout (xbg_bc_gpu.h
-// XbgBcGpuBatch) and both verdicts exactly as bcgpu::selftest / bcastc::selftest judge them, the encoder's per-format flags and shape rules.
-// Pure functions of their arguments: no translator state, no lock (the translator's own bcgpu / bcastc are untouched by these).
-// Declarations: dm/gfx/vkn/vkn_bcgpu.h (section "translator doors"). Only BC1 / BC1A / BC2 / BC3 / BC7 and their sRGB twins (0x41..0x48,
-// 0x4d, 0x4e): the decoder writes RGBA8 for them whatever xbg_bc_8bit_channels / xbg_bc6_e5 say.
-#include "../../vkn/vkn_bcgpu.h"   // the doors' declarations (signatures checked here)
-static bool xbg_vkn_bc_rgba8(uint32_t f){return (f>=0x41 && f<=0x48) || f==0x4d || f==0x4e;}
-extern "C" const uint32_t *xbg_vkn_bc_blob(int which,size_t *bytes){
-    if(bytes)*bytes=which==0?sizeof(xbg_bc_decode_cs):which==1?sizeof(xbg_bc_astc_encode_cs):which==2?sizeof(xbg_bc_astc_tables):0;
-    return which==0?xbg_bc_decode_cs:which==1?xbg_bc_astc_encode_cs:which==2?xbg_bc_astc_tables:nullptr;}
-extern "C" int xbg_vkn_bc_kat_input(uint32_t fmt,void *in,size_t in_cap,size_t *in_bytes,size_t *out_bytes,uint32_t push[4]){
-    xbg_bc_format info;if(!xbg_vkn_bc_rgba8(fmt) || xbg_bc_format_info(fmt,&info))return -1;
-    const uint32_t bb=info.bytes_per_block,bpp=info.bytes_per_pixel,bx=64,by=32;   // bcgpu::selftest: 2048 blocks, one region
-    std::vector<uint8_t> raw;xbg_bc_kat_blocks(fmt,bb,bx*by,raw);XbgBcGpuBatch batch;batch.add(raw.data(),bx,by,1,bb,bpp);
-    if(!in || batch.input_bytes()>in_cap)return -1;
-    batch.write_input(in);*in_bytes=batch.input_bytes();*out_bytes=batch.out;
-    push[0]=uint32_t(batch.regions());push[1]=batch.blocks;push[2]=bpp;push[3]=bb/4;return 0;}
-extern "C" int xbg_vkn_bc_kat_check(uint32_t fmt,const void *out,size_t out_bytes,char *line,size_t cap){
-    xbg_bc_format info;if(!xbg_vkn_bc_rgba8(fmt) || xbg_bc_format_info(fmt,&info) || !out)return -1;
-    const uint32_t bb=info.bytes_per_block,bpp=info.bytes_per_pixel,bx=64,by=32,n=bx*by;
-    if(out_bytes<size_t(n)*16*bpp)return -1;
-    std::vector<uint8_t> raw;xbg_bc_kat_blocks(fmt,bb,n,raw);const uint8_t *o=static_cast<const uint8_t*>(out);int bad=0;uint32_t modes=0;
-    if(line && cap)line[0]=0;
-    for(uint32_t i=0;i<n;i++){   // bcgpu::selftest's comparison: decoder rows of 64 * 4 pixels, every pixel byte equal (no SNORM here)
-        uint8_t cpu[128];const uint8_t *blk=raw.data()+size_t(i)*bb;if(xbg_decode_block(fmt,blk,bb,cpu,sizeof cpu))continue;
-        int bad_row=-1;
-        for(uint32_t row=0;row<4 && bad_row<0;row++){const uint8_t *g=o+((size_t(i/bx)*4+row)*bx*4+size_t(i%bx)*4)*bpp,*e=cpu+row*4*bpp;if(memcmp(g,e,4*bpp))bad_row=int(row);}
-        if(bad_row<0)continue;
-        int m=-1;if(fmt==0x4d || fmt==0x4e){m=8;for(int k=0;k<8;k++)if(blk[0]>>k&1){m=k;break;}}
-        if(m>=0)modes|=1u<<m;
-        if(!bad++ && line && cap){char rh[40],eh[40],gh[40];const uint8_t *g=o+((size_t(i/bx)*4+uint32_t(bad_row))*bx*4+size_t(i%bx)*4)*bpp,*e=cpu+bad_row*4*bpp;
-            for(uint32_t k=0;k<bb;k++)snprintf(rh+2*k,3,"%02x",blk[k]);for(uint32_t k=0;k<16 && k<4*bpp;k++){snprintf(eh+2*k,3,"%02x",e[k]);snprintf(gh+2*k,3,"%02x",g[k]);}
-            snprintf(line,cap,"first: block %u mode %d row %d raw=%s cpu=%s gpu=%s",i,m,bad_row,rh,eh,gh);}
-    }
-    if(bad && line && cap){const size_t at=strlen(line);snprintf(line+at,cap-at," (BC7 modes %#x)",modes);}
-    return bad;}
-extern "C" int xbg_vkn_bca_kat_input(void *in,size_t in_cap,size_t *in_bytes,void *rgba,size_t rgba_cap,size_t *rgba_bytes,uint32_t push[][4],uint32_t max_disp,uint32_t *ndisp,uint32_t *blocks){
-    XbgAstcKatSet s;xbg_bc_astc_kat(s);XbgBcGpuBatch batch;std::vector<size_t> out_at;   // bcastc::selftest: one region a category, BC blocks as 4 words
-    for(const auto &c:s.cats)out_at.push_back(batch.add(s.bc.data()+size_t(c.first)*4,c.count,1,1,16,4));
-    if(!in || !rgba || batch.input_bytes()>in_cap || batch.out>rgba_cap || s.cats.size()>max_disp)return -1;
-    batch.write_input(in);uint8_t *o=static_cast<uint8_t*>(rgba);memset(o,0,batch.out);
-    for(size_t k=0;k<s.cats.size();k++){const auto &c=s.cats[k];const uint32_t row=c.count*4;   // decoder layout: rows of count * 4 texels
-        for(uint32_t b=0;b<c.count;b++)for(uint32_t t=0;t<16;t++)memcpy(o+out_at[k]+(size_t(t>>2)*row+size_t(b)*4+(t&3))*4,s.rgba.data()+(size_t(c.first+b)*16+t)*4,4);
-        push[k][0]=uint32_t(batch.regions());push[k][1]=c.first;push[k][2]=c.first+c.count;push[k][3]=xbg_bc_astc_direct(c.nvn)|(4u<<8);}
-    *in_bytes=batch.input_bytes();*rgba_bytes=batch.out;*ndisp=uint32_t(s.cats.size());*blocks=s.blocks();return 0;}
-extern "C" int xbg_vkn_bca_kat_check(const void *enc,uint32_t cands,int *zero,char *line,size_t cap){
-    if(!enc)return 0;
-    XbgAstcKatSet s;xbg_bc_astc_kat(s);const float *expected=xbg_bc_astc_kat_expected(cands);
-    const XbgAstcKatResult r=xbg_bc_astc_check(s,static_cast<const uint8_t*>(enc),expected);
-    if(zero)*zero=r.zero!=0;
-    const bool good=r.bad==0 && r.blocks==s.blocks();
-    if(line && cap){
-        size_t at=size_t(snprintf(line,cap,"blocks=%u candidates=%u bad=%u (error %u, zero %u, worse than host*1.25+10 %u) psnr avg/min",r.blocks,cands,r.bad,r.error,r.zero,r.worse));
-        for(size_t k=0;k<s.cats.size() && k<8 && at+40<cap;k++)at+=size_t(snprintf(line+at,cap-at," %s=%.1f/%.1f",s.cats[k].name,r.cat[k].n?r.cat[k].psnr_sum/r.cat[k].n:0.0,r.cat[k].min_psnr));
-        if(r.first_bad!=UINT32_MAX && at+80<cap){uint32_t w[4];memcpy(w,static_cast<const uint8_t*>(enc)+size_t(r.first_bad)*16,16);
-            snprintf(line+at,cap-at," first bad block %u: %08x %08x %08x %08x",r.first_bad,w[0],w[1],w[2],w[3]);}}
-    return good?1:0;}
-extern "C" uint32_t xbg_vkn_bca_flags(uint32_t nvn){return xbg_bc_astc_family(nvn)<0?0u:xbg_bc_astc_flags(nvn);}
-extern "C" const char *xbg_vkn_bca_shape(uint32_t nvn,int target,uint32_t w,uint32_t h,uint32_t levels,uint32_t layers,int samples,int storage,int vt){
-    return xbg_bc_astc_shape(nvn,target,w,h,levels,layers,samples,storage?0x4u:0u,vt!=0);}
+// [DOS2] VK-NATIVE stage 4: the GPU BC route's data doors (xbg_vkn_bc_* / xbg_vkn_bca_*) moved to dm/gfx/vkn/vkn_shlib_bc.cpp (vkn_shlib_bc_*).
 #endif
 #define XBG_NR_Z5G_BRIDGE
 #include "xbg_nr_z5g.inc"   // [DOS2] NR-ZERO Z5: the game thread's entry points (called by the NVN tap)

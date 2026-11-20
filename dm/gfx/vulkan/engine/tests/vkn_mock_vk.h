@@ -6,9 +6,10 @@
 //     3-component formats, D24 attachments, 3-component vertex formats); command buffers record barriers, buffer -> image copies
 //     (with a pointer to the staged bytes) and image copies into logs the test reads; vkQueueSubmit checks the queue lock;
 //   - the front end's doors: dm_vk_handles (a device can be switched off), dm_present_queue_lock / unlock (depth counted);
-//   - the translator's doors (xbg_game.h / xbg_game_internal.h / xbg_vulkan.h): xbg_shader_program_key (the key is the first 16
-//     characters of the control section; '!' = no key), xbg_vkn_shader (synthetic bundles registered by the test, an optional gate
-//     that holds the worker inside the call), the alpha / retype variant getters (logged with their thread), xbg_support_defaults.
+//   - the shader loader mode 1 uses (vkn_shlib.h, the backend's shader library: vkn_shlib_on = 1, vkn_shlib_shader = synthetic bundles
+//     registered by the test with an optional gate that holds the worker inside the call, the alpha / retype variant getters logged
+//     with their thread) and the pure helpers (xbg_game_internal.h / xbg_vulkan.h): xbg_shader_program_key (the key is the first 16
+//     characters of the control section; '!' = no key), xbg_support_defaults.
 // Stage 3 additions (used by vkn_stage3_test.c; stage 2 does not turn them on):
 //   - one ordered command log of every vkCmd* call, command buffer begin / end, submit and the presenter's doors (mk_ev: call + the key
 //     arguments, the queue-lock depth at the call), with the command buffer of each entry;
@@ -1149,14 +1150,14 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
     }
 }
 
-// ---------------------------------------------------------------- the translator's doors
+// ---------------------------------------------------------------- the shader loader of mode 1 (vkn_shlib.h; it took over the translator's doors)
 typedef struct mk_bundle { char key[17]; xbg_vkn_stage st; } mk_bundle;
 static mk_bundle mk_bundles[32]; static int mk_nbundles;
-static int mk_xbg_down;                         // xbg_vkn_shader returns -1
+static int mk_xbg_down;                         // vkn_shlib_shader returns -1 (the library not initialised)
 static pthread_t mk_main_thread;
 static int mk_xbg_calls, mk_xbg_off_main, mk_key_calls, mk_alpha_calls, mk_retype_calls, mk_variant_off_main;
 static uint32_t mk_alpha_func; static float mk_alpha_ref; static uint64_t mk_retype_code; static void *mk_variant_xs;
-// gate: while mk_gate_on, xbg_vkn_shader for the key mk_gate_key blocks (the worker stays inside the call)
+// gate: while mk_gate_on, vkn_shlib_shader for the key mk_gate_key blocks (the worker stays inside the call)
 static pthread_mutex_t mk_gate_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t mk_gate_cv = PTHREAD_COND_INITIALIZER;
 static int mk_gate_on, mk_gate_inside; static char mk_gate_key[17];
 
@@ -1178,7 +1179,8 @@ int xbg_shader_program_key(const void *control, const void *code, char out_hex17
     memcpy(out_hex17, c, 16); out_hex17[16] = 0;
     return 0;
 }
-int xbg_vkn_shader(const char *key, const void *control, const void *code, xbg_vkn_stage *out) {
+int vkn_shlib_on(void) { return 1; }
+int vkn_shlib_shader(const char *key, const void *control, const void *code, xbg_vkn_stage *out) {
     (void)control; (void)code;
     __atomic_add_fetch(&mk_xbg_calls, 1, __ATOMIC_RELAXED);
     if (pthread_equal(pthread_self(), mk_main_thread)) __atomic_add_fetch(&mk_xbg_off_main, 0, __ATOMIC_RELAXED); else __atomic_add_fetch(&mk_xbg_off_main, 1, __ATOMIC_RELAXED);
@@ -1189,12 +1191,12 @@ int xbg_vkn_shader(const char *key, const void *control, const void *code, xbg_v
     for (int i = 0; i < mk_nbundles; i++) if (!strcmp(mk_bundles[i].key, key)) { *out = mk_bundles[i].st; return 0; }
     return 1;
 }
-VkShaderModule xbg_vkn_alpha_module(void *shader, uint32_t func, float ref) {
+VkShaderModule vkn_shlib_alpha_module(void *shader, uint32_t func, float ref) {
     mk_alpha_calls++; mk_alpha_func = func; mk_alpha_ref = ref; mk_variant_xs = shader;
     if (!pthread_equal(pthread_self(), mk_main_thread)) mk_variant_off_main++;
     return (VkShaderModule)(uintptr_t)(0x7a00000ull + func);
 }
-VkShaderModule xbg_vkn_retype_module(void *shader, uint64_t code) {
+VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     mk_retype_calls++; mk_retype_code = code; mk_variant_xs = shader;
     if (!pthread_equal(pthread_self(), mk_main_thread)) mk_variant_off_main++;
     return (VkShaderModule)(uintptr_t)(0x7b00000ull + (code & 0xffff));

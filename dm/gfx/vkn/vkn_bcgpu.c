@@ -1,6 +1,6 @@
 // [DOS2] VK-NATIVE stage 4: GPU BC decode -> RGBA8 / -> ASTC 4x4 for vkn_tex on GPUs without BC (vkn_bcgpu.h). The shaders, the encoder
 // tables and both self-test sets are the translator's (xbg_bc_decode.comp: KB TEX-01 / TEX-02; port-common bc-astc-gpu
-// xbg_bc_astc_encode.comp: KB TEX-18), taken through the narrow doors of xbg_game.cpp's [DOS2] VK-NATIVE export block; the pipelines,
+// xbg_bc_astc_encode.comp: KB TEX-18), taken through the narrow data doors of vkn_shlib_bc.cpp (moved there from xbg_game.cpp's [DOS2] VK-NATIVE export block); the pipelines,
 // descriptor sets, scratch buffers and submissions are this file's own (the translator's bcgpu / bcastc buffers belong to its recording,
 // which still runs in mode 2). No game addresses, no NVN objects: NVN format / target NUMBERS only.
 #ifdef DM_GAME_DOS2
@@ -95,7 +95,7 @@ static VkDescriptorSet make_set(const vkn_dev *d, VkDescriptorSetLayout dsl, con
     return s;
 }
 static VkShaderModule make_module(const vkn_dev *d, int which) {
-    size_t bytes = 0; const uint32_t *code = xbg_vkn_bc_blob(which, &bytes);
+    size_t bytes = 0; const uint32_t *code = vkn_shlib_bc_blob(which, &bytes);
     if (!code || !bytes) return VK_NULL_HANDLE;
     const VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code};
     VkShaderModule m = VK_NULL_HANDLE;
@@ -145,7 +145,7 @@ static int prepare_locked(void) {
     const vkn_dev *d = vkn_device();
     const char *why = NULL;
     if (cpu) { g_why_dev = VKN_BCGW_OFF; why = "DM_GFX_BC_DECODE=cpu"; }
-    else if (!xbg_vkn_bc_blob || !xbg_vkn_bc_kat_input || !xbg_vkn_bc_kat_check || !xbg_vkn_bc_blob(0, NULL)) { g_why_dev = VKN_BCGW_DOOR; why = "no translator doors in this build"; }
+    else if (!vkn_shlib_bc_blob || !vkn_shlib_bc_kat_input || !vkn_shlib_bc_kat_check || !vkn_shlib_bc_blob(0, NULL)) { g_why_dev = VKN_BCGW_DOOR; why = "no data doors (vkn_shlib_bc.cpp) in this build"; }
     else if (!d) { g_why_dev = VKN_BCGW_DEV; why = "no device"; }
     else {
         const uint32_t range = d->props.limits.maxStorageBufferRange;
@@ -202,9 +202,9 @@ static int dec_selftest_locked(VkPipeline p, uint32_t fmt) {
     const uint64_t cap = 2048ull * 16 + 64;   // input of 2048 blocks of at most 16 bytes + one region
     if (vkn_block_alloc(VKN_ARENA_STAGING, cap + 2048ull * 64, 16, &b)) { vkn_logf(RED "bc-gpu: self-test fmt=%#x: no staging memory, format left on the CPU", fmt); return 0; }
     size_t in_b = 0, out_b = 0; int bad = -1, ran = 0;
-    if (!xbg_vkn_bc_kat_input(fmt, b.cpu, (size_t)cap, &in_b, &out_b, k.push) && out_b <= 2048ull * 64 && out_b <= g_out_bytes && in_b <= g_in_bytes) {
+    if (!vkn_shlib_bc_kat_input(fmt, b.cpu, (size_t)cap, &in_b, &out_b, k.push) && out_b <= 2048ull * 64 && out_b <= g_out_bytes && in_b <= g_in_bytes) {
         k.in_b = in_b; k.out_b = out_b; k.rb_at = (in_b + 15) & ~15ull;
-        if (k.rb_at + out_b <= b.size && !kat_run(&b, dec_kat_rec, &k)) { ran = 1; bad = xbg_vkn_bc_kat_check(fmt, (const uint8_t *)b.cpu + k.rb_at, out_b, line, sizeof line); }
+        if (k.rb_at + out_b <= b.size && !kat_run(&b, dec_kat_rec, &k)) { ran = 1; bad = vkn_shlib_bc_kat_check(fmt, (const uint8_t *)b.cpu + k.rb_at, out_b, line, sizeof line); }
     }
     vkn_block_free(&b);
     const int good = ran && bad == 0;
@@ -268,17 +268,17 @@ static int enc_selftest_locked(char *line, size_t cap) {
     size_t in_b = 0, rgba_b = 0;
     int good = 0, ran = 0, zero = 0, retries = 0;
     k.rgba_at = in_cap; k.rb_at = in_cap + rgba_cap;
-    if (xbg_vkn_bca_kat_input(b.cpu, (size_t)in_cap, &in_b, (uint8_t *)b.cpu + k.rgba_at, (size_t)rgba_cap, &rgba_b, k.push, 8, &k.nd, &k.blocks) ||
+    if (vkn_shlib_bca_kat_input(b.cpu, (size_t)in_cap, &in_b, (uint8_t *)b.cpu + k.rgba_at, (size_t)rgba_cap, &rgba_b, k.push, 8, &k.nd, &k.blocks) ||
         in_b > g_in_bytes || rgba_b > g_out_bytes || (uint64_t)k.blocks * 16 > rb_cap || (uint64_t)k.blocks * 16 > g_astc_bytes) snprintf(line, cap, "self-test does not fit");
     else {
         k.in_b = in_b; k.rgba_b = rgba_b;
         uint8_t *rb = (uint8_t *)b.cpu + k.rb_at;
         memset(rb, 0, (size_t)k.blocks * 16);
         if (!kat_run(&b, enc_kat_rec, &k)) {
-            ran = 1; good = xbg_vkn_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap);
+            ran = 1; good = vkn_shlib_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap);
             // FN-61: a result read as zeros may be a stale read: look again, then run the test once more
-            if (zero) { retries++; good = xbg_vkn_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap); }
-            if (zero) { retries++; memset(rb, 0, (size_t)k.blocks * 16); ran = !kat_run(&b, enc_kat_rec, &k); if (ran) good = xbg_vkn_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap); }
+            if (zero) { retries++; good = vkn_shlib_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap); }
+            if (zero) { retries++; memset(rb, 0, (size_t)k.blocks * 16); ran = !kat_run(&b, enc_kat_rec, &k); if (ran) good = vkn_shlib_bca_kat_check(rb, (uint32_t)g_cands, &zero, line, cap); }
         } else snprintf(line, cap, "submission failed");
     }
     vkn_block_free(&b);
@@ -294,10 +294,10 @@ static void astc_decide_locked(void) {
     if (!g_astc_mode) off = VKN_BCAK_OFF;
     else if (g_astc_mode == 1 && d && d->props.vendorID == 0x5143) off = VKN_BCAK_QCOM;
     else if (!d || !astc_feat_ok(d)) off = VKN_BCAK_FEAT;
-    else if (!xbg_vkn_bca_kat_input || !xbg_vkn_bca_kat_check || !xbg_vkn_bca_flags || !xbg_vkn_bca_shape || !xbg_vkn_bc_blob(1, NULL) || !xbg_vkn_bc_blob(2, NULL)) {
+    else if (!vkn_shlib_bca_kat_input || !vkn_shlib_bca_kat_check || !vkn_shlib_bca_flags || !vkn_shlib_bca_shape || !vkn_shlib_bc_blob(1, NULL) || !vkn_shlib_bc_blob(2, NULL)) {
         off = VKN_BCAK_ENC; snprintf(line, sizeof line, "no encoder doors in this build");
     } else {
-        size_t tb = 0; const uint32_t *tab = xbg_vkn_bc_blob(2, &tb); void *map = NULL;
+        size_t tb = 0; const uint32_t *tab = vkn_shlib_bc_blob(2, &tb); void *map = NULL;
         VkBuffer eb[4] = {g_in, g_out, VK_NULL_HANDLE, VK_NULL_HANDLE};
         off = VKN_BCAK_ENC;
         if (make_buffer(d, g_astc_bytes, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &g_astcb, &g_astc_mem)) snprintf(line, sizeof line, "ASTC scratch failed");
@@ -361,7 +361,7 @@ int vkn_bcgpu_route(uint32_t nvn, uint32_t target, uint32_t w, uint32_t h, uint3
         astc_decide_locked();
         if (g_astc_st < 0) kept = g_astc_off;
         else if (!family_ok_locked(family(nvn))) kept = VKN_BCAK_FAMILY;
-        else if (xbg_vkn_bca_shape(nvn, (int)target, w, h, levels, layers, (int)samples, storage, g_vt)) kept = VKN_BCAK_SHAPE;
+        else if (vkn_shlib_bca_shape(nvn, (int)target, w, h, levels, layers, (int)samples, storage, g_vt)) kept = VKN_BCAK_SHAPE;
         else {
             const vkn_dev *d = vkn_device(); VkImageFormatProperties q; memset(&q, 0, sizeof q);
             const VkImageCreateFlags fl = (target == 8 || target == 9) && w == h ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
@@ -379,7 +379,7 @@ int vkn_bcgpu_route(uint32_t nvn, uint32_t target, uint32_t w, uint32_t h, uint3
         static uint32_t told;
         if (__atomic_fetch_add(&told, 1, __ATOMIC_RELAXED) < 16)
             vkn_logf("bc-gpu: kept RGBA8 fmt=%#x target=%u %ux%u levels=%u layers=%u%s (%s)", nvn, target, w, h, levels, layers, storage ? " storage" : "",
-                     kept == VKN_BCAK_SHAPE ? xbg_vkn_bca_shape(nvn, (int)target, w, h, levels, layers, (int)samples, storage, g_vt) : "image format properties");
+                     kept == VKN_BCAK_SHAPE ? vkn_shlib_bca_shape(nvn, (int)target, w, h, levels, layers, (int)samples, storage, g_vt) : "image format properties");
     }
     return r;
 }
@@ -405,7 +405,7 @@ vkn_bcg_job *vkn_bcgpu_job_new(uint32_t nvn, int route) {
     if (!dec || !enc_ok) return NULL;
     vkn_bcg_job *j = (vkn_bcg_job *)calloc(1, sizeof *j); if (!j) return NULL;
     j->nvn = nvn; j->route = (uint32_t)route; j->bb = block_bytes(nvn); j->dec = dec;
-    j->flags = route == VKN_BCG_ASTC && xbg_vkn_bca_flags ? xbg_vkn_bca_flags(nvn) : 0;
+    j->flags = route == VKN_BCG_ASTC && vkn_shlib_bca_flags ? vkn_shlib_bca_flags(nvn) : 0;
     return j;
 }
 static uint64_t al16(uint64_t n) { return (n + 15) & ~15ull; }

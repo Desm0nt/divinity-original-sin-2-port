@@ -87,26 +87,26 @@ void vkn_bcgpu_get_stats(vkn_bcgpu_stats *s);
 // Tests only: destroys the device objects (no job may be pending) and forgets every decision and switch (read again at the next route).
 void vkn_bcgpu_reset(void);
 
-// ---- translator doors (xbg_game.cpp, [DOS2] VK-NATIVE export; pure functions of their arguments). vkn_bcgpu.c declares them weak
-// (VKN_BCG_DOOR): a build without the translator has no GPU route. ----
+// ---- the data doors (vkn_shlib_bc.cpp: the shader library piece moved them out of xbg_game.cpp's [DOS2] VK-NATIVE export block; pure
+// functions of their arguments). vkn_bcgpu.c declares them weak (VKN_BCG_DOOR): a build without them has no GPU route. ----
 #ifndef VKN_BCG_DOOR
 #define VKN_BCG_DOOR
 #endif
 // SPIR-V / table words: which 0 = the GPU BC decoder, 1 = the ASTC 4x4 encoder, 2 = the encoder's tables (storage buffer, binding 3).
-const uint32_t *xbg_vkn_bc_blob(int which, size_t *bytes) VKN_BCG_DOOR;
+const uint32_t *vkn_shlib_bc_blob(int which, size_t *bytes) VKN_BCG_DOOR;
 // Decoder self-test of fmt (BC1..BC3 / BC7 only): the batch input (2048 known-answer blocks, one region of 64 x 32 blocks) into in;
 // *in_bytes, *out_bytes (the RGBA8 output it writes), push = its push constants. 0 = ok.
-int xbg_vkn_bc_kat_input(uint32_t fmt, void *in, size_t in_cap, size_t *in_bytes, size_t *out_bytes, uint32_t push[4]) VKN_BCG_DOOR;
+int vkn_shlib_bc_kat_input(uint32_t fmt, void *in, size_t in_cap, size_t *in_bytes, size_t *out_bytes, uint32_t push[4]) VKN_BCG_DOOR;
 // Its verdict: bad blocks against the CPU decoder (0 = pass, -1 = not checkable); line: the first bad block.
-int xbg_vkn_bc_kat_check(uint32_t fmt, const void *out, size_t out_bytes, char *line, size_t cap) VKN_BCG_DOOR;
+int vkn_shlib_bc_kat_check(uint32_t fmt, const void *out, size_t out_bytes, char *line, size_t cap) VKN_BCG_DOOR;
 // Encoder self-test: batch input into in, the decoder-layout RGBA8 texels into rgba, one dispatch per category (push[i] = regions,
 // first, end, flags). 0 = ok.
-int xbg_vkn_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba, size_t rgba_cap, size_t *rgba_bytes, uint32_t push[][4],
+int vkn_shlib_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba, size_t rgba_cap, size_t *rgba_bytes, uint32_t push[][4],
                           uint32_t max_disp, uint32_t *ndisp, uint32_t *blocks) VKN_BCG_DOOR;
 // Its verdict over blocks x 16 bytes: 1 = pass; *zero = some block read all zero; line: the log text.
-int xbg_vkn_bca_kat_check(const void *enc, uint32_t cands, int *zero, char *line, size_t cap) VKN_BCG_DOOR;
-uint32_t xbg_vkn_bca_flags(uint32_t nvn) VKN_BCG_DOOR;   // the encoder's push flags of an NVN format, 0 = not an encoded family
-const char *xbg_vkn_bca_shape(uint32_t nvn, int target, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, int samples, int storage,
+int vkn_shlib_bca_kat_check(const void *enc, uint32_t cands, int *zero, char *line, size_t cap) VKN_BCG_DOOR;
+uint32_t vkn_shlib_bca_flags(uint32_t nvn) VKN_BCG_DOOR;   // the encoder's push flags of an NVN format, 0 = not an encoded family
+const char *vkn_shlib_bca_shape(uint32_t nvn, int target, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, int samples, int storage,
                               int vt) VKN_BCG_DOOR;   // why such a texture stays RGBA8, NULL = may be ASTC
 
 #ifdef __cplusplus

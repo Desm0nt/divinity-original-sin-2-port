@@ -138,7 +138,10 @@ static void ct_post(uint64_t r, uint64_t handle, uint64_t data, uint32_t efmt, u
     // flag 0x2000 (record +0x14, 0x91e2a0): the memory is the storage key's reservation, copied into A at the object's +0xe0 (+0xe8
     // offset in the pool, +0xf0 u32 size, +0xf6 u8 pool kind = valid, +0xf8 pool block): (block, offset) names the memory
     vkn_tex_share sh, *shp = NULL; char nm[32], km[32];
-    if (flags & 0x2000) {
+    // DM_VK_NATIVE_SHARED=0: every target its own image, as before this part (phone bisect).
+    static int sh_on = -1;
+    if (sh_on < 0) { const char *e = getenv("DM_VK_NATIVE_SHARED"); sh_on = !(e && *e == '0'); }
+    if ((flags & 0x2000) && sh_on) {
         __atomic_add_fetch(&g_sh_seen, 1, __ATOMIC_RELAXED);
         const uint64_t blk = vkn_rd64(obj + 0xf8), off = vkn_rd64(obj + 0xe8);
         name_str(name, nm); name_str(shared_key(r, name), km);
