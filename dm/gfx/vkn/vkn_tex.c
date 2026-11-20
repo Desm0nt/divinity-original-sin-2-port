@@ -8,12 +8,18 @@
 // Lifetime: a texture has one reference for the engine (dropped by its destroy event) and one per queued upload (dropped once the
 // upload is recorded); at zero it goes to vkn_retire (destroyed 3 frames later). An upload of a texture the engine already destroyed
 // records nothing.
+// Shared render-target storage (vkn_tex_create_shared): several engine textures may be ONE vkn_tex. The object's own handle / cookie /
+// pool ids are one engine texture's; the others are name records (vkn_tex_name, t->names) whose handle, cookie and pool ids resolve to
+// the same object, so every user (passes, draws, copies, read-back, UI, dump) sees one image with one layout and one pass state. The
+// engine reference is dropped when the LAST name is destroyed: a name record leaves alone; the object's own name leaving hands its
+// identity fields to the first name record (handover_locked). Images on shared storage are chained by identity (g_store).
 #ifdef DM_GAME_DOS2
 #include "vkn_tex.h"
 #include "vkn_state.h"   // vkn_fb_forget_view: framebuffers of a dying texture's views
 #include "vkn_astc.h"    // stage 4: the setup ASTC pack
 #include "vkn_bcgpu.h"   // stage 4: GPU BC decode (-> ASTC 4x4) at upload
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../nvn/nvn_tex.h"
@@ -160,6 +166,21 @@ static vkn_tex *g_cookie[COOKIE_BUCKETS];
 static uint32_t *g_id_page[ID_PAGES];             // (slot + 1) << 3 | view (0 whole, 1..7 layer i - 1)
 static vkn_tab g_samp; static VkSampler g_samp_by_id[SAMP_IDS];
 static vkn_tex_stats g_st;
+// Shared render-target storage (vkn_tex_create_shared): an engine texture attached to another one's image is a name record - its
+// handle, cookie and pool ids resolve to that vkn_tex (cookie hash of names g_ncookie; the handle table and the pool-id cells hold the
+// vkn_tex itself). Images that sit on shared storage are chained by storage identity in g_store. g_share_mu serialises shared
+// creations (taken before g_mu), so two creations on one storage always see each other.
+typedef struct vkn_tex_name {
+    uint64_t handle, cookie; uint32_t pool_id, layer_ids[VKN_TEX_LAYER_IDS], sampler_id; uint8_t linked;
+    vkn_tex *t; struct vkn_tex_name *cnext, *tnext;   // cookie bucket chain; the texture's list
+    char sname[32];
+} vkn_tex_name;
+enum { STORE_BUCKETS = 256 };
+static vkn_tex_name *g_ncookie[COOKIE_BUCKETS];
+static vkn_tex *g_store[STORE_BUCKETS];
+static pthread_mutex_t g_share_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread const vkn_tex_share *t_share;   // vkn_tex_create_shared: the storage of this creation, NULL = not shared
+static uint32_t g_al_logged, g_kept_logged;
 
 static int tables_init_locked(void) {
     if (g_init) return g_init > 0 ? 0 : -1;
@@ -188,18 +209,22 @@ static uint32_t *id_cell_locked(uint32_t id, int make) {
     if (!*pg) { if (!make) return NULL; *pg = (uint32_t *)calloc(ID_PAGE, sizeof(uint32_t)); if (!*pg) return NULL; }
     return &(*pg)[id % ID_PAGE];
 }
-static void ids_set_locked(vkn_tex *t) {
-    uint32_t *c = t->pool_id != ~0u ? id_cell_locked(t->pool_id, 1) : NULL;
+// The pool ids of one engine texture (t's own or an attached name's) -> t's slot and views.
+static void ids_set_of_locked(vkn_tex *t, uint32_t pool_id, const uint32_t *lids) {
+    uint32_t *c = pool_id != ~0u ? id_cell_locked(pool_id, 1) : NULL;
     if (c) *c = (t->slot + 1) << 3;
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
-        if (t->layer_ids[i] != ~0u && t->layer_view[i] && (c = id_cell_locked(t->layer_ids[i], 1))) *c = (t->slot + 1) << 3 | (uint32_t)(i + 1);
+        if (lids[i] != ~0u && t->layer_view[i] && (c = id_cell_locked(lids[i], 1))) *c = (t->slot + 1) << 3 | (uint32_t)(i + 1);
 }
-static void ids_clear_locked(vkn_tex *t) {   // only the cells that still name this texture (an id may have gone to a newer texture)
-    uint32_t *c = t->pool_id != ~0u ? id_cell_locked(t->pool_id, 0) : NULL;
+// Only the cells that still name t (an id may have gone to a newer texture).
+static void ids_clear_of_locked(const vkn_tex *t, uint32_t pool_id, const uint32_t *lids) {
+    uint32_t *c = pool_id != ~0u ? id_cell_locked(pool_id, 0) : NULL;
     if (c && *c >> 3 == t->slot + 1) *c = 0;
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
-        if (t->layer_ids[i] != ~0u && (c = id_cell_locked(t->layer_ids[i], 0)) && *c >> 3 == t->slot + 1) *c = 0;
+        if (lids[i] != ~0u && (c = id_cell_locked(lids[i], 0)) && *c >> 3 == t->slot + 1) *c = 0;
 }
+static void ids_set_locked(vkn_tex *t) { ids_set_of_locked(t, t->pool_id, t->layer_ids); }
+static void ids_clear_locked(vkn_tex *t) { ids_clear_of_locked(t, t->pool_id, t->layer_ids); }
 // Unlinks t from its handle (if it is the one linked there).
 static void handle_unlink_locked(vkn_tex *t) {
     if (!t->linked) return;
@@ -207,12 +232,68 @@ static void handle_unlink_locked(vkn_tex *t) {
     if (r && *r == t) { *r = NULL; vkn_tab_kill(&g_handles, t->handle); }
     t->linked = 0;
 }
+// A newer link takes the handle index of `handle`: the name of x (its own or an attached one) that held it loses its link; x stays
+// known by its cookie.
+static void index_lost_locked(vkn_tex *x, uint64_t handle) {
+    if (x->linked && vkn_h_idx(x->handle) == vkn_h_idx(handle)) x->linked = 0;
+    for (vkn_tex_name *n = x->names; n; n = n->tnext) if (n->linked && vkn_h_idx(n->handle) == vkn_h_idx(handle)) n->linked = 0;
+}
 static void handle_link_locked(vkn_tex *t, uint64_t handle) {
     int alive = 0;
     vkn_tex **r = (vkn_tex **)vkn_tab_put(&g_handles, handle, &alive);
     if (!r) return;
-    if (alive && *r && *r != t) (*r)->linked = 0;   // the previous texture of this index stays known by its cookie
+    if (alive && *r) index_lost_locked(*r, handle);   // the previous texture of this index stays known by its cookie
     *r = t; t->handle = handle; t->linked = 1;
+}
+
+// ---- shared render-target storage: names attached to another texture's image ----
+static uint32_t store_bucket(uint64_t blk, uint64_t off) {
+    const uint64_t k = blk ^ (off * 0x9e3779b97f4a7c15ull);
+    return (uint32_t)(k >> 7 ^ k >> 29) & (STORE_BUCKETS - 1);
+}
+static void store_unlink_locked(vkn_tex *t) {
+    vkn_tex **p = &g_store[store_bucket(t->st_block, t->st_off)];
+    while (*p && *p != t) p = &(*p)->snext;
+    if (*p) *p = t->snext;
+    t->snext = NULL; t->shared = 0;
+}
+static vkn_tex_name *name_find_locked(uint64_t c) {
+    for (vkn_tex_name *n = g_ncookie[cookie_bucket(c)]; n; n = n->cnext) if (n->cookie == c) return n;
+    return NULL;
+}
+static void name_cookie_unlink_locked(vkn_tex_name *n) {
+    vkn_tex_name **p = &g_ncookie[cookie_bucket(n->cookie)];
+    while (*p && *p != n) p = &(*p)->cnext;
+    if (*p) *p = n->cnext;
+    n->cnext = NULL;
+}
+// n leaves every table and its texture's list (the image stays: it is the texture's).
+static void name_drop_locked(vkn_tex_name *n) {
+    vkn_tex *t = n->t;
+    if (n->linked) {
+        vkn_tex **r = (vkn_tex **)vkn_tab_get(&g_handles, n->handle);
+        if (r && *r == t) { *r = NULL; vkn_tab_kill(&g_handles, n->handle); }
+        n->linked = 0;
+    }
+    name_cookie_unlink_locked(n);
+    if (t->slot < TEX_SLOTS) ids_clear_of_locked(t, n->pool_id, n->layer_ids);
+    for (vkn_tex_name **p = &t->names; *p; p = &(*p)->tnext) if (*p == n) { *p = n->tnext; break; }
+    t->nnames--; g_st.sh_aliases--; g_st.sh_detached++;
+    free(n);
+}
+// t's own engine texture is gone while names stay attached: the first attached name becomes the object's own (handle, cookie, pool
+// ids, name); the image, its layout and its pass state stay as they are.
+static void handover_locked(vkn_tex *t) {
+    vkn_tex_name *n = t->names;
+    handle_unlink_locked(t); cookie_unlink_locked(t);
+    if (t->slot < TEX_SLOTS) ids_clear_locked(t);
+    t->names = n->tnext; t->nnames--; g_st.sh_aliases--;
+    name_cookie_unlink_locked(n);
+    t->handle = n->handle; t->linked = n->linked; t->cookie = n->cookie; t->pool_id = n->pool_id; t->sampler_id = n->sampler_id;
+    memcpy(t->layer_ids, n->layer_ids, sizeof t->layer_ids); memcpy(t->sname, n->sname, sizeof t->sname);
+    const uint32_t b = cookie_bucket(t->cookie); t->hnext = g_cookie[b]; g_cookie[b] = t;
+    free(n);
+    g_st.sh_handover++;
 }
 
 static void tex_free(void *ctx) {
@@ -239,6 +320,8 @@ static void unref(vkn_tex *t) { pthread_mutex_lock(&g_mu); unref_locked(t); pthr
 // The engine is done with t: out of every table, its engine reference dropped.
 static void kill_locked(vkn_tex *t) {
     if (t->dead) return;
+    while (t->names) name_drop_locked(t->names);   // (callers that mean one name only use drop_cookie_locked / vkn_tex_destroy_handle)
+    if (t->shared) store_unlink_locked(t);
     t->dead = 1;
     handle_unlink_locked(t); cookie_unlink_locked(t); ids_clear_locked(t);
     // vkn_state.h: framebuffers keyed by a view must leave the cache before the view dies (a later view may get the same handle value);
@@ -252,6 +335,43 @@ static void kill_locked(vkn_tex *t) {
     const int k = bc_kind(t); if (k >= 0) { g_st.bc_alive[k]--; g_st.bc_bytes[k] -= t->bytes; }
     g_st.destroyed++;
     unref_locked(t);
+}
+// The engine is done with its texture object `c`: that one name leaves; the image dies with its last name. 1 = known.
+static int drop_cookie_locked(uint64_t c) {
+    vkn_tex *t = cookie_find_locked(c);
+    if (t) { if (t->names) handover_locked(t); else kill_locked(t); return 1; }
+    vkn_tex_name *n = name_find_locked(c);
+    if (n) { name_drop_locked(n); return 1; }
+    return 0;
+}
+// vkn_tex_create_shared: why the live image c on the same storage cannot be this creation's image (VKN_AL_*), -1 = it can. conv:
+// decoded | widened << 1 | ASTC << 2 | GPU route << 3 of this creation.
+static int alias_mismatch(const vkn_tex *c, const VkImageCreateInfo *ci, uint32_t nvn, uint32_t tg, VkComponentMapping sw, uint32_t conv, int has_data,
+                          const vkn_tex_desc *d) {
+    if (c->w != ci->extent.width || c->h != ci->extent.height || c->depth != ci->extent.depth) return VKN_AL_SIZE;
+    if (c->format != ci->format || c->nvn_fmt != nvn || (uint32_t)(c->decoded | c->widened << 1 | (c->astc != 0) << 2 | (c->bcgpu != 0) << 3) != conv) return VKN_AL_FORMAT;
+    if (c->mips != ci->mipLevels || c->layers != ci->arrayLayers || c->samples != (uint32_t)ci->samples || c->nvn_target != tg || c->cflags != ci->flags) return VKN_AL_SHAPE;
+    if (c->usage != ci->usage || memcmp(&c->swz, &sw, sizeof sw)) return VKN_AL_USAGE;
+    if (has_data) return VKN_AL_DATA;   // (initial data would have to land in the other texture's image: never expected for targets)
+    if ((c->usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) && tg != 2)
+        for (uint32_t i = 0; i < VKN_TEX_LAYER_IDS && i < ci->arrayLayers; i++) if (d->layer_ids[i] != ~0u && !c->layer_view[i]) return VKN_AL_VIEWS;
+    return -1;
+}
+static void sname_set(char out[32], const char *s) { snprintf(out, 32, "%s", s && *s ? s : "?"); }
+// Attaches the engine texture of this creation (handle, d's cookie and pool ids) to o's image. 0 = attached; -1 = no memory.
+static int attach_locked(vkn_tex *o, uint64_t handle, const vkn_tex_desc *d, const vkn_tex_share *sh) {
+    vkn_tex_name *n = (vkn_tex_name *)calloc(1, sizeof *n);
+    if (!n) return -1;
+    n->t = o; n->cookie = d->cookie; n->pool_id = d->pool_id; n->sampler_id = d->sampler_id; n->handle = handle;
+    memcpy(n->layer_ids, d->layer_ids, sizeof n->layer_ids); sname_set(n->sname, sh->name);
+    int alive = 0;
+    vkn_tex **r = (vkn_tex **)vkn_tab_put(&g_handles, handle, &alive);
+    if (r) { if (alive && *r) index_lost_locked(*r, handle); *r = o; n->linked = 1; }
+    const uint32_t b = cookie_bucket(n->cookie); n->cnext = g_ncookie[b]; g_ncookie[b] = n;
+    n->tnext = o->names; o->names = n; o->nnames++;
+    if (o->slot < TEX_SLOTS) ids_set_of_locked(o, n->pool_id, n->layer_ids);
+    g_st.sh_aliases++; g_st.sh_attached++;
+    return 0;
 }
 
 // ---- uploads ----
@@ -426,9 +546,54 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cube && w == h ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
         .imageType = d3 ? VK_IMAGE_TYPE_3D : d1 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, dep}, .mipLevels = mips, .arrayLayers = layers,
         .samples = samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    // view swizzle (sampled views)
+    VkComponentMapping sw = fmt_swizzle(nvn, x && !decoded);
+    if (t_swz) {   // vkn_tex_create_swz: the caller's NVN swizzle (0 zero, 1 one, 2 R, 3 G, 4 B, 5 A)
+        static const VkComponentSwizzle k[6] = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
+                                                VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+        VkComponentSwizzle *c[4] = {&sw.r, &sw.g, &sw.b, &sw.a};
+        for (int i = 0; i < 4; i++) if (t_swz[i] < 6) *c[i] = k[t_swz[i]];
+    }
+    const int has_data = src && ((src->kind == VKN_SRC_REGIONS && src->nreg) || (src->kind == VKN_SRC_PACKAGED && src->storage));
+
+    // shared render-target storage (vkn_tex_create_shared): a live image of exactly this shape on the same storage IS this texture on
+    // the Switch (one piece of memory): the engine texture is attached to it, no image is made
+    int kept = -1; char kept_line[320]; kept_line[0] = 0;
+    if (t_share) {
+        char line[320]; line[0] = 0;
+        pthread_mutex_lock(&g_mu);
+        drop_cookie_locked(d->cookie);   // (the engine object reused without a destroy event we saw: that texture is gone)
+        vkn_tex *o = NULL;
+        const uint32_t conv = (uint32_t)(decoded | widened << 1 | (astc != 0) << 2 | (bcg != 0) << 3);
+        for (vkn_tex *c = g_store[store_bucket(t_share->block, t_share->offset)]; c; c = c->snext) {
+            if (c->st_block != t_share->block || c->st_off != t_share->offset) continue;
+            const int m = alias_mismatch(c, &ci, nvn, tg, sw, conv, has_data, d);
+            if (m < 0) { o = c; break; }
+            if (m > kept) {   // the reason against the most similar image there (the checks run size, format, shape, usage, data, views)
+                kept = m;
+                snprintf(kept_line, sizeof kept_line, "kept separate from %#llx (%s, %ux%u format %d NVN %#x, %u levels, %u layers, %u samples, usage %#x)",
+                         (unsigned long long)c->handle, c->sname, c->w, c->h, (int)c->format, c->nvn_fmt, c->mips, c->layers, c->samples, (unsigned)c->usage);
+            }
+        }
+        if (o && !attach_locked(o, handle, d, t_share)) {
+            if (g_al_logged < 16) {
+                g_al_logged++;
+                snprintf(line, sizeof line, "tex shared: %#llx (%s) = %#llx (%s): %ux%u, format %d (NVN %#x), %u levels, %u layers, %u samples; storage %#llx + %#llx (%llu bytes, key %s): one image, %u names",
+                         (unsigned long long)handle, t_share->name ? t_share->name : "?", (unsigned long long)o->handle, o->sname, o->w, o->h, (int)o->format,
+                         o->nvn_fmt, o->mips, o->layers, o->samples, (unsigned long long)t_share->block, (unsigned long long)t_share->offset,
+                         (unsigned long long)t_share->bytes, t_share->key ? t_share->key : "?", o->nnames + 1);
+            }
+            pthread_mutex_unlock(&g_mu);
+            if (line[0]) vkn_logf("%s", line);
+            *why = NULL;
+            return o;
+        }
+        pthread_mutex_unlock(&g_mu);   // (no image to attach to, or no memory for the name record: an image of its own)
+    }
 
     vkn_tex *t = (vkn_tex *)calloc(1, sizeof *t);
     if (!t) { *why = "no memory"; goto fail0; }
+    t->usage = usage; t->cflags = ci.flags; t->swz = sw;
     t->cookie = d->cookie; t->format = fmt; t->aspect = fmt_aspect(fmt); t->w = w; t->h = h; t->depth = dep; t->mips = mips; t->layers = layers;
     t->samples = (uint32_t)samples; t->efmt = d->efmt; t->nvn_fmt = nvn; t->nvn_target = tg; t->cls = d->cls < VKN_TC_N ? d->cls : VKN_TC_SAMPLED; t->cube = (uint8_t)cube;
     t->decoded = decoded; t->widened = widened; t->astc = astc; t->bcgpu = bcg; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
@@ -438,13 +603,6 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { *why = "no device memory"; goto fail1; }
 
     // views
-    VkComponentMapping sw = fmt_swizzle(nvn, x && !decoded);
-    if (t_swz) {   // vkn_tex_create_swz: the caller's NVN swizzle (0 zero, 1 one, 2 R, 3 G, 4 B, 5 A)
-        static const VkComponentSwizzle k[6] = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
-                                                VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
-        VkComponentSwizzle *c[4] = {&sw.r, &sw.g, &sw.b, &sw.a};
-        for (int i = 0; i < 4; i++) if (t_swz[i] < 6) *c[i] = k[t_swz[i]];
-    }
     const VkImageAspectFlags sasp = t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect;   // a depth-stencil texture samples depth
     const VkImageViewType vt = d3 ? VK_IMAGE_VIEW_TYPE_3D : tg == 0 ? VK_IMAGE_VIEW_TYPE_1D : tg == 3 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : (tg == 4 || tg == 6) ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : tg == 8 && (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? VK_IMAGE_VIEW_TYPE_CUBE
@@ -459,7 +617,6 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
 
     // data -> one staging block
     up_ctx *u = NULL; uint64_t total = 0; uint32_t nc = 0;
-    const int has_data = src && ((src->kind == VKN_SRC_REGIONS && src->nreg) || (src->kind == VKN_SRC_PACKAGED && src->storage));
     if (frompack) {
         // stage 4: the entry's blocks (every level the pack holds; level 0 first, tight 16-byte blocks: every level offset is a multiple
         // of 16, the texel block size) read into one staging block, one copy per level. The key includes the level count, so the entry
@@ -577,8 +734,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
 
     // tables
     pthread_mutex_lock(&g_mu);
-    vkn_tex *old = cookie_find_locked(t->cookie);
-    if (old) kill_locked(old);   // the engine object was reused without a destroy event we saw: the old texture is gone
+    drop_cookie_locked(t->cookie);   // the engine object was reused without a destroy event we saw: the old texture is gone
     if (g_nfree) t->slot = g_free_slot[--g_nfree]; else if (g_slot_hi < TEX_SLOTS) t->slot = g_slot_hi++; else t->slot = ~0u;
     if (t->slot != ~0u) g_slot[t->slot] = t;
     handle_link_locked(t, handle);
@@ -590,7 +746,24 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     g_st.pack_ns += pack_ns;
     { const int k = bc_kind(t); if (k >= 0) { g_st.bc_ns[k] += vkn_now_ns() - t0; g_st.bc_upload[k] += total; } }
     if (u) { t->refs++; g_st.uploads += nc || u->job ? 1 : 0; g_st.upload_bytes += total; g_st.decoded += decoded && !bcg; g_st.widened += widened; g_st.upload_ns += vkn_now_ns() - t0; }
+    char kline[480]; kline[0] = 0;
+    if (t_share) {   // the first image on this storage, or one that differs from those there (kept: VKN_AL_*)
+        t->shared = 1; t->st_block = t_share->block; t->st_off = t_share->offset; sname_set(t->sname, t_share->name);
+        const uint32_t sb = store_bucket(t->st_block, t->st_off); t->snext = g_store[sb]; g_store[sb] = t;
+        g_st.sh_made++;
+        if (kept >= 0) {
+            g_st.sh_kept[kept]++;
+            static const char *const k_al[VKN_AL_N] = {"size", "format", "shape", "usage", "initial data", "layer views"};
+            if (g_kept_logged < 16) {
+                g_kept_logged++;
+                snprintf(kline, sizeof kline, "tex shared: %#llx (%s, %ux%u format %d NVN %#x) on storage %#llx + %#llx (key %s) %s: differs in %s, own image",
+                         (unsigned long long)handle, t->sname, t->w, t->h, (int)t->format, t->nvn_fmt, (unsigned long long)t->st_block, (unsigned long long)t->st_off,
+                         t_share->key ? t_share->key : "?", kept_line, k_al[kept]);
+            }
+        }
+    }
     pthread_mutex_unlock(&g_mu);
+    if (kline[0]) vkn_logf("%s", kline);
     if (u) vkn_upload_push(up_run, u, total);
     *why = NULL;
     return t;
@@ -608,7 +781,10 @@ vkn_tex *vkn_tex_get(uint64_t handle) {
     return t;
 }
 vkn_tex *vkn_tex_by_cookie(uint64_t cookie) {
-    pthread_mutex_lock(&g_mu); vkn_tex *t = g_init > 0 ? cookie_find_locked(cookie) : NULL; pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu);
+    vkn_tex *t = g_init > 0 ? cookie_find_locked(cookie) : NULL;
+    if (!t && g_init > 0) { const vkn_tex_name *n = name_find_locked(cookie); if (n) t = n->t; }   // attached to another texture's image
+    pthread_mutex_unlock(&g_mu);
     return t;
 }
 VkImageView vkn_tex_view_by_id(uint32_t pool_id, vkn_tex **tex) {
@@ -626,15 +802,20 @@ VkImageView vkn_tex_view_by_id(uint32_t pool_id, vkn_tex **tex) {
 }
 int vkn_tex_destroy_cookie(uint64_t cookie) {
     pthread_mutex_lock(&g_mu);
-    vkn_tex *t = g_init > 0 ? cookie_find_locked(cookie) : NULL;
-    if (t) kill_locked(t);
+    const int known = g_init > 0 ? drop_cookie_locked(cookie) : 0;   // (one name; the image dies with its last one)
     pthread_mutex_unlock(&g_mu);
-    return t != NULL;
+    return known;
 }
 int vkn_tex_destroy_handle(uint64_t handle) {
     pthread_mutex_lock(&g_mu);
     vkn_tex **r = g_init > 0 ? (vkn_tex **)vkn_tab_get(&g_handles, handle) : NULL; vkn_tex *t = r ? *r : NULL;
-    if (t) kill_locked(t);
+    if (t) {   // the name linked under this handle: the texture's own, or an attached one
+        vkn_tex_name *n = NULL;
+        if (!(t->linked && t->handle == handle)) for (n = t->names; n && !(n->linked && n->handle == handle); n = n->tnext) {}
+        if (n) name_drop_locked(n);
+        else if (t->names && t->linked && t->handle == handle) handover_locked(t);
+        else kill_locked(t);
+    }
     pthread_mutex_unlock(&g_mu);
     return t != NULL;
 }
@@ -803,8 +984,20 @@ VkSampler vkn_sampler_by_id(uint32_t id) {
 void vkn_tex_get_stats(vkn_tex_stats *s) {
     pthread_mutex_lock(&g_mu);
     *s = g_st;
-    s->pending = 0;
-    if (g_init > 0) for (uint32_t i = 0; i < g_slot_hi; i++) if (g_slot[i] && !g_slot[i]->linked) s->pending++;
+    s->pending = 0; s->sh_storages = s->sh_images = 0;
+    if (g_init > 0)
+        for (uint32_t i = 0; i < g_slot_hi; i++) {
+            const vkn_tex *t = g_slot[i]; if (!t) continue;
+            int linked = t->linked;
+            for (const vkn_tex_name *n = t->names; n && !linked; n = n->tnext) linked = n->linked;
+            if (!linked) s->pending++;
+        }
+    for (uint32_t b = 0; b < STORE_BUCKETS; b++)   // images on shared storage, and the distinct identities they sit on
+        for (const vkn_tex *t = g_store[b]; t; t = t->snext) {
+            s->sh_images++;
+            const vkn_tex *e = g_store[b]; while (e != t && (e->st_block != t->st_block || e->st_off != t->st_off)) e = e->snext;
+            if (e == t) s->sh_storages++;
+        }
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -926,6 +1119,18 @@ vkn_tex *vkn_tex_create_swz(uint64_t handle, const vkn_tex_desc *d, const vkn_te
     t_swz = swz;
     vkn_tex *t = vkn_tex_create(handle, d, src, why);
     t_swz = NULL;
+    return t;
+}
+
+// ==== shared render-target storage (vkn_tex.h): one creation at a time (g_share_mu, before g_mu), so two textures of one storage
+// created on two threads still find each other ====
+vkn_tex *vkn_tex_create_shared(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const vkn_tex_share *sh, const char **why) {
+    if (!sh) return vkn_tex_create(handle, d, src, why);
+    pthread_mutex_lock(&g_share_mu);
+    t_share = sh;
+    vkn_tex *t = vkn_tex_create(handle, d, src, why);
+    t_share = NULL;
+    pthread_mutex_unlock(&g_share_mu);
     return t;
 }
 #endif

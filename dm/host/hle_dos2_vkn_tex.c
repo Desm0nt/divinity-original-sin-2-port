@@ -26,8 +26,17 @@
 // setup ASTC pack (vkn_astc.h; DM_VK_NATIVE_ASTC=0 = always decode), then the GPU routes (vkn_bcgpu.h: GPU decode + ASTC 4x4 encode,
 // GPU decode to RGBA8), then the CPU decode; the census adds the lines "tex BC:" (textures and MB by storage, time on the creating
 // threads, why the pack did not take them) and "tex BC gpu:" (the device's decisions, self-tests, GPU work recorded).
-// Not covered here: 0x914bb0 shared RT storage (every target gets its own memory, VK-NATIVE.md 3.3), texture updates after creation
-// (UI WriteTexels / CopyBufferToTexture, packets 0x2c / 0x2d: stage 3).
+// Shared render-target storage (both modes): 0x913170 (renderer init, the only caller of 0x914bb0) reserves one piece of pool-3 memory
+// per storage key (0x914bb0(r, &key, format, w, h): a 2D one-level description, its storage size / alignment, 0x932900 -> record A in
+// the map r+0x18c8[key]); the map r+0x18d8 sends several target names to one key. The target pool 0x912700 sets r+0x18e8 = name and
+// flag 0x2000 when the name is in r+0x18d8, and 0x91e2a0 then copies the key's record A into the texture object (+0xe0, 0x20 bytes)
+// instead of allocating: SetStorage(A+0x18 block +0x50, A+8 offset). So every texture of one key is the same memory on the Switch
+// (0x91d630 does not free A under flag 0x2000; the reservation is never re-made, also not on a window resize 0x912f70: the new
+// generation lands on the same memory). The CreateTexture hook passes (block, offset) of such a texture as its storage identity to
+// vkn_tex_create_shared, which makes textures of one identity and one shape ONE image (VK-NATIVE.md 3.3; the save-game thumbnail
+// reads ScreenshotBackBuffer, which only the scaled back buffer of the same key is drawn into). Non-shared textures never take part:
+// 0x932900 never hands out live memory twice, and the reservations are never freed.
+// Not covered here: texture updates after creation (UI WriteTexels / CopyBufferToTexture, packets 0x2c / 0x2d: stage 3).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <stdio.h>
@@ -65,9 +74,29 @@ static void tex_failed(const char *what, uint64_t handle, const vkn_tex_desc *d,
              (unsigned long long)handle, why ? why : "?", d->efmt, d->nvn_fmt, d->nvn_target, d->w, d->h, d->depth, d->mips, d->layers, d->samples, d->cls, d->srgb, d->pool_id);
 }
 
+// ---- shared render-target storage ----
+static uint64_t g_sh_seen, g_sh_norec;
+static uint32_t g_sh_red;
+// An engine name (a string object: the value points to its characters, the reference count sits at -0x10, 0x912700) as text for logs.
+static void name_str(uint64_t v, char out[32]) {
+    int i = 0;
+    if (v >= 0x10000)
+        for (; i < 31; i++) { const uint8_t c = vkn_rd8(v + (uint64_t)i); if (!c) break; if (c < 0x20 || c > 0x7e) { i = 0; break; } out[i] = (char)c; }
+    if (i) out[i] = 0; else snprintf(out, 32, "%#llx", (unsigned long long)v);
+}
+// The storage key of a target name: the map r+0x18d8 as 0x91e2a0's shared path walks it (u32 count r+0x18dc, buckets r+0x18e0; hash =
+// the name value, 0 -> 0x1f77c8c, modulo the count; a bucket holds the first node; node +0 next, +8 name, +0x10 storage key). 0 = none.
+static uint64_t shared_key(uint64_t r, uint64_t name) {
+    const uint32_t n = vkn_rd32(r + 0x18dc); const uint64_t b = vkn_rd64(r + 0x18e0);
+    if (!n || !b) return 0;
+    uint64_t p = vkn_rd64(b + ((name ? name : 0x1f77c8c) % n) * 8);
+    for (int i = 0; p && i < 256; i++, p = vkn_rd64(p)) if (vkn_rd64(p + 8) == name) return vkn_rd64(p + 0x10);
+    return 0;
+}
+
 // ---- CreateTexture ----
 static void ct_post(uint64_t r, uint64_t handle, uint64_t data, uint32_t efmt, uint32_t w, uint32_t h, uint32_t depth, uint16_t flags, uint32_t msaa_code,
-                    uint32_t layers_arg, uint32_t nvn_ov) {
+                    uint32_t layers_arg, uint32_t nvn_ov, uint64_t name) {
     const uint64_t rec = vkn_rec(r, 0x000, 0x28, handle); if (!rec) return;
     const uint64_t obj = vkn_rd64(rec); if (!obj) return;
     vkn_tex_desc d = {0};
@@ -106,13 +135,33 @@ static void ct_post(uint64_t r, uint64_t handle, uint64_t data, uint32_t efmt, u
     }
     const vkn_tex_src src = {.kind = nreg ? VKN_SRC_REGIONS : VKN_SRC_NONE, .reg = reg, .nreg = nreg};
     const char *why = NULL;
-    if (!vkn_tex_create(handle, &d, &src, &why)) tex_failed(data && nreg ? "CreateTexture (with data)" : "CreateTexture", handle, &d, why);
+    // flag 0x2000 (record +0x14, 0x91e2a0): the memory is the storage key's reservation, copied into A at the object's +0xe0 (+0xe8
+    // offset in the pool, +0xf0 u32 size, +0xf6 u8 pool kind = valid, +0xf8 pool block): (block, offset) names the memory
+    vkn_tex_share sh, *shp = NULL; char nm[32], km[32];
+    if (flags & 0x2000) {
+        __atomic_add_fetch(&g_sh_seen, 1, __ATOMIC_RELAXED);
+        const uint64_t blk = vkn_rd64(obj + 0xf8), off = vkn_rd64(obj + 0xe8);
+        name_str(name, nm); name_str(shared_key(r, name), km);
+        if (vkn_rd8(obj + 0xf6) && blk) {
+            memset(&sh, 0, sizeof sh);
+            sh.block = blk; sh.offset = off; sh.bytes = vkn_rd32(obj + 0xf0); sh.name = nm; sh.key = km;
+            shp = &sh;
+        } else {
+            __atomic_add_fetch(&g_sh_norec, 1, __ATOMIC_RELAXED);
+            if (__atomic_fetch_add(&g_sh_red, 1, __ATOMIC_RELAXED) < 16)
+                vkn_logf(RED "tex: shared target %#llx (%s, key %s, %ux%u engine fmt %u) has no storage record (A +0x16 %u, block %#llx): own image", (unsigned long long)handle,
+                         nm, km, w, h, efmt, (unsigned)vkn_rd8(obj + 0xf6), (unsigned long long)blk);
+        }
+    }
+    if (!(shp ? vkn_tex_create_shared(handle, &d, &src, shp, &why) : vkn_tex_create(handle, &d, &src, &why)))
+        tex_failed(data && nreg ? "CreateTexture (with data)" : "CreateTexture", handle, &d, why);
     free(reg);
 }
 VKN_HOOK vkn_h_ct(VKN_A) {
     const uint64_t data = a2 ? vkn_rd64(a2) : 0;   // *initData
+    const uint64_t name = vkn_rd64(a0 + 0x18e8);    // the target name 0x912700 set (read by the shared path of 0x91e2a0)
     const uint64_t v = g_o_ct(VKN_F);
-    ct_post(a0, a1, data, (uint32_t)a3, (uint32_t)a4, (uint32_t)a5, (uint32_t)a6, (uint16_t)s3, (uint32_t)s2, (uint32_t)s1, (uint32_t)s6);
+    ct_post(a0, a1, data, (uint32_t)a3, (uint32_t)a4, (uint32_t)a5, (uint32_t)a6, (uint16_t)s3, (uint32_t)s2, (uint32_t)s1, (uint32_t)s6, name);
     return v;
 }
 
@@ -276,6 +325,15 @@ static void tex_census(void) {
                      g.build_ns / 1e6, g.prep_ns / 1e6, g.scratch_bytes / mb);
         }
     }
+    // shared render-target storage: identities with an image now, images on them, engine textures attached to another one's image now;
+    // so far: shared creations seen, without a storage record, new images, attached, kept separate by reason, names gone, hand-overs
+    if (g_sh_seen)
+        vkn_logf("tex shared: storages %u, images %u, aliases attached now %u; creations %llu (no record %llu): new image %llu, attached %llu, kept separate "
+                 "(size %llu, format %llu, shape %llu, usage %llu, data %llu, views %llu); names destroyed %llu, owner hand-overs %llu",
+                 s.sh_storages, s.sh_images, s.sh_aliases, (unsigned long long)g_sh_seen, (unsigned long long)g_sh_norec, (unsigned long long)s.sh_made,
+                 (unsigned long long)s.sh_attached, (unsigned long long)s.sh_kept[VKN_AL_SIZE], (unsigned long long)s.sh_kept[VKN_AL_FORMAT],
+                 (unsigned long long)s.sh_kept[VKN_AL_SHAPE], (unsigned long long)s.sh_kept[VKN_AL_USAGE], (unsigned long long)s.sh_kept[VKN_AL_DATA],
+                 (unsigned long long)s.sh_kept[VKN_AL_VIEWS], (unsigned long long)s.sh_detached, (unsigned long long)s.sh_handover);
     if (s.failed || s.samplers_failed) vkn_logf(RED "tex: %llu texture / %llu sampler creations failed so far (the first 16 of each are logged)", (unsigned long long)s.failed,
                                                 (unsigned long long)s.samplers_failed);
 }

@@ -1,6 +1,6 @@
 // [DOS2] VK-NATIVE stage 2 host test (docs/dos2/nr/VK-NATIVE.md §3, VK-NATIVE-STATUS.md stage 2): the five modules of dm/gfx/vkn
 // (vkn_core.c, vkn_buf.c, vkn_tex.c, vkn_shader.c, vkn_state.c) compiled with -DDM_GAME_DOS2 against the mock of vkn_mock_vk.h (the
-// Vulkan entry points, the front end's dm_vk_handles / queue lock, the translator's xbg_vkn_* shader door).
+// Vulkan entry points, the front end's dm_vk_handles / queue lock, the shader library's vkn_shlib_* door of mode 1).
 //   core     arena alloc / free / merge / reuse, alignment, dedicated chunks, retire delay of exactly 3 frame ends, the upload queue
 //            (order, run, flush under the queue lock), handle tables (put / get / kill / generation replace);
 //   buffers  create with / without init data, destroy (the block comes back only after the retire delay), replace, pseudo addresses,
@@ -14,6 +14,10 @@
 //            linear data, a packaged (block-linear) texture built by hand with the Tegra GOB formula, BC on a device without BC (CPU decode),
 //            RGB widening, render / depth target usage, pool-id lookups, destroy, mip-reduction swap, samplers for every filter / wrap /
 //            compare value (MAP-1 §3.2 and CreateSampler 0x921e40);
+//   shared   render-target storage (vkn_tex_create_shared, flag 0x2000 of 0x91e2a0): one storage identity + one shape = one vkn_tex for
+//            every name (lookups, layout, pass state), both destroy orders and by handle, hand-over of the object's identity, a handle
+//            index taken by a newer texture, size / format / data kept separate by reason, other identities and plain creates never
+//            attach, a resize generation on the same reservation, an engine object reused while attached;
 //   ASTC     stage 4, the setup pack (vkn_astc.c) on a device without BC: a synthetic D3AC pack written here (hit with every level and the
 //            zero-block fix, the sRGB twin, 6x6 with two levels, key miss with an entry of another byte count, level count in the key /
 //            shape filter without hashing, block size the device lacks, linear / BC4 / cube never looked up, an update refused, the mip
@@ -28,7 +32,7 @@
 //            written here from the doc's NVN numbers, not from the code), vertex formats (MAP-1 §3.1, 0x9181d0; the engine's own
 //            fullscreen-mesh element list of 0x1f58698), the write-mask rule (0x9282c0, MAP-2), the primitive table 0x1f58640, the render
 //            pass cache, framebuffers + forget-view, the pipeline key, the pipeline cache and the captured create info;
-//   shaders  synthetic bundles through the mocked xbg_vkn_shader: set layout bindings (original x 6 + stage, uniform buffers dynamic by
+//   shaders  synthetic bundles through the mocked vkn_shlib_shader: set layout bindings (original x 6 + stage, uniform buffers dynamic by
 //            the dynamic-offset policy), the binding table, c1 blocks, missing / unusable stages, variants through the export, a destroy
 //            that cancels a queued creation, ids, the SUPPORT block.
 // Ends with "vkn_stage2_test: N checks passed" (exit 0) or the failures and exit 1.
@@ -958,7 +962,7 @@ static uint32_t t_adler32(const uint8_t *p, uint64_t n) {
     return b << 16 | a;
 }
 static int g_key_calls;
-int xbg_astc_storage_key(const void *mem, uint64_t size, uint32_t *crc, uint32_t *adler) {
+int vkn_shlib_astc_key(const void *mem, uint64_t size, uint32_t *crc, uint32_t *adler) {   // vkn_shlib.cpp (the pack key)
     g_key_calls++; *crc = t_crc32((const uint8_t *)mem, size); *adler = t_adler32((const uint8_t *)mem, size); return 0;
 }
 typedef struct { vkn_astc_entry e; const uint8_t *data; } tp_ent;
@@ -1331,6 +1335,148 @@ static void test_tex_lifetime(void) {
     flush_logged(); frames(3);
 }
 
+// Shared render-target storage (vkn_tex_create_shared; 0x914bb0 reservations, flag 0x2000 of 0x91e2a0): textures of one storage
+// identity (pool block, offset) and one shape are ONE vkn_tex (one image, layout, pass state; every name resolves to it), the image
+// lives until the last name goes (both destroy orders, by cookie and by handle), a different size / format / data gets an image of its
+// own (counted by reason), another identity or a plain create never attaches, and a resize generation on the same storage (0x914bb0 is
+// never called again: the new targets land on the same reservation) attaches only to a live image of its own shape.
+static vkn_tex *sh_create(uint64_t h, uint32_t efmt, uint32_t w, uint32_t hh, uint64_t cookie, uint32_t pool_id, uint64_t blk, uint64_t off, const char *name) {
+    vkn_tex_desc d = tdesc(efmt, 1, w, hh, 1, 1, VKN_TC_COLOR, cookie, pool_id);
+    const vkn_tex_share sh = {blk, off, (uint64_t)w * hh * 4, name, "Key"};
+    return vkn_tex_create_shared(h, &d, NULL, &sh, NULL);
+}
+static void test_tex_shared(void) {
+    flush_logged(); frames(3);
+    vkn_tex_stats s0, ts; vkn_tex_get_stats(&s0);
+    const uint64_t img0 = mk_live(MK_IMAGE);
+    // (1) same identity, same shape: one object; every lookup of B resolves to A; pass state is one
+    vkn_tex *A = sh_create(H(400, 1), 4, 96, 48, 0x5A0, 4000, 0x9000, 0x100, "HalfWidthBackBuffer");
+    vkn_tex *B = sh_create(H(401, 1), 4, 96, 48, 0x5B0, 4001, 0x9000, 0x100, "ScreenshotBackBuffer");
+    CHECK(A != NULL); CHECK(B == A); CHECK_EQ(mk_live(MK_IMAGE), img0 + 1);
+    if (!A || B != A) return;
+    CHECK(vkn_tex_get(H(400, 1)) == A); CHECK(vkn_tex_get(H(401, 1)) == A);
+    CHECK(vkn_tex_by_cookie(0x5A0) == A); CHECK(vkn_tex_by_cookie(0x5B0) == A);
+    vkn_tex *vt = NULL;
+    CHECK(vkn_tex_view_by_id(4000, &vt) == A->view && vt == A); vt = NULL; CHECK(vkn_tex_view_by_id(4001, &vt) == A->view && vt == A);
+    CHECK_EQ(A->handle, H(400, 1)); CHECK_EQ(A->cookie, 0x5A0); CHECK_EQ(A->nnames, 1);
+    A->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; A->pass_ever = 1;   // (what vkn_pass writes through either name)
+    CHECK_EQ(vkn_tex_by_cookie(0x5B0)->layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); CHECK_EQ(vkn_tex_get(H(401, 1))->pass_ever, 1);
+    CHECK(vkn_tex_att_view(vkn_tex_by_cookie(0x5B0), 0, 0) == A->att);
+    vkn_tex_get_stats(&ts);
+    CHECK_EQ(ts.sh_storages, s0.sh_storages + 1); CHECK_EQ(ts.sh_images, s0.sh_images + 1); CHECK_EQ(ts.sh_aliases, s0.sh_aliases + 1);
+    CHECK_EQ(ts.sh_made, s0.sh_made + 1); CHECK_EQ(ts.sh_attached, s0.sh_attached + 1);
+    CHECK_EQ(ts.alive[VKN_TC_COLOR], s0.alive[VKN_TC_COLOR] + 1); CHECK_EQ(ts.bytes[VKN_TC_COLOR], s0.bytes[VKN_TC_COLOR] + A->bytes); CHECK_EQ(ts.pending, s0.pending);
+    // (2) the owner's own name goes first: the image stays, B takes over the object's identity; then B goes: the image is retired
+    const VkImage ia = A->image;
+    CHECK_EQ(vkn_tex_destroy_cookie(0x5A0), 1);
+    CHECK(!A->dead); CHECK(vkn_tex_get(H(400, 1)) == NULL); CHECK(vkn_tex_by_cookie(0x5A0) == NULL); CHECK(vkn_tex_view_by_id(4000, NULL) == VK_NULL_HANDLE);
+    CHECK(vkn_tex_get(H(401, 1)) == A); CHECK(vkn_tex_by_cookie(0x5B0) == A); CHECK(vkn_tex_view_by_id(4001, NULL) == A->view);
+    CHECK_EQ(A->handle, H(401, 1)); CHECK_EQ(A->cookie, 0x5B0); CHECK_EQ(A->pool_id, 4001); CHECK_EQ(A->nnames, 0); CHECK(!strcmp(A->sname, "ScreenshotBackBuffer"));
+    CHECK_EQ(A->layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);   // (state untouched by the hand-over)
+    frames(4); CHECK(mk_is_live((uint64_t)(uintptr_t)ia, MK_IMAGE));
+    vkn_tex_get_stats(&ts); CHECK_EQ(ts.sh_handover, s0.sh_handover + 1); CHECK_EQ(ts.sh_aliases, s0.sh_aliases); CHECK_EQ(ts.alive[VKN_TC_COLOR], s0.alive[VKN_TC_COLOR] + 1);
+    CHECK_EQ(vkn_tex_destroy_cookie(0x5A0), 0);
+    CHECK_EQ(vkn_tex_destroy_cookie(0x5B0), 1);
+    CHECK(vkn_tex_get(H(401, 1)) == NULL); CHECK(vkn_tex_view_by_id(4001, NULL) == VK_NULL_HANDLE);
+    frames(2); CHECK(mk_is_live((uint64_t)(uintptr_t)ia, MK_IMAGE)); frames(1); CHECK(!mk_is_live((uint64_t)(uintptr_t)ia, MK_IMAGE));
+    vkn_tex_get_stats(&ts); CHECK_EQ(ts.sh_images, s0.sh_images); CHECK_EQ(ts.sh_storages, s0.sh_storages); CHECK_EQ(ts.alive[VKN_TC_COLOR], s0.alive[VKN_TC_COLOR]);
+    // (3) the other order: the attached name goes first (by handle), then the owner
+    A = sh_create(H(402, 1), 4, 96, 48, 0x5C0, 4002, 0x9000, 0x100, "A");
+    B = sh_create(H(403, 1), 4, 96, 48, 0x5D0, 4003, 0x9000, 0x100, "B");
+    CHECK(A && B == A);
+    if (A && B == A) {
+        const VkImage ib = A->image;
+        CHECK_EQ(vkn_tex_destroy_handle(H(403, 1)), 1);
+        CHECK(vkn_tex_get(H(403, 1)) == NULL); CHECK(vkn_tex_by_cookie(0x5D0) == NULL); CHECK(vkn_tex_view_by_id(4003, NULL) == VK_NULL_HANDLE);
+        CHECK(vkn_tex_get(H(402, 1)) == A); CHECK(vkn_tex_view_by_id(4002, NULL) == A->view); CHECK_EQ(A->handle, H(402, 1)); CHECK(!A->dead);
+        frames(4); CHECK(mk_is_live((uint64_t)(uintptr_t)ib, MK_IMAGE));
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5D0), 0);
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5C0), 1);
+        frames(3); CHECK(!mk_is_live((uint64_t)(uintptr_t)ib, MK_IMAGE));
+    }
+    // (4) three names, the middle one first; a newer texture takes an attached name's handle index (that name keeps its cookie)
+    A = sh_create(H(404, 1), 4, 96, 48, 0x5E0, 4004, 0x9000, 0x100, "A");
+    B = sh_create(H(405, 1), 4, 96, 48, 0x5E1, 4005, 0x9000, 0x100, "B");
+    vkn_tex *C = sh_create(H(406, 1), 4, 96, 48, 0x5E2, 4006, 0x9000, 0x100, "C");
+    CHECK(A && B == A && C == A); CHECK_EQ(A ? A->nnames : 0, 2);
+    if (A && B == A && C == A) {
+        vkn_tex_desc dx = tdesc(4, 1, 8, 8, 1, 1, VKN_TC_SAMPLED, 0x5EF, ~0u);
+        vkn_tex *X = vkn_tex_create(H(406, 2), &dx, NULL, NULL);
+        CHECK(X && X != A); CHECK(vkn_tex_get(H(406, 2)) == X); CHECK(vkn_tex_get(H(406, 1)) == NULL); CHECK(vkn_tex_by_cookie(0x5E2) == A);
+        vkn_tex_get_stats(&ts); CHECK_EQ(ts.pending, s0.pending);   // (A is still linked under its own handle)
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5E1), 1); CHECK(vkn_tex_get(H(405, 1)) == NULL); CHECK(vkn_tex_get(H(404, 1)) == A); CHECK_EQ(A->nnames, 1);
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5E0), 1);   // hand-over to C, which has lost its handle index: known by cookie only
+        CHECK(vkn_tex_get(H(404, 1)) == NULL); CHECK(vkn_tex_by_cookie(0x5E2) == A); CHECK(!A->linked); CHECK(vkn_tex_get(H(406, 2)) == X);
+        vkn_tex_get_stats(&ts); CHECK_EQ(ts.pending, s0.pending + 1);
+        CHECK_EQ(vkn_tex_destroy_handle(H(406, 1)), 0);   // (that index belongs to X now)
+        CHECK(vkn_tex_get(H(406, 2)) == X);
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5E2), 1); CHECK(vkn_tex_get(H(406, 2)) == X);
+        CHECK_EQ(vkn_tex_destroy_cookie(0x5EF), 1);
+    }
+    flush_logged(); frames(3);
+    // (5) what differs stays separate, counted by reason: size, format; another identity / a plain create never attaches
+    vkn_tex_get_stats(&s0);
+    A = sh_create(H(410, 1), 4, 96, 48, 0x600, 4010, 0x9000, 0x200, "A");
+    vkn_tex *S = sh_create(H(411, 1), 4, 48, 24, 0x601, 4011, 0x9000, 0x200, "S");      // half size, same storage
+    vkn_tex *F = sh_create(H(412, 1), 24, 96, 48, 0x602, 4012, 0x9000, 0x200, "F");     // RGBA32F, same storage
+    vkn_tex *O = sh_create(H(413, 1), 4, 96, 48, 0x603, 4013, 0x9000, 0x300, "O");      // another offset
+    vkn_tex *Q = sh_create(H(414, 1), 4, 96, 48, 0x604, 4014, 0x9001, 0x200, "Q");      // another block
+    vkn_tex_desc dp = tdesc(4, 1, 96, 48, 1, 1, VKN_TC_COLOR, 0x605, 4015);
+    vkn_tex *P = vkn_tex_create(H(415, 1), &dp, NULL, NULL);                            // no storage identity
+    CHECK(A && S && F && O && Q && P);
+    CHECK(S != A && F != A && O != A && Q != A && P != A && F != S);
+    vkn_tex *A2 = sh_create(H(416, 1), 4, 96, 48, 0x606, 4016, 0x9000, 0x200, "A2");    // the chain holds A, S, F: A2 finds A
+    CHECK(A2 == A);
+    vkn_tex *S2 = sh_create(H(417, 1), 4, 48, 24, 0x607, 4017, 0x9000, 0x200, "S2");    // ... and S2 finds S
+    CHECK(S2 == S);
+    // initial data: never attached (it would land in the other texture's image)
+    uint8_t px[96 * 48 * 4]; memset(px, 3, sizeof px);
+    vkn_tex_region r = {0, 0, 0, 96, 48, 1, px}; const vkn_tex_src src = {VKN_SRC_REGIONS, &r, 1, NULL, 0, 0, 0};
+    vkn_tex_desc dd = tdesc(4, 1, 96, 48, 1, 1, VKN_TC_COLOR, 0x608, 4018);
+    const vkn_tex_share shd = {0x9000, 0x200, 0, "D", "Key"};
+    vkn_tex *D = vkn_tex_create_shared(H(418, 1), &dd, &src, &shd, NULL);
+    CHECK(D && D != A);
+    vkn_tex_get_stats(&ts);
+    CHECK_EQ(ts.sh_kept[VKN_AL_SIZE], s0.sh_kept[VKN_AL_SIZE] + 1); CHECK_EQ(ts.sh_kept[VKN_AL_FORMAT], s0.sh_kept[VKN_AL_FORMAT] + 1);
+    CHECK_EQ(ts.sh_kept[VKN_AL_DATA], s0.sh_kept[VKN_AL_DATA] + 1); CHECK_EQ(ts.sh_attached, s0.sh_attached + 2);
+    CHECK_EQ(ts.sh_made, s0.sh_made + 6);   // A, S, F, O, Q, D
+    CHECK_EQ(ts.sh_images, s0.sh_images + 6); CHECK_EQ(ts.sh_storages, s0.sh_storages + 3); CHECK_EQ(ts.sh_aliases, s0.sh_aliases + 2);
+    CHECK(vkn_tex_view_by_id(4016, NULL) == A->view); CHECK(vkn_tex_view_by_id(4017, NULL) == S->view); CHECK(vkn_tex_view_by_id(4015, NULL) == P->view);
+    // the different-size image survives its storage neighbours
+    vkn_tex_destroy_cookie(0x600); vkn_tex_destroy_cookie(0x606);
+    CHECK(vkn_tex_get(H(411, 1)) == S && !S->dead); CHECK(vkn_tex_by_cookie(0x607) == S);
+    for (uint64_t c = 0x601; c <= 0x608; c++) vkn_tex_destroy_cookie(c);
+    flush_logged(); frames(3);
+    // (6) a resize generation on the same storage (0x912f70 -> new targets, the same reservation): while the old generation lives, a
+    // new size is separate; after the old one is gone, the new generation's second name attaches to the new image, not to a dead one
+    vkn_tex_get_stats(&s0);
+    vkn_tex *G1 = sh_create(H(420, 1), 4, 96, 48, 0x700, 4020, 0x9000, 0x400, "G1"), *G1b = sh_create(H(421, 1), 4, 96, 48, 0x701, 4021, 0x9000, 0x400, "G1b");
+    CHECK(G1 && G1b == G1);
+    vkn_tex *N1 = sh_create(H(422, 1), 4, 128, 64, 0x702, 4022, 0x9000, 0x400, "N1");
+    CHECK(N1 && N1 != G1);
+    vkn_tex_destroy_cookie(0x700); vkn_tex_destroy_cookie(0x701);   // the old generation goes (deferred destroys of 0x91d630)
+    vkn_tex *N1b = sh_create(H(423, 1), 4, 128, 64, 0x703, 4023, 0x9000, 0x400, "N1b");
+    CHECK(N1b == N1);
+    vkn_tex *G2 = sh_create(H(424, 1), 4, 96, 48, 0x704, 4024, 0x9000, 0x400, "G2");   // back to the old size: the old image is gone, a new one
+    CHECK(G2 && G2 != N1); CHECK(G2 && !G2->dead && G2->nnames == 0);
+    vkn_tex_get_stats(&ts);
+    CHECK_EQ(ts.sh_made, s0.sh_made + 3); CHECK_EQ(ts.sh_attached, s0.sh_attached + 2); CHECK_EQ(ts.sh_kept[VKN_AL_SIZE], s0.sh_kept[VKN_AL_SIZE] + 2);
+    CHECK_EQ(ts.sh_images, s0.sh_images + 2); CHECK_EQ(ts.sh_storages, s0.sh_storages + 1);
+    for (uint64_t c = 0x702; c <= 0x704; c++) vkn_tex_destroy_cookie(c);
+    // (7) an engine object reused without a destroy event while attached: that name goes, the image keeps its other name
+    A = sh_create(H(430, 1), 4, 96, 48, 0x710, 4030, 0x9000, 0x500, "A");
+    B = sh_create(H(431, 1), 4, 96, 48, 0x711, 4031, 0x9000, 0x500, "B");
+    CHECK(A && B == A);
+    vkn_tex_desc dr = tdesc(4, 1, 8, 8, 1, 1, VKN_TC_SAMPLED, 0x711, 4032);
+    vkn_tex *R = vkn_tex_create(H(432, 1), &dr, NULL, NULL);
+    CHECK(R && R != A); CHECK(vkn_tex_by_cookie(0x711) == R); CHECK(vkn_tex_get(H(431, 1)) == NULL); CHECK(A && A->nnames == 0 && !A->dead);
+    vkn_tex_destroy_cookie(0x711); vkn_tex_destroy_cookie(0x710);
+    flush_logged(); frames(3);
+    vkn_tex_get_stats(&ts);
+    CHECK_EQ(ts.sh_images, 0); CHECK_EQ(ts.sh_storages, 0); CHECK_EQ(ts.sh_aliases, 0);
+    CHECK_EQ(mk_live(MK_IMAGE), img0);
+}
+
 // Samplers: every filter / wrap / compare value (MAP-1 §3.2; out-of-range values as CreateSampler 0x921e40 treats them).
 static void test_samplers(void) {
     // filter 0..5 -> (mag, min, mip); NVN min filter numbers of the doc: 1..5 -> 3, 3, 5, 3, 5 (3 linear + nearest level, 5 linear +
@@ -1423,28 +1569,28 @@ static void test_tex_shapes(void) {
 }
 
 // ---- stage 4: the GPU BC route (vkn_bcgpu.c) on a device without BC: pack > GPU ASTC 4x4 > GPU RGBA8 > CPU ----
-// The translator doors (xbg_game.cpp [DOS2] VK-NATIVE export) are stubbed here: td_on = 0 (the default for every other test) is a build
+// The data doors (vkn_shlib_bc.cpp, moved there from xbg_game.cpp's [DOS2] VK-NATIVE export) are stubbed here: td_on = 0 (the default for every other test) is a build
 // without them (blob NULL: no GPU route, the CPU decode as before). The self-tests themselves are device-side: here their verdicts are
 // what the stubs say, the test checks what the backend does with them (one submission each, the zero re-read / re-run, route off).
 static int td_on, td_dec_bad, td_enc_good = 1, td_enc_zero, td_dec_kat_calls, td_enc_kat_calls, td_enc_checks;
 static const uint32_t td_blob[16] = {0x07230203};
-const uint32_t *xbg_vkn_bc_blob(int which, size_t *bytes) {
+const uint32_t *vkn_shlib_bc_blob(int which, size_t *bytes) {
     if (bytes) *bytes = td_on && which >= 0 && which <= 2 ? sizeof td_blob : 0;
     return td_on && which >= 0 && which <= 2 ? td_blob : NULL;
 }
 static int td_rgba8(uint32_t f) { return (f >= 0x41 && f <= 0x48) || f == 0x4d || f == 0x4e; }
-int xbg_vkn_bc_kat_input(uint32_t fmt, void *in, size_t in_cap, size_t *in_bytes, size_t *out_bytes, uint32_t push[4]) {
+int vkn_shlib_bc_kat_input(uint32_t fmt, void *in, size_t in_cap, size_t *in_bytes, size_t *out_bytes, uint32_t push[4]) {
     if (!td_rgba8(fmt) || in_cap < 64) return -1;
     td_dec_kat_calls++;
     memset(in, 0, 64); *in_bytes = 64; *out_bytes = 2048u * 64;
     push[0] = 1; push[1] = 2048; push[2] = 4; push[3] = fmt == 0x41 || fmt == 0x42 || fmt == 0x45 || fmt == 0x46 ? 2 : 4;
     return 0;
 }
-int xbg_vkn_bc_kat_check(uint32_t fmt, const void *out, size_t out_bytes, char *line, size_t cap) {
+int vkn_shlib_bc_kat_check(uint32_t fmt, const void *out, size_t out_bytes, char *line, size_t cap) {
     (void)out; (void)out_bytes; if (line && cap) snprintf(line, cap, "stub");
     return fmt == (uint32_t)td_dec_bad ? 7 : 0;
 }
-int xbg_vkn_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba, size_t rgba_cap, size_t *rgba_bytes, uint32_t push[][4], uint32_t max_disp,
+int vkn_shlib_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba, size_t rgba_cap, size_t *rgba_bytes, uint32_t push[][4], uint32_t max_disp,
                           uint32_t *ndisp, uint32_t *blocks) {
     if (in_cap < 256 || rgba_cap < 285 * 64 || max_disp < 6) return -1;
     td_enc_kat_calls++;
@@ -1453,18 +1599,18 @@ int xbg_vkn_bca_kat_input(void *in, size_t in_cap, size_t *in_bytes, void *rgba,
     for (int i = 0; i < 6; i++) { push[i][0] = 6; push[i][1] = first[i]; push[i][2] = first[i + 1]; push[i][3] = (i == 1 || i == 2 ? 1u : i == 3 || i == 4 ? 2u : 0u) | 4u << 8; }
     return 0;
 }
-int xbg_vkn_bca_kat_check(const void *enc, uint32_t cands, int *zero, char *line, size_t cap) {
+int vkn_shlib_bca_kat_check(const void *enc, uint32_t cands, int *zero, char *line, size_t cap) {
     (void)enc; td_enc_checks++;
     if (zero) *zero = td_enc_zero > 0;
     if (td_enc_zero > 0) td_enc_zero--;
     if (line && cap) snprintf(line, cap, "stub candidates=%u", cands);
     return td_enc_good;
 }
-uint32_t xbg_vkn_bca_flags(uint32_t nvn) {   // xbg_bc_astc_flags
+uint32_t vkn_shlib_bca_flags(uint32_t nvn) {   // xbg_bc_astc_flags
     switch (nvn) { case 0x41: case 0x42: case 0x45: case 0x46: return 1 | 2 << 8; case 0x43: case 0x44: case 0x47: case 0x48: return 2 | 4 << 8;
                    case 0x4d: case 0x4e: return 4 << 8; default: return 0; }
 }
-const char *xbg_vkn_bca_shape(uint32_t nvn, int target, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, int samples, int storage, int vt) {   // xbg_bc_astc_shape
+const char *vkn_shlib_bca_shape(uint32_t nvn, int target, uint32_t w, uint32_t h, uint32_t levels, uint32_t layers, int samples, int storage, int vt) {   // xbg_bc_astc_shape
     if (samples > 1) return "multisample";
     if (storage) return "storage";
     if (target == 0 || target == 2 || target == 3) return "not-2d";
@@ -1719,6 +1865,7 @@ static void test_textures(void) {
     test_tex_bcgpu();
     test_tex_targets();
     test_tex_lifetime();
+    test_tex_shared();
     test_samplers();
     flush_logged(); frames(3);
     CHECK_EQ(mk_live(MK_IMAGE), 0); CHECK_EQ(mk_live(MK_VIEW), 0); CHECK_EQ(mk_live(MK_SAMPLER), 0);

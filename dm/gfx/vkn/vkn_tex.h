@@ -27,6 +27,8 @@ extern "C" {
 enum { VKN_TEX_LAYER_IDS = 7 };   // per-layer / per-face pool ids the engine keeps (texture object +0xc4..+0xdc)
 enum { VKN_TC_SAMPLED, VKN_TC_COLOR, VKN_TC_DEPTH, VKN_TC_WINDOW, VKN_TC_N };   // texture classes (census, usage)
 enum { VKN_SRC_NONE, VKN_SRC_REGIONS, VKN_SRC_PACKAGED };
+// why an alias of shared render-target storage got an image of its own (vkn_tex_create_shared)
+enum { VKN_AL_SIZE, VKN_AL_FORMAT, VKN_AL_SHAPE, VKN_AL_USAGE, VKN_AL_DATA, VKN_AL_VIEWS, VKN_AL_N };
 
 // One (level, layer) of linear data: block rows packed tight (row = ceil(w / block width) blocks), `d` slices for a 3D level from z.
 typedef struct vkn_tex_region { uint32_t level, layer, z, w, h, d; const void *src; } vkn_tex_region;
@@ -77,6 +79,12 @@ typedef struct vkn_tex {
     uint32_t pass_stencil; float pass_depth;
     struct { uint32_t layer; float rgba[4]; } pass_clr[4];
     uint64_t pass_clr_ns;                      // vkn_now_ns() of the newest remembered clear (vkn_tex_update orders queued data after it)
+    // shared render-target storage (vkn_tex_create_shared; private, vkn_tex.c): the other engine textures attached to this image (their
+    // handle / cookie / pool ids resolve to this object), the storage identity it sits on, what aliases are compared against
+    struct vkn_tex_name *names; uint32_t nnames;
+    uint8_t shared; struct vkn_tex *snext; uint64_t st_block, st_off;
+    VkImageUsageFlags usage; VkImageCreateFlags cflags; VkComponentMapping swz;
+    char sname[32];                            // the engine's target name (logs)
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index
@@ -133,6 +141,11 @@ typedef struct vkn_tex_stats {
     uint64_t pack_tail;                       // mip reductions re-made in the old texture's storage (vkn_tex_swap_reduced)
     uint64_t bc_ns[VKN_BC_N];                 // creation time of BC textures by storage (the creating thread: pack read, GPU job build, CPU decode)
     uint64_t bc_upload[VKN_BC_N];             // bytes staged for them (BC blocks for the GPU routes, decoded texels for the CPU one)
+    // ---- shared render-target storage (vkn_tex_create_shared): alive storage identities with an image on them, images on them,
+    // engine textures attached to another one's image; creations so far: new image, attached, kept separate by reason (VKN_AL_*),
+    // names detached (destroyed while their image lives on), owner name handed over to an attached one
+    uint32_t sh_storages, sh_images, sh_aliases;
+    uint64_t sh_made, sh_attached, sh_kept[VKN_AL_N], sh_detached, sh_handover;
 } vkn_tex_stats;
 void vkn_tex_get_stats(vkn_tex_stats *s);
 
@@ -154,6 +167,26 @@ void vkn_tex_update_stats_get(vkn_tex_update_stats *s);
 // vkn_tex_create with an explicit view swizzle (NVN TextureSwizzle numbers per output component r, g, b, a: 0 zero, 1 one, 2 R, 3 G,
 // 4 B, 5 A; what nvnTextureBuilderSetSwizzle got) instead of the format's own. Applies to the sampled views (whole and per layer).
 vkn_tex *vkn_tex_create_swz(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const uint8_t swz[4], const char **why);
+
+// ==== shared render-target storage (aliasing; the cause of black save-game thumbnails in mode 1) ====
+// The engine creates some named targets on one reserved piece of memory per "storage key" (several names map to one key): on the
+// Switch those textures ARE the same memory, and the engine relies on it (the screenshot target is never drawn into: the scene's last
+// pass writes the scaled back buffer, which is the same storage, and the copy out of the screenshot target reads the scene).
+// vkn_tex_create_shared creates a texture that sits on storage `sh` (identity: the engine's pool block + offset of the reservation).
+// When a live image on the same identity has exactly the same shape (VkFormat and NVN format, size, depth, levels, layers, samples,
+// target, usage, create flags, view swizzle, the per-layer views this one needs) and the creation has no initial data, NO new image is
+// made: the new engine texture is attached to that one - its handle, cookie and pool ids resolve to the SAME vkn_tex (one image, one
+// layout, one set of remembered clears / "ever written" / views / attachment views), and the returned pointer is that object (its
+// `handle` field stays the first live name's). The object lives until its last name is destroyed (destroy by cookie or handle drops
+// one name; the owner's own name leaving hands the object's identity fields to an attached name). Anything that differs (the same
+// memory reinterpreted: garbage on the Switch too) gets an image of its own on the same identity; VKN_AL_* counts why.
+// The other create functions never attach (identity unknown): only creations the engine made with its "shared storage" flag call this.
+typedef struct vkn_tex_share {
+    uint64_t block, offset;                   // storage identity (the engine's pool block and offset in it)
+    uint64_t bytes;                           // reservation size (logs)
+    const char *name, *key;                   // the engine's target name and storage-key name (logs; NULL = unknown)
+} vkn_tex_share;
+vkn_tex *vkn_tex_create_shared(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_src *src, const vkn_tex_share *sh, const char **why);
 
 #ifdef __cplusplus
 }

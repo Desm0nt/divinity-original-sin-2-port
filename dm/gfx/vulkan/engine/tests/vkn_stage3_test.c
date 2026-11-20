@@ -15,6 +15,9 @@
 //            stage, unknown state / shader / vertex buffer, index range, viewport), alpha variant, scissor clamp, arrays, index rewrite
 //            of fans / quads / line loops (generated indices checked), the set cache and its retirement, compute dispatch;
 //   end to end  one synthetic frame (targets A with clears, 3 draws, targets B sampling A, 1 draw, present B) checked as a whole;
+//   thumbnail  shared render-target storage (vkn_tex_create_shared): the save-game thumbnail of 0xa66bc0 - clear the override, draw
+//            the scene into its alias, copy the override: one image, the clear folded into the scene pass, the copy reads the drawn
+//            image; the same with separate images reproduces phone run V5_b (a cleared, never-drawn source);
 //   queries  (stage 4, vkn_query.c) report pairs as occlusion queries inside a pass, a pair broken by a pass end, the copy + barrier
 //            after the pass, consumers visible / hidden (GPU predicate) / empty pair (CPU skip) / unknown / same pass / dropped draw /
 //            nesting / off-frame, slot reuse with the verdict readback, modes 0 / 2 / 3, a device without the extension.
@@ -1012,6 +1015,86 @@ static void test_e2e(void) {
     CHECK_EQ(mk_val_errors, val0);
 }
 
+// ================================================================================================================ save-game thumbnail
+// Shared render-target storage (vkn_tex_create_shared): the frame function 0xa66bc0 makes "ScreenshotBackBuffer" the window's override
+// target, renders the scene off-frame and copies the override into a small read-back texture. With a render scale the scene's last
+// pass draws into the scaled back buffer "HalfWidthBackBuffer" instead, which is the same storage key (flag 0x2000): the same memory on
+// the Switch. Phone run V5_b (separate images): the copy read a never-drawn target whose remembered clear ran just before it - zeros.
+// Checked: the two names are one image; the override's clear folds into the scene's pass (LOAD_OP_CLEAR, not a clear command after the
+// draw); the copy (a scaled blit) reads the drawn image after the draw; the separate-image case shows the old failure; the override's
+// destroy leaves the back buffer working.
+static vkn_tex *shtex(uint32_t idx, uint32_t w, uint32_t h, uint32_t pool, uint64_t off, const char *name) {
+    vkn_tex_desc d; memset(&d, 0, sizeof d);
+    d.efmt = EF_RGBA8; d.nvn_target = 1; d.w = w; d.h = h; d.depth = 1; d.mips = 1; d.layers = 1; d.samples = 1; d.cls = VKN_TC_COLOR;
+    d.pool_id = pool; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) d.layer_ids[i] = ~0u;
+    d.sampler_id = ~0u; d.cookie = 0xC00000ull + idx;
+    const vkn_tex_share sh = {0x7000, off, (uint64_t)w * h * 4, name, "HalfWidthBackBuffer"};
+    return vkn_tex_create_shared(H(idx, 1), &d, NULL, &sh, NULL);
+}
+static int clears_of(uint64_t from, VkImage img) { int n = 0; for (int k = 0; nth(from, VK_NULL_HANDLE, MK_E_CLEAR_COLOR_IMG, k); k++) n += nth(from, VK_NULL_HANDLE, MK_E_CLEAR_COLOR_IMG, k)->a[0] == VH(img); return n; }
+static const mk_ev *clear_of(uint64_t from, VkImage img) {   // the first colour clear command of img since from
+    for (int k = 0; nth(from, VK_NULL_HANDLE, MK_E_CLEAR_COLOR_IMG, k); k++) if (nth(from, VK_NULL_HANDLE, MK_E_CLEAR_COLOR_IMG, k)->a[0] == VH(img)) return nth(from, VK_NULL_HANDLE, MK_E_CLEAR_COLOR_IMG, k);
+    return NULL;
+}
+static void test_thumbnail(void) {
+    vkn_tex *HW = shtex(640, 64, 32, 640, 0x1000, "HalfWidthBackBuffer"), *SS = shtex(641, 64, 32, 641, 0x1000, "ScreenshotBackBuffer");
+    vkn_tex *RB = mktex(642, EF_RGBA8, VKN_TC_SAMPLED, 1, 32, 16, 1, 1, 642, 0);   // the read-back texture (480x270 on the phone)
+    vkn_tex *SS2 = mktex(643, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 643, 0), *HW2 = mktex(644, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 644, 0);
+    CHECK(HW && SS && RB && SS2 && HW2); CHECK(SS == HW);
+    if (!HW || SS != HW || !RB || !SS2 || !HW2) return;
+    CHECK(vkn_tex_by_cookie(0xC00000ull + 641) == HW); CHECK(vkn_tex_view_by_id(641, NULL) == HW->view);
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    vkn_draw_in in = g_in; in.shader = H(30, 1); in.ib = H(52, 1); in.prim = 1;
+    g_ftex[0] = 300; g_ftex[3] = 303; g_fsmp[3] = 13;
+    const float black[4] = {0, 0, 0, 0};
+    // ---- one image: clear the override, the scene into the scaled back buffer, copy the override
+    uint64_t m = mark();
+    VkCommandBuffer cb = fbegin(0);   // off-frame (0xa66bc0 renders the screenshot outside the presented frame)
+    vkn_pass_clear_color(vkn_tex_by_cookie(0xC00000ull + 641), 0, black, NULL);
+    targets(HW, NULL, NULL);
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    vkn_pass_copy(RB, vkn_tex_by_cookie(0xC00000ull + 641));
+    fsubmit(1);
+    const mk_ev *rp = nth(m, cb, MK_E_BEGIN_RP, 0), *dr = nth(m, cb, MK_E_DRAW_IDX, 0), *er = nth(m, cb, MK_E_END_RP, 0), *bl = nth(m, cb, MK_E_BLIT_IMG, 0);
+    CHECK(rp && dr && er && bl);
+    if (rp && dr && er && bl) {
+        CHECK(att_of(rp, 0) && att_of(rp, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);   // the override's clear is the scene pass's clear
+        mk_obj *fb = fb_of(rp); CHECK(fb && fb->fb_view[0] == HW->att);
+        CHECK(rp->seq < dr->seq && dr->seq < er->seq && er->seq < bl->seq);
+        CHECK_EQ(bl->a[0], VH(HW->image)); CHECK_EQ(bl->a[1], VH(RB->image));   // the copy reads the image that was drawn
+        CHECK_EQ(clears_of(dr->seq, HW->image), 0);                           // and nothing cleared it after the draw
+    }
+    CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
+    // ---- separate images (the old backend): the copy reads a target nothing was drawn into, its remembered clear run right before it
+    m = mark();
+    cb = fbegin(0);
+    vkn_pass_clear_color(SS2, 0, black, NULL);
+    targets(HW2, NULL, NULL);
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    vkn_pass_copy(RB, SS2);
+    fsubmit(1);
+    bl = nth(m, cb, MK_E_BLIT_IMG, 0); const mk_ev *cc = clear_of(m, SS2->image); dr = nth(m, cb, MK_E_DRAW_IDX, 0);
+    CHECK(bl && cc && dr && bl->a[0] == VH(SS2->image) && cc->a[0] == VH(SS2->image) && dr->seq < cc->seq && cc->seq < bl->seq);
+    // (the audit question: a remembered clear of the copy source is recorded BEFORE the copy, also when the trace line of the copy
+    // - printed at vkn_pass_copy's entry - comes first)
+    // ---- the override goes (0x912700's reference drops to zero): the back buffer keeps its image and its state
+    const VkImage hwi = HW->image;
+    CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 641), 1);
+    CHECK(!HW->dead); CHECK(vkn_tex_get(H(640, 1)) == HW); CHECK(vkn_tex_by_cookie(0xC00000ull + 641) == NULL); CHECK(vkn_tex_view_by_id(641, NULL) == VK_NULL_HANDLE);
+    m = mark();
+    cb = fbegin(1);
+    targets(HW, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    targets(NULL, NULL, NULL);
+    fsubmit(0);
+    rp = nth(m, cb, MK_E_BEGIN_RP, 0);
+    CHECK(att_of(rp, 0) && att_of(rp, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD); CHECK(fb_of(rp) && fb_of(rp)->fb_view[0] == HW->att);
+    CHECK(mk_is_live(VH(hwi), MK_IMAGE));
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    vkn_tex_destroy_cookie(0xC00000ull + 640); vkn_tex_destroy_cookie(0xC00000ull + 642); vkn_tex_destroy_cookie(0xC00000ull + 643); vkn_tex_destroy_cookie(0xC00000ull + 644);
+    frames_n(4);
+    CHECK(!mk_is_live(VH(hwi), MK_IMAGE));
+}
+
 // ================================================================================================================ UI smoke
 // GDraw through vkn_ui: targets, a full and a masked stencil clear, a textured quad draw, an indexed draw, then an engine draw (which
 // must rebind everything after the UI's own binds). Checked: the calls draw, the validator finds nothing.
@@ -1247,6 +1330,7 @@ int main(void) {
     test_draw();
     test_tex_update();
     test_e2e();
+    test_thumbnail();
     test_ui();
     test_query();
     CHECK_EQ(mk_val_errors, 0);
