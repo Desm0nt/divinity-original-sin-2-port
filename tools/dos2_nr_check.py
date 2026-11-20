@@ -48,6 +48,17 @@ def sites():
         rows = body.count('(void *)nr_h_')
         if len(got) != rows or not got: sys.exit('%s %s: parsed %d of %d rows' % (f, table, len(got), rows))
         out += got
+    # [DOS2] VK-NATIVE: every row dm_vkn_site(0x..., k_x, "name", (void *)hook, &orig, modes) of dm/host/hle_dos2_vkn*.c with its words
+    # `static const uint32_t k_x[4] = {...}` (same file)
+    for f in sorted((ROOT / 'dm/host').glob('hle_dos2_vkn*.c')):
+        s = re.sub(r' */\*.*?\*/', '', f.read_text(encoding='utf-8'))
+        words = {m.group(1): [int(m.group(k), 16) for k in range(2, 6)]
+                 for m in re.finditer(r'static const uint32_t (k_\w+)\[4\] = \{(0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+), (0x[0-9a-f]+)\};', s)}
+        got = [(int(m.group(1), 16), words.get(m.group(2)), m.group(3), m.group(4))
+               for m in re.finditer(r'dm_vkn_site\((0x[0-9a-f]+), (k_\w+), "([^"]+)", \(void \*\)(\w+), &\w+, VKN_M_\w+\);', s)]
+        rows = s.count('    dm_vkn_site(0x')
+        if len(got) != rows or any(g[1] is None for g in got): sys.exit('%s: parsed %d of %d dm_vkn_site rows (or a row without its words)' % (f.name, len(got), rows))
+        out += got
     return out
 
 
@@ -316,7 +327,9 @@ def main():
         if rel: print('       PC-RELATIVE at +%s' % ','.join(str(4 * k) for k in rel))
         if inb: print('       INBOUND ' + ' '.join('0x%x->0x%x' % h for h in inb[:6]))
         for e in early: print('       %s' % e)
-    dup = len(hooks) - len({h[0] for h in hooks})
+    # (a VK-NATIVE hook - function name vkn_h_* / vb_h_* - may sit on a site an older module hooked: dn_hook_chain chains them)
+    vk = [h for h in hooks if h[3].startswith(('vkn_h_', 'vb_h_'))]; old = [h for h in hooks if not h[3].startswith(('vkn_h_', 'vb_h_'))]
+    dup = len(old) - len({h[0] for h in old}) + len(vk) - len({h[0] for h in vk})
     if dup: bad += 1; print('FAIL: %d duplicate hook addresses' % dup)
 
     print('\n== not hookable, as the hook file says')

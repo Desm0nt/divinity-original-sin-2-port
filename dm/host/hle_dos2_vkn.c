@@ -34,6 +34,7 @@ void dm_vkn_site(uint32_t off, const uint32_t pro[4], const char *name, void *ho
     s->off = off; memcpy(s->pro, pro, sizeof s->pro); s->name = name; s->hook = hook; s->orig = orig; s->modes = modes;
 }
 
+void dm_vkn_exec_register(void) __attribute__((weak));     // stage 3: packets, flushes, draws, frame, present
 // ---- the frame tick (window slot 8 = 0x93ccd0 EndFrame(window, bit0 present)): census and, in mode 2, the upload flush ----
 static vkn_fn g_o_endframe; static uint64_t g_census_t;
 static vkn_census_fn g_census[16]; static int g_ncensus;
@@ -42,10 +43,13 @@ VKN_HOOK vkn_h_endframe(VKN_A) {
     const uint64_t rc = g_o_endframe(VKN_F);
     if (a1 & 1) {   // a presented frame
         const uint64_t now = vkn_now_ns();
-        if (vkn_mode() == VKN_ALONGSIDE) { vkn_frame_end(); if (vkn_upload_pending_bytes() > (64ull << 20)) vkn_upload_flush(); }
+        // Until the frame part (stage 3) records frames itself, this tick stands for it in both modes: frames advance (deferred
+        // destruction) and queued uploads are flushed by an own submission.
+        const int own = vkn_mode() == VKN_ALONGSIDE || !dm_vkn_exec_register;
+        if (own) { vkn_frame_end(); if (vkn_upload_pending_bytes() > (64ull << 20)) vkn_upload_flush(); }
         if (now - g_census_t >= 10000000000ull) {
             g_census_t = now;
-            if (vkn_mode() == VKN_ALONGSIDE) vkn_upload_flush();
+            if (own) vkn_upload_flush();
             uint64_t used[VKN_ARENAS], res[VKN_ARENAS]; vkn_arena_stats(used, res);
             vkn_logf("mode %d frame %llu: arenas static %.1f / %.1f MB, staging %.1f / %.1f MB, ring %.1f / %.1f MB (used / reserved)", vkn_mode(), (unsigned long long)vkn_frame(),
                      used[VKN_ARENA_STATIC] / 1048576.0, res[VKN_ARENA_STATIC] / 1048576.0, used[VKN_ARENA_STAGING] / 1048576.0, res[VKN_ARENA_STAGING] / 1048576.0,
@@ -61,7 +65,6 @@ void dm_vkn_buf_register(void) __attribute__((weak));      // hle_dos2_vkn_buf.c
 void dm_vkn_tex_register(void) __attribute__((weak));      // hle_dos2_vkn_tex.c: textures, targets, samplers
 void dm_vkn_shader_register(void) __attribute__((weak));   // hle_dos2_vkn_shader.c: shaders
 void dm_vkn_state_register(void) __attribute__((weak));    // hle_dos2_vkn_state.c: state objects, vertex formats
-void dm_vkn_exec_register(void) __attribute__((weak));     // stage 3: packets, flushes, draws, frame, present
 void dm_vkn_ui_register(void) __attribute__((weak));       // stage 3: the UI entries
 
 void dm_dos2_vkn_install(void);   // main.c host_preload, after every other dm_dos2_*_install (before any guest code runs)

@@ -9,6 +9,7 @@
 // records nothing.
 #ifdef DM_GAME_DOS2
 #include "vkn_tex.h"
+#include "vkn_state.h"   // vkn_fb_forget_view: framebuffers of a dying texture's views
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -222,6 +223,11 @@ static void kill_locked(vkn_tex *t) {
     if (t->dead) return;
     t->dead = 1;
     handle_unlink_locked(t); cookie_unlink_locked(t); ids_clear_locked(t);
+    // vkn_state.h: framebuffers keyed by a view must leave the cache before the view dies (a later view may get the same handle value);
+    // retired now, they are destroyed before (or with) this texture, whose retirement is queued after them. (g_rp_mu after g_mu: the
+    // state piece never calls into this one.)
+    vkn_fb_forget_view(t->view); vkn_fb_forget_view(t->att);
+    for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) vkn_fb_forget_view(t->layer_view[i]);
     if (t->slot < TEX_SLOTS && g_slot[t->slot] == t) { g_slot[t->slot] = NULL; g_free_slot[g_nfree++] = t->slot; }
     if (t->cls < VKN_TC_N) { g_st.alive[t->cls]--; g_st.bytes[t->cls] -= t->bytes; }
     g_st.destroyed++;
@@ -389,8 +395,13 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
         }
         u = (up_ctx *)calloc(1, sizeof *u + sizeof(VkBufferImageCopy) * maxc);
         if (!u) { *why = "no memory"; goto fail1; }
-        if (total && vkn_block_alloc(VKN_ARENA_STAGING, total, (uint32_t)p.align, &u->blk)) { free(u); *why = "no staging memory"; goto fail1; }
+        // p.align is 48 for 3-, 6- and 12-byte texels: no power of two, which vkn_block_alloc refuses. Such a block is taken 16-aligned
+        // with p.align bytes more, and its start moved up to the next multiple of p.align (skew): every bufferOffset stays a multiple.
+        const int al_pow2 = !(p.align & (p.align - 1));
+        if (total && vkn_block_alloc(VKN_ARENA_STAGING, total + (al_pow2 ? 0 : p.align), al_pow2 ? (uint32_t)p.align : 16, &u->blk)) { free(u); *why = "no staging memory"; goto fail1; }
         u->have_blk = total != 0;
+        const uint64_t skew = u->have_blk ? (p.align - u->blk.off % p.align) % p.align : 0;
+        uint8_t *const stage = u->have_blk ? (uint8_t *)u->blk.cpu + skew : NULL;
         uint8_t *tmp = NULL; uint64_t tmp_bytes = 0, off = 0;
         for (uint32_t i = 0; i < maxc && total; i++) {
             uint32_t lw, lh, ld, lv, ly, z = 0; const uint8_t *s;
@@ -402,17 +413,17 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
                 const uint64_t lin = (uint64_t)((lw + p.bw - 1) / p.bw) * p.bpb * ((lh + p.bh - 1) / p.bh) * ld;
                 if (p.mode) { if (lin > tmp_bytes) { free(tmp); tmp = (uint8_t *)malloc((size_t)lin); tmp_bytes = tmp ? lin : 0; } if (!tmp) { *why = "no memory"; goto fail2; } }
                 off = (off + p.align - 1) / p.align * p.align;
-                uint8_t *to = p.mode ? tmp : (uint8_t *)u->blk.cpu + off;
+                uint8_t *to = p.mode ? tmp : stage + off;
                 if (nvn_deswizzle_gob(&nd, lv, ly, src->storage, to, (size_t)((lw + p.bw - 1) / p.bw) * p.bpb)) { *why = "deswizzle refused the layout"; goto fail2; }
                 s = to;
             }
             off = (off + p.align - 1) / p.align * p.align;
             if (src->kind == VKN_SRC_REGIONS || p.mode) {
                 if (off + dst_bytes(&p, lw, lh, ld) > total) { *why = "staging overflow"; goto fail2; }
-                if (convert(&p, s, lw, lh, ld, (uint8_t *)u->blk.cpu + off)) { *why = "BC decode failed"; goto fail2; }
+                if (convert(&p, s, lw, lh, ld, stage + off)) { *why = "BC decode failed"; goto fail2; }
             }
             VkBufferImageCopy *c = &u->c[nc++];
-            c->bufferOffset = u->blk.off + off; c->bufferRowLength = 0; c->bufferImageHeight = 0;
+            c->bufferOffset = u->blk.off + skew + off; c->bufferRowLength = 0; c->bufferImageHeight = 0;
             c->imageSubresource = (VkImageSubresourceLayers){t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect, lv, d3 ? 0 : ly, 1};
             c->imageOffset = (VkOffset3D){0, 0, d3 ? (int32_t)z : 0};
             c->imageExtent = (VkExtent3D){lw, d1 ? 1 : lh, ld};

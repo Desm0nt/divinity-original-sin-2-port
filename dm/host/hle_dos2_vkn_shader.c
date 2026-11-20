@@ -151,11 +151,16 @@ static void shader_census(void) {
              (unsigned long long)g_n_destroy_calls, (unsigned long long)g_n_destroyed, (unsigned long long)g_n_unmatched, g_n_mapfull ? " " RED "program map full" : "");
 }
 
+// A dead shader's dense id is reused: the pipeline cache (vkn_state.c) must drop every pipeline built with it first. Weak: the
+// state part may be absent from a build.
+extern void vkn_pipe_forget_shader(uint32_t shader) __attribute__((weak));
+static void vkn_shader_dead(uint32_t id, uint64_t handle) { (void)handle; if (vkn_pipe_forget_shader) vkn_pipe_forget_shader(id); }
 void dm_vkn_shader_register(void);
 void dm_vkn_shader_register(void) {
     static const uint32_t k_create[4] = {0xd102c3ff /* sub sp,sp,#0xb0 */, 0xa9056ffc, 0xa90667fa, 0xa9075ff8};
     static const uint32_t k_destroy[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};
     static const uint32_t k_load[4] = {0xa9ba6ffc /* stp x28,x27,[sp,#-0x60]! */, 0xa90167fa, 0xa9025ff8, 0xa90357f6};
+    vkn_shader_set_dead_fn(vkn_shader_dead);
     dm_vkn_site(0x92d320, k_load, "LoadShaderFile", (void *)vkn_h_load, &g_o_load, VKN_M_BOTH);
     dm_vkn_site(0x915ad0, k_create, "CreateShader", (void *)vkn_h_create, &g_o_create, VKN_M_BOTH);
     dm_vkn_site(0x91ce90, k_destroy, "DestroyShaderIfOld", (void *)vkn_h_destroy, &g_o_destroy, VKN_M_BOTH);
