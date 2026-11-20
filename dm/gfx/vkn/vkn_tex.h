@@ -71,6 +71,7 @@ typedef struct vkn_tex {
     uint8_t pass_dclr;                         // remembered depth-stencil clear: bit 0 depth, bit 1 stencil
     uint32_t pass_stencil; float pass_depth;
     struct { uint32_t layer; float rgba[4]; } pass_clr[4];
+    uint64_t pass_clr_ns;                      // vkn_now_ns() of the newest remembered clear (vkn_tex_update orders queued data after it)
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index

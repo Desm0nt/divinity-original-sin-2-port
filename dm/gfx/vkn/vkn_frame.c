@@ -43,6 +43,7 @@ static struct {
     int cur, cur_presented;                                 // cur = open slot, -1 = none
     uint32_t serial;
     int want_presented;                                     // vkn_rec_begin(1) was asked since the last presented submit (even if it failed)
+    int end_due;                                            // a presented recording was submitted: its vkn_frame_end waits for the next buffer (end_due_run)
     struct { int have; vkn_tex *tex; VkImage image; VkFormat fmt; uint32_t w, h; int32_t crop[4]; int has_crop, interval; } pres;
     void (*on_begin[VKN_FR_LISTEN])(void); int nbegin;
     void (*on_close[VKN_FR_LISTEN])(void); int nclose;
@@ -128,6 +129,12 @@ static int slot_wait(int k) {
 }
 
 static int next_slot(int presented) { return presented ? (int)(g.next % VKN_FR_RING) : VKN_FR_OFF; }
+// The frame end of the last presented submission (vkn.h: frame counter + due retirements), run once the next presented buffer is
+// free. Why not at the submit: an object retired while recording N (staging of an upload recorded in N, a transient index block, a
+// descriptor pool of a mid-recording flush) is destroyed at the 3rd frame end after it. Ended at the submits of N, N+1, N+2, it would
+// go while N may still run (N+2's buffer wait proved only N-1 done). Ended here, the 3rd end is at N+3's begin, after the wait that
+// proves N finished. Mode 1 only; the host's mode-2 frame ends are untouched.
+static void end_due_run(void) { if (g.end_due) { g.end_due = 0; vkn_frame_end(); } }
 
 void vkn_rec_prewait(int presented) {
     if (g.cur >= 0 || fr_init()) return;
@@ -148,6 +155,7 @@ int vkn_rec_begin(int presented) {
     const int k = next_slot(presented);
     fr_slot *s = &g.s[k];
     if (slot_wait(k)) { g.st.begin_fail++; return -1; }
+    if (presented) end_due_run();   // buffer k is free: the recording 3 before this one finished
     const VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     VkResult r = vkResetFences(g.dev, 1, &s->fence);
     if (r == VK_SUCCESS) r = vkResetCommandBuffer(s->cb, 0);
@@ -231,6 +239,7 @@ static void before_submit(void) {
 // destruction must never overtake the GPU).
 static void frame_end_idle(void) {
     for (int k = 0; k < VKN_FR_NCB; k++) if (g.init && slot_wait(k)) return;   // stuck: no frame end (retirements wait)
+    end_due_run();   // everything finished: the due end of the last submitted frame, then this one's
     vkn_frame_end();
 }
 
@@ -270,7 +279,7 @@ int vkn_rec_submit(int wait) {
         g.pres.have = 0; g.pres.tex = NULL;
     }
     if (rc == 0 && wait && slot_wait(k)) rc = -1;
-    if (presented) { g.want_presented = 0; vkn_frame_end(); }
+    if (presented) { g.want_presented = 0; end_due_run(); g.end_due = 1; }   // (a still-due end runs first: one end per frame)
     return rc;
 }
 

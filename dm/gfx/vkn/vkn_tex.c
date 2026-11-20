@@ -237,7 +237,10 @@ static void kill_locked(vkn_tex *t) {
 }
 
 // ---- uploads ----
-typedef struct up_ctx { vkn_tex *t; vkn_block blk; int have_blk; uint32_t n; VkBufferImageCopy c[]; } up_ctx;
+typedef struct up_ctx { vkn_tex *t; vkn_block blk; int have_blk; uint32_t n; uint64_t ns; VkBufferImageCopy c[]; } up_ctx;   // ns: queued vkn_tex_update (0 = other)
+// (vkn_frame.c / vkn_pass.c; weak: this file also links without them, as in the stage-2 host test)
+extern VkCommandBuffer vkn_cb(void) __attribute__((weak));
+extern void vkn_pass_layout(vkn_tex *t, VkImageLayout to) __attribute__((weak));
 static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout from, VkImageLayout to) {
     const VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, .oldLayout = from, .newLayout = to, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -247,6 +250,10 @@ static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout from, VkImageL
 static void up_run(VkCommandBuffer cb, void *ctx) {
     up_ctx *u = (up_ctx *)ctx; vkn_tex *t = u->t;
     if (!t->dead) {   // (read without the lock: dead only ever goes 0 -> 1, and a dead texture's image lives until its last reference)
+        // a queued update whose texture has clears vkn_pass.c holds back that the engine issued BEFORE this update: they run first, else
+        // they would run later (next pass's CLEAR, or before a sample) and wipe the data (only in the recording vkn_pass records into)
+        if (u->ns && (t->pass_nclr || t->pass_dclr) && t->pass_clr_ns <= u->ns && vkn_cb && vkn_pass_layout && vkn_cb() == cb)
+            vkn_pass_layout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         barrier(cb, t, t->layout, u->n ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         if (u->n) {
             vkCmdCopyBufferToImage(cb, u->blk.buf, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, u->n, u->c);
@@ -641,8 +648,6 @@ void vkn_tex_get_stats(vkn_tex_stats *s) {
 // The recording thread: set by a begin listener of vkn_frame (weak: this file also links without the frame and pass modules, as in
 // the stage-2 host test; then every update is queued).
 extern void vkn_rec_on_begin(void (*fn)(void)) __attribute__((weak));
-extern VkCommandBuffer vkn_cb(void) __attribute__((weak));
-extern void vkn_pass_layout(vkn_tex *t, VkImageLayout to) __attribute__((weak));
 static pthread_t g_rec_thread; static int g_rec_known;
 static vkn_tex_update_stats g_ust;
 static void rec_begin_seen(void) { g_rec_thread = pthread_self(); __atomic_store_n(&g_rec_known, 1, __ATOMIC_RELEASE); }
@@ -733,7 +738,7 @@ int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_
         // in order with the draws of this recording: an open pass ends, remembered clears of t run, then the copy
         vkn_pass_layout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         up_run(vkn_cb(), u);   // -> copy -> SHADER_READ_ONLY_OPTIMAL; staging retired, reference dropped
-    } else vkn_upload_push(up_run, u, bytes);
+    } else { u->ns = vkn_now_ns(); vkn_upload_push(up_run, u, bytes); }
     pthread_mutex_lock(&g_mu);
     if (here) g_ust.recorded++; else g_ust.queued++;
     g_ust.bytes += bytes;

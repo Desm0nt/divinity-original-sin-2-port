@@ -136,12 +136,13 @@ static int flush_clears(vkn_tex *t) {
 // Remembers a full clear of (level 0, layer) of t (the last one of a layer wins).
 static void clr_put(vkn_tex *t, uint32_t layer, const float rgba[4]) {
     for (uint32_t i = 0; i < t->pass_nclr; i++)
-        if (t->pass_clr[i].layer == layer) { memcpy(t->pass_clr[i].rgba, rgba, sizeof t->pass_clr[i].rgba); return; }
+        if (t->pass_clr[i].layer == layer) { memcpy(t->pass_clr[i].rgba, rgba, sizeof t->pass_clr[i].rgba); t->pass_clr_ns = vkn_now_ns(); return; }
     if (t->pass_nclr >= 4 && flush_clears(t)) {   // more layers than the record holds and no recording to run them: the oldest is lost
         g_st2.clear_lost++;
         memmove(&t->pass_clr[0], &t->pass_clr[1], sizeof t->pass_clr[0] * 3); t->pass_nclr = 3;
     }
     t->pass_clr[t->pass_nclr].layer = layer; memcpy(t->pass_clr[t->pass_nclr].rgba, rgba, sizeof t->pass_clr[0].rgba); t->pass_nclr++;
+    t->pass_clr_ns = vkn_now_ns();
 }
 // 1 = a remembered clear of that layer (its colour in rgba); take: also removed from the record.
 static int clr_find(vkn_tex *t, uint32_t layer, float rgba[4], int take) {
@@ -375,6 +376,7 @@ void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
     }
     if (a & VK_IMAGE_ASPECT_DEPTH_BIT) { t->pass_dclr |= 1; t->pass_depth = depth; }
     if (a & VK_IMAGE_ASPECT_STENCIL_BIT) { t->pass_dclr |= 2; t->pass_stencil = stencil; }
+    t->pass_clr_ns = vkn_now_ns();
 }
 
 // ---- texture copy (0x920b00) ----

@@ -31,7 +31,9 @@ int vkn_rec_submit(int wait);
 // which vkn_rec_submit(0) performs right after its vkQueueSubmit (the presenter's contract: the work producing the image is on the
 // queue). crop: {x, y, w, h}, NULL = whole image. interval: the engine's present interval (1 = every vblank, 2 = every second).
 int vkn_rec_present(vkn_tex *win, const int32_t crop[4], int interval);
-// vkn_frame_end() (vkn.h: the frame counter, deferred destruction) is called by vkn_rec_submit of a presented recording.
+// vkn_frame_end() (vkn.h: the frame counter, deferred destruction) is due with vkn_rec_submit of a presented recording and runs at the
+// next vkn_rec_begin(1) once its buffer is free (or at a submit without a recording, after every buffer is free): so a retirement
+// never overtakes the GPU (see end_due_run in vkn_frame.c).
 
 typedef struct vkn_frame_stats { uint64_t frames, offframe, submits, waits, wait_ns, begin_fail, present_fail, uploads; } vkn_frame_stats;
 void vkn_frame_stats_get(vkn_frame_stats *s);
