@@ -72,12 +72,15 @@
 // ExternalInterface names of the `_p` movies (taken here):
 //   dmSide(code)     dmSide_p / minimap_p: 1 = options -> the escape key (PC: ToggleInGameMenu, needs Eoc/keyboard_1.json = UI mode TOUCH's
 //                    bindings); 2..7 = map, character, inventory, skills, crafting, journal -> "hotbarBtnPressed"(PC id) to the player's PC
-//                    hot bar object: its class's own handler main+0x122fdb0 (ids 0..5 -> the panel toggles 0x10c6360 / 0x10d6240 / 0x10c70a0 /
-//                    0x10d55c0 / 0x10cc7c0 / 0x10ccb40 of the player UI manager): what a click on the PC hot bar's own button does.
+//                    hot bar object: its class's own handler main+0x122fdb0 (ids 0..5 -> 0x10c6360 the GAME MENU, 0x10d6240 the inventory AND
+//                    the sheet together, 0x10c70a0 skills, 0x10d55c0 crafting, 0x10cc7c0 map, 0x10ccb40 journal of the player UI manager): what a
+//                    click on the PC hot bar's own button does. Run 21.11: the sheet / inventory alone = that one toggle + the engine's hide of
+//                    the other half (hu_pair_ops: main+0x10c01d0 / 0x10c7b30) - id 0 opened the pause menu, id 1 both windows.
 //   dmAim(0 | 1)     hotBar_p: the engine marks / unmarks a prepared skill (showActiveSkill). dm_dos2_touchui_hud_aiming() tells the gestures.
 //   dmAimBtn(1 | 0)  hotBar_p: CONFIRM = the PC's left click at the aimed point, cancel = the PC's right click there (PC: right click drops a
-//                    prepared skill). The aimed point = dm_dos2_touchui_hud_aim_at(x, y) when the gestures call it, else the last place the
-//                    cursor rested before the finger went to the button. Sent as mouse records through InjectInput on the next polls.
+//                    prepared skill). The aimed point = the world point of dm_dos2_touchui_hud_aim_at(x, y) (an aim tap / the action plate)
+//                    since the skill was prepared, else the world under the button (run 21.11: no more "where the cursor rested"). CONFIRM
+//                    is the world tap's own click (hle_dos2_touch.c dm_dos2_touch_world_click: past the UI, one poll per step).
 //   dmKey(code)      minimap_p: 1 = quick save -> the f5 key (PC: QuickSave <- key:f5), 2 = the tactical camera -> the o key (ToggleTacticalCamera
 //                    <- key:o); raw key ids from the engine's name table main+0x2974b10 (index - 2: f5 0x42, o 0x32, as hle_dos2_touch.c's).
 // The ACTION PLATE (the iPad's overhead_t action button; "Implemented: touch HUD extras"). The iPad's own route - the overhead class's
@@ -171,6 +174,13 @@ static const uint32_t k_hu_setflags_fn[3] = {0xa9be4ff4, 0xa9017bfd, 0x910043fd}
 static const uint32_t k_hu_clrflags_fn[3] = {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd};
 static const uint32_t k_hu_hb_called[12] = {0xd105c3ff, 0xfd0083e8, 0xa9116ffc, 0xa91267fa, 0xa9135ff8, 0xa91457f6, 0xa9154ff4, 0xa9167bfd, 0x910583fd, 0xaa0103f6 /* x22 = name */,
                                             0xaa0003f3 /* x19 = this */, 0xf00060c1};
+// the engine's "hide the sheet / the inventory of player p" (x0 = [main+0x3298140], w1 = player): record +0x238 / +0x228, vt+0x58 when visible
+enum { HU_SHEET_HIDE = 0x10c01d0, HU_INV_HIDE = 0x10c7b30, HU_SHEET_SLOT_RD = 0x10c023c, HU_INV_SLOT_RD = 0x10c7b9c };
+static const uint32_t k_hu_pair_hide[14] = {0xb940f408 /* ldr w8,[x0,#0xf4] */, 0x93403c29, 0x9ac8092a, 0x9b08a548, 0xf9407c09, 0xf8687928, 0xb40001c8, 0xaa0803e9,
+                                            0x7940112a, 0x6b21215f /* cmp w10,w1,uxth */, 0x54000101, 0xb942c129 /* ldr w9,[x9,#0x2c0] */, 0x7100053f, 0x54000141};
+static const uint32_t k_hu_sheet_slot[1] = {0xf9411d0a /* ldr x10,[x8,#0x238] */};
+static const uint32_t k_hu_inv_slot[1] = {0xf941150a /* ldr x10,[x8,#0x228] */};
+static int g_pair_ok, g_pair_hide, g_pair_hide_who; static uint64_t g_pair_hide_t;   // a half still to hide when its Show comes a frame late
 static const uint32_t k_hu_hb_btn[5] = {0xd0006481 /* adrp x1,main+0x1ec1000 */, 0x9116e421 /* add x1,x1,#0x5b9: "hotbarBtnPressed" */, 0xaa1603e0, 0x942711d7 /* bl strcmp */, 0x34004f20};
 static const uint32_t k_hu_hb_switch[5] = {0x1e780108 /* fcvtzs w8,d8: args[0].d */, 0x7100151f /* cmp w8,#5 */, 0x54ffb688, 0xd0006909, 0x91387929 /* main+0x1f52e1e */};
 static const uint16_t k_hu_hb_table[6] = {0x0, 0x1e5, 0x1c8, 0x1d6, 0x1ba, 0x1f2};   // branch offsets / 4 from 0x1230904 for the ids 0..5
@@ -220,6 +230,7 @@ static struct { int kind, step; float x, y; uint64_t t; uint32_t key; } g_act;  
 static int g_one = 1;                     // DM_DOS2_TOUCH_ONE_PANEL: one panel window at a time + the equipment view (0 = the PC's free windows)
 static int g_plate = 1, g_plate_on, g_pick_mode;   // the action plate: enabled, shown now, DM_DOS2_TOUCH_T_PICK
 static hu_pick g_pick;
+static int g_view; static uint16_t g_view_who; static uint64_t g_view_t;   // the host's last view of the panel group (HU_VIEW_EQUIP while the pair is up)
 
 int dm_dos2_ui_mode(void); int dm_dos2_ui_mode_hud(void);   // hle_dos2_uimode.c
 int dm_dos2_touch_on(void);                                 // hle_dos2_touch.c
@@ -277,6 +288,54 @@ static void hu_tail(uint8_t *mgr, uint32_t type, char *out, size_t n) {
     const char *p = cr->path.ptr; const uint32_t len = cr->path.len;
     for (int k = (int)len - 8; k >= 0; k--) if (!memcmp(p + k, "GUI/", 4) && (k == 0 || p[k - 1] == '/')) { snprintf(out, n, "%.*s", (int)(len - (uint32_t)k), p + k); return; }
 }
+
+// ---- the PC tooltip window (review of the phone run 20.11, docs/dos2/TOUCH_MODES_PLAN.md "Прогон 20.11") ----
+// Every PC movie asks for its tooltips by ExternalInterface (showItemTooltip / showSkillTooltip / showStatusTooltip / showTooltip ... 40+ movies
+// of the Switch's GUI folder), and the base UI class 0x10a5750 answers them through the tooltip UI object: the getter 0x110e1f0 reads the handle
+// [[main+0x3298140]+0x88] and returns NULL without it. The Switch never makes that object (main has no CreateUIObject of its type 0x2c,
+// "GUI/tooltip.swf", registrar 0x10abbe8 `mov w22,#0x2c`), and most users of 0x10a6fc0 (getter + set-up) do not check: the crashes of runs tu03
+// (0x1121220) and 20.11 (0x111fee4, a hot bar slot tap), and the tails 0x10a726c -> 0x111f1e0, 0x1323434 -> 0x111fb40, the callers of 0x10a76b0
+// (0x10a7444 / 0x10a74ac / 0x10a78b0: `ldr x0,[x0,#0x18]` on it). In UI mode TOUCH every hover of an item / skill / status reaches them.
+// The iPad's shared UI builder makes the object in its PC mode (0x1012dfd60..0x1012dfd7c: CreateUIObject(mgr, layer 0x2a, type 0x2c,
+// flags | 0x20000, 0x80, player 0); `str x0,[x19,#0x88]`, x19 = the same player UI manager object), in touch mode tooltip_t 0xbf there. The Switch's
+// shared builder 0x10c2840 passes the flags 0x20020000. So the host makes it the same way once a TOUCH HUD is up (and again if it is gone); it
+// is kept - the Switch's shared destroy 0x10c41f0 never touches +0x88 and the getter checks the handle's salt every time. A tooltip is then the
+// PC's: the short long press (= hover) shows it (the iPad's ShortLongPress). DM_DOS2_TOUCHUI_HUD_TIP=0: not made.
+// Without the object (sites differ, made later, TIP=0) and with the mode byte 0 the tooltip calls themselves are taken by the host (dropped): the
+// game would only crash on them (hle_dos2_touchui.c guards the entry points it can; these names cover the rest). The controller UI keeps them.
+enum { HU_TIP_T = 0x2c, HU_TIP_LAYER = 0x2a, HU_TIP_FLAGS = 0x20020000, HU_TIP_SLOT = 0x88, HU_TIP_GET = 0x110e1fc, HU_TIP_REG = 0x10abbe8 };
+static const uint32_t k_hu_tip_get[4] = {0xd0010c48 /* adrp x8,main+0x3298000 */, 0xf940a108 /* ldr x8,[x8,#0x140] */, 0xf940450a /* ldr x10,[x8,#0x88]: the handle */,
+                                         0xf260555f /* tst x10,#0x3fffff00000000 */};
+static const uint32_t k_hu_tip_reg[3] = {0xf9411b34 /* ldr x20,[x25,#0x230] */, 0xb940da88 /* ldr w8,[x20,#0xd8] */, 0x52800596 /* mov w22,#0x2c */};
+static int g_tip = 1, g_tip_ok, g_tip_tries; static unsigned g_tip_drop;
+static uint8_t *hu_tip_obj(const uint8_t *ui, uint8_t *mgr) {   // the tooltip object the getter would find, NULL = none
+    if (!ui || !mgr) return NULL;
+    uint8_t *o = hu_obj(mgr, *(const volatile uint64_t *)(ui + HU_TIP_SLOT));
+    return o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_TIP_T ? o : NULL;
+}
+static void hu_tip_make(uint8_t *ui, uint8_t *mgr, const char *why) {   // game thread
+    if (!g_tip || !g_tip_ok || !ui || !mgr || *hu_mode() != 0 || g_tip_tries >= 3 || hu_tip_obj(ui, mgr)) return;
+    char mv[96]; hu_tail(mgr, HU_TIP_T, mv, sizeof mv);
+    if (strcmp(mv, "GUI/tooltip.swf")) { g_tip_tries = 3; LOG("【红】[hud] tooltip: type %#x plays \"%s\", not GUI/tooltip.swf: not made (tooltip calls are dropped in the PC UI)", HU_TIP_T, mv); return; }
+    g_tip_tries++;
+    const uint64_t h = ((hu_fn)(void *)(g_main->base + HU_CREATE))((uint64_t)(uintptr_t)mgr, HU_TIP_LAYER, HU_TIP_T, HU_TIP_FLAGS, 0x80, 0);
+    uint8_t *o = hu_obj(mgr, h);
+    if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != HU_TIP_T) { LOG("【红】[hud] tooltip: CreateUIObject type %#x -> handle %#llx FAILED (try %d of 3; tooltip calls are dropped in the PC UI)", HU_TIP_T, (unsigned long long)h, g_tip_tries); return; }
+    *(volatile uint64_t *)(ui + HU_TIP_SLOT) = h; g_tip_tries = 0;
+    LOG("[hud] tooltip: the PC tooltip window made (%s): CreateUIObject type %#x = GUI/tooltip.swf layer %#x flags %#x player 0 -> handle %#llx, into [[main+0x3298140]+%#x] "
+        "as the iPad's PC branch does (main+0x110e1f0 finds it now: item / skill / status tooltips of the PC movies)", why, HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, (unsigned long long)h, HU_TIP_SLOT);
+}
+static int hu_ei_tip(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // show*Tooltip: dropped when nothing could draw it
+    (void)ctx; (void)player; (void)n; (void)a;
+    if (!g_main || *hu_mode() != 0) return 0;   // the controller UI: as before (its `_c` classes have their own tooltips)
+    if (hu_tip_obj(*(uint8_t *volatile *)(g_main->base + HU_UI_THIS), hu_mgr())) return 0;
+    if (g_tip_drop++ < 12 || g_dbg) LOG("[hud] %s from UI type %#x: no PC tooltip window: dropped (the game would use a NULL object, main+0x110e1f0)", name,
+                                        ui ? *(const volatile uint32_t *)((const uint8_t *)ui + HU_OBJ_TYPE) : 0);
+    return 1;
+}
+static const char *const k_hu_tip_names[] = {"showTooltip", "showItemTooltip", "showStatusTooltip", "showSkillTooltip", "showCharTooltip", "showHealthTooltip", "showExpTooltip",
+    "showTagTooltip", "showStatTooltip", "showTalentTooltip", "showAbilityTooltip", "showSkillAbilityTooltip", "showRollTooltip", "showMapIconTooltip", "showMapCharIconTooltip",
+    "showFormattedTooltip", "showRuneTooltip", "showClassEditTooltip", "showCustomStatTooltip", "showHeroTooltip", "showModTooltip", "showParamTooltip"};   // every show*Tooltip string of main
 
 // ---- the size: class scale + the engine's own resize ----
 // The factor of each object (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: physical scale for fingers"; the rule: hle_dos2_touch_scale.h):
@@ -351,6 +410,7 @@ static void hu_destroy(const char *why) {
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
     g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
+    g_view = 0; g_view_who = 0;   // run 20.11 review: the equipment view's state of the old set must not steer the first dmSide of the next one
 }
 static void hu_create(uint8_t *ui, const char *why) {
     uint8_t *mgr = hu_mgr();
@@ -383,6 +443,7 @@ static void hu_create(uint8_t *ui, const char *why) {
     LOG("%s[hud] touch HUD up (%s): %d object(s) for %d player(s)%s, %d slot(s) were filled already, handles %s: %s; %llu us (game state %#x, UI mode %s)", failed ? "【红】" : "", why, made, np,
         failed ? ", some failed" : "", had, g_slots && g_slots_ok ? "written into the player's record (the PC branch of the set)" : "kept by the host only (panels cannot be opened)", list,
         (unsigned long long)(hu_us() - t0), hu_state(), ui_mode_name(dm_dos2_ui_mode()));
+    g_tip_tries = 0; hu_tip_make(ui, mgr, why);   // the PC tooltip window with the HUD (the iPad: its shared builder at the same create-all)
     dm_dos2_touchui_ei_dump("touch HUD up");
 }
 static uint64_t hu_destroy_all_hook(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -436,11 +497,13 @@ static int hu_input_ok(uint32_t dev) {   // the raw-state array hle_dos2_touch.c
     return *(void *const volatile *)(mgr + HU_IN_DEVS) != NULL && *(const volatile uint32_t *)(mgr + HU_IN_DEVN) > dev;
 }
 static void hu_act_start_key(int kind, const char *what, uint32_t key);
-// [touch] the Back gesture in UI mode TOUCH (DmActivity.dos2PadB): the PC escape (close the window / the pause menu), never the pad's B - a pad
-// press there means "the player took a gamepad" and rebuilt the UI to the controller set (phone 20.11: six rebuilds back and forth, the UI broke)
-static _Atomic int g_back_req;
+// [touch] the Back gesture in UI mode TOUCH (DmActivity.dos2PadB, jni nativeDos2Back): the PC escape (close the window / the pause menu / skip a
+// video), never the pad's B - a pad press there meant "the player took a gamepad" and rebuilt the UI to the controller set (phone 20.11: six
+// rebuilds back and forth, the UI broke). Run 20.11 review: the escape was queued here and only sent from the HUD's poll while the HUD objects
+// existed, so in the main menu / a loading screen / a video the Back was swallowed and came out as an escape at the next level start (the pause
+// menu). It is a key tap of hle_dos2_touch.c now (dm_dos2_touch_back), which runs whether the HUD is up or not.
 int dm_dos2_touchui_hud_back(void);
-int dm_dos2_touchui_hud_back(void) { if (!hu_on()) return 0; atomic_store(&g_back_req, 1); return 1; }
+int dm_dos2_touchui_hud_back(void) { int dm_dos2_touch_back(void); return dm_dos2_touch_back(); }
 static void hu_act_start(int kind, const char *what) { hu_act_start_key(kind, what, 1 /* escape */); }
 static void hu_act_start_key(int kind, const char *what, uint32_t key) {
     float x = -1, y = -1;
@@ -466,7 +529,7 @@ static void hu_act_step(void) {
         }
         hu_send(dev, id, 1, 1, 1, 0); g_act.step = 2; g_act.t = now; return;
     }
-    if (now - g_act.t < 30) return;
+    (void)now;   // run 21.11 ("the confirm button lags"): one poll per step, no 30 ms waits (the motion of step 0 is read the frame it is sent)
     if (g_act.step == 1) { hu_send(dev, id, 1, 1, 1, 0); g_act.step = 2; g_act.t = now; return; }
     hu_send(dev, id, 0, 0, 0, 0); g_act.kind = 0;
 }
@@ -504,7 +567,23 @@ static int hu_panel_state(uint8_t *o, int bit, int st) {
     dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)(HU_PANEL_CMD + st);
     return dm_dos2_touchui_invoke(fp, bit == HU_P_SHEET ? "setHelmetOptionState" : "setAnchor", &v, 1);
 }
-static int g_view; static uint16_t g_view_who; static uint64_t g_view_t;   // the host's last view of the panel group (HU_VIEW_EQUIP while the pair is up)
+// the sheet / the inventory to `want` (HU_P_SHEET | HU_P_INV bits) from `vis` (hu_pair_ops); 1 = something was done
+static int hu_pair_apply(uint8_t *hb, int vis, int want) {
+    int press = 0, hide = 0;
+    hu_pair_ops(vis, want, &press, &hide);
+    if (!press && !hide) return 0;
+    if (press) hu_press(hb, hu_panel_pc(HU_P_INV));
+    if (hide) {
+        void *ui = *(void *volatile *)(g_main->base + HU_UI_THIS);
+        const uint16_t pl = *(volatile uint16_t *)(hb + HU_OBJ_PLAYER);
+        if (!g_pair_ok || !ui) { static unsigned n; if (n++ < 8) LOG("【红】[hud] the sheet / inventory hide (main+%#x / +%#x) differs or no UI: %#x stays up (two windows)", HU_SHEET_HIDE, HU_INV_HIDE, hide); return 1; }
+        if (hide & HU_P_SHEET) ((int (*)(void *, unsigned))(void *)(g_main->base + HU_SHEET_HIDE))(ui, pl);
+        if (hide & HU_P_INV) ((int (*)(void *, unsigned))(void *)(g_main->base + HU_INV_HIDE))(ui, pl);
+    }
+    g_pair_hide = press ? hide : 0; g_pair_hide_who = *(volatile uint16_t *)(hb + HU_OBJ_PLAYER); g_pair_hide_t = hu_us() / 1000;   // checked again by the poll
+    return 1;
+}
+// g_view / g_view_who / g_view_t: declared with the file state above (hu_destroy resets them)
 static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmSide(code)
     (void)ctx; (void)player; (void)name;
     const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1;
@@ -524,9 +603,12 @@ static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsig
     if (!g_one) { if (code == HU_VIEW_EQUIP) return 1; press = 1; }
     else g_view = hu_view_plan(code, vis, g_view_who == pl ? g_view : 0, &cl, &op, &press, &st);
     g_view_who = pl; g_view_t = hu_us() / 1000;
-    for (int b = 0; b < 5; b++) if (cl & (1 << b)) hu_press(hb, hu_panel_pc(1 << b));
-    for (int b = 0; b < 5; b++) if (op & (1 << b)) hu_press(hb, hu_panel_pc(1 << b));
-    if (press) hu_press(hb, hu_side_panel(code));
+    // the panels with a toggle of their own; the sheet / inventory pair through its one engine toggle + hides (hu_pair_ops, run 21.11)
+    const int pair = HU_P_SHEET | HU_P_INV;
+    for (int b = 0; b < 5; b++) if ((cl & (1 << b)) && !(pair & (1 << b))) hu_press(hb, hu_panel_pc(1 << b));
+    if ((cl | op) & pair) hu_pair_apply(hb, vis, ((vis & ~cl) | op) & pair);
+    for (int b = 0; b < 5; b++) if ((op & (1 << b)) && !(pair & (1 << b))) hu_press(hb, hu_panel_pc(1 << b));
+    if (press) hu_press(hb, hu_side_panel(code));   // map / journal; DM_DOS2_TOUCH_ONE_PANEL=0: every code (sheet / inventory come up together, as on the PC)
     if (st >= 0) for (int b = 0; b < 2; b++) if (o[b] && ((op | (vis & ~cl)) & (1 << b) || !st)) told |= hu_panel_state(o[b], 1 << b, st) << b;
     if (g_dbg || g_nside++ < 24) LOG("[hud] dmSide(%d %s) from type %#x, player %u: on the screen %#x -> close %#x, open %#x%s by \"hotbarBtnPressed\" to the PC hot bar %p; "
                                      "look %d told to %#x (1 sheet, 2 inventory); view %d", code, k_nm[code], from, (unsigned)pl, vis, cl, op, press ? ", the button's own toggle" : "",
@@ -536,6 +618,8 @@ static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsig
 static int hu_ei_aim(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmAim(0 | 1)
     (void)ctx; (void)player; (void)ui; (void)name;
     const int on = n && a && a[0].type == 4 && a[0].d != 0;
+    // run 21.11: a newly prepared skill forgets the old aimed point (CONFIRM aims where the player taps the world from now on, else under itself)
+    if (on && !atomic_load(&g_aim)) { memset(&g_aimp, 0, sizeof g_aimp); atomic_store(&g_aim_set, 0); }
     atomic_store(&g_aim, on);
     static unsigned cnt; if (g_dbg || cnt++ < 12) LOG("[hud] dmAim(%d): the hot bar %s a prepared skill; CONFIRM / cancel %s", on, on ? "marks" : "has no", on ? "shown" : "hidden");
     return 1;
@@ -544,7 +628,26 @@ static int hu_ei_aimbtn(void *ctx, void *player, void *ui, const char *name, uns
     (void)ctx; (void)player; (void)name;
     const int ok = n && a && a[0].type == 4 && a[0].d != 0;
     if (!dm_dos2_touchui_may_press(ui)) return 1;
-    hu_act_start(ok ? 1 : 2, ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)");
+    // Run 21.11 ("the skill confirm button lags"): the aimed point was "where the cursor last RESTED" - the hot bar slot the skill was taken
+    // from, or the CONFIRM circle itself (the finger rests there between taps) - and the click went out as a UI gesture: tw_input kept its
+    // Action1 from the world and a click on the circle came back to CONFIRM. Now the point is the world point the player aimed at (a world
+    // tap while the skill is prepared, or the object of the action plate); none yet = the world under the CONFIRM circle (the cursor now:
+    // the camera keeps the hero there, a self-centred skill casts at once). The click is the world tap's own (hle_dos2_touch.c
+    // dm_dos2_touch_world_click: past the UI, Action1 marked as the world's, one poll per step).
+    int dm_dos2_touch_world_click(float x, float y); int dm_dos2_touch_world_click_busy(void); void dm_dos2_route_world_click(void);
+    if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a0 = (uint32_t)(v >> 32), b0 = (uint32_t)v; float x, y; memcpy(&x, &a0, 4); memcpy(&y, &b0, 4); hu_aim_set(&g_aimp, x, y); }
+    if (g_act.kind || dm_dos2_touch_world_click_busy()) { if (g_dbg || g_naim++ < 12) LOG("[hud] %s: a click is still running: this tap ignored", ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)"); return 1; }
+    float x = -1, y = -1; int aimed = hu_aim_point(&g_aimp, &x, &y);
+    if (!aimed) { const float *c = *(float *const volatile *)(g_main->base + HU_CURSOR); if (c) { x = c[0]; y = c[1]; } }
+    if (x < 0 || y < 0) { LOG("[hud] %s: no point (no aim, no cursor): nothing sent", ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)"); return 1; }
+    if (ok && dm_dos2_touch_world_click(x, y)) {
+        if (g_dbg || g_naim++ < 12) LOG("[hud] dmAimBtn(1 CONFIRM) -> the PC left click at %.0f,%.0f (%s), the world's click past the UI", (double)x, (double)y,
+                                        aimed ? "the aimed point" : "nothing aimed yet: the world under the button");
+    } else {   // cancel (right click: the PC drops a prepared skill), or no world click layer: the old records, past the UI too
+        hu_aim_set(&g_aimp, x, y);
+        dm_dos2_route_world_click();
+        hu_act_start(ok ? 1 : 2, ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)");
+    }
     if (ok) g_plate_on = 0;   // the movie hid the plate itself
     return 1;
 }
@@ -555,6 +658,7 @@ static int hu_ei_key(void *ctx, void *player, void *ui, const char *name, unsign
     if (code != 1 && code != 2) { LOG("[hud] dmKey(%d): no such key button (1 quick save, 2 tactical camera)", code); return 1; }
     if (!dm_dos2_touchui_may_press(ui)) return 1;
     hu_act_start_key(3, code == 1 ? "dmKey(1 quick save: f5)" : "dmKey(2 tactical camera: o)", code == 1 ? ID_KEY_F5 : ID_KEY_O);
+    if (code == 2 && g_act.kind == 3) { void dm_dos2_touch_tac_toggled(void); dm_dos2_touch_tac_toggled(); }   // sent: the three-finger swipe's belief follows the button
     return 1;
 }
 // hle_dos2_touch.c, the release of a short long press over the world in UI mode TOUCH: with the `long` rule on, the plate goes up there (1)
@@ -600,6 +704,50 @@ int dm_dos2_touchui_hud_plate(float x, float y, int obj) {
     if (g_dbg || cnt++ < 20) LOG("[hud] action plate over the object at %.0f,%.0f (stage %d,%d of hotBar_p): a tap on it = the PC click there", (double)x, (double)y, sx, sy);
     return 1;
 }
+// hle_dos2_touch.c (game thread): the plate was put at a SCREEN point and acts there - once the camera pans / turns / zooms, or a menu / panel
+// comes up, that point shows something else and a tap on the plate would click it (run 20.11 review). The plate goes; a new tap puts it back.
+void dm_dos2_touchui_hud_plate_off(const char *why);
+void dm_dos2_touchui_hud_plate_off(const char *why) {
+    if (!g_plate_on || !g_nobj || !g_main) return;
+    g_plate_on = 0;
+    uint8_t *mgr = hu_mgr(), *hb = NULL;
+    for (int i = 0; i < g_nobj && mgr && !hb; i++) if (g_obj[i].type == HU_T_HOTBAR) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
+    uint8_t *fp = hb ? *(uint8_t *volatile *)(hb + HU_OBJ_FP) : NULL;
+    if (!fp || atomic_load(&g_aim)) return;   // a prepared skill owns CONFIRM / cancel now: leave them
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = 1999999;   // PLATE_HIDE (dm_dos2_touchui_hud_plate)
+    dm_dos2_touchui_invoke(fp, "showActiveSkill", &v, 1);
+    static unsigned n; if (g_dbg || n++ < 20) LOG("[hud] action plate hidden (%s): its point would be stale", why ? why : "?");
+}
+// hle_dos2_touch.c, a UI tap in UI mode TOUCH (game thread; window px): a tap in the top-right corner of an open panel closes it (run 21.11:
+// the inventory's close button stood at the left of its header, the journal's 57 px pad was missed). 1 = taken (no click is sent).
+int dm_dos2_touchui_hud_corner(float x, float y);
+int dm_dos2_touchui_hud_corner(float x, float y) {
+    if (!g_hooked || !g_nobj || !g_main || !hu_on() || *hu_mode() != 0) return 0;
+    uint8_t *mgr = hu_mgr(), *o[5];
+    uint8_t *hb = hu_hotbar(mgr, g_obj[0].player);
+    if (!hb) return 0;
+    const uint16_t pl = *(volatile uint16_t *)(hb + HU_OBJ_PLAYER);
+    const int vis = hu_panels(mgr, pl, o);
+    if (!vis) return 0;
+    void dm_dos2_wide_size(unsigned *w, unsigned *h); unsigned sw = 0, sh = 0; dm_dos2_wide_size(&sw, &sh);
+    if (!sw || !sh) return 0;
+    const float k = (float)sh / 1080.0f;
+    const int code = hu_corner_code(vis, g_view_who == pl ? g_view : 0, x / k, y / k, (float)sw / k, g_ts.cell >= 40 ? g_ts.cell : 76);
+    if (!code) return 0;
+    // phone 21.11 (second run): the corner zone ate the crafting window's rune tab next to its close (taps at 1398,63 / 1400,95 closed the
+    // window). Skills / crafting / journal have their own >= 90 px close pads now, so the zone is only for the inventory / sheet / equipment
+    // view (the inventory's close stood at the left of its header). DM_DOS2_TOUCH_CORNER_ALL=1: every panel as before.
+    if ((code == 5 || code == 6 || code == 7) && !getenv("DM_DOS2_TOUCH_CORNER_ALL")) return 0;
+    static unsigned n; if (g_dbg || n++ < 20) LOG("[hud] tap at %.0f,%.0f in the top-right corner of the open %s: closed (%s)", (double)x, (double)y,
+        code == 7 ? "journal / map" : code == 5 ? "skills" : code == 6 ? "crafting" : code == 8 ? "equipment view" : code == 4 ? "inventory" : "character sheet",
+        code == 7 ? "the escape key: the PC closes the top window" : "the column's own toggle");
+    if (code == 7) { int dm_dos2_touch_back(void); dm_dos2_touch_back(); return 1; }
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)code;
+    if (g_one) hu_ei_side(NULL, NULL, hb, "dmSide", 1, &v);
+    else if (code == 3 || code == 4 || code == 8) hu_pair_apply(hb, vis, 0);
+    else hu_press(hb, hu_side_panel(code));
+    return 1;
+}
 // for the gestures (hle_dos2_touch.c; any thread): is a skill prepared (CONFIRM / cancel on screen), and "the player aimed here" (window px)
 int dm_dos2_touchui_hud_aiming(void);
 int dm_dos2_touchui_hud_aiming(void) { return g_nobj > 0 && atomic_load(&g_aim); }
@@ -643,6 +791,27 @@ static void hu_tell_cell(uint8_t *mgr) {   // inventory / sheet: dmSetCell(cell)
         uint8_t *fp = *(uint8_t *volatile *)(o + HU_OBJ_FP);
         if (!fp) continue;   // its movie is not loaded yet: asked again on the next poll
         vis |= (uint8_t)bit;
+        {   // run 21.11: the window centres itself (tools/dos2_ppanel_inv.py OX_CMD / DW_CMD): where the engine put the movie and the screen width,
+            // both in stage px (k = the player's height / 1080), sent when they change (the engine moves the movie after a new setMcSize too)
+            enum { OX_CMD = 100000, OX_BIAS = 5000, DW_CMD = 200000 };
+            static int sent_ox[3] = {-99999, -99999, -99999}, sent_dw[3];
+            const int32_t *r = (const int32_t *)(const void *)(fp + 0x10);
+            void dm_dos2_wide_size(unsigned *w, unsigned *h); unsigned sw = 0, sh = 0; dm_dos2_wide_size(&sw, &sh);
+            if (r[3] > 0 && sw) {
+                const float k = (float)r[3] / 1080.0f;
+                const int ox = (int)lroundf((float)r[0] / k), dw = (int)lroundf((float)sw / k);
+                const char *name = bit == 2 ? "setHelmetOptionState" : "setAnchor";
+                if (dw != sent_dw[bit] && dw > 0 && dw < 10000) { dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)(1000000 + DW_CMD + dw); if (dm_dos2_touchui_invoke(fp, name, &v, 1)) sent_dw[bit] = dw; }
+                if (ox != sent_ox[bit] && ox > -OX_BIAS && ox < 90000) {
+                    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)(1000000 + OX_CMD + OX_BIAS + ox);
+                    if (dm_dos2_touchui_invoke(fp, name, &v, 1)) {
+                        static unsigned n; if (g_dbg || n++ < 16) LOG("[scale] %s: the engine put the movie at x %d (stage px; screen %d px wide in stage px): told, it centres its window itself",
+                                                                      bit == 2 ? "characterSheet_p" : "partyInventory_p", ox, dw);
+                        sent_ox[bit] = ox;
+                    }
+                }
+            }
+        }
         if (g_cell_vis & bit) continue;
         const char *name = bit == 2 ? "setHelmetOptionState" : "setAnchor";
         dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4;
@@ -702,21 +871,30 @@ void dm_dos2_touchui_hud_poll(void) {
         }
     }
     if (g_send_cell) hu_tell_cell(mgr);
+    // the half the toggle opened and the host hid: if its Show came after the hide, it goes again (300 ms)
+    if (g_pair_hide && g_pair_ok) {
+        if (hu_us() / 1000 - g_pair_hide_t > 300) g_pair_hide = 0;
+        else { uint8_t *o[5]; const int vis = hu_panels(mgr, (uint16_t)g_pair_hide_who, o), late = vis & g_pair_hide;
+            if (late) { const uint16_t pl = (uint16_t)g_pair_hide_who;
+                if (late & HU_P_SHEET) ((int (*)(void *, unsigned))(void *)(g_main->base + HU_SHEET_HIDE))(ui, pl);
+                if (late & HU_P_INV) ((int (*)(void *, unsigned))(void *)(g_main->base + HU_INV_HIDE))(ui, pl);
+                static unsigned n; if (g_dbg || n++ < 12) LOG("[hud] one window: the %s came up after its hide: hidden again", late & HU_P_SHEET ? "sheet" : "inventory"); } }
+    }
     // the equipment view is one window: the close button of one half takes the other half with it
     if (g_one && g_view == HU_VIEW_EQUIP) {
         uint8_t *o[5]; const int vis = hu_panels(mgr, g_view_who, o);
         if (hu_pair_broken(g_view, vis, hu_us() / 1000 - g_view_t)) {
             uint8_t *hb = hu_hotbar(mgr, g_view_who); const int left = vis & (HU_P_SHEET | HU_P_INV);
             g_view = 0;
-            if (hb && left) hu_press(hb, hu_panel_pc(left));
+            if (hb && left) hu_pair_apply(hb, left, 0);
             for (int b = 0; b < 2; b++) if (o[b]) hu_panel_state(o[b], 1 << b, 0);
             static unsigned n; if (n++ < 24 || g_dbg) LOG("[hud] equipment view: one half was closed (on the screen %#x) -> the other closed too, both back to their plain look", vis);
         }
     }
     // the aimed point: named by the gestures, else where the cursor rested
     if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v; float x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); hu_aim_set(&g_aimp, x, y); }
-    else if (!g_act.kind) { const float *c = *(float *const volatile *)(g_main->base + HU_CURSOR); if (c) hu_aim_feed(&g_aimp, c[0], c[1], hu_us() / 1000); }
-    if (atomic_exchange(&g_back_req, 0) && !g_act.kind) hu_act_start(3, "the Back gesture: escape (UI mode TOUCH)");
+    // (run 21.11: no more "where the cursor rested" - that was the hot bar slot or the CONFIRM circle; see hu_ei_aimbtn)
+    hu_tip_make(ui, mgr, "the touch HUD is up and the tooltip object is gone");
     hu_act_step();
 }
 
@@ -766,6 +944,9 @@ void dm_dos2_touchui_hud_install(void) {
     static const hu_site k_hb[] = {{HU_HB_CALLED, 12, k_hu_hb_called}, {HU_HB_BTN, 5, k_hu_hb_btn}, {HU_HB_SWITCH, 5, k_hu_hb_switch}};
     g_btn_ok = hu_same(m, k_hb, 3) < 0 && m->size > HU_HB_TABLE + sizeof k_hu_hb_table && !memcmp(m->base + HU_HB_TABLE, k_hu_hb_table, sizeof k_hu_hb_table);
     if (!g_btn_ok) LOG("【红】[hud] the PC hot bar class's hotbarBtnPressed (main+%#x) differs: the panel column of dmSide_p opens nothing", HU_HB_CALLED);
+    { static const hu_site k_ph[] = {{HU_SHEET_HIDE, 14, k_hu_pair_hide}, {HU_INV_HIDE, 14, k_hu_pair_hide}, {HU_SHEET_SLOT_RD, 1, k_hu_sheet_slot}, {HU_INV_SLOT_RD, 1, k_hu_inv_slot}};
+      g_pair_ok = hu_same(m, k_ph, 4) < 0;
+      if (!g_pair_ok) LOG("【红】[hud] the engine's sheet / inventory hide (main+%#x / +%#x) differs: the bag / armour buttons bring both windows up (no one-window rule for the pair)", HU_SHEET_HIDE, HU_INV_HIDE); }
     static const hu_site k_sl[] = {{HU_SLOT_SKILLS, 2, k_hu_slot_skills}, {HU_SLOT_SKILLS_T, 2, k_hu_slot_skills_t}, {HU_SLOT_INV, 2, k_hu_slot_inv}, {HU_SLOT_SHEET, 2, k_hu_slot_sheet},
                                    {HU_SLOT_CRAFT, 2, k_hu_slot_craft}, {HU_SLOT_HOTBAR, 2, k_hu_slot_hotbar}};
     const int bl = hu_same(m, k_sl, sizeof k_sl / sizeof *k_sl);
@@ -798,6 +979,16 @@ void dm_dos2_touchui_hud_install(void) {
             g_ts.bottom, g_ts.cell_cap, cv && *cv && g_send_cell ? ", DM_DOS2_TOUCH_CELL given" : "", g_ts.cell_mm, g_send_cell ? "" : " (DM_DOS2_TOUCH_CELL=off: not sent, the movies keep 76)",
             g_ts.menu, g_ts.examine, g_ts.tooltip, g_ts.dialog, g_ts.reward, g_ts.splitter, g_win_scale ? "" : " (DM_DOS2_TOUCH_WIN_SCALE=0: the game's own windows keep the engine's size)");
         if (g_tune == 0) LOG("[scale] DM_DOS2_TOUCH_HUD_SCALE=0: no class scale is set at all (the engine's own sizes); the panels' cell is still sent");
+        // Owner, phone run 21.11: "the skills bar is huge, and when I open a window it becomes normal" - the hot bar grown to an 8 mm cell
+        // (x1.5 on a 6.7" 20:9: the row spanned the whole width) and back to x1 under every panel. The hot bar and the status console stay at
+        // the iPad's px (x1) all the time now: no jump either. DM_DOS2_TOUCH_HB_GROW=1: the 8 mm growth back (testing); the column, the
+        // portraits and the windows keep their factors.
+        const char *gv = getenv("DM_DOS2_TOUCH_HB_GROW");
+        if (!(v && *v) && !(gv && atoi(gv) > 0) && g_ts.hud != 1.0f) {
+            LOG("[scale] hot bar / status console: x1 (the iPad's px, cell %.1f mm) instead of x%.3f (owner 21.11: \"huge\"; DM_DOS2_TOUCH_HB_GROW=1 grows it again)",
+                (double)(g_ts.mm > 0 ? TS_HB_CELL * g_ts.mm / 1080.0f : 0), (double)g_ts.hud);
+            g_ts.hud = 1.0f; g_ts.hb_mm = g_ts.mm > 0 ? TS_HB_CELL * g_ts.mm / 1080.0f : 0;
+        }
     }
     if ((v = getenv("DM_DOS2_TOUCH_DEV")) && atoi(v) > 0 && atoi(v) < 64) g_mdev = atoi(v);
     g_sites = 1;
@@ -805,6 +996,20 @@ void dm_dos2_touchui_hud_install(void) {
         dm_dos2_touchui_ei_register("dmSide", hu_ei_side, NULL); dm_dos2_touchui_ei_register("dmAim", hu_ei_aim, NULL); dm_dos2_touchui_ei_register("dmAimBtn", hu_ei_aimbtn, NULL);
         dm_dos2_touchui_ei_register("dmKey", hu_ei_key, NULL);
     } else LOG("【红】[hud] the ExternalInterface hook is off (DM_DOS2_TOUCHUI_EI=0 or its sites differ): dmSide / dmAim / dmAimBtn of the touch HUD movies do nothing");
+    {   // the PC tooltip window (run 20.11 review, the section above hu_tip_make)
+        static const hu_site k_tip[] = {{HU_TIP_GET, 4, k_hu_tip_get}, {HU_TIP_REG, 3, k_hu_tip_reg}};
+        const int bt = hu_same(m, k_tip, 2);
+        g_tip_ok = bt < 0;
+        // phone 21.11: the window is made but its Flash player has no root (vt+0x118 -> NULL) and the class crashes on the first mouse
+        // move (main+0x111e6ec, twice). Off by default until the load is understood; DM_DOS2_TOUCHUI_HUD_TIP=1 = make it (test)
+        g_tip = (v = getenv("DM_DOS2_TOUCHUI_HUD_TIP")) && *v == '1';
+        int nreg = 0;
+        if (dm_dos2_touchui_ei_on()) for (unsigned i = 0; i < sizeof k_hu_tip_names / sizeof *k_hu_tip_names; i++) nreg += dm_dos2_touchui_ei_register(k_hu_tip_names[i], hu_ei_tip, NULL);
+        if (bt >= 0) LOG("【红】[hud] main+%#x differs (the tooltip getter / type 0x2c): no PC tooltip window is made; in the PC UI the %d tooltip calls are dropped", k_tip[bt].off, nreg);
+        else LOG("[hud] PC tooltip window: %s (type %#x layer %#x flags %#x into [[main+0x3298140]+%#x] once a TOUCH HUD is up, as the iPad's PC branch 0x1012dfd60); "
+                 "while there is none the PC UI's %d show*Tooltip calls are dropped (the game would use a NULL object)", g_tip ? "made" : "NOT made (DM_DOS2_TOUCHUI_HUD_TIP=0)",
+                 HU_TIP_T, HU_TIP_LAYER, HU_TIP_FLAGS, HU_TIP_SLOT, nreg);
+    }
     if (g_env > 0) {   // the old switch: the PC set follows the last input, rebuilt in game
         const char *lv = getenv("DM_DOS2_TOUCH_LIVE");
         if (!lv || !*lv) setenv("DM_DOS2_TOUCH_LIVE", "1", 1);

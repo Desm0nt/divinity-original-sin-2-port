@@ -119,7 +119,36 @@ int main(void) {
         assert(dt_cam_keys(0, 0, 50, 0, 1, 4) == DT_K_ROTL);
         assert(dt_cam_keys(2, -3, 1, 0, 0, 4) == 0);
     }
+    {   // review of run 20.11: the keyboard twins of the host's pad pulses in TOUCH (raw ids of main+0x2974b10, index - 2)
+        assert(dt_pad_key(1u << 0) == 0x00 && dt_pad_key(1u << 1) == 0x01);                 // A = return, B = escape
+        assert(dt_pad_key(1u << 13) == 0x59 && dt_pad_key(1u << 15) == 0x58);               // up, down
+        assert(dt_pad_key(1u << 12) == 0x57 && dt_pad_key(1u << 14) == 0x56);               // left, right
+        assert(dt_pad_key(1u << 11) == 0x30);                                               // '-' = m (ToggleMap)
+        assert(dt_pad_key(1u << 2) == DT_PADKEY_NONE && dt_pad_key(1u << 3) == DT_PADKEY_NONE && dt_pad_key(1u << 8) == DT_PADKEY_NONE && dt_pad_key(0) == DT_PADKEY_NONE);
+        assert(dt_pad_key((1u << 0) | (1u << 11)) == 0x00);                                 // A wins over '-'
+        // the TOUCH keys go while a menu is up or out of game; unknown state (bit 2 clear) keeps them (the old rule)
+        assert(dt_t_away(4 | 2 | 1) && dt_t_away(4) && dt_t_away(4 | 1) && !dt_t_away(4 | 2) && !dt_t_away(0) && !dt_t_away(1) && !dt_t_away(2 | 1));
+        // the PC windows that take the finger as a menu; the HUD, the tooltips and the tutorial overlay do not
+        static const uint32_t menu[] = {0x74, 0x77, 0x29, 0x66, 0x16, 0x68, 0x2e, 0x2f, 0x0e, 0x88, 0x15, 0x0a, 0x0b};
+        static const uint32_t hud[] = {0x28, 0x1e, 0x26, 0x75, 0x07, 0x8d, 0x2c, 0x30, 0x37, 0x05, 0x10, 0x2a, 0x1d, 0x13};
+        for (unsigned i = 0; i < sizeof menu / sizeof *menu; i++) assert(dt_pc_menu_type(menu[i]));
+        for (unsigned i = 0; i < sizeof hud / sizeof *hud; i++) assert(!dt_pc_menu_type(hud[i]));
+        // run 21.11: the windows that stop the mouse below them: the panels and containers, not the small context menus, never the HUD
+        for (unsigned i = 0; i < sizeof menu / sizeof *menu; i++) assert(dt_pc_blocker(menu[i]) == (menu[i] != 0x0a && menu[i] != 0x0b));
+        for (unsigned i = 0; i < sizeof hud / sizeof *hud; i++) assert(!dt_pc_blocker(hud[i]));
+        assert(dt_pc_blocker(0x09) && dt_pc_blocker(0x25));
+        {   // the walk runs from the last entry (top) down: the LOWEST visible blocker is the one below which nothing gets the press
+            const uint32_t ty[6] = {0x30, 0x1e, 0x10, 0x74, 0x77, 0x28}; const uint8_t vis[6] = {1, 1, 1, 1, 1, 1}, vis2[6] = {1, 1, 1, 0, 1, 1}, none[6] = {1, 1, 1, 0, 0, 1};
+            assert(dt_lowest_blocker(ty, vis, 6) == 3 && dt_lowest_blocker(ty, vis2, 6) == 4 && dt_lowest_blocker(ty, none, 6) == -1);
+        }
+        // a HUD finger whose probe press was taken: tap < 350 ms clicks, 350..599 = tooltip only, >= 600 = the right click; no tooltip step
+        // when the short long press is 0 or not shorter than the long press
+        assert(dt_tui_state(0, 350, 600) == DT_TUI_CLICK && dt_tui_state(349, 350, 600) == DT_TUI_CLICK);
+        assert(dt_tui_state(350, 350, 600) == DT_TUI_TIP && dt_tui_state(599, 350, 600) == DT_TUI_TIP);
+        assert(dt_tui_state(600, 350, 600) == DT_TUI_LONG && dt_tui_state(5000, 350, 600) == DT_TUI_LONG);
+        assert(dt_tui_state(400, 0, 600) == DT_TUI_CLICK && dt_tui_state(400, 600, 600) == DT_TUI_CLICK && dt_tui_state(600, 600, 600) == DT_TUI_LONG);
+    }
     puts("PASS: dos2 TOUCH gestures (one-finger tap / tooltip / long press / pan, double tap, two-finger pinch / rotation / pan, 2f / 3f taps, "
-         "3f swipe, tactical camera toggle, keyboard camera hold times)");
+         "3f swipe, tactical camera toggle, keyboard camera hold times; run 20.11: pad pulse keyboard twins, keys let go on menus, PC windows as menus)");
     return 0;
 }

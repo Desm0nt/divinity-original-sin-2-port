@@ -61,6 +61,7 @@
 //   DM_DOS2_TOUCH_ROUTE_ACCEPT=0   no accept guard (3.); DM_DOS2_TOUCH_ROUTE_ACCEPT_MS=<ms> its window
 //   DM_DOS2_TOUCH_ROUTE_HIDDEN=1   mouse also to allowed objects without the visible flag
 //   DM_DOS2_TOUCH_STAGE_TYPES=<h>  hex type ids of movies with a stage listener (5.), default "3b"; "" or "0" = none (the touch6 behaviour)
+//   DM_DOS2_TOUCH_ROUTE_BLOCK=0    UI mode TOUCH: an open PC window does not stop the mouse for what is below it (6., the run 21.11 behaviour)
 //   DM_DBG=1                       every routing decision once per (type, decision), the events after a tap, who took a left press
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -113,6 +114,18 @@ static const void *volatile g_kit_obj;   // K2: the UI object of the kit gesture
 static int (*g_kit_accept)(const void *obj);   // K7: 1 = drop this UIAccept to obj
 static void (*g_kit_note)(const void *obj, uint32_t type, uint32_t id, int down, int pass1, unsigned ret, unsigned handled);   // M0-3: a non-mouse input event reached obj
 
+// 6. PC WINDOWS BLOCK WHAT IS UNDER THEM (phone run 21.11, UI mode TOUCH in game): every tap reached every movie below an open PC window as
+//    "flag 0 (THE TARGET)": a window answers "not handled" for a press on its background (Iggy hits only elements with mouse code), so the
+//    engine's walk handed the press on - the minimap / combat log / overhead under the inventory took it ("a button under the window got
+//    pressed, random windows opened"). Rule (hle_dos2_touch_gesture.h dt_pc_blocker / dt_lowest_blocker): at the start of a walk the host
+//    finds the lowest visible PC window in the walk order; once that object has had a mouse event in pass 2, the host sets [x5] = 1, so the
+//    engine itself gives every object below "an upper object took it" (vt+0xb0(event, 1), main+0xaea830) - and the world gets nothing. The
+//    HUD above the windows (column, hot bar, portraits) and the windows above the lowest one keep their own turn. DM_DOS2_TOUCH_ROUTE_BLOCK=0 off.
+// 7. A HOST CLICK FOR THE WORLD (hle_dos2_touch.c dm_dos2_touch_world_click: CONFIRM / the action plate): the next left / right button down and
+//    up go past every UI object (none sees them, [x5] stays 0), so the click lands in the world even when its point is under a HUD button
+//    (run 21.11: CONFIRM's click at the CONFIRM circle came back to CONFIRM, again and again).
+static const void *g_block_obj; static uint32_t g_block_type; static int g_block = 1; static unsigned g_n_block;
+static unsigned g_skip_n; static uint64_t g_skip_until; static int g_walk_skip; static unsigned g_n_skip;
 static uint64_t rt_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000ull + (uint64_t)t.tv_nsec / 1000000ull; }
 static const struct { const char *name; uint16_t ids[12]; } k_groups[] = {
     {"hud", {0x3b, 0x26, 0x3d, 0x73, 0x75, 0x08, 0x3c, 0x8d}},   // 0x8d = the iPad column's own movie (dmColumn_d.swf, hle_dos2_touchui.c)
@@ -186,6 +199,25 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
       if (list && n && n < 0x10000 && list[n - 1] == (const void *)o) {   // the top object: a walk starts
           g_modal_seen = 0;
           if (!g_names_done) rt_names();
+          // 6. the lowest visible PC window of this walk (UI mode TOUCH, in game)
+          g_block_obj = NULL;
+          if (g_block && mouse && *(const volatile uint8_t *)(g_main->base + RT_MODE_BYTE) == 0 && dm_dos2_touch_in_game()) {
+              for (uint64_t i = 0; i < n; i++) {
+                  const uint8_t *x = (const uint8_t *)list[i]; if (!x) continue;
+                  const uint32_t xf = *(const volatile uint32_t *)(x + RT_OBJ_FLAGS), xt = *(const volatile uint32_t *)(x + RT_OBJ_TYPE);
+                  const uint8_t vis = (xf & RT_F_VISIBLE) && (xf & RT_F_INPUT);
+                  if (dt_lowest_blocker(&xt, &vis, 1) == 0) { g_block_obj = x; g_block_type = xt; break; }
+              }
+          }
+          // 7. a host world click: decided at the start of pass 1 of a button event, kept for its pass 2
+          const int btn = id == RT_EV_LEFT || id == RT_EV_RIGHT || id == RT_EV_MIDDLE;
+          if (!btn) g_walk_skip = 0;
+          else if (pass & 1) {
+              g_walk_skip = 0;
+              if (g_skip_n && rt_ms() < g_skip_until) { g_skip_n--; g_walk_skip = 1; g_n_skip++;
+                  if (g_dbg) LOG("[route] %s %s: a host click for the world (CONFIRM / action plate): no UI object gets it", id == RT_EV_LEFT ? "left" : "right", down ? "down" : "up"); }
+              else g_skip_n = 0;
+          }
           if (g_dbg && !mouse && (pass & 1) && rt_ms() - g_left_ms < (uint64_t)g_accept_ms) {   // what else a tap makes: the answer to "where does the accept come from"
               static uint32_t seen[48]; static int ns; const uint32_t key = id << 1 | (uint32_t)down; int have = 0;
               for (int i = 0; i < ns; i++) if (seen[i] == key) have = 1;
@@ -193,6 +225,7 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
                                                            *(const int32_t *)(e + 4), rt_ms() - dm_dos2_touch_a_ms() < 300 ? "DOWN" : "not down"); }
           }
       } }
+    if (g_walk_skip && (id == RT_EV_LEFT || id == RT_EV_RIGHT || id == RT_EV_MIDDLE)) return 0;   // 7. the host's world click: past every UI object
     if (!(fl & RT_F_INPUT)) return g_orig(mgr, obj, ev, pass, a4, a5);   // the game does nothing with it either
     const int in_game = dm_dos2_touch_in_game();
     // UI mode touch (mode byte main+0x2bb8918 = 0, hle_dos2_uimode.c): the PC movies are up and every one of them has the PC's own mouse code -
@@ -247,6 +280,14 @@ static uint64_t rt_hook(uint64_t mgr, uint64_t obj, uint64_t ev, uint64_t pass, 
                 down ? "press" : "release", (double)cx, (double)cy, rt_movie(o, mv, sizeof mv), type, hr == DT_HR_IN ? "inside one of its HUD rects" : "no live HUD rects of it: its answer stands"); }
         }
     }
+    // 6. the lowest open PC window has had its turn: nothing below it gets this mouse event (the engine's own "an upper object took it")
+    if (mouse && !(pass & 1) && a5 && o == (const uint8_t *)g_block_obj && !*(const volatile uint16_t *)(uintptr_t)a5) {
+        *(volatile uint16_t *)(uintptr_t)a5 = 1;
+        if (id != RT_EV_MOVE) { g_n_block++;
+            static uint8_t said[256]; if (g_dbg && type < 256 && !said[type]) { said[type] = 1; char mv[48];
+                LOG("[route] type %#x %s is the lowest open PC window: a %s it did not take stops there (nothing below it, nor the world, gets it; DM_DOS2_TOUCH_ROUTE_BLOCK=0 off)",
+                    type, rt_movie(o, mv, sizeof mv), id == RT_EV_LEFT ? "left button" : id == RT_EV_RIGHT ? "right button" : "mouse event"); } }
+    }
     if (g_kit_note && !mouse) g_kit_note(o, type, id, down, (int)(pass & 1), (unsigned)(v & 0xff), a5 ? *(const volatile uint16_t *)(uintptr_t)a5 : 0xffff);   // M0-3 trace (kit)
     if (mouse) g_n_pass++;
     if (id == RT_EV_LEFT && down && !(pass & 1)) {   // pass 2 of a left press: [x5] = this object's answer (main+0xaea8d4)
@@ -279,6 +320,8 @@ int dm_dos2_route_game(void);
 int dm_dos2_route_game(void) { return g_on && g_game; }
 void dm_dos2_route_left(int down);   // a touch-made left record goes to InjectInput now
 void dm_dos2_route_left(int down) { g_left_ms = rt_ms(); if (down) g_left_seq++; }
+void dm_dos2_route_world_click(void);   // 7. the next button down + up (within 600 ms) go past every UI object: a host click meant for the world
+void dm_dos2_route_world_click(void) { if (g_on) { g_skip_n = 2; g_skip_until = rt_ms() + 600; } }
 int dm_dos2_route_taken(uint32_t *type);   // the last left press: 1 = a UI object took it, 0 = the UI saw it and none did, -1 = not seen by the UI yet
 int dm_dos2_route_taken(uint32_t *type) {
     if (!g_on) return -1;
@@ -346,8 +389,9 @@ const void *dm_dos2_route_player(uint32_t want) {
 void dm_dos2_route_summary(void);   // hle_dos2_touch.c's DM_DBG summary
 void dm_dos2_route_summary(void) {
     if (g_on) LOG("[route] mouse events delivered %u, kept away %u (no mouse code / hidden) + %u (under a modal), UIAccept dropped %u; left presses %u, last taken #%u by type %#x; "
-                  "stage-listener movies: button events given back %u, kept inside a HUD rect %u, kept with no rects %u",
-                  g_n_pass, g_n_drop, g_n_modal, g_n_accept, g_left_seq, g_taken_seq, g_taken_type, g_n_stage, g_n_stage_kept, g_n_stage_norect);
+                  "stage-listener movies: button events given back %u, kept inside a HUD rect %u, kept with no rects %u; stopped below an open PC window %u (last %#x), "
+                  "host world clicks past the UI %u",
+                  g_n_pass, g_n_drop, g_n_modal, g_n_accept, g_left_seq, g_taken_seq, g_taken_type, g_n_stage, g_n_stage_kept, g_n_stage_norect, g_n_block, g_block_type, g_n_skip);
 }
 void dm_dos2_touchui_route_install(void);   // main.c host_preload, after dm_dos2_touchui_install and before dm_dos2_touch_install
 void dm_dos2_touchui_route_install(void) {
@@ -369,6 +413,7 @@ void dm_dos2_touchui_route_install(void) {
     g_modal = !((v = getenv("DM_DOS2_TOUCH_ROUTE_MODAL")) && *v == '0');
     g_accept = !((v = getenv("DM_DOS2_TOUCH_ROUTE_ACCEPT")) && *v == '0');
     g_hidden = (v = getenv("DM_DOS2_TOUCH_ROUTE_HIDDEN")) && atoi(v) > 0;
+    g_block = !((v = getenv("DM_DOS2_TOUCH_ROUTE_BLOCK")) && *v == '0');
     if ((v = getenv("DM_DOS2_TOUCH_ROUTE_ACCEPT_MS")) && atoi(v) >= 100 && atoi(v) <= 5000) g_accept_ms = atoi(v);
     const char *gr = getenv("DM_DOS2_TOUCH_ROUTE_GROUPS");
     for (unsigned g = 0; g < sizeof k_groups / sizeof *k_groups; g++) {
@@ -407,8 +452,8 @@ void dm_dos2_touchui_route_install(void) {
     char list[640]; size_t lo = 0; list[0] = 0;
     for (int i = 0; i < 256 && lo + 8 < sizeof list; i++) if (g_allow[i]) lo += (size_t)snprintf(list + lo, sizeof list - lo, "%s%x", lo ? " " : "", i);
     LOG("[route] DM_DOS2_TOUCH_ROUTE=1: UI input dispatch main+%#x hooked: mouse events go only to visible UI objects of types [%s] (%s), modal guard %s, "
-        "tap-is-not-accept guard %s (%d ms)%s", RT_DISPATCH, list, g_game ? "menus and in game" : "menus only: DM_DOS2_TOUCH_ROUTE_GAME=0", g_modal ? "on" : "OFF", g_accept ? "on" : "OFF",
-        g_accept_ms, g_hidden ? ", hidden objects too" : "");
+        "tap-is-not-accept guard %s (%d ms)%s; UI mode TOUCH: an open PC window stops the mouse below it %s", RT_DISPATCH, list, g_game ? "menus and in game" : "menus only: DM_DOS2_TOUCH_ROUTE_GAME=0",
+        g_modal ? "on" : "OFF", g_accept ? "on" : "OFF", g_accept_ms, g_hidden ? ", hidden objects too" : "", g_block ? "on" : "OFF (DM_DOS2_TOUCH_ROUTE_BLOCK=0)");
     {
         char sl[200]; size_t so = 0; sl[0] = 0;
         for (int i = 1; i < 256 && so + 8 < sizeof sl; i++) if (g_stage[i]) so += (size_t)snprintf(sl + so, sizeof sl - so, "%s%x", so ? " " : "", i);

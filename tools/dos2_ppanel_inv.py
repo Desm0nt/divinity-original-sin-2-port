@@ -397,7 +397,13 @@ CTX_GUARD_MS = 400     # one long press = at most one context menu (the movie's 
 CMD = 1000000          # setAnchor(CMD + n): n = 0 / 1 the window's state, n >= 40 the cell px (setAnchor is the one invoke name every UI class registers)
 CELL0, SCREEN0 = 76, 1920
 MARGIN = 80            # stage px kept free at each side of the screen (notch)
-INPUTS = [('C', 'dmCell'), ('ST', 'dmState'), ('DW', 'dmW'), ('BT', 'dmB')]
+INPUTS = [('C', 'dmCell'), ('ST', 'dmState'), ('DW', 'dmW'), ('BT', 'dmB'), ('OX', 'dmOX'), ('OK', 'dmOXok')]
+# Phone run 21.11: the inventory stood at x 784..2217 on a 2400 screen (its FlashPlayer's origin 784, the sheet's 823), not centred: the
+# engine's own centring of the movie does not follow setMcSize (main+0xae2ccc applies it only in the layout mode 3). So the movie centres
+# ITSELF: the host reads where the engine put the movie (the FlashPlayer's rect, hle_dos2_touchui_hud.c hu_tell_cell) and tells it, in stage
+# px, through the same invoke channel: CMD + OX_CMD + OX_BIAS + origin (dmOX, dmOXok = 1) and CMD + DW_CMD + width (dmW, the screen width in
+# stage px). dmLay then shifts the window by DX = dmOXok x ((dmW - MW) / 2 - dmOX): its middle on the screen's middle, whatever the engine did.
+OX_CMD, OX_BIAS, DW_CMD = 100000, 5000, 200000
 BOTTOM0 = 1080         # dmB: the bottom limit the host sets (the hot bar's top; `cmd`(CMD + n) with n >= 400); 1080 = none
 def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None):
     """the document class of a `_p` window: vars dmCell (cell px, CELL0 = the iPad's), dmState, dmW (the screen width in stage px, height 1080);
@@ -405,11 +411,17 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None):
     onEventInit = original + dmHook (drag bar `off` hidden, the doll button `btn` armed: dmSide(8) = the equipment view, dmSide(back) from it)
     + dmLay; onEventResolution(w, h) = original + dmW + dmLay."""
     d = code.of('MainTimeline', 'onEventInit'); P = d.P
-    for n, v in (('dmCell', CELL0), ('dmState', 0), ('dmW', SCREEN0), ('dmB', BOTTOM0)): add_slot(d, n, v)
+    for n, v in (('dmCell', CELL0), ('dmState', 0), ('dmW', SCREEN0), ('dmB', BOTTOM0), ('dmOX', 0), ('dmOXok', 0)): add_slot(d, n, v)
     d.method('dmLay', 0, HEAD + spec.asm(d, INPUTS) + [('returnvoid',)])
     lay = [('getlocal0',), ('callpropvoid', P('dmLay'), 0)]
     # dmSetCell(px): 40..399 = the cell px; 400..1080 = the bottom limit dmB (the host's hot bar top), one channel for both
-    d.method('dmSetCell', 1, HEAD + [('getlocal1',), ('pushbyte', 40), ('ifnlt', 'e'), ('returnvoid',), ('L', 'e'),
+    # n >= DW_CMD: dmW = n - DW_CMD (the host's screen width in stage px); n >= OX_CMD: dmOX = n - OX_CMD - OX_BIAS, dmOXok = 1 (run 21.11)
+    d.method('dmSetCell', 1, HEAD + [('getlocal1',), ('pushint', _int(d, DW_CMD)), ('iflt', 'nw'),
+             ('getlocal0',), ('getlocal1',), ('pushint', _int(d, DW_CMD)), ('subtract',), ('setproperty', P('dmW'))] + lay + [('returnvoid',), ('L', 'nw'),
+             ('getlocal1',), ('pushint', _int(d, OX_CMD)), ('iflt', 'no'),
+             ('getlocal0',), ('getlocal1',), ('pushint', _int(d, OX_CMD + OX_BIAS)), ('subtract',), ('setproperty', P('dmOX')),
+             ('getlocal0',), ('pushbyte', 1), ('setproperty', P('dmOXok'))] + lay + [('returnvoid',), ('L', 'no'),
+             ('getlocal1',), ('pushbyte', 40), ('ifnlt', 'e'), ('returnvoid',), ('L', 'e'),
              ('getlocal1',), ('pushshort', 400), ('iflt', 'c'), ('getlocal1',), ('pushshort', 1080), ('ifgt', 'x'),
              ('getlocal0',), ('getlocal1',), ('setproperty', P('dmB'))] + lay + [('returnvoid',), ('L', 'x'), ('returnvoid',),
              ('L', 'c'), ('getlocal0',), ('getlocal1',), ('setproperty', P('dmCell'))] + lay + [('returnvoid',)])
@@ -508,7 +520,7 @@ def doll_button(swf, name, glyph='pan_helmet'):
 INV_CLIP = 'inventory_mc'
 def inv_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
     """the numbers dmLay computes (the same Spec, run here): dict of the Spec's variables"""
-    env = dict(C=C, ST=ST, DW=DW, BT=BT); inv_spec(None).run(env); return env
+    env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); inv_spec(None).run(env); return env
 
 
 def inv_spec(k):
@@ -534,7 +546,8 @@ def inv_spec(k):
     H = s.let('H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
     HS = s.let('HS', H * SH)                                                 # screen px
     s.state('ST', lambda a: a.let('X0', DOLL_PX), lambda a: a.let('X0', 0))
-    X0 = V('X0'); MW = s.let('MW', ffloor(X0 + INV_W * S + R(999, 1000)))
+    MW = s.let('MW', ffloor(V('X0') + INV_W * S + R(999, 1000)))
+    X0 = s.let('X1', V('X0') + V('OK') * ((DW - MW) / 2 - V('OX')))      # run 21.11: the movie centres itself (dmOX from the host)
     Y0 = s.let('Y0', fmax(0, fmin(1080 - HS, TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
     s.let('PX', 50 * S)
     if k is None: return s
@@ -560,6 +573,7 @@ def inv_spec(k):
     s.on((('nm', INV_BTN),), [('x', X0 + INV_BTN_AT[0] * SH), ('y', Y0 + INV_BTN_AT[1] * SH), ('scaleX', INV_BTN_AT[2] * SH / BTN_ART), ('scaleY', INV_BTN_AT[2] * SH / BTN_ART)])
     # keepCustomInScreen: the part of the stage the engine keeps on the screen (PC: uiLeft 0, uiRight 680, uiTop 45, uiMinHeight 190, uiMinWidth 150)
     for prop, e in (('uiLeft', X0), ('uiRight', X0 + INV_W * S), ('uiTop', Y0 + 45 * SH), ('uiMinHeight', 190 * SH), ('uiMinWidth', 150 * SH)): s.root(prop, ffloor(e + R(1, 2)))
+    s.let('DX', X0 - V('X0'))
     s.ei('setMcSize', MW, 1080); s.ei('setPosition', 'center', 'screen', 'center')
     return s
 
@@ -612,7 +626,7 @@ def party(data, env=None):
     global BTN_ART
     BTN_ART, nbtn = doll_button(swf, INV_BTN)
 
-    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0)
+    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
     spec = inv_spec(_kids(swf, win)); res = spec.run(env); rest = bake(swf, res)
     swf.head = rect_bytes(int(env['MW']), STAGE_H) + swf.head[-4:]
 
@@ -638,7 +652,7 @@ def party(data, env=None):
 # ---------------------------------------------------------------- characterSheet_p
 CS_CLIP = 'stats_mc'
 def cs_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
-    env = dict(C=C, ST=ST, DW=DW, BT=BT); cs_spec(None).run(env); return env
+    env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); cs_spec(None).run(env); return env
 
 
 def cs_spec(k):
@@ -656,9 +670,10 @@ def cs_spec(k):
         for n, v in (('RX', CS_SPLIT), ('RW', CS_DOLL_W), ('XS', CS_FAR), ('XD', 0), ('EY', CS_EQ_Y_DOLL), ('TX', CS_TITLE_X[1])): a.let(n, v)
     s.state('ST', doll, sheet)
     S, PB, H, MW, Y0, RX, RW, XS, XD, EY = [V(n) for n in ('S', 'PB', 'H', 'MW', 'Y0', 'RX', 'RW', 'XS', 'XD', 'EY')]
+    DX = s.let('DX', V('OK') * ((DW - MW) / 2 - V('OX')))                # run 21.11: the movie centres itself (dmOX from the host)
     if k is None: return s
     w = (CS_CLIP,)
-    s.on(w, [('scaleX', S), ('scaleY', S), ('x', 0), ('y', Y0)])
+    s.on(w, [('scaleX', S), ('scaleY', S), ('x', DX), ('y', Y0)])
     s.rect(w, RX, 0, RW, H)                                  # the window clip shows its own px RX.. only: the doll panel = the right half
     bg = w + ('bg_mc', ('at', 0))
     s.on(bg + (('nm', 's0'),), [('x', XS)])
@@ -675,8 +690,8 @@ def cs_spec(k):
     s.on(w + ('title_txt',), [('x', V('TX'))])
     s.on(w + ('hitArea_mc',), [('scaleY', k['hitArea_mc'][4] * (H - 17) / CS_HIT_H)])
     s.raw('lists', cs_lists)
-    s.on((('nm', INV_BTN),), [('x', (CS_BTN_AT[0] - RX) * S), ('y', Y0 + (EY - 45) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
-    for prop, e in (('uiLeft', 0), ('uiRight', RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
+    s.on((('nm', INV_BTN),), [('x', DX + (CS_BTN_AT[0] - RX) * S), ('y', Y0 + (EY - 45) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
+    for prop, e in (('uiLeft', DX), ('uiRight', DX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
     s.ei('setMcSize', MW, STAGE_H); s.ei('setPosition', 'center', 'screen', 'center')
     return s
 
@@ -764,7 +779,7 @@ def sheet(data, env=None):
     BTN_ART, nbtn = doll_button(swf, INV_BTN)
 
     kids = _kids(swf, win)
-    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0)
+    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
     spec = cs_spec(kids); res = spec.run(env); rest = bake(swf, res)
     swf.head = rect_bytes(int(env['MW']), STAGE_H) + swf.head[-4:]
     code = Code(swf)

@@ -491,7 +491,7 @@ static int dt_world_zone_ui(float nx, float ny) { return ny > 0.80f || (nx < 0.1
 // the picking has had the point for at least g_w3_settle polls, then left down, two polls later left up (both marked "world click"), the window
 // stays open g_w3_after_ms more. DM_DOS2_TOUCH_WORLD_CONFIRM=1: the first tap only previews (window kept 4 s), a second tap on the same spot clicks.
 static int g_w3_confirm, g_w3_after_ms = 300, g_w3_settle = 2, g_world_hold_ms = 150, g_ctx_hold = 2;   // g_ctx_hold: DM_DOS2_TOUCH_CTX_HOLD=0 off, 1 pad X (pack 3y), 2 PC right click (pack 3z, default)
-static struct { int ph, polls, ptype; float x, y, px, py; uint64_t hover_until, prev_until, place_t; } w3;   // ptype: the target mode's task type at the tap (10 / aim)   // ph: 1 / 2 = PC click down / up, 3 = placement tap (pass 9)
+static struct { int ph, polls, ptype, fast; float x, y, px, py; uint64_t hover_until, prev_until, place_t; } w3;   // fast: a host click (CONFIRM), one poll per step   // ptype: the target mode's task type at the tap (10 / aim)   // ph: 1 / 2 = PC click down / up, 3 = placement tap (pass 9)
 static unsigned g_n_w3click, g_n_w3prev;
 int dm_dos2_touch_world_placing(void); void dm_dos2_touch_world_kinds_clear(void); int dm_dos2_touch_world_run_type(void);   // hle_dos2_touch_world.c
 int dm_dos2_touch_world_place_mode(void); void dm_dos2_touch_world_place_at(void); int dm_dos2_touch_world_place_ready(void); int dm_dos2_touch_world_place_failed(void);
@@ -545,14 +545,14 @@ static void dt_w3_tap_x(void *mgr, float x, float y, int place) {
         if (g_dbg) LOG("[touch] world tap at %.0f,%.0f: PREVIEW (DM_DOS2_TOUCH_WORLD_CONFIRM=1): tap the same spot again within 4 s to act", (double)x, (double)y);
         return;
     }
-    w3.prev_until = 0; w3.x = x; w3.y = y; w3.ph = 1; w3.polls = 0; g_n_w3click++;
+    w3.prev_until = 0; w3.x = x; w3.y = y; w3.ph = 1; w3.polls = 0; w3.fast = 0; g_n_w3click++;
     dt_move(mgr, x, y);
     if (g_dbg) LOG("[touch] world tap at %.0f,%.0f: PC click (left down after %d poll(s) with the cursor there, up two polls later; running task type %d)", (double)x, (double)y, g_w3_settle,
                    dm_dos2_touch_world_run_type());
 }
 static void dt_w3_poll(void *mgr) {   // every pad poll
     const uint64_t now = dt_ms();
-    if (w3.ph == 1 && ++w3.polls >= g_w3_settle) { dt_move(mgr, w3.x, w3.y); g_w3_kind = 2; dt_button(mgr, ID_LEFT, 1); g_w3_kind = 1; w3.ph = 2; w3.polls = 0; }
+    if (w3.ph == 1 && ++w3.polls >= (w3.fast ? 1 : g_w3_settle)) { dt_move(mgr, w3.x, w3.y); g_w3_kind = 2; dt_button(mgr, ID_LEFT, 1); g_w3_kind = 1; w3.ph = 2; w3.polls = 0; }
     else if (w3.ph == 3 && ++w3.polls >= g_w3_settle) {   // placement tap -> pad A with the pad's target at the finger
         const int how = dm_dos2_touch_world_place_mode(), pv = dm_dos2_touch_world_place_preview();
         const int ready = how == 2 || (dm_dos2_touch_world_place_ready() && (pv == w3.ptype || now - w3.place_t > 500));   // point 5: preview 10 (aim: its type) back (or give it 0.5 s)
@@ -570,7 +570,7 @@ static void dt_w3_poll(void *mgr) {   // every pad poll
         } else if (now - w3.place_t > 1200) { w3.ph = 0; dm_dos2_touch_world_place_hold(0); LOG("[touch] placement tap: given up after 1.2 s (point %s, preview task type %d)",
                                                                                                  dm_dos2_touch_world_place_ready() ? "known" : "not known", pv); }
     }
-    else if (w3.ph == 2 && ++w3.polls >= 2) { g_w3_kind = 2; dt_button(mgr, ID_LEFT, 0); g_w3_kind = 1; w3.ph = 0; if (w3.hover_until < now + (uint64_t)g_w3_after_ms) w3.hover_until = now + (uint64_t)g_w3_after_ms; }
+    else if (w3.ph == 2 && ++w3.polls >= (w3.fast ? 1 : 2)) { g_w3_kind = 2; dt_button(mgr, ID_LEFT, 0); g_w3_kind = 1; w3.ph = 0; w3.fast = 0; if (w3.hover_until < now + (uint64_t)g_w3_after_ms) w3.hover_until = now + (uint64_t)g_w3_after_ms; }
     if (w3.hover_until && now >= w3.hover_until) w3.hover_until = 0;
 }
 static void dt_w3_sync(int st, int wact) {   // the PC picking window: a world finger that is not a stick yet, a click in flight, the time after it / a preview
@@ -843,6 +843,28 @@ static void dt_t_poll(void *mgr) {
         static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: long press with %d fingers = the iPad's LongPress%dFingers: no PC twin in keyboard_1.json, nothing sent", tm.nmax, tm.nmax);
     }
 }
+// hle_dos2_touchui_hud.c (UI mode TOUCH, game thread, from hotBar_p's dmAimBtn(1)): CONFIRM of a prepared skill / the action plate = the PC
+// left click at a WORLD point through the world tap's own click (phone run 21.11, "the confirm button lags": the old click of the HUD module
+// went out 30 ms per step with no world mark - tw_input took its Action1 for "a UI gesture" (the finger's tap on CONFIRM 50 ms before) and kept
+// it from the input controller, and when its point was the CONFIRM circle itself the click went back to CONFIRM). Now: the cursor there and
+// the PC picking window open at once, left down on the next poll and up on the one after (Action1 marked as the world click), and the route
+// hook lets both buttons pass every UI object (dm_dos2_route_world_click). 1 = queued.
+void dm_dos2_route_world_click(void);
+int dm_dos2_touch_world_click(float x, float y);
+int dm_dos2_touch_world_click(float x, float y) {
+    if (!g_on || !g_w3 || !g_main) return 0;
+    void *mgr = dt_mgr();
+    if (!mgr) return 0;
+    if (w3.ph == 2) { g_w3_kind = 2; dt_button(mgr, ID_LEFT, 0); g_w3_kind = 1; w3.ph = 0; }   // a click still down: up first
+    w3.prev_until = 0; w3.x = x; w3.y = y; w3.ph = 1; w3.polls = 0; w3.fast = 1; g_n_w3click++;
+    dt_move(mgr, x, y);
+    dm_dos2_touch_world_hover(1);   // the picking follows the cursor from this frame on (dt_w3_sync keeps it while the click runs)
+    dm_dos2_route_world_click();
+    if (g_dbg) LOG("[touch] host world click at %.0f,%.0f (CONFIRM / action plate): cursor there now, left down on the next poll, up on the one after, past the UI", (double)x, (double)y);
+    return 1;
+}
+int dm_dos2_touch_world_click_busy(void);   // a host / world click is still running (1)
+int dm_dos2_touch_world_click_busy(void) { return w3.ph == 1 || w3.ph == 2; }
 // a one-finger tap on the world = the PC click at the finger (dt_w3_tap without the placement / aim diversion: in the PC input mode the item move
 // and the throw follow the cursor themselves and Action1's release places / throws)
 static void dt_t_world_tap(void *mgr, float x, float y) {
@@ -1139,7 +1161,9 @@ static void dt_step(void *mgr, const dt_ev *e) {
             const int rel = dt_t1_release(hypotf(x - g.sx, y - g.sy), e->t - g.t0, slop, g_t_slong_ms);
             const float cx = g.dtap ? g_t_tap_x : x, cy = g.dtap ? g_t_tap_y : y;
             dt_move(mgr, cx, cy);
-            if (rel == DT_REL_TAP) { dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0); { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } dt_t_note_tap(cx, cy, "UI"); }
+            int dm_dos2_touchui_hud_corner(float x, float y);   // run 21.11: the top-right corner of an open panel = its close (hle_dos2_touchui_hud.c)
+            if (rel == DT_REL_TAP && !g.dtap && dm_dos2_touchui_hud_corner(cx, cy)) dt_t_note_tap(cx, cy, "UI: a panel's close corner");
+            else if (rel == DT_REL_TAP) { dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0); { void dm_dos2_touchui_ie_gesture(int kind); dm_dos2_touchui_ie_gesture(0); } dt_t_note_tap(cx, cy, "UI"); }
             else { g_n_t_tip++; if (g_dbg) LOG("[touch] TOUCH: UI short long press over at %.0f,%.0f (%llu ms): tooltip (hover) only, no click", (double)x, (double)y, (unsigned long long)(e->t - g.t0)); }
         }
         else if (g.st == G_PENDING && e->ph == EV_UP) { dt_move(mgr, x, y); dt_button(mgr, ID_LEFT, 1); dt_button(mgr, ID_LEFT, 0);

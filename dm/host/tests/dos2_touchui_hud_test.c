@@ -26,8 +26,30 @@ int main(void) {
     { const float s = 1.562f, pitch = 58 * 0.9494f * s, w = 50 * 0.9494f * s, h = 50 * s; assert(fabsf(pitch - 86) < 0.2f && fabsf(w - 74.1f) < 0.2f && fabsf(h - 78.1f) < 0.2f); }
     // dmSide: the iPad column's order -> the PC hot bar button ids
     assert(hu_side_panel(1) == -1 && hu_side_panel(0) == -1 && hu_side_panel(8) == -1);
-    assert(hu_side_panel(2) == 4 && hu_side_panel(3) == 0 && hu_side_panel(4) == 1 && hu_side_panel(5) == 2 && hu_side_panel(6) == 3 && hu_side_panel(7) == 5);
-    { int seen = 0; for (int c = 2; c <= 7; c++) seen |= 1 << hu_side_panel(c); assert(seen == 0x3f); }   // every PC button exactly once
+    // run 21.11: hot bar id 0 is the GAME MENU (the armour icon opened the pause menu); the sheet and the inventory share id 1 (one engine toggle)
+    assert(hu_side_panel(2) == 4 && hu_side_panel(3) == 1 && hu_side_panel(4) == 1 && hu_side_panel(5) == 2 && hu_side_panel(6) == 3 && hu_side_panel(7) == 5);
+    { int seen = 0; for (int c = 2; c <= 7; c++) seen |= 1 << hu_side_panel(c); assert(seen == 0x3e); }   // every panel button, never the game menu (0)
+    {   // the pair's engine ops: one toggle (opens both unless both are up, then closes both) + a hide per half
+        const int S = HU_P_SHEET, I = HU_P_INV, B = S | I; int pr, hd;
+        hu_pair_ops(0, I, &pr, &hd); assert(pr == 1 && hd == S);        // the bag: both open, the sheet goes
+        hu_pair_ops(0, S, &pr, &hd); assert(pr == 1 && hd == I);        // the armour: both open, the inventory goes
+        hu_pair_ops(0, B, &pr, &hd); assert(pr == 1 && hd == 0);        // the equipment view
+        hu_pair_ops(I, B, &pr, &hd); assert(pr == 1 && hd == 0);        // the doll button from the inventory: the toggle opens both (not both were up)
+        hu_pair_ops(I, S, &pr, &hd); assert(pr == 1 && hd == I);
+        hu_pair_ops(I, 0, &pr, &hd); assert(pr == 0 && hd == I);        // the inventory alone closes by its hide (the toggle would OPEN both)
+        hu_pair_ops(B, 0, &pr, &hd); assert(pr == 1 && hd == 0);        // both up: the PC's own close
+        hu_pair_ops(B, I, &pr, &hd); assert(pr == 0 && hd == S);        // the equipment view back to the plain inventory
+        hu_pair_ops(I, I | HU_P_SKILLS, &pr, &hd); assert(pr == 0 && hd == 0);   // other bits are not the pair's
+    }
+    {   // run 21.11: the corner of an open window closes it (2400 x 1080: sw 2400 design px; cell 93)
+        const float sw = 2400;
+        assert(hu_corner_code(HU_P_JOURNAL, 0, 1200 + 598 - 40, 40, sw, 93) == 7 && hu_corner_code(HU_P_JOURNAL, 0, 1200 + 598 - 200, 40, sw, 93) == 0);
+        assert(hu_corner_code(HU_P_SKILLS, 0, 1200 + 605, 60, sw, 93) == 5 && hu_corner_code(HU_P_SKILLS, 0, 1200 + 605, 300, sw, 93) == 0);
+        assert(hu_corner_code(HU_P_INV, 0, 1200 + 716 - 30, 30, sw, 93) == 4);                 // the inventory: 770 x 1.86 = 1432 wide
+        assert(hu_corner_code(HU_P_INV, 0, 1200 - 716 + 30, 30, sw, 93) == 0);                 // its LEFT corner is not a close
+        assert(hu_corner_code(HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, 1200 + 920, 20, sw, 93) == 8);
+        assert(hu_corner_code(0, 0, 2300, 20, sw, 93) == 0);
+    }
     // the aimed point: where the cursor rested before the finger went to the button
     hu_aim a = {0}; float x, y;
     assert(!hu_aim_point(&a, &x, &y));

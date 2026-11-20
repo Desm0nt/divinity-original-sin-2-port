@@ -315,6 +315,7 @@ def hotbar(data):
             ('getlocal', 2), ('callpropvoid', P('endFill'), 0), ('L', 'h%d' % k)]
     for k, (name, c) in enumerate((('dmConfirm_mc', 1), ('dmCancel_mc', 0))):
         code += d.child(name, 1) + [('getlocal', 1), ('iffalse', 'b%d' % k)] + arm(d, 1, c) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'b%d' % k)]
+    code += d.get('hotbar_mc', 'hotkeys_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nk'), ('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'nk')]
     code += d.child('dmDeck_mc', 1) + [('getlocal', 1), ('iffalse', 'nd')] + arm(d, 1, 30) + [('L', 'nd')]
     for k in range(1, 6):
         code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 'dk%d' % k)] + arm(d, 1, 30 + k) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'dk%d' % k)]
@@ -349,6 +350,12 @@ def hotbar(data):
             ('getlocal', a), ('iffalse', 'off')] + d.ei('dmAim', num(1)) + [('returnvoid',), ('L', 'off')] + d.ei('dmAim', num(0)) + [('L', 'end'), ('returnvoid',)]
         return c
     d.wrap('showActiveSkill', 'dmSasOrig', sas)
+    # phone run 21.11: no PC keyboard labels (the iPad's hot bar has none) - the slot numbers 1..9 0 - = (hotbar_mc.hotkeys_mc, filled by the
+    # engine through setText / setAllText) are hidden in dmHook and get no text, the buttons' letters (M L X: setButton(id, text, tooltip) ->
+    # hotBarButton.btn_txt) get an empty text; the tooltips stay
+    d.wrap('setText', 'dmSetTextOrig', lambda n: HEAD + [('returnvoid',)])
+    d.wrap('setAllText', 'dmSetAllTextOrig', lambda n: HEAD + [('returnvoid',)])
+    d.wrap('setButton', 'dmSetButtonOrig', lambda n: HEAD + [('getlocal0',), ('getlocal1',), ('pushstring', S('')), ('getlocal3',), ('callpropvoid', P('dmSetButtonOrig'), 3), ('returnvoid',)])
     d.done()
     return swf.write(), dict(placed=placed, defs=ndefs, methods=d.made)
 
@@ -526,6 +533,8 @@ def check(src):
             say("'dmAimBtn'" in dis('dmBAct') and all((n.encode() + b'\0') in names for n in ('dmConfirm_mc', 'dmCancel_mc')), 'CONFIRM %s / cancel %s on the root, tap -> dmAimBtn(1 | 0)' % (CONFIRM, CANCEL))
             t = dis('dmBAct'); say('dmDeckShow' in t and 'cycleHotBar' in t and all((('dmDeck%d_mc' % k).encode() + b'\0') in names and (('dmInd%d_mc' % k).encode() + b'\0') in names for k in range(1, 6))
                                    and (b'dmDeck_mc\0') in names and 'currentHotBarIndex' in dis('dmTick'), 'deck list (button, 5 plates -> cycleHotBar) and the deck indicator (5 bars, enterFrame)')
+            say('dmSetButtonOrig' in dis('setButton') and "''" in dis('setButton') and 'dmSetTextOrig' not in dis('setText').split('returnvoid')[0] and 'hotkeys_mc' in dis('dmHook'),
+                'no PC keyboard labels: slot numbers hidden (hotkeys_mc), setText / setAllText dropped, setButton with an empty letter')
             t = dis('showActiveSkill'); say('dmPlate' in t and str(PLATE_BASE) in t and str(PLATE_HIDE) in t, 'action plate: showActiveSkill(%d + x * %d + y) puts CONFIRM %d px above the point, %d hides' % (PLATE_BASE, PLATE_MUL, PLATE_UP, PLATE_HIDE))
         elif o == 'combatLog_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and "'center'" in t and "'center'" in dis('onEventResize'), 'onEventInit = original + setPosition center / screen / center; onEventResize the same unless moved')

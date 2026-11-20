@@ -228,4 +228,52 @@ static inline unsigned dt_cam_keys(float bx, float by, float br, int invert, int
     const int x = dt_hold_dir(bx, eps) * (invert ? -1 : 1), y = dt_hold_dir(by, eps) * (invert ? -1 : 1), r = dt_hold_dir(br, eps) * (swap ? -1 : 1);
     return (x > 0 ? DT_K_A : x < 0 ? DT_K_D : 0) | (y > 0 ? DT_K_W : y < 0 ? DT_K_S : 0) | (r > 0 ? DT_K_ROTR : r < 0 ? DT_K_ROTL : 0);
 }
+// ---- review of the phone run 20.11 (docs/dos2/TOUCH_MODES_PLAN.md "Прогон 20.11"; host test dm/host/tests/dos2_touch_t_gesture_test.c) ----
+// UI mode TOUCH: the keyboard twin of a host pad pulse. The mode byte is 0 there (the pad's records are filtered for most listeners) and the
+// bindings are Eoc/keyboard_1.json (no c:a / c:b), so a pad pulse did nothing; its key does what the pad's button means in a menu
+// (keyboard_1.json of the iPad = the Switch's minus the mouse buttons). Raw key ids of the name table main+0x2974b10 (index - 2, from main.raw's
+// .rela.dyn). Button bits = dm_input.h DM_BTN_* (nn::hid::NpadButton). DT_PADKEY_NONE = no sure twin: nothing is sent.
+enum { DT_PADKEY_NONE = 0xffff, DT_KEY_RETURN = 0x00, DT_KEY_ESCAPE = 0x01, DT_KEY_M = 0x30, DT_KEY_RIGHT = 0x56, DT_KEY_LEFT = 0x57, DT_KEY_DOWN = 0x58, DT_KEY_UP = 0x59 };
+static inline uint32_t dt_pad_key(uint64_t mask) {
+    if (mask & (1u << 0)) return DT_KEY_RETURN;    // A     -> UIAccept <- key:return
+    if (mask & (1u << 1)) return DT_KEY_ESCAPE;    // B     -> UICancel / ToggleInGameMenu <- key:escape
+    if (mask & (1u << 13)) return DT_KEY_UP;       // up    -> UIUp <- key:up
+    if (mask & (1u << 15)) return DT_KEY_DOWN;     // down  -> UIDown <- key:down
+    if (mask & (1u << 12)) return DT_KEY_LEFT;     // left  -> UILeft <- key:left
+    if (mask & (1u << 14)) return DT_KEY_RIGHT;    // right -> UIRight <- key:right
+    if (mask & (1u << 11)) return DT_KEY_M;        // '-'   -> ToggleMap <- key:m
+    return DT_PADKEY_NONE;                          // X / Y / L / R / ZL / ZR / + / sticks: no sure twin
+}
+// UI mode TOUCH, every pad poll: the held camera keys (pan w / a / s / d, rotation delete / end - delete is UIDelete too -, zoom pageup /
+// pagedown, the alt / shift toggles) are let go and the action plate hidden while this is true. st = hle_dos2_touch.c g_ui_state: bit 2 known,
+// bit 1 in game, bit 0 a menu / panel / dialog / modal window is up
+static inline int dt_t_away(int st) { return (st & 4) && ((st & 1) || !(st & 2)); }
+// UI mode TOUCH (mode byte 0): the PC windows that make a finger the UI's (a menu for the gestures; hle_dos2_touchui_route.c dm_dos2_route_world_ok):
+// inventory 0x74, character sheet 0x77, skills 0x29, crafting 0x66, journal / map 0x16, examine 0x68, trade 0x2e, waypoints 0x2f, dialog 0xe,
+// reward 0x88, item splitter 0x15, the PC context menus 0xa / 0xb. Not the HUD (hot bar 0x28, minimap 0x1e, portraits 0x26, status console
+// 0x75, combat log 7, the right side 0x8d), not the tooltip 0x2c / worldTooltip 0x30, not the tutorial box 0x37 (an overlay, as 0x5e)
+// UI mode TOUCH, a finger whose world probe press a HUD movie took (hot bar slot, portrait, minimap ...; the press is down already) and that has
+// not moved past the slop: what the time held means. DT_TUI_CLICK = a tap (the release clicks there), DT_TUI_TIP = the short long press (the
+// hover tooltip only: the release must not click - it is sent with the cursor off the element), DT_TUI_LONG = the long press (the left is let go
+// off the element, then the right click at the finger: ContextMenu / the portrait's openCharInventory). long_ms <= slong_ms = no tooltip step.
+enum { DT_TUI_CLICK = 0, DT_TUI_TIP = 1, DT_TUI_LONG = 2 };
+static inline int dt_tui_state(uint64_t held_ms, int slong_ms, int long_ms) {
+    if (held_ms >= (uint64_t)(long_ms > 0 ? long_ms : 0)) return DT_TUI_LONG;
+    return slong_ms > 0 && slong_ms < long_ms && held_ms >= (uint64_t)slong_ms ? DT_TUI_TIP : DT_TUI_CLICK;
+}
+static inline int dt_pc_menu_type(uint32_t ty) {
+    switch (ty) { case 0x74: case 0x77: case 0x29: case 0x66: case 0x16: case 0x68: case 0x2e: case 0x2f: case 0x0e: case 0x88: case 0x15: case 0x0a: case 0x0b: return 1; default: return 0; }
+}
+// Phone run 21.11 ("a button under the open window gets pressed, random windows open"): a PC window answers "not handled" for a press on its
+// background (Iggy hits only elements with mouse code), so the UI manager's walk handed the press on, as THE TARGET, to everything below it in
+// the walk (minimap, overhead, combat log, the world). The windows that stop the mouse for what lies below them (hle_dos2_touchui_route.c):
+// the PC panels of dt_pc_menu_type and the containers 9 / 0x25 - not the small PC context menus 0xa / 0xb (a click beside them is the PC's
+// own "close it and act there").
+static inline int dt_pc_blocker(uint32_t ty) { return (dt_pc_menu_type(ty) && ty != 0x0a && ty != 0x0b) || ty == 0x09 || ty == 0x25; }
+// The walk visits the object list from its LAST entry (the top) to the first. Which index is the lowest visible blocker (-1 = none): every
+// object below it gets "an upper object took it" for a mouse event; the blockers above it (two halves of one view) still take their turn.
+static inline int dt_lowest_blocker(const uint32_t *types, const uint8_t *visible, int n) {
+    for (int i = 0; i < n; i++) if (visible[i] && dt_pc_blocker(types[i])) return i;
+    return -1;
+}
 #endif
