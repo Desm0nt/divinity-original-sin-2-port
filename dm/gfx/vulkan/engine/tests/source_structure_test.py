@@ -1124,7 +1124,7 @@ def nr02_check():
     ni = body(host, 'void dm_dos2_nr_install(void) {')
     gate = 'if (mode != 1 && mode != 2) return;'
     assert ni.index(gate) < ni.index('nk_mode()') < ni.index('nk_install(') and ni.count('nk_install(') == 1, 'NR-02: DM_NR_KEY is read and armed only behind the DM_NR gate'
-    assert 'if (key) nk_install(m, key, rc == 0);' in ni and 'dn_install_rc(key ? &k_nk_rc : &k_nr_rc)' in ni, 'NR-02: off = the NR-01 handler and no key install'
+    assert 'if (key) nk_install(m, key, rc == 0);' in ni and 'dn_install_rc(key ? &k_nk_rc : ev ? &k_nr_rc_ev : &k_nr_rc)' in ni, 'NR-02: off = the NR-01 handler and no key install'   # [DOS2] NR-NATIVE step E: + its handler pair when DM_NRN_EV is armed
     assert re.search(r'NR_HOOK nr_h_tf\(NR_A\) \{\s*nk_draw\(a0, \(uint64_t\)\(uintptr_t\)__builtin_return_address\(0\)\);\s*return g_o_tf\(NR_F\);\s*\}', inc), \
         'NR-02: the flush hook reads, then calls its own trampoline once with the forwarded arguments'
     assert body(inc, 'k_nr_key_site[] =').count('(void *)nr_h_tf, &g_o_tf}') == 1, 'NR-02: nr_h_tf is listed in k_nr_key_site'
@@ -3986,6 +3986,53 @@ def nrn_check():   # [DOS2] NR-NATIVE DM_NRN_<PASS> (docs/dos2/nr/NR-NATIVE.md):
     assert (root / 'gfx/vulkan/engine/tests/nr_nrn_test.c').is_file(), 'NRN: the host test exists'
     return 'NR-NATIVE DM_NRN_<PASS>: default 0 by the policy function / safe-mode step 2 / not set by the app; =1 executes a draw from the row of its card through the answered half of nrz3 (step B; never a draw the prologue changed), =2 compares the row with the path; a published card of a pass at 1 is written SHORT (no state record, no texture bind of its flush: the backend writes exactly what the record names from the image of the card); off = the old record byte for byte (flag, size and tail only with a card); the card reads the renderer\'s own cache with the volatile words masked; the verify notes after the lane\'s commands and records nothing'
 print('PASS: '+nrn_check())
+
+def nrnev_check():   # [DOS2] NR-NATIVE step E DM_NRN_EV (docs/dos2/nr/NR-NATIVE-E.md): resources by engine events instead of page tracking
+    g = (root / 'gfx/vulkan/engine/xbg_game.cpp').read_text(encoding='utf-8')
+    b = (root / 'gfx/vulkan/engine/xbg_nr_nrn_ev.inc').read_text(encoding='utf-8')
+    h = (root / 'gfx/nr/nr_nrn_ev.h').read_text(encoding='utf-8')
+    f = (root / 'host/hle_dos2_nrn_ev.inc').read_text(encoding='utf-8')
+    nr = (root / 'host/hle_dos2_nr.c').read_text(encoding='utf-8')
+    key = (root / 'host/hle_dos2_nr_key.inc').read_text(encoding='utf-8')
+    shc = (root / 'gfx/vulkan/engine/xbg_nr_shc.inc').read_text(encoding='utf-8')
+    buf = (root / 'gfx/vulkan/engine/xbg_nr_buf.inc').read_text(encoding='utf-8')
+    pol = (root / 'gfx/vulkan/engine/xbg_vendor_policy.h').read_text(encoding='utf-8')
+    safe = (root / 'gfx/vulkan/engine/xbg_safe_mode.h').read_text(encoding='utf-8')
+    # default 0 by the policy function, on both halves; safe-mode step 2; the app sets nothing
+    assert 'inline int xbg_nrn_ev_default(){return 0;}' in pol, 'NRN-EV: the policy default is 0 on every family'
+    assert 'atoi(e):xbg_nrn_ev_default();' in b and b.count('getenv("DM_NRN_EV")') == 1, 'NRN-EV: the backend reads DM_NRN_EV once, default by the policy function'
+    assert 'const int v = e && *e ? atoi(e) : 0;' in f and 'if (v != 1 && v != 2)' in f, 'NRN-EV: the host half is off unless asked, and only 1 / 2 exist'
+    assert 'add("DM_NRN_EV","0");' in safe, 'NRN-EV: safe-mode step 2 forces it 0'
+    for app in (root / 'android').rglob('*.java'):
+        assert 'DM_NRN_EV' not in app.read_text(encoding='utf-8', errors='ignore'), 'NRN-EV: the app does not set the switch (%s)' % app.name
+    # off = nothing: every line of the host is behind the one load, the three hooks are installed only when armed, the backend's
+    # places are behind nrnev::mode
+    assert '#define NRNEV_ON() __builtin_expect(g_nrnev, 0)' in f and f.count('if (NRNEV_ON()') == 5, 'NRN-EV: every host line is one load and a branch while the switch is off'
+    assert nr.count('NRNEV_CREATED(') == 2 and nr.count('NRNEV_DESTROYED(') == 2 and nr.count('NRNEV_TEX(') == 1 and nr.count('NRNEV_RC(list, op, pkt);') == 1, 'NRN-EV: creation (2), destroy (2), texture (1) and the opcode line (1) of hle_dos2_nr.c'
+    assert nr.index('NRNEV_CREATED(NRS_KIND_VB') > nr.index('const uint64_t v = g_o_vb(NR_F);'), 'NRN-EV: the creation event comes after the original (the initial data is in)'
+    assert 'k_nrnev_site[] = {' in f and 'k_nrnev_site' not in nr and f.index('if (!v) return 0;') < f.index('dn_hook(m, s->off, s->pro, s->hook, &o)'), 'NRN-EV: its three hooks are its own table, installed only when the switch is 1 / 2'
+    assert 'dn_install_rc(key ? &k_nk_rc : ev ? &k_nr_rc_ev : &k_nr_rc)' in nr and 'nrnev_rc_post(list, op, pkt, len);' in key, 'NRN-EV: the post handler only when armed (and inside the key handler)'
+    assert f.count('nrnev_cpu(NRNE_K_VB, h, 1);') == 2 and f.count('nrnev_cpu(NRNE_K_IB, h, 1);') == 2 and 'op == 0x2f || op == 0x33 || op == 0x2c' in f, 'NRN-EV: a CPU copy is an event before AND after the memcpy'
+    assert 'nrn_ev_updated_slow(g_nrnev_t, kind, handle)' in f, 'NRN-EV: a CPU copy into a handle the handle table lost still moves the journal of its range'
+    assert 'if(__builtin_expect(nrnev::mode!=0,0))nrnev::wrote(address,bytes);' in g and g.index('nrnev::wrote(address,bytes);') > g.index('void snapshot_invalidate(uint64_t address,uint64_t bytes){'), 'NRN-EV: the backend journals its own writes from snapshot_invalidate'
+    assert g.count('nrnev::wrote(uint64_t(uintptr_t(p)),') == 2, 'NRN-EV: a pool that comes or goes is an event of its range'
+    assert g.index('#include "xbg_nr_nrn_ev.inc"') < g.index('#include "xbg_nr_buf.inc"') < g.index('#include "xbg_nr_shc.inc"'), 'NRN-EV: included ahead of its consumers'
+    # the consumers: the shadow cache's version after the no-CPU class, before any tracker call; =2 never takes the word
+    rv = shc[shc.index('void rv(uint64_t a,uint64_t n,Ver &V){'):shc.index('void texver(')]
+    assert rv.count('nrnev::rv(a,n,V.p)') == 1 and rv.index('if(m.cls==1)') < rv.index('nrnev::rv(a,n,V.p)') < rv.index('if(cpuw==2)') < rv.index('nvn_dirty_version'), 'NRN-EV: rv() asks the events before the tracker'
+    brv = b[b.index('bool rv(uint64_t a,uint64_t n,uint64_t &vp){'):b.index('// ---- NR-06')]
+    assert brv.count('return true;') == 1 and brv.index('if(mode==1)') < brv.index('return true;') < brv.index('// verify:') and 'if(!ep)' in brv and brv.index('if(!ep)') < brv.index('if(mode==1)'), 'NRN-EV: only =1 takes the word, only for a covered range; =2 compares and lets the tracker decide'
+    assert 'vp=mix(mix(vp,0x4e524e45564e5431ull),ep);' in brv, 'NRN-EV: the epoch is tagged (never equal to a tracker word)'
+    assert 'nvn_dirty_protect' not in b and 'mprotect' not in b.split('namespace nrnev{')[1], 'NRN-EV: the backend half protects no page'
+    fu = buf[buf.index('bool first_use(nr_sbuf *e){'):buf.index('// snapshot()' + chr(39) + 's first step')]
+    assert fu.count('nrnev::st_copy(e->lo,bytes)') == 1 and fu.index('nrnev::st_copy(e->lo,bytes)') < fu.index('memcpy(c.mapped+k.off,p,size_t(bytes));'), 'NRN-EV: the epoch of a static copy is taken BEFORE its bytes are read'
+    assert fu.count('nrnev::mode==2,0))nrnev::st_demoted(') == 1 and fu.count('nrnev::mode==1,0) && nrnev::st_stale(e->lo,bytes)') == 1, 'NRN-EV: static copies - =2 classifies a tracker demote, =1 drops a copy by its epoch'
+    # the table: the scratch buffer is never covered, a reader that met a writer is not answered, the word carries the buffer's identity
+    assert 'if (nrne_meta_cls(e.meta) == NRNE_C_SCRATCH && NRNE_MUTATE != 8) return 0;' in h and 'if ((s1 & 1) && NRNE_MUTATE != 5) return 0;' in h and 'e.lo * 0x9E3779B97F4A7C15ull ^ e.meta' in h, 'NRN-EV: scratch / writer inside = no epoch; the epoch carries the entry'
+    inc = [l for l in h.splitlines() if l.startswith('#include')]
+    assert inc == ['#include <stddef.h>', '#include <stdint.h>', '#include <string.h>'], 'NRN-EV: nr_nrn_ev.h is pure C'
+    return 'NR-NATIVE step E DM_NRN_EV: default 0 by the policy function / safe-mode step 2 / not set by the app; off = one load at each host line, no hook, no table; creation after the original, CPU copies before and after; the backend journals its own writes in stream order; rv() asks the events before the tracker, =1 takes a tagged epoch only for a range wholly inside a non-scratch engine buffer, =2 only compares; a static copy takes its epoch before it reads; the backend half protects no page'
+print('PASS: '+nrnev_check())
 def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/dos2/nr/NR-ZERO.md section 39, branch dos2-z11)
     z = (root / 'gfx/vulkan/engine/xbg_nr_z8.inc').read_text(encoding='utf-8')
     h = (root / 'gfx/nr/nr_z8.h').read_text(encoding='utf-8')

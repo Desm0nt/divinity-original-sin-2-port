@@ -1718,8 +1718,10 @@ inline SnapFront &snap_front_for(int which,uint64_t a,uint64_t n){uint64_t x=a*0
 void snapshot_reset(){snapshot_maps_reset();snapshot_maxlen=0;desc_memo_reset();++texel_write_epoch;++snapshot_epoch;last_pass_reset();}   // the guest may write memory between submissions: texel copies are re-verified
 namespace nrbuf{void cpu_write_hook(uint64_t a,uint64_t n);}   // [DOS2] NR-06 (xbg_nr_buf.inc)
 namespace nrshc{extern int mode;void wrote(uint64_t a,uint64_t n);}   // [DOS2] NR-SHCACHE shc4 (xbg_nr_shc.inc): the write journal
+namespace nrnev{extern int mode;void wrote(uint64_t a,uint64_t n);}   // [DOS2] NR-NATIVE step E (xbg_nr_nrn_ev.inc): the event journal
 void snapshot_invalidate(uint64_t address,uint64_t bytes){
     if(__builtin_expect(nrshc::mode>0,0))nrshc::wrote(address,bytes);   // [DOS2] NR-SHCACHE shc4: every byte range the backend writes into guest memory versions the draws that read it
+    if(__builtin_expect(nrnev::mode!=0,0))nrnev::wrote(address,bytes);   // [DOS2] NR-NATIVE step E: DM_NRN_EV - the backend's own writes are events of the journal, in stream order
     nrbuf::cpu_write_hook(address,bytes);   // [DOS2] NR-06 DM_NR_BUF: mirror granules re-copy / hold, static copies demote
     ++snap_invalidations;if(ab_off("snapinval"))++snapshot_epoch;
     if(address<texel_hi && address+bytes>texel_lo)texel_touch(address,bytes);
@@ -2195,6 +2197,7 @@ bool view(uint64_t address,uint64_t bytes,VkDeviceSize align,Buffer &out){
 }
 }
 bool overlaps_pending(uint64_t address,uint64_t bytes);
+#include "xbg_nr_nrn_ev.inc"   // [DOS2] NR-NATIVE step E: DM_NRN_EV - resources by engine events instead of page tracking (namespace nrnev; before NR-06, whose static copies ask it)
 #include "xbg_nr_buf.inc"   // [DOS2] NR-06 DM_NR_BUF: the constant ring mirror / in place, static vertex / index copies (namespace nrbuf)
 bool snap_no_sync=false;int snap_how=0;   /* [NR-ZERO Z3c] how snapshot() answered: 1 a static copy of NR-06, 2 a zero-copy view in place (set there, cleared by nrzx::view) */
 bool gpu_merge_pending(uint64_t base,uint64_t bytes,const std::function<Buffer()> &alloc,Buffer &dst);   // [DOOM] GPU-indirect index range: overlapping pending results are arguments, not indices
@@ -10227,8 +10230,8 @@ extern "C" void xbg_game_get_stats(xbg_game_stats *out){if(out)*out={stats.submi
 extern "C" void xbg_game_frame_counters(xbg_frame_counters *out){if(out)*out={hud::pipelines.load(),hud::pipeline_ns.load(),hud::shaders.load(),hud::shader_ns.load(),hud::uploads.load(),hud::reuploads.load(),hud::upload_bytes.load(),hud::upload_ns.load()};}
 extern "C" void xbg_game_set_frame(uint64_t frame){hud::frame.store(frame,std::memory_order_relaxed);}
 extern "C" double xbg_game_gpu_ms(uint64_t frame){const hud::Gpu &g=hud::gpu[frame%64];if(g.frame.load(std::memory_order_acquire)!=frame)return -1;return double(g.ns.load(std::memory_order_acquire))/1e6;}
-static void xbg_legacy_pool_add_now(void *p,size_t n){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&n,"Invalid NVN pool");if(__builtin_expect(nrshc::mode>0,0))nrshc::pool_event(uint64_t(uintptr_t(p)),n);   /* [DOS2] NR-SHCACHE shc4 */pools[uintptr_t(p)]=n;cmd_range_lo=0;cmd_range_bytes=0;auto epoch=provenance.pool(uint64_t(p),true);provenance_log("POOL_ADD mem=%p bytes=%zu epoch=%llu",p,n,epoch);}
-static void xbg_legacy_pool_del_now(void *p){std::lock_guard<std::recursive_mutex> lock(mutex);provenance_log("POOL_DEL mem=%p epoch=%llu",p,provenance.epoch(uint64_t(p)));provenance.pool(uint64_t(p),false);{auto pit=pools.find(uintptr_t(p));if(pit!=pools.end()){vcache::drop_pool(uintptr_t(p),pit->second);nrbuf::drop_pool(uintptr_t(p),pit->second);if(__builtin_expect(nrshc::mode>0,0))nrshc::pool_event(uint64_t(uintptr_t(p)),pit->second);}}zc::unmap_pool(uintptr_t(p));pools.erase(uintptr_t(p));cmd_range_lo=0;cmd_range_bytes=0;}
+static void xbg_legacy_pool_add_now(void *p,size_t n){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&n,"Invalid NVN pool");if(__builtin_expect(nrshc::mode>0,0))nrshc::pool_event(uint64_t(uintptr_t(p)),n);   /* [DOS2] NR-SHCACHE shc4 */if(__builtin_expect(nrnev::mode!=0,0))nrnev::wrote(uint64_t(uintptr_t(p)),n);   /* [DOS2] NR-NATIVE step E */pools[uintptr_t(p)]=n;cmd_range_lo=0;cmd_range_bytes=0;auto epoch=provenance.pool(uint64_t(p),true);provenance_log("POOL_ADD mem=%p bytes=%zu epoch=%llu",p,n,epoch);}
+static void xbg_legacy_pool_del_now(void *p){std::lock_guard<std::recursive_mutex> lock(mutex);provenance_log("POOL_DEL mem=%p epoch=%llu",p,provenance.epoch(uint64_t(p)));provenance.pool(uint64_t(p),false);{auto pit=pools.find(uintptr_t(p));if(pit!=pools.end()){vcache::drop_pool(uintptr_t(p),pit->second);nrbuf::drop_pool(uintptr_t(p),pit->second);if(__builtin_expect(nrshc::mode>0,0))nrshc::pool_event(uint64_t(uintptr_t(p)),pit->second);if(__builtin_expect(nrnev::mode!=0,0))nrnev::wrote(uint64_t(uintptr_t(p)),pit->second);   /* [DOS2] NR-NATIVE step E */}}zc::unmap_pool(uintptr_t(p));pools.erase(uintptr_t(p));cmd_range_lo=0;cmd_range_bytes=0;}
 static void xbg_register_texture_now(const dpool_t *p,int id,const tex_t *t,const view_t *v){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&id>=0&&id<p->n&&t,"Invalid texture registration");auto &slot=textures[pool_key(p)][id];if(register_texture_record(slot,*t,v)){++memo_bump[0];note_reg(id);}}
 static void xbg_register_sampler_now(const dpool_t *p,int id,const samp_par *s){std::lock_guard<std::recursive_mutex> lock(mutex);need(p&&id>=0&&id<p->n&&s,"Invalid sampler registration");auto &slot=samplers[pool_key(p)][id];if(memcmp(&slot,s,sizeof(*s))){++memo_epoch;++memo_bump[1];}slot=*s;}
 static void xbg_legacy_tex_release_now(tex_t *t){std::lock_guard<std::recursive_mutex> lock(mutex);if(t){

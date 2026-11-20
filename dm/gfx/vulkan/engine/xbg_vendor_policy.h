@@ -175,6 +175,10 @@ inline int xbg_nr_z8_default(){return 0;}
 // target objects in one word) and the backend notes what was recorded for it. 0 on every family: =2 is a verify that costs the game
 // thread a hash a draw, =1 (the replay) is not built. The app never sets them; safe-mode step 2 forces every one to 0.
 inline int xbg_nrn_default(){return 0;}
+// [DOS2] NR-NATIVE step E (docs/dos2/nr/NR-NATIVE-E.md): DM_NRN_EV - a vertex / index range inside an engine buffer is versioned by the engine's
+// own events (creation, update, copy, destroy) instead of the dirty-page tracker. 0 on every family: =2 (the events against the tracker, a
+// difference decided by a hash of the bytes) has not run on a phone, so =1 is not proven. The app never sets it; safe-mode step 2 forces 0.
+inline int xbg_nrn_ev_default(){return 0;}
 // [DOS2] NR-ZERO Z8, the parts of section 28 on (each its own switch; all 0 on every family until the phone runs; the app sets none;
 // safe-mode step 2 forces 0): DM_NR_Z8_THREAD - the walk on a thread of its own instead of the submitting thread.
 inline int xbg_nr_z8_thread_default(){return 0;}

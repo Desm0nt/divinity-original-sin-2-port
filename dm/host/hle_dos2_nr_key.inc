@@ -104,7 +104,7 @@ static void nk_texture(uint64_t handle, uint64_t obj, unsigned views) {
 
 // ---- ExecuteRenderCommand: the opcode-55 handler of NR-01 + the list depth of this thread ----
 static void nk_rc_pre(uint64_t list, unsigned op, uint64_t pkt) { t_nk.rc++; nr_rc_pre(list, op, pkt); }
-static void nk_rc_post(uint64_t list, unsigned op, uint64_t pkt, uint64_t len) { (void)list; (void)op; (void)pkt; (void)len; if (t_nk.rc > 0) t_nk.rc--; }
+static void nk_rc_post(uint64_t list, unsigned op, uint64_t pkt, uint64_t len) { if (t_nk.rc > 0) t_nk.rc--; nrnev_rc_post(list, op, pkt, len); /* [DOS2] NR-NATIVE step E */ }
 static const dn_rc_handler k_nk_rc = {nk_rc_pre, nk_rc_post};
 
 // ---- NR-09: the identity only (g_nr_key == 3: DM_NR_DRAW without DM_NR_KEY). The same reads and tables as nk_draw below, without the

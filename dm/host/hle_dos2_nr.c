@@ -130,6 +130,7 @@ static void nrd_ident_lr(uint64_t r, uint64_t lr);
 static void nrd_ident_cmp(uint64_t r, uint64_t lr);
 static void nrd_report(uint64_t frames);
 static int nrn_on(void); static void nrn_rc55(uint64_t handle, uint64_t name); static void nrn_report(uint64_t frames);   // NR-NATIVE (hle_dos2_nrn.inc)
+static void nrnev_report(uint64_t frames);   // [DOS2] NR-NATIVE step E (hle_dos2_nrn_ev.inc)
 // NR-09S (hle_dos2_nr_state.inc): DM_NR_STATE; 0 = off (no native opcode handler)
 static int g_nrs;
 static void nrs_report(uint64_t frames);
@@ -525,6 +526,7 @@ static void nr_report(uint64_t now) {   // g_nr_rep_mu held
     if (g_nr_key) nk_report(now, df, dump_now);   // outside g_nr_mu: lock order key mutex -> registry mutex
     if (g_nrs) nrs_report(df);   // NR-09S
     nrn_report(df);   // NR-NATIVE
+    nrnev_report(df);   // [DOS2] NR-NATIVE step E
     const double f = df ? (double)df : 1., mb = 1048576.;
     const uint64_t rt_new = NR_GET(g_nr.rt_new), tr_new = NR_GET(g_nr.tr_new);
     LOG("[nr] objects (DM_NR=%d, last %.1f s, %llu frames): %s; NVN objects outside an engine call: tex %llu prog %llu smp %llu buf %llu; unreadable %llu, nesting past %d: %llu, programs with unreadable code %llu; reads process_vm_readv refused %llu, of them read through the pipe %llu",
@@ -623,6 +625,7 @@ typedef uint64_t (*nr_fn)(NR_A);
 #define NR_HOOK static __attribute__((disable_tail_calls)) uint64_t
 static nr_fn g_o_ct, g_o_cti, g_o_win, g_o_dt, g_o_rsv, g_o_cs, g_o_sg, g_o_sl, g_o_sc, g_o_vf, g_o_vb, g_o_ib, g_o_dvb, g_o_dib, g_o_bs, g_o_ds, g_o_rs, g_o_srt;
 static uint8_t nr_u8(uint64_t v) { return (uint32_t)v > 255 ? 255 : (uint8_t)v; }
+#include "hle_dos2_nrn_ev.inc"   // [DOS2] NR-NATIVE step E: DM_NRN_EV (resources by engine events; nothing while it is 0)
 
 // The texture the engine call made under `handle`: into the registry, and in mode 2 against the engine's own record (r+0: +0 the NVN
 // texture object, +0x10 the engine format) and the expectations of nr_check_tex.
@@ -631,6 +634,7 @@ static void nr_tex_commit(uint64_t r, uint64_t handle, const nr_tex_desc *e, con
     if (g_dm_nr == 2 && r) { const uint64_t rec = nr_record(r, 0, 0x28, handle); have = rec && nr_peek(rb, rec, sizeof rb); }
     pthread_mutex_lock(&g_nr_mu);
     nr_tex *t = nr_tex_put(g_reg, handle, e, nvn, nnvn);
+    NRNEV_TEX(handle);   // [DOS2] NR-NATIVE step E
     nr_tex c = {0}; if (t && g_dm_nr == 2) { t->bad = nr_check_tex(t); c = *t; }
     pthread_mutex_unlock(&g_nr_mu);
     if (g_nr_key && t && nvn && nvn->obj) nk_texture(handle, nvn->obj, e->src == NR_SRC_CREATE || e->src == NR_SRC_CREATE_DATA || e->src == NR_SRC_RT ? (e->eflags & NR_TF_CUBE ? 6u : e->layers > 1 ? e->layers : 0u) : 0u);
@@ -763,6 +767,7 @@ NR_HOOK nr_h_vb(NR_A) {   // CreateVertexBuffer(r, handle, size, usage, init)
     const uint64_t v = g_o_vb(NR_F);
     pthread_mutex_lock(&g_nr_mu); nr_buffer_put(g_reg, NR_BUF_VERTEX, a1, a2, 0, 0, (uint8_t)a3, b ? b->buf : 0, b ? b->buf_size : 0); pthread_mutex_unlock(&g_nr_mu);
     nr_buf_created(NRS_KIND_VB, a1, (uint8_t)a3, a4 != 0, b);   // NR-06
+    NRNEV_CREATED(NRS_KIND_VB, a1, (uint8_t)a3, a4 != 0, b);   // [DOS2] NR-NATIVE step E
     nr_close(); nr_tick();
     return v;
 }
@@ -773,11 +778,12 @@ NR_HOOK nr_h_ib(NR_A) {   // CreateIndexBuffer(r, handle, count, indexSize, usag
     nr_buffer_put(g_reg, NR_BUF_INDEX, a1, (uint64_t)(uint32_t)a2 * (uint32_t)a3, (uint32_t)a2, nr_u8(a3), (uint8_t)a4, b ? b->buf : 0, b ? b->buf_size : 0);
     pthread_mutex_unlock(&g_nr_mu);
     nr_buf_created(NRS_KIND_IB, a1, (uint8_t)a4, a5 != 0, b);   // NR-06
+    NRNEV_CREATED(NRS_KIND_IB, a1, (uint8_t)a4, a5 != 0, b);   // [DOS2] NR-NATIVE step E
     nr_close(); nr_tick();
     return v;
 }
-NR_HOOK nr_h_dvb(NR_A) { pthread_mutex_lock(&g_nr_mu); nr_buffer_kill(g_reg, NR_BUF_VERTEX, a1); pthread_mutex_unlock(&g_nr_mu); nr_buf_destroyed(NRS_KIND_VB, a1); return g_o_dvb(NR_F); }
-NR_HOOK nr_h_dib(NR_A) { pthread_mutex_lock(&g_nr_mu); nr_buffer_kill(g_reg, NR_BUF_INDEX, a1); pthread_mutex_unlock(&g_nr_mu); nr_buf_destroyed(NRS_KIND_IB, a1); return g_o_dib(NR_F); }
+NR_HOOK nr_h_dvb(NR_A) { pthread_mutex_lock(&g_nr_mu); nr_buffer_kill(g_reg, NR_BUF_VERTEX, a1); pthread_mutex_unlock(&g_nr_mu); nr_buf_destroyed(NRS_KIND_VB, a1); NRNEV_DESTROYED(NRS_KIND_VB, a1); /* [DOS2] NR-NATIVE step E */ return g_o_dvb(NR_F); }
+NR_HOOK nr_h_dib(NR_A) { pthread_mutex_lock(&g_nr_mu); nr_buffer_kill(g_reg, NR_BUF_INDEX, a1); pthread_mutex_unlock(&g_nr_mu); nr_buf_destroyed(NRS_KIND_IB, a1); NRNEV_DESTROYED(NRS_KIND_IB, a1); /* [DOS2] NR-NATIVE step E */ return g_o_dib(NR_F); }
 NR_HOOK nr_h_sg(NR_A) {   // ShaderManager::Get(mgr, FixedString *name, flag): a cache hit creates nothing
     nr_bracket *b = nr_open(NRB_GET);
     if (b && a1) {
@@ -869,6 +875,7 @@ NR_HOOK nr_h_srt(NR_A) {   // SetRenderTargets(r, n, u64 color[], layers, mips, 
 
 // ---- engine opcode 55 (resource transition) through the shared ExecuteRenderCommand chain ----
 static void nr_rc_pre(uint64_t list, unsigned op, uint64_t pkt) {
+    NRNEV_RC(list, op, pkt);   // [DOS2] NR-NATIVE step E: the opcodes that write a buffer / a texture, the ring's head
     (void)list;
     if (op != 55 || !pkt) return;
     const uint8_t *p = (const uint8_t *)(uintptr_t)pkt;   // the packet the engine's handler reads next
@@ -892,6 +899,7 @@ static void nr_rc_pre(uint64_t list, unsigned op, uint64_t pkt) {
     nr_tick();
 }
 static const dn_rc_handler k_nr_rc = {nr_rc_pre, NULL};
+static const dn_rc_handler k_nr_rc_ev = {nr_rc_pre, nrnev_rc_post};   // [DOS2] NR-NATIVE step E: + after the CPU copies
 
 // ---- install ----
 static const struct nr_site { uint32_t off; uint32_t pro[4]; const char *name; void *hook; nr_fn *orig; } k_nr_site[] = {
@@ -949,7 +957,8 @@ void dm_dos2_nr_install(void) {
         in++;
     }
     const int key = nk_mode();   // NR-02: DM_NR_KEY 0 / 1 / 2 (read here, armed below)
-    const int rc = dn_install_rc(key ? &k_nk_rc : &k_nr_rc);   // checks 0x93e5f0 itself; with DM_NR_KEY: the same opcode-55 handler + list depth
+    const int ev = nrnev_arm(m);   // [DOS2] NR-NATIVE step E: DM_NRN_EV (its table and hooks before any other hook runs)
+    const int rc = dn_install_rc(key ? &k_nk_rc : ev ? &k_nr_rc_ev : &k_nr_rc);   // checks 0x93e5f0 itself; with DM_NR_KEY: the same opcode-55 handler + list depth
     if (rc) LOG("【红】[nr] no ExecuteRenderCommand handler (see above): resource transitions (opcode 55) not recorded");
     if (!in && rc) { g_dm_nr = 0; LOG("【红】[nr] nothing hooked: DM_NR off"); return; }
     if (tex >= 1 && tex <= 3 && in && nrt_start(tex, ts)) LOG("【红】[nr] DM_NR_TEX=%d: no memory / thread for the texture table: DM_NR_TEX off", tex);

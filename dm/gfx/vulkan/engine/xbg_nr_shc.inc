@@ -235,6 +235,7 @@ void rv(uint64_t a,uint64_t n,Ver &V){
     VMemo &m=vm[uint32_t((a*0x9E3779B97F4A7C15ull^n*0xC2B2AE3D27D4EB4Full)>>51)&8191u];
     if(m.a!=a || m.n!=n || m.gen!=pool_gen){m=VMemo{};m.a=a;m.n=n;m.gen=pool_gen;const int f=nvn_pool_flags?nvn_pool_flags(reinterpret_cast<const void*>(uintptr_t(a)),size_t(n)):-1;m.cls=f>=0 && (f&1)?1:2;}
     if(m.cls==1){++s.v_nocpu;return;}   // NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS: only the GPU / the backend write it
+    if(__builtin_expect(nrnev::mode!=0,0) && nrnev::rv(a,n,V.p)){++s.v_cpu_ok;return;}   // [DOS2] NR-NATIVE step E: DM_NRN_EV=1 - a range inside an engine buffer is versioned by the engine's events, not by page generations (=2: compared, the tracker decides)
     if(cpuw==2){++s.v_trust;return;}
     if(cpuw==0){V.salt=true;++s.v_cpu_untr;return;}
     const void *p=reinterpret_cast<const void*>(uintptr_t(a));uint64_t g=0,inc=0;

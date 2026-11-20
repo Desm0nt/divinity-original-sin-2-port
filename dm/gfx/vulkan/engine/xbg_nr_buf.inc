@@ -237,7 +237,7 @@ bool first_use(nr_sbuf *e){
         const int32_t slot=copy_alloc(bytes,(place&1) && e->kind!=NRS_KIND_VB?1:0,(place&2) && e->kind==NRS_KIND_VB?VkDeviceSize(stride_hint):1);   // [DOS2] NR-09: placement for the folds (place 0: as NR-06)
         if(slot<0){e->phase=NRS_NOBUDGET;e->stamp=slot_serial+600;++s.nobudget;++s.swhy[S_NOBUDGET];return false;}
         Copy &k=copies[slot];Chunk &c=chunks[k.chunk];
-        const bool tracked=nvn_dirty_tracked && nvn_dirty_now && nvn_dirty_protect && nvn_dirty_since && nvn_dirty_tracked(p,size_t(bytes)) && !vcache::overlaps_wtrack(e->lo,bytes);
+        const bool tracked=!(__builtin_expect(nrnev::mode!=0,0) && nrnev::st_copy(e->lo,bytes)) /* [DOS2] NR-NATIVE step E: DM_NRN_EV=1 - a copy over an engine buffer is guarded by its event epoch */ && nvn_dirty_tracked && nvn_dirty_now && nvn_dirty_protect && nvn_dirty_since && nvn_dirty_tracked(p,size_t(bytes)) && !vcache::overlaps_wtrack(e->lo,bytes);
         uint64_t stamp=0;int whole=1;if(tracked){if(dirty_safe())stamp=nvn_dirty_stamp_protect(p,size_t(bytes),&whole);else{stamp=nvn_dirty_now();nvn_dirty_protect(p,size_t(bytes));}}   // stamp, protect (until all read-only: NR-TRAFFIC), then copy: a later write faults and is newer
         {evguard::EngineRead er(p,size_t(bytes));memcpy(c.mapped+k.off,p,size_t(bytes));}
         if(!c.coherent)flush(c.memory,k.off,bytes);
@@ -245,7 +245,8 @@ bool first_use(nr_sbuf *e){
         if(tracked && !whole){++s.demote_dirty;++s.swhy[S_DEMOTED];demote(e,"its pages never all became read-only after the copy (busy / VMA limit)");return false;}   // [DOS2] NR-TRAFFIC
         if(mode==2 && e->hash){++s.born_checked;if((nr_fnv64(p,size_t(bytes))|1)!=e->hash){++s.born_dirty;
             red("static %s buffer %#llx (%#llx+%llu) was written between its creation and its first draw",e->kind==NRS_KIND_VB?"vertex":"index",(unsigned long long)e->handle,(unsigned long long)e->lo,(unsigned long long)bytes);}}}
-    else if(e->stamp && nvn_dirty_since(p,size_t(bytes),e->stamp-1)){++s.demote_dirty;++s.swhy[S_DEMOTED];demote(e,"its pages were written after the copy (dirty-page tracker)");return false;}
+    else if(e->stamp && nvn_dirty_since(p,size_t(bytes),e->stamp-1)){++s.demote_dirty;++s.swhy[S_DEMOTED];if(__builtin_expect(nrnev::mode==2,0))nrnev::st_demoted(e->lo,bytes,chunks[copies[e->slot].chunk].mapped+copies[e->slot].off);   /* [DOS2] NR-NATIVE step E: was there an event? */demote(e,"its pages were written after the copy (dirty-page tracker)");return false;}
+    else if(__builtin_expect(nrnev::mode==1,0) && nrnev::st_stale(e->lo,bytes)){++s.demote_dirty;++s.swhy[S_DEMOTED];demote(e,"an engine event wrote its bytes after the copy (DM_NRN_EV)");return false;}   // [DOS2] NR-NATIVE step E
     e->ready=epoch32();return true;}
 // snapshot()'s first step for vertex / index ranges (snap_site 1 / 2): 0 old path, 1 served, 2 mode 2 (z built).
 int vb(uint64_t address,size_t bytes,VkDeviceSize align,Buffer &z){

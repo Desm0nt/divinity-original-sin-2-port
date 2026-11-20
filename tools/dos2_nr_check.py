@@ -38,7 +38,8 @@ ARG_REGS = ['x%d' % i for i in range(8)]
 def sites():
     """The hook tables: k_nr_site of hle_dos2_nr.c (NR-01) and k_nr_key_site of hle_dos2_nr_key.inc (NR-02, DM_NR_KEY)."""
     out = []
-    for f, table in (('dm/host/hle_dos2_nr.c', 'k_nr_site[] = {'), ('dm/host/hle_dos2_nr_key.inc', 'k_nr_key_site[] = {')):
+    for f, table in (('dm/host/hle_dos2_nr.c', 'k_nr_site[] = {'), ('dm/host/hle_dos2_nr_key.inc', 'k_nr_key_site[] = {'),
+                     ('dm/host/hle_dos2_nrn_ev.inc', 'k_nrnev_site[] = {')):   # NR-NATIVE step E (DM_NRN_EV)
         s = (ROOT / f).read_text(encoding='utf-8')
         body = s[s.index(table):]
         body = re.sub(r' */\*.*?\*/', '', body[:body.index('\n};')])   # the instruction comments hold commas
