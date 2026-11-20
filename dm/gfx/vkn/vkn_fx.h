@@ -109,7 +109,9 @@ uint16_t vkn_fx_ds(uint8_t depth_test, uint8_t depth_write, uint8_t depth_func, 
 // The constant block a draw would bind now for (stage 0 vertex / 1 fragment, slot): 0 = ok, -1 = never announced.
 int vkn_draw_ubo_get(int stage, uint32_t slot, uint32_t *ring_off, uint32_t *size);
 // ---- provided by the named-bundle piece (vkn_tex.c); weak in the draw path until it lands ----
-// The comparison twin of an engine sampler (same filter / wrap, compare enabled, LESS_OR_EQUAL), created on first use.
+// The comparison twin of an engine sampler (wraps / mip mode / anisotropy / LOD range of the game's sampler, linear min / mag, compare
+// enabled with LESS: the old path's dref_sampler rule, vkn_tex.c samp_info), created on first use; a sampler that compares already is
+// its own twin.
 VkSampler vkn_sampler_cmp_by_id(uint32_t sampler_id);
 
 typedef struct vkn_fx_stats {

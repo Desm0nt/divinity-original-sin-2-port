@@ -95,6 +95,59 @@ typedef struct vkn_draw_rw_stats {
 } vkn_draw_rw_stats;
 void vkn_draw_rw_stats_get(vkn_draw_rw_stats *s);
 
+// ==== [stage 5] added by the draw-cost piece (A2, vkn_draw.c "draw cost"): not part of the original contract ====
+// DM_VK_NATIVE_COST: a bit mask of exact shortcuts of the per-draw path (every one gives the same Vulkan state at every draw as the
+// path without it; a bit off = that part of the stage-4 code exactly; 0 = everything as before). Set once at install (the host reads
+// the switch; default VKN_COST_ALL in mode 1); this module's default is 0 (host tests and other callers keep the old path unless set).
+//   IB      index buffers bound at (offset mod index size), firstIndex grows by offset / index size (nr_fold_index, dm/gfx/nr/nr_draw.h):
+//           every engine index buffer is a 256-aligned block of one arena VkBuffer, so consecutive meshes bind the same (buffer, 0)
+//   VB      vertex buffers of a draw looked up under one lock (vkn_buf_get_n); changed streams bound as one vkCmdBindVertexBuffers per
+//           run of used bindings (nr_vb_runs)
+//   VFOLD   [stage 5.1 G] (with VB only) per-vertex streams folded into vertexOffset / firstVertex (nr_fold_vertex) only for a vertex
+//           shader KNOWN not to read gl_VertexIndex / gl_VertexID / gl_BaseVertex (vkn_shader_vindex; a piece's shader: never); the
+//           fold changes the draw command's vertexOffset / firstVertex, so it has a bit of its own for the A/B run (0x7f = off)
+//   SET     descriptor-set key hashed by words (not by bytes) and compared with the previous draw's key first (same key: the same
+//           set, no probe); with vkn_tex_bind_gen (below) the texture bindings of the previous draw are reused when the shader, the
+//           slot values, the effect output (all zero) and the generation are the same (no view / sampler lookups)
+//   PIPE    a direct-mapped front cache key -> VkPipeline before vkn_pipe_get (valid while vkn_pipe_forget_gen() is unchanged and
+//           until vkn_draw_forget_all)
+//   LOOKUP  per-draw lookups of things that cannot change: the ring's buffer / base (fixed once created), SUPPORT blocks by viewport
+//           size (immutable, never freed), shader objects by handle (valid while vkn_pipe_forget_gen() is unchanged: every shader
+//           death calls vkn_pipe_forget_shader through vkn_shader_set_dead_fn), vertex-format ids (no destroy event exists); blend /
+//           depth-stencil / raster ids only with vkn_state_handle_gen (below)
+//   UBO     (host, hle_dos2_vkn_draw.c) a constant block whose bytes equal a ring copy made in this frame for the same slot is not
+//           copied again: the record points at that copy
+//   FLUSH   (host) the flushes skip work whose result is known: the texture-range reset when every range is already clean, the
+//           shader blocks' re-announce when the same record was announced last with no upload and no announce since, the ring's CPU
+//           pointer and the engine thread id are read once
+enum { VKN_COST_IB = 1, VKN_COST_VB = 2, VKN_COST_SET = 4, VKN_COST_PIPE = 8, VKN_COST_LOOKUP = 16, VKN_COST_UBO = 32, VKN_COST_FLUSH = 64,
+       VKN_COST_VFOLD = 128, VKN_COST_ALL = 255 };
+void vkn_draw_cost_set(uint32_t mask);   // install time (or between recordings); a change of the SET bit starts a new set generation
+uint32_t vkn_draw_cost(void);
+// Generation of the uniform-block announces: + 1 at every vkn_draw_ubo that changes what a (stage, slot) holds.
+uint32_t vkn_draw_ubo_gen(void);
+// What the fast paths need from other modules, weak here (absent = that fast path stays off). [stage 5.1 G] all three exist now:
+//   uint32_t vkn_tex_bind_gen(void)       vkn_tex.h: + 1 (atomic) whenever vkn_tex_view_by_id(id, &t) (view or t), vkn_sampler_by_id(id)
+//                                         or vkn_sampler_cmp_by_id(id) may return something else for some id; a plain atomic load
+//   uint32_t vkn_state_handle_gen(void)   vkn_state.h: + 1 (atomic) in hmap and hkill (every handle -> id change, incl. vkn_vfmt_kill)
+//   int vkn_shader_vindex(const vkn_shader *s)   vkn_shader.h: 1 = the vertex module reads BuiltIn VertexIndex / VertexId / BaseVertex
+//                                         (the translator's NR-09 scan, xbg_game.cpp "vi") or that is not known, 0 = it does not
+//                                         (< 0 from a stand-in: unknown, no fold either: the fold needs exactly 0)
+// Host tests may install stand-ins (NULL = the weak symbol):
+void vkn_draw_cost_gens(uint32_t (*tex_gen)(void), uint32_t (*state_gen)(void), int (*vindex)(const void *shader));
+typedef struct vkn_draw_cost_stats {
+    uint64_t ib_calls_old, ib_calls, ib_folded;              // index binds the stage-4 path would make / made; draws drawn with a folded index offset
+    uint64_t vb_calls_old, vb_calls, vb_folded, vb_batched;  // vertex binds (calls) old / made; draws with a vertex fold; draws looked up under one lock
+    uint64_t vb_vindex;                                      // draws not folded: the shader reads gl_VertexIndex or is not known
+    uint64_t set_key_same, set_tex_reuse, set_tex_lookups;   // set lookups answered by the previous key; texture bindings reused (draws) / looked up (draws)
+    uint64_t pipe_front_hits, pipe_front_miss;               // pipeline lookups after a key change
+    uint64_t shader_hits, support_hits, vfmt_hits, state_hits, ring_hits;   // lookups answered by the per-draw caches
+} vkn_draw_cost_stats;
+void vkn_draw_cost_stats_get(vkn_draw_cost_stats *s);
+// [stage 5.1 G] A draw a piece makes INSIDE the effect chain (vkn_fx.h: between vkn_fx_bypass(1) / (0) in its function, e.g. the shadow
+// cache's replays) is nested in the engine draw being prepared: it keeps that draw's state (call values, fold) intact and does not enter
+// the query module (vkn_query.h brackets, conditions, predicates and counts are the engine's draws only).
+
 #ifdef __cplusplus
 }
 #endif

@@ -56,6 +56,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_buf.h"
 #include "../gfx/vkn/vkn_draw.h"
+#include "../gfx/vkn/vkn_prof.h"   // [stage 5.1 G] the measurement probes (DM_VK_NATIVE_PROF "draw by part")
 #include "../gfx/vkn/vkn_query.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
@@ -100,9 +101,35 @@ static struct {
 static uint8_t g_red[8];
 #define DR_REDLN(i, ...) do { if (g_red[i] < REDS) { g_red[i]++; vkn_logf(DR_RED "draw host: " __VA_ARGS__); } } while (0)
 
+// ---- [stage 5] draw cost (DM_VK_NATIVE_COST, vkn_draw.h): the host's bits UBO / FLUSH and their counters ----
+static uint32_t g_hcost;   // the switch as read at install (the draw module keeps its own copy: vkn_draw_cost)
+static struct {
+    uint64_t ubo_reuse[3], ubo_bytes;   // copies not made: the bytes equal a ring copy of this frame of [0] the same stage list and slot,
+                                        // [1] the other graphics stage list and the same slot, [2] the same global slot; bytes not copied
+    uint64_t ubo_cmp;                   // byte compares made (each against one candidate copy of the same size)
+    uint64_t ann_skip, ann_skip_blocks; // shader-block bind passes left out (nothing they would announce differs) / announces in them
+    uint64_t tex_clean, tid_hits;       // texture flushes with every range already clean; engine thread ids from the per-thread copy
+} g_k;
+// The ring: created once by vkn_buf.c and never destroyed, so its CPU pointer is fixed once known.
+static uint8_t *g_rcpu;
+static uint8_t *ring_cpu(void) {
+    if (g_rcpu) return g_rcpu;
+    uint8_t *c = (uint8_t *)vkn_ring_cpu();
+    if (c && (g_hcost & VKN_COST_FLUSH)) g_rcpu = c;
+    return c;
+}
+
 // ---- the constant flushes ----
 typedef int (*tid_fn)(void);
 static int engine_tid(void) { return ((tid_fn)(void *)(dm_vkn_base() + M_TID))(); }   // the SDK thread id thunk the original calls
+// [stage 5, draw cost] nn::os::GetCurrentThread (the PLT 0x1bf4590, NR-09U.md) names the calling thread's ThreadType: one value for
+// the life of the thread, so each thread asks once.
+static __thread int t_tid, t_tid_ok;
+static int engine_tid_c(void) {
+    if (!(g_hcost & VKN_COST_FLUSH)) return engine_tid();
+    if (t_tid_ok) { g_k.tid_hits++; return t_tid; }
+    t_tid = engine_tid(); t_tid_ok = 1; return t_tid;
+}
 // Reader side of the engine's word r+0xbe0 (0x926f90 / 0x918050): wait while a writer holds it, then count one reader.
 static void rlock(uint64_t w) {
     uint32_t *p = (uint32_t *)(uintptr_t)w;
@@ -115,33 +142,60 @@ static void rlock(uint64_t w) {
 }
 static void runlock(uint64_t w) { __atomic_sub_fetch((uint32_t *)(uintptr_t)w, 1, __ATOMIC_ACQ_REL); }
 
+// [stage 5, draw cost, bit UBO] The last ring copy per (list, slot): list 0 / 1 / 2 the shader blocks of the vertex / fragment /
+// compute list, 3 the global blocks; frame = vkn_frame() when it was made. A copy made in this frame holds the bytes it was made from
+// until the GPU has run this frame: the ring is never written over before that (the engine's own rule, the one every draw of this frame
+// that reads that copy already relies on). So a block whose shadow bytes equal such a copy (same size) points at it instead of a new
+// copy: the draw reads the same bytes. The record gets every field the original writes, with that copy's offset.
+static struct { uint32_t off, size; uint64_t frame; uint8_t ok; } g_lc[4][VKN_UBO_SLOTS];
+static int dedupe(int list, uint32_t slot, uint32_t size, const void *shadow, const uint8_t *cpu, uint32_t *off) {
+    if (!(g_hcost & VKN_COST_UBO) || list < 0 || list > 3 || slot >= VKN_UBO_SLOTS || !size || !shadow) return 0;
+    const uint64_t f = vkn_frame();
+    const int cand[2] = {list, list == 0 ? 1 : list == 1 ? 0 : -1};
+    for (int c = 0; c < 2; c++) {
+        if (cand[c] < 0) continue;
+        const int l = cand[c];
+        if (!g_lc[l][slot].ok || g_lc[l][slot].frame != f || g_lc[l][slot].size != size) continue;
+        g_k.ubo_cmp++;
+        if (memcmp(cpu + g_lc[l][slot].off, shadow, size)) continue;
+        *off = g_lc[l][slot].off;
+        g_k.ubo_reuse[list == 3 ? 2 : c]++; g_k.ubo_bytes += size;
+        return 1;
+    }
+    return 0;
+}
 // Copies a block into our ring and writes the record as the original does. shader: the shader-block variant (high-water fields).
-// Returns the ring offset, or -1 (nothing written: the block stays dirty / stale and is tried again at the next flush).
-static int64_t upload(uint64_t b, uint64_t frame, int shader) {
+// list: the dedupe list (0 / 1 / 2 shader stage lists, 3 globals). Returns the ring offset, or -1 (nothing written: the block stays
+// dirty / stale and is tried again at the next flush).
+static int64_t upload(uint64_t b, uint64_t frame, int shader, int list) {
     const uint32_t size = vkn_rd32(b + B_SIZE); const uint64_t shadow = vkn_rd64(b + B_SHADOW);
-    uint8_t *cpu = (uint8_t *)vkn_ring_cpu(); uint32_t off = 0;
+    uint8_t *cpu = ring_cpu(); uint32_t off = 0;
     if (!shadow && size) { g_c.null_block++; DR_REDLN(0, "constant block %#llx (%u bytes, binding %u) has no shadow copy: not uploaded", (unsigned long long)b, size, vkn_rd8(b + B_BIND)); return -1; }
+    const uint32_t slot = vkn_rd8(b + B_BIND);
+    if (cpu && dedupe(list, slot, size, (const void *)(uintptr_t)shadow, cpu, &off)) goto fields;
     if (!cpu || vkn_ring_alloc(size, &off)) { g_c.ring_fail++; DR_REDLN(1, "constant ring: no room / no ring for %u bytes (block %#llx)", size, (unsigned long long)b); return -1; }
     if (size) memcpy(cpu + off, (const void *)(uintptr_t)shadow, size);
+    g_c.ring_bytes += size;
+    if (list >= 0 && list <= 3 && slot < VKN_UBO_SLOTS) { g_lc[list][slot].off = off; g_lc[list][slot].size = size; g_lc[list][slot].frame = vkn_frame(); g_lc[list][slot].ok = 1; }
+fields:
     wr64(b + B_VA, DR_UBO_VA | off);
     wr64(b + B_CPU, (uint64_t)(uintptr_t)(cpu + off));
     if (shader) { const uint32_t hw = vkn_rd32(b + B_HW); wr32(b + B_HW, 0); wr32(b + B_HW_PREV, hw); }
     wr8(b + B_DIRTY, 0);
     wr64(b + B_STAMP, frame);
-    g_c.ring_bytes += size;
     return off;
 }
 static void flush_globals(uint64_t r) {
     g_c.fg++;
     const int32_t owner = (int32_t)vkn_rd32(r + R_GOWNER);
-    const int lock = owner == -1 || owner != engine_tid();
+    const int lock = owner == -1 || owner != engine_tid_c();
     if (lock) rlock(r + R_GLOCK);
     const uint64_t n = (vkn_rd64(r + R_GCOUNT) >> 24) & 0xffffff, list = vkn_rd64(r + R_GLIST), frame = frame_of(r);
     for (uint64_t i = 0; list && i < n; i++) {
         const uint64_t b = vkn_rd64(list + 8 * i);
         if (!b) { g_c.null_block++; DR_REDLN(0, "global constant list entry %llu of %llu is NULL", (unsigned long long)i, (unsigned long long)n); continue; }
         if (!vkn_rd8(b + B_DIRTY) && vkn_rd64(b + B_STAMP) == frame) continue;
-        const int64_t off = upload(b, frame, 0);
+        const int64_t off = upload(b, frame, 0, 3);
         if (off < 0) continue;
         g_c.g_up++;
         const uint32_t slot = vkn_rd8(b + B_BIND), size = vkn_rd32(b + B_SIZE);
@@ -150,20 +204,31 @@ static void flush_globals(uint64_t r) {
     }
     if (lock) runlock(r + R_GLOCK);
 }
+// [stage 5, draw cost, bit FLUSH] The record whose blocks the last bind pass announced, its lists, and vkn_draw_ubo_gen() after it:
+// a block's announce (ring offset of +0x18, size +0x30, slot +0x35) changes only by an upload of it (in the pass before) or a new
+// record (other pointer / lists, or fresh blocks: those are stale and uploaded); what vkn_draw holds changes only by vkn_draw_ubo
+// (the generation). Same record and lists, no upload, same generation: the pass would announce exactly what the slots hold.
+static struct { uint64_t rec, arr[3]; uint32_t cnt[3], gen, n; int ok; } g_ann;
 static void flush_shader(uint64_t r) {
     const uint64_t rec = vkn_rd64(r + R_SREC);
     if (!rec) return;
     g_c.fs++;
     const uint64_t frame = frame_of(r);
+    uint64_t arrs[3]; uint32_t cnts[3]; int uploaded = 0;
     for (int k = 0; k < 3; k++) {   // upload pass: vertex, fragment, compute lists
         const uint64_t arr = vkn_rd64(rec + SREC_BLOCKS + 8 * k); const uint32_t cnt = vkn_rd8(rec + SREC_COUNTS + k);
+        arrs[k] = arr; cnts[k] = cnt;
         if (!arr && cnt) { g_c.null_block++; DR_REDLN(0, "shader record %#llx: list %d has %u blocks and no array", (unsigned long long)rec, k, cnt); continue; }
         for (uint32_t i = 0; i < cnt; i++) {
             const uint64_t b = arr + (uint64_t)B_REC * i;
-            if (vkn_rd8(b + B_BIND) < 8 && (vkn_rd8(b + B_DIRTY) || vkn_rd64(b + B_STAMP) != frame) && upload(b, frame, 1) >= 0) g_c.s_up++;
+            if (vkn_rd8(b + B_BIND) < 8 && (vkn_rd8(b + B_DIRTY) || vkn_rd64(b + B_STAMP) != frame)) { uploaded = 1; if (upload(b, frame, 1, k) >= 0) g_c.s_up++; }
         }
     }
-    const uint8_t *cpu = (const uint8_t *)vkn_ring_cpu();
+    if ((g_hcost & VKN_COST_FLUSH) && !uploaded && g_ann.ok && g_ann.rec == rec && g_ann.gen == vkn_draw_ubo_gen() &&
+        !memcmp(g_ann.arr, arrs, sizeof arrs) && !memcmp(g_ann.cnt, cnts, sizeof cnts)) { g_k.ann_skip++; g_k.ann_skip_blocks += g_ann.n; return; }
+    g_ann.ok = 0;
+    const uint64_t bad0 = g_c.bad_ptr, ann0 = g_c.s_ann;
+    const uint8_t *cpu = ring_cpu();
     for (int k = 0; k < 3; k++) {   // bind pass: every uploaded block of the current shader, at its own stage
         const uint64_t arr = vkn_rd64(rec + SREC_BLOCKS + 8 * k); const uint32_t cnt = arr ? vkn_rd8(rec + SREC_COUNTS + k) : 0;
         for (uint32_t i = 0; i < cnt; i++) {
@@ -179,11 +244,19 @@ static void flush_shader(uint64_t r) {
             g_c.s_ann++;
         }
     }
+    if ((g_hcost & VKN_COST_FLUSH) && g_c.bad_ptr == bad0) {   // (a pass with a bad pointer is always made again: its red line / counter)
+        g_ann.ok = 1; g_ann.rec = rec; memcpy(g_ann.arr, arrs, sizeof arrs); memcpy(g_ann.cnt, cnts, sizeof cnts);
+        g_ann.gen = vkn_draw_ubo_gen(); g_ann.n = (uint32_t)(g_c.s_ann - ann0);
+    }
 }
 // 0x924730: only the resets (and a count of the binds the original would have issued: slots in the dirty ranges holding a texture).
 static void flush_textures(uint64_t r) {
     g_c.ft++;
     static const uint32_t dirty[3] = {R_TDIRTY_VS, R_TDIRTY_FS, R_TDIRTY_CS}, ids[3] = {R_TEX_VS, R_TEX_FS, R_TEX_CS}, sdirty[3] = {R_SDIRTY_VS, R_SDIRTY_FS, R_SDIRTY_CS};
+    // [stage 5, draw cost, bit FLUSH] every range already clean (min 0x20, max -1: the loop below visits no slot): the writes below
+    // would store the values that are there
+    if ((g_hcost & VKN_COST_FLUSH) && vkn_rd16(r + dirty[0]) == 0xff20 && vkn_rd16(r + dirty[1]) == 0xff20 && vkn_rd16(r + dirty[2]) == 0xff20 &&
+        vkn_rd16(r + sdirty[0]) == 0xff20 && vkn_rd16(r + sdirty[1]) == 0xff20 && vkn_rd16(r + sdirty[2]) == 0xff20) { g_k.tex_clean++; return; }
     for (int k = 0; k < 3; k++) {
         const int8_t lo = (int8_t)vkn_rd8(r + dirty[k]), hi = (int8_t)vkn_rd8(r + dirty[k] + 1);
         for (int s = lo < 0 ? 0 : lo; s <= hi && s < 32; s++) g_c.tex_binds_orig += (int32_t)vkn_rd32(r + ids[k] + 4u * s) != -1;
@@ -312,44 +385,62 @@ void dm_vkn_draw_fill(vkn_draw_in *in) {
 VKN_HOOK h_flush_globals(VKN_A) { VKN_UNUSED; flush_globals(a0); return 0; }   // 0x926f90(r)
 VKN_HOOK h_flush_shader(VKN_A) { VKN_UNUSED; flush_shader(a0); return 0; }     // 0x925740(r)
 VKN_HOOK h_flush_textures(VKN_A) { VKN_UNUSED; flush_textures(a0); return 0; } // 0x924730(r)
+// [stage 5 A0 probes] vkn_prof.h: begin at the entry, a mark after the flushes and after the cache read, end after the tail (the draw
+// module marks its own parts in between; whatever has no mark of its own goes to "tail").
 VKN_HOOK h_draw_indexed(VKN_A) {   // 0x928e80(r, w1 first, w2 count)
     VKN_UNUSED;
     const uint64_t r = a0;
+    vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
+    vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
+    vkn_prof_mark(VKN_PROF_FILL);
     g_c.di++; g_c.dropped += vkn_draw_indexed(&in, (uint32_t)a1, (uint32_t)a2, 1) != 0;
     dm_vkn_draw_tail_post(r);
+    vkn_prof_draw_end();
     return 0;
 }
 VKN_HOOK h_draw_indexed_inst(VKN_A) {   // 0x928fb0(r, -, w2 instances, -, w4 count); first index [r+0x17d0]
     VKN_UNUSED;
     const uint64_t r = a0;
+    vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
+    vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
+    vkn_prof_mark(VKN_PROF_FILL);
     g_c.dii++; g_c.dropped += vkn_draw_indexed(&in, (uint32_t)vkn_rd64(r + R_FIRST), (uint32_t)a4, (uint32_t)a2) != 0;
     dm_vkn_draw_tail_post(r);
+    vkn_prof_draw_end();
     return 0;
 }
 VKN_HOOK h_dispatch(VKN_A) {   // 0x9290f0(r, w1 x, w2 y, w3 z)
     VKN_UNUSED;
     const uint64_t r = a0;
+    vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
+    vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
+    vkn_prof_mark(VKN_PROF_FILL);
     vkn_query_dispatch();   // [stage 4: queries] a dispatch is never skipped
     vkn_img_bind img[IMG_SLOTS]; uint32_t n = 0;
     for (uint32_t s = 0; s < IMG_SLOTS; s++) if (g_img[2][s]) { img[n].slot = s; img[n].tex = g_img[2][s]; n++; }
     g_c.dc++; g_c.dropped += vkn_draw_dispatch(&in, img, n, (uint32_t)a1, (uint32_t)a2, (uint32_t)a3) != 0;
     dm_vkn_draw_tail_post(r);
+    vkn_prof_draw_end();
     return 0;
 }
 int dm_vkn_draw_arrays(uint32_t first, uint32_t count) {
     const uint64_t r = vkn_renderer();
     if (!r) return 1;
+    vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
+    vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
+    vkn_prof_mark(VKN_PROF_FILL);
     const int rc = vkn_draw_arrays(&in, first, count);
     g_c.da++; g_c.dropped += rc != 0;
     dm_vkn_draw_tail_post(r);
+    vkn_prof_draw_end();
     return rc;
 }
 
@@ -380,6 +471,18 @@ static void draw_census(void) {
              (unsigned long long)g_c.bad_ptr, (unsigned long long)g_c.gl_slot, (unsigned long long)g_c.img_binds, (unsigned long long)g_c.img_gfx, (unsigned long long)g_c.img_bad,
              (unsigned long long)g_c.ssbo_binds, (unsigned long long)g_c.ssbo_bad, (unsigned long long)g_c.cond_resets, (unsigned long long)g_c.blend_zero, (unsigned long long)g_c.blend_default,
              (unsigned long long)g_c.ds_zero, (unsigned long long)g_c.raster_zero, (unsigned long long)g_c.scissor_vp, (unsigned long long)g_c.scissor_both);
+    // [stage 5] the draw-cost shortcuts (totals since start; "old" = what the stage-4 path would have issued on the same draws)
+    vkn_draw_cost_stats k; vkn_draw_cost_stats_get(&k);
+    vkn_logf("draw cost (DM_VK_NATIVE_COST=%#x): index binds %llu (old %llu, folded draws %llu); vertex bind calls %llu (old %llu; folded draws %llu, not folded for gl_VertexIndex / unknown %llu, "
+             "one-lock lookups %llu); sets: same key as before %llu, texture bindings reused %llu / looked up %llu; pipeline front cache %llu hits / %llu misses; cached lookups: shader %llu, "
+             "support %llu, vertex format %llu, states %llu, ring %llu; constant copies avoided %llu same list / %llu other stage / %llu global (%.1f KB, %llu compares); "
+             "shader re-announce passes avoided %llu (%llu announces); clean texture flushes %llu; thread id reuses %llu",
+             g_hcost, (unsigned long long)k.ib_calls, (unsigned long long)k.ib_calls_old, (unsigned long long)k.ib_folded, (unsigned long long)k.vb_calls, (unsigned long long)k.vb_calls_old,
+             (unsigned long long)k.vb_folded, (unsigned long long)k.vb_vindex, (unsigned long long)k.vb_batched, (unsigned long long)k.set_key_same, (unsigned long long)k.set_tex_reuse,
+             (unsigned long long)k.set_tex_lookups, (unsigned long long)k.pipe_front_hits, (unsigned long long)k.pipe_front_miss, (unsigned long long)k.shader_hits,
+             (unsigned long long)k.support_hits, (unsigned long long)k.vfmt_hits, (unsigned long long)k.state_hits, (unsigned long long)k.ring_hits,
+             (unsigned long long)g_k.ubo_reuse[0], (unsigned long long)g_k.ubo_reuse[1], (unsigned long long)g_k.ubo_reuse[2], g_k.ubo_bytes / 1024.0, (unsigned long long)g_k.ubo_cmp,
+             (unsigned long long)g_k.ann_skip, (unsigned long long)g_k.ann_skip_blocks, (unsigned long long)g_k.tex_clean, (unsigned long long)g_k.tid_hits);
 }
 
 void dm_vkn_draw_register(void);
@@ -402,6 +505,17 @@ void dm_vkn_draw_register(void) {
     dm_vkn_site(0x928fb0, k_dii, "DrawIndexedInstanced", (void *)h_draw_indexed_inst, &g_o_dii, VKN_M_NATIVE);
     dm_vkn_site(0x9290f0, k_dc, "DispatchCompute", (void *)h_dispatch, &g_o_dc, VKN_M_NATIVE);
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2: no site of this part goes in (VKN_M_NATIVE), nothing else either
+    {   // [stage 5] DM_VK_NATIVE_COST (vkn_draw.h): bit mask of the draw-cost shortcuts, default all; 0 = the stage-4 draw path exactly
+        const char *e = getenv("DM_VK_NATIVE_COST");
+        g_hcost = e && *e ? (uint32_t)strtoul(e, NULL, 0) & VKN_COST_ALL : VKN_COST_ALL;
+        vkn_draw_cost_set(g_hcost);
+        // [stage 5.1 G] bit 0x80 VFOLD (default on): the vertex fold alone (it changes vertexOffset / firstVertex; needs bit VB);
+        // DM_VK_NATIVE_COST=0x7f = everything but the fold (the A/B run). The generations it and the texture / state caches need:
+        // vkn_tex_bind_gen, vkn_state_handle_gen, vkn_shader_vindex (all present in this build).
+        vkn_logf("draw: DM_VK_NATIVE_COST=%#x (index fold %d, vertex binds %d, vertex fold %d (0x80), set %d, pipeline front %d, lookups %d, constant copies %d, flushes %d)%s", g_hcost,
+                 !!(g_hcost & VKN_COST_IB), !!(g_hcost & VKN_COST_VB), (g_hcost & (VKN_COST_VB | VKN_COST_VFOLD)) == (VKN_COST_VB | VKN_COST_VFOLD), !!(g_hcost & VKN_COST_SET),
+                 !!(g_hcost & VKN_COST_PIPE), !!(g_hcost & VKN_COST_LOOKUP), !!(g_hcost & VKN_COST_UBO), !!(g_hcost & VKN_COST_FLUSH), e && *e ? "" : " (default)");
+    }
     vkn_draw_install();
     dm_vkn_census(draw_census);
     if (vkn_fx_census) dm_vkn_census(vkn_fx_census);   // [stage 5] the draw effects (vkn_fx.h)

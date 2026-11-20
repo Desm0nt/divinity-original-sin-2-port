@@ -200,6 +200,11 @@ int vkn_rp_compat_info(uint16_t compat, uint32_t color[8], uint8_t *ncolor, uint
 uint16_t vkn_rp_compat_make(const uint32_t color[8], uint8_t ncolor, uint32_t depth, uint8_t samples);
 typedef struct vkn_state_wstats { uint64_t warm_hits, warm_builds, warm_build_ns, stale_builds, compiles; } vkn_state_wstats;
 void vkn_state_wstats_get(vkn_state_wstats *s);
+// ==== [stage 5.1 G] the handle generation (vkn_draw.h "stage 5 draw cost": the state-id cache of DM_VK_NATIVE_COST bit LOOKUP) ====
+// + 1 (atomic, under the state mutex) at every handle -> id write: every put of a blend / depth-stencil / raster state or a vertex
+// format (a put of a handle also ends the older generation of its index) and every kill. While it is unchanged, vkn_blend_id /
+// vkn_ds_id / vkn_raster_id / vkn_vfmt_id give every handle the same answer. A plain atomic load; read it BEFORE the lookups.
+uint32_t vkn_state_handle_gen(void);
 
 #ifdef __cplusplus
 }

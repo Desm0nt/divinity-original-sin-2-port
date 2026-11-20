@@ -68,6 +68,7 @@ static struct {
     // its tile pre_rect[k]; pre_frame: the frame the precopy ran in
     uint32_t pre; int32_t pre_rect[NRSHC_CAS][4]; uint64_t pre_frame;
     int self;                                 // this module is calling vkn_pass itself (its watch events are ours)
+    uint64_t cond_ref;                        // [stage 5.1 G] cascades refused for DM_VK_NATIVE_COND 1 / 3 (since the last census)
     const uint8_t *ring;
     struct { uint64_t frame; uint32_t off, n; uint64_t h; } um[2][VKN_UBO_SLOTS];   // the content hash of the last block of (stage, slot)
     vkn_shc_stats s; uint8_t red[R_N];
@@ -75,6 +76,16 @@ static struct {
 
 #define SHC_RED(k, ...) do { if (g.red[k] < 16) { g.red[k]++; vkn_logf(RED "shcache: " __VA_ARGS__); } } while (0)
 
+// [stage 5.1 G] DM_VK_NATIVE_COND (vkn_query.h) and this cache. The engine never puts a visibility condition on a draw of the sun
+// cascade and opens no bracket there (its pass flags exclude the visibility query: docs/dos2/nr/NR-NATIVE-RE.md, the visibility-query
+// row; the facts with addresses in dm/host/hle_dos2_vkn_exec.c), so no mode skips or predicates a caster by itself. Mode 2 (count)
+// records every draw as asked: the cache stays on. Mode 4 (oracle) skips on the CPU (fx order 50, before this function) only draws
+// of a bracket or conditional draws, neither of which reaches the atlas: the cascades this function sees are the ones mode 0 sees, so a hit's members all come and
+// the RECOVER path ("a member did not come") does not run for that reason - on as well. The replays this module makes inside the chain
+// do not enter the query module (vkn_draw.c g_fx_nest: a piece's nested draw), so they leave the brackets, the predicates and the
+// counts alone. Modes 1 / 3 (GPU predicates) stay refused as before (a predicated caster would not be a pure function of its inputs;
+// none is expected, but the phone has not shown it): counted by cond_ref, named in the census.
+static int cond_ok(void) { const int m = vkn_query_mode(); return m == VKN_COND_OFF || m == VKN_COND_COUNT || m == VKN_COND_ORACLE; }
 static int stage_src(uint8_t st) { return st == 0 ? 0 : st == 1 ? 1 : -1; }   // engine stage (vkn_bind.stage) -> draw-path stage (graphics only)
 static int fixed_depth(VkFormat f) { return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32; }
 static uint32_t depth_bpp(VkFormat f) { return f == VK_FORMAT_D16_UNORM ? 2u : 4u; }
@@ -314,7 +325,7 @@ static void clear_in_pass(const int32_t r[4]) {
 }
 static void precopy(void) {
     g.pre = 0; g.pre_frame = g.frame;
-    if (g.mode != NRSHC_ON || !g.S || g.dirty || g.img_fail || vkn_query_mode() || !(g.clear_seen && g.clear_frame == g.frame)) return;
+    if (g.mode != NRSHC_ON || !g.S || g.dirty || g.img_fail || !cond_ok() || !(g.clear_seen && g.clear_frame == g.frame)) return;
     uint32_t m = 0;
     for (int j = 0; j < NRSHC_CAS; j++) {
         const nrshc_cas *c = g.cas[j]; const int32_t *r = c->rect;
@@ -368,8 +379,9 @@ static void start_range(const int32_t rect[4], int exact) {
     if (g.ntiles < NRSHC_CAS) memcpy(g.tiles[g.ntiles++], rect, sizeof g.tiles[0]);
     const int clear_ok = g.clear_seen && g.clear_frame == g.frame;
     g.R.clear_bits = g.clear_bits;
-    // backend: the image could be made; conditional rendering off (a predicated caster is not a pure function of its inputs)
-    const int backend_ok = !g.img_fail && !vkn_query_mode();
+    // backend: the image could be made; no GPU predicates (DM_VK_NATIVE_COND 1 / 3: cond_ok above; 2 / 4 are fine)
+    const int cok = cond_ok(), backend_ok = !g.img_fail && cok;
+    if (!cok) g.cond_ref++;
     nrshc_cas *c = g.cas[k];
     int why = 0;
     int act = nrshc_arm(c, &g.par, g.atlas_gen, rect, clear_ok, g.R.clear_bits, g.dirty || ov, rect_ok, backend_ok, &why);
@@ -650,6 +662,8 @@ void vkn_shc_census(void) {
         s->copies / fr, (ull)s->precopied, (ull)s->pre_hit, (ull)s->pre_undone, (ull)s->pre_lost, s->tile_clears / fr, (ull)s->verify_eq, (ull)s->verify_ne, (ull)s->verify_runs, (ull)s->verify_skip, g.far, s->far_draws / fr, g.far == 1 ? "skipped" : "would skip",
         g.far == 1 ? s->far_skipped / fr : s->far_draws / fr, s->img_bytes / 1048576.0, s->model_bytes / 1048576.0);
     { int r = 0; for (int i = 0; i < R_N; i++) r += g.red[i]; put(&a, " %d", r); }
+    if (g.cond_ref) put(&a, "; refused for DM_VK_NATIVE_COND=%d (GPU predicates) %llu", vkn_query_mode(), (ull)g.cond_ref);   // (in "backend" above)
+    g.cond_ref = 0;
     vkn_logf("%s", a.b);
     if (g.mode && s->armed) {   // the reasons: taints by draw kind (nrs_why for order), salted draws, per cascade how stable the draws were
         txt w; w.k = 0; w.b[0] = 0;

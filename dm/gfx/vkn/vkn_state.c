@@ -44,6 +44,9 @@ static ds_c g_ds[VKN_STATE_IDS]; static uint32_t g_nds;
 static raster_c g_raster[VKN_STATE_IDS]; static uint32_t g_nraster;
 static vfmt_c g_vfmt[VKN_VFMT_IDS]; static uint32_t g_nvfmt;
 static uint64_t g_st_puts, g_st_kills, g_st_bad;
+// [stage 5.1 G] vkn_state_handle_gen (vkn_state.h): + 1 under g_st_mu at every handle -> id write (hmap, hkill), read atomically
+static uint32_t g_handle_gen;
+uint32_t vkn_state_handle_gen(void) { return __atomic_load_n(&g_handle_gen, __ATOMIC_ACQUIRE); }
 // Depth bias (0x93d9f0 sets these every frame; constants in this build).
 static float g_bias_factor = -2.5f, g_bias_units = -5.0f, g_bias_clamp = 0.0f, g_bias_units_x = 1.0f;
 
@@ -60,6 +63,7 @@ static void hmap(int kind, uint64_t h, uint16_t id) {
     hrec *r = (hrec *)vkn_tab_put(&g_htab[kind], h, NULL);
     if (!r) { g_st_bad++; static int noted; if (!noted++) vkn_logf(VKN_RED "state: engine handle index %u beyond %u: not mapped", vkn_h_idx(h), (unsigned)VKN_STATE_HANDLES); return; }
     r->id = id; g_st_puts++;
+    __atomic_add_fetch(&g_handle_gen, 1, __ATOMIC_RELEASE);   // [stage 5.1 G] (a put also ends the older generation of this index)
 }
 static uint16_t hid(int kind, uint64_t h) {
     uint16_t id = 0;
@@ -72,6 +76,7 @@ static int hkill(int kind, uint64_t h) {
     int was = 0;
     pthread_mutex_lock(&g_st_mu);
     if (g_htab_ok > 0) { hrec *r = (hrec *)vkn_tab_get(&g_htab[kind], h); if (r) r->id = 0; was = vkn_tab_kill(&g_htab[kind], h); if (was) g_st_kills++; }
+    __atomic_add_fetch(&g_handle_gen, 1, __ATOMIC_RELEASE);   // [stage 5.1 G] every kill (blend / depth-stencil / raster / vertex format)
     pthread_mutex_unlock(&g_st_mu);
     return was;
 }

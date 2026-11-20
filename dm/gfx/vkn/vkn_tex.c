@@ -168,6 +168,12 @@ static uint32_t *g_id_page[ID_PAGES];             // (slot + 1) << 3 | view (0 w
 static vkn_tab g_samp; static VkSampler g_samp_by_id[SAMP_IDS];
 static vkn_tex_stats g_st;
 static uint64_t g_up_serial;                      // [stage 5 A3] the upload numbers (vkn_tex.shc_up; atomic)
+// [stage 5.1 G] vkn_tex_bind_gen (vkn_tex.h): + 1 under g_mu at every write that can change what vkn_tex_view_by_id (the view or the
+// vkn_tex) / vkn_sampler_by_id / vkn_sampler_cmp_by_id answer for some id: pool-id cells (set / cleared), texture slots, sampler cells,
+// comparison twins. A reader loads it before its lookups (which take g_mu): a write it did not see makes its record stale.
+static uint32_t g_bind_gen;
+static inline void bind_gen_bump(void) { __atomic_add_fetch(&g_bind_gen, 1, __ATOMIC_RELEASE); }
+uint32_t vkn_tex_bind_gen(void) { return __atomic_load_n(&g_bind_gen, __ATOMIC_ACQUIRE); }
 // Shared render-target storage (vkn_tex_create_shared): an engine texture attached to another one's image is a name record - its
 // handle, cookie and pool ids resolve to that vkn_tex (cookie hash of names g_ncookie; the handle table and the pool-id cells hold the
 // vkn_tex itself). Images that sit on shared storage are chained by storage identity in g_store. g_share_mu serialises shared
@@ -213,6 +219,7 @@ static uint32_t *id_cell_locked(uint32_t id, int make) {
 }
 // The pool ids of one engine texture (t's own or an attached name's) -> t's slot and views.
 static void ids_set_of_locked(vkn_tex *t, uint32_t pool_id, const uint32_t *lids) {
+    bind_gen_bump();   // [stage 5.1 G]
     uint32_t *c = pool_id != ~0u ? id_cell_locked(pool_id, 1) : NULL;
     if (c) *c = (t->slot + 1) << 3;
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
@@ -220,6 +227,7 @@ static void ids_set_of_locked(vkn_tex *t, uint32_t pool_id, const uint32_t *lids
 }
 // Only the cells that still name t (an id may have gone to a newer texture).
 static void ids_clear_of_locked(const vkn_tex *t, uint32_t pool_id, const uint32_t *lids) {
+    bind_gen_bump();   // [stage 5.1 G]
     uint32_t *c = pool_id != ~0u ? id_cell_locked(pool_id, 0) : NULL;
     if (c && *c >> 3 == t->slot + 1) *c = 0;
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++)
@@ -333,6 +341,7 @@ static void kill_locked(vkn_tex *t) {
     for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) vkn_fb_forget_view(t->layer_view[i]);
     if (t->att_views) for (uint32_t i = 0, n = t->mips * t->layers; i < n; i++) vkn_fb_forget_view(t->att_views[i]);
     if (t->slot < TEX_SLOTS && g_slot[t->slot] == t) { g_slot[t->slot] = NULL; g_free_slot[g_nfree++] = t->slot; }
+    bind_gen_bump();   // [stage 5.1 G] (the slot left; ids_clear_locked bumped already: one more is harmless)
     if (t->cls < VKN_TC_N) { g_st.alive[t->cls]--; g_st.bytes[t->cls] -= t->bytes; }
     const int k = bc_kind(t); if (k >= 0) { g_st.bc_alive[k]--; g_st.bc_bytes[k] -= t->bytes; }
     g_st.destroyed++;
@@ -740,6 +749,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     drop_cookie_locked(t->cookie);   // the engine object was reused without a destroy event we saw: the old texture is gone
     if (g_nfree) t->slot = g_free_slot[--g_nfree]; else if (g_slot_hi < TEX_SLOTS) t->slot = g_slot_hi++; else t->slot = ~0u;
     if (t->slot != ~0u) g_slot[t->slot] = t;
+    bind_gen_bump();   // [stage 5.1 G] a slot holds a new texture (its pool ids follow: ids_set_locked)
     handle_link_locked(t, handle);
     t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);   // [stage 5 A3]
     const uint32_t b = cookie_bucket(t->cookie); t->hnext = g_cookie[b]; g_cookie[b] = t;
@@ -881,6 +891,7 @@ int vkn_tex_swap_reduced(uint64_t handle, uint64_t old_cookie, uint64_t new_cook
     pthread_mutex_lock(&g_mu);
     vkn_tex *o = g_init > 0 ? cookie_find_locked(old_cookie) : NULL, *n = g_init > 0 ? cookie_find_locked(new_cookie) : NULL;
     if (!n) { pthread_mutex_unlock(&g_mu); free(u); return -1; }
+    bind_gen_bump();   // [stage 5.1 G] (only handles move here, no pool-id cell: bumped anyway, a swap is rare)
     if (!o) {   // the old texture is unknown (its creation failed): the handle still owns the new one, without its level tail
         handle_unlink_locked(n); handle_link_locked(n, handle); g_st.swaps++;
         pthread_mutex_unlock(&g_mu); free(u); return -1;
@@ -945,7 +956,7 @@ static VkSampler g_samp_cmp[SAMP_IDS]; static uint8_t g_samp_cmp_own[SAMP_IDS]; 
 static uint64_t g_cmp_made, g_cmp_game, g_cmp_failed; static uint32_t g_cmp_alive, g_cmp_reds;
 static void cmp_drop_locked(uint32_t id) {   // the twin of id leaves with its engine sampler (under g_mu)
     if (id >= SAMP_IDS) return;
-    g_samp_gen[id]++;
+    g_samp_gen[id]++; bind_gen_bump();   // [stage 5.1 G]
     if (g_samp_cmp[id] && g_samp_cmp_own[id]) { vkn_retire(sampler_free, (void *)(uintptr_t)g_samp_cmp[id]); g_cmp_alive--; }
     g_samp_cmp[id] = VK_NULL_HANDLE; g_samp_cmp_own[id] = 0;
 }
@@ -988,6 +999,7 @@ int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint3
         g_samp_by_id[pool_id] = s; cmp_drop_locked(pool_id);
         g_samp_args[pool_id] = (samp_args){filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 1};
     }
+    bind_gen_bump();   // [stage 5.1 G] a sampler-pool id cell written / a replaced record's cell cleared
     pthread_mutex_unlock(&g_mu);
     if (!r) { vkDestroySampler(d->dev, s, NULL); __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
     return 0;
@@ -1000,6 +1012,7 @@ int vkn_sampler_destroy(uint64_t handle) {
         vkn_retire(sampler_free, (void *)(uintptr_t)r->s); r->s = VK_NULL_HANDLE; g_st.samplers--; known = 1;
     }
     if (r) vkn_tab_kill(&g_samp, handle);
+    if (known) bind_gen_bump();   // [stage 5.1 G]
     pthread_mutex_unlock(&g_mu);
     return known;
 }
@@ -1016,7 +1029,7 @@ VkSampler vkn_sampler_cmp_by_id(uint32_t id) {
     if (id >= SAMP_IDS || !d) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_mu);
     VkSampler c = g_samp_cmp[id]; const VkSampler base = g_samp_by_id[id]; const samp_args a = g_samp_args[id]; const uint32_t gen = g_samp_gen[id];
-    if (!c && base && a.known && a.compare) { c = g_samp_cmp[id] = base; g_samp_cmp_own[id] = 0; g_cmp_game++; }
+    if (!c && base && a.known && a.compare) { c = g_samp_cmp[id] = base; g_samp_cmp_own[id] = 0; g_cmp_game++; bind_gen_bump(); }   // [stage 5.1 G] twin installed
     const int none = !c && (!base || !a.known);
     const int red = none && g_cmp_reds < 16 ? (int)++g_cmp_reds : 0;
     if (none) g_cmp_failed++;
@@ -1030,7 +1043,7 @@ VkSampler vkn_sampler_cmp_by_id(uint32_t id) {
     const VkResult vr = vkCreateSampler(d->dev, &si, NULL, &t);
     pthread_mutex_lock(&g_mu);
     int installed = 0, n = 0;
-    if (vr == VK_SUCCESS && g_samp_gen[id] == gen && !g_samp_cmp[id]) { g_samp_cmp[id] = t; g_samp_cmp_own[id] = 1; g_cmp_alive++; n = (int)++g_cmp_made; installed = 1; }
+    if (vr == VK_SUCCESS && g_samp_gen[id] == gen && !g_samp_cmp[id]) { g_samp_cmp[id] = t; g_samp_cmp_own[id] = 1; g_cmp_alive++; n = (int)++g_cmp_made; installed = 1; bind_gen_bump(); }   // [stage 5.1 G]
     else if (vr != VK_SUCCESS) g_cmp_failed++;
     c = g_samp_cmp[id];
     const int red2 = vr != VK_SUCCESS && g_cmp_reds < 16 ? (int)++g_cmp_reds : 0;
@@ -1230,7 +1243,7 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
 void vkn_tex_private_free(vkn_tex *t) {
     if (!t) return;
     pthread_mutex_lock(&g_mu);
-    if (!t->dead) { t->dead = 1; vkn_fb_forget_view(t->att); unref_locked(t); }
+    if (!t->dead) { t->dead = 1; vkn_fb_forget_view(t->att); unref_locked(t); bind_gen_bump(); }   // [stage 5.1 G] (no id names it: harmless)
     pthread_mutex_unlock(&g_mu);
 }
 #endif

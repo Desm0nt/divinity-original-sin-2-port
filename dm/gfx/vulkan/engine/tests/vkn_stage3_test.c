@@ -14,7 +14,8 @@
 //            ranges, the zero block, the null stream, placeholders (unknown / empty / feedback), unknown sampler, drops (missing
 //            stage, unknown state / shader / vertex buffer, index range, viewport), alpha variant, scissor clamp, arrays, index rewrite
 //            of fans / quads / line loops (generated indices checked), the set cache and its retirement, compute dispatch;
-//            [stage 5] draw effects (vkn_fx.h); [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE: the EQUAL -> LEQUAL swap of a conditional draw
+//            [stage 5] draw effects (vkn_fx.h); draw cost (DM_VK_NATIVE_COST; [stage 5.1 G] the real texture / state generations, the
+//            texture reuse after a remembered clear and a target change, bit VFOLD alone, a piece's draw nested in the chain); [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE: the EQUAL -> LEQUAL swap of a conditional draw
 //            whose pair holds the same draw drawn whole, and each refusal reason (no pair, other draw, alpha test, discard / unknown
 //            fragment facts, pre-pass depth state, depth raised / clear pending, several draws, pre-pass draw skipped, wider scissor),
 //            count-only mode, the tile-model gate;
@@ -707,6 +708,7 @@ static void fx_test(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *ou
         case 3: out->ds = g_fxds; break;
         case 4: out->no_fs = 1; break;
         case 5: out->shader = g_fxsh; out->tex[2].view = g_t0 ? g_t0->view : VK_NULL_HANDLE; out->tex[2].tex = g_t0; out->ubo[1].off = 512; out->ubo[1].size = 64; break;
+        case 6: { vkn_draw_in x = *in; vkn_fx_bypass(1); vkn_draw_indexed(&x, 0, 3, 1); vkn_fx_bypass(0); break; }   // [stage 5.1 G] a piece's nested draw
         default: break;
     }
 }
@@ -999,7 +1001,9 @@ static void test_draw(void) {
         in.blend = H(41, 1); m = mark(); vkn_draw_indexed(&in, 0, 3, 1); OPS(m, cb, MK_E_BIND_PIPE, MK_E_DRAW_IDX); in.blend = H(40, 1); vkn_draw_indexed(&in, 0, 3, 1);
         vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.pipe_front_hits, fh + 2);
         CHECK(c1.ib_calls < c1.ib_calls_old); CHECK(c1.set_key_same > c0.set_key_same); CHECK(c1.shader_hits > c0.shader_hits); CHECK(c1.vfmt_hits > c0.vfmt_hits);
-        CHECK(c1.support_hits > c0.support_hits); CHECK(c1.ring_hits > c0.ring_hits); CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse);   // no texture generation: no reuse
+        CHECK(c1.support_hits > c0.support_hits); CHECK(c1.ring_hits > c0.ring_hits);
+        CHECK(c1.set_tex_reuse > c0.set_tex_reuse);   // [stage 5.1 G] vkn_tex_bind_gen is in the build: the same textures are reused
+        CHECK_EQ(c1.vb_folded, c0.vb_folded); CHECK(c1.vb_vindex > c0.vb_vindex);   // no shader library here: gl_VertexIndex not known, no fold
         // with the generations of the other modules (stand-ins): texture bindings reused, state ids cached, the vertex fold
         vkn_draw_cost_gens(cost_tex_gen, cost_state_gen, cost_vindex);
         vkn_draw_indexed(&in, 0, 3, 1);
@@ -1031,8 +1035,48 @@ static void test_draw(void) {
         vkn_draw_cost_stats_get(&c0); CHECK(c0.vb_folded > c1.vb_folded);
         m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 2, 3), 0);   // arrays: firstVertex = first + k
         { const mk_ev *d = nth(m, cb, MK_E_DRAW, 0); CHECK(d && d->u[2] == 2 + k); }
+        // [stage 5.1 G] a piece's draw nested in the chain (vkn_fx_bypass inside an effect function): both recorded, the nested one
+        // first, the outer arrays draw keeps its own first vertex + fold
+        g_fxm = 6; m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 2, 3), 0); g_fxm = 0;
+        { const mk_ev *dn = nth(m, cb, MK_E_DRAW_IDX, 0), *d = nth(m, cb, MK_E_DRAW, 0); CHECK(dn && d && dn->seq < d->seq && d->u[2] == 2 + k); }
+        // [stage 5.1 G] bit VFOLD alone off (DM_VK_NATIVE_COST=0x7f, the A/B run): the same draw is not folded
+        vkn_draw_cost_set(VKN_COST_ALL & ~VKN_COST_VFOLD);
+        vkn_draw_cost_stats_get(&c0); m = mark(); CHECK_EQ(vkn_draw_arrays(&in, 2, 3), 0);
+        { const mk_ev *d = nth(m, cb, MK_E_DRAW, 0); CHECK(d && d->u[2] == 2); }
+        vkn_draw_cost_stats_get(&c1); CHECK_EQ(c1.vb_folded, c0.vb_folded); CHECK_EQ(c1.vb_vindex, c0.vb_vindex);
+        vkn_draw_cost_set(VKN_COST_ALL);
         vkn_draw_cost_gens(NULL, NULL, NULL);
         vkn_draw_indexed(&in, 0, 3, 1); in.vb_off[0] = 16;
+        // [stage 5.1 G] the real generations of this build (vkn_tex_bind_gen, vkn_state_handle_gen, vkn_shader_vindex)
+        {
+            const uint32_t tg0 = vkn_tex_bind_gen(), sg0 = vkn_state_handle_gen();
+            vkn_tex *tq = NULL; CHECK(vkn_tex_view_by_id(300, &tq) == g_t0->view && tq == g_t0); CHECK(vkn_sampler_by_id(10) != VK_NULL_HANDLE); CHECK(vkn_blend_id(H(40, 1)) != 0);
+            vkn_draw_indexed(&in, 0, 3, 1);
+            CHECK_EQ(vkn_tex_bind_gen(), tg0); CHECK_EQ(vkn_state_handle_gen(), sg0);   // lookups and draws move neither
+            CHECK_EQ(vkn_sampler_create(H(62, 1), 20, 1, 0, 0, 0, 1, 0), 0); const uint32_t tg1 = vkn_tex_bind_gen(); CHECK(tg1 != tg0);
+            CHECK_EQ(vkn_sampler_destroy(H(62, 1)), 1); const uint32_t tg2 = vkn_tex_bind_gen(); CHECK(tg2 != tg1);
+            vkn_tex *tn = mktex(321, EF_RGBA8, VKN_TC_SAMPLED, 1, 8, 8, 1, 1, 321, 0); CHECK(tn != NULL);
+            const uint32_t tg3 = vkn_tex_bind_gen(); CHECK(tg3 != tg2);
+            CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 321), 1); CHECK(vkn_tex_bind_gen() != tg3);
+            CHECK(vkn_blend_put(H(42, 1), 2, 3, 0, 0, 0, 0) != 0); const uint32_t sg1 = vkn_state_handle_gen(); CHECK(sg1 != sg0);
+            CHECK_EQ(vkn_blend_kill(H(42, 1)), 1); CHECK(vkn_state_handle_gen() != sg1);
+            CHECK_EQ(vkn_shader_vindex(g_s1), 1); CHECK_EQ(vkn_shader_vindex(NULL), 1); if (g_fxsh) CHECK_EQ(vkn_shader_vindex(g_fxsh), 1);
+            // the generation moved: the next draw looks its textures up once, the one after reuses them
+            vkn_draw_cost_stats_get(&c0); vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_cost_stats_get(&c1);
+            CHECK_EQ(c1.set_tex_lookups, c0.set_tex_lookups + 1); CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse + 1);
+            // a texture the record samples is written while the record holds (a remembered clear of colour target A2): the reused draw
+            // still makes it readable - vkn_pass_sample runs the clear outside the pass and transitions it, as the full path does
+            targets(g_b2, NULL, g_d3); g_ftex[0] = 310;
+            vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_cost_stats_get(&c0);
+            const float rgba[4] = {1.0f, 0.0f, 0.0f, 1.0f}; vkn_pass_clear_color(g_a2, 0, rgba, NULL); CHECK(g_a2->pass_nclr > 0);
+            CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); vkn_draw_cost_stats_get(&c1);
+            CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse + 1); CHECK_EQ(g_a2->pass_nclr, 0); CHECK_EQ(g_a2->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            // the sampled texture becomes a target of the set: vkn_pass_sample answers otherwise, the full path binds the placeholder
+            targets(g_a2, NULL, g_d3); vkn_draw_cost_stats_get(&c0); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); vkn_draw_cost_stats_get(&c1);
+            CHECK_EQ(c1.set_tex_lookups, c0.set_tex_lookups + 1); CHECK_EQ(c1.set_tex_reuse, c0.set_tex_reuse);
+            { const mk_dw *w = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 22); CHECK(w && w->view != g_a2->view); }
+            g_ftex[0] = 300; vkn_draw_indexed(&in, 0, 3, 1);
+        }
     }
     // ---- [stage 5.1 O2] DM_VK_NATIVE_GBUF_LE (vkn_query.h): a conditional EQUAL draw whose pair holds the same draw, drawn whole in the
     // pre-pass with LESS + writes, gets LEQUAL (only the compare op changes); every other case keeps EQUAL and is counted by its reason

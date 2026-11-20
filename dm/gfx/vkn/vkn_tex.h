@@ -207,6 +207,13 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
 // as any target. NULL = failure. vkn_tex_private_free: its owner lets go (dead, the framebuffers of its view forgotten; the object is
 // retired when the last reference - vkn_pass's current set - is dropped).
 void vkn_tex_private_free(vkn_tex *t);
+// ==== [stage 5.1 G] the binding generation (vkn_draw.h "stage 5 draw cost": the texture-binding reuse of DM_VK_NATIVE_COST bit SET) ====
+// + 1 (atomic, under this module's mutex) at every change that can make vkn_tex_view_by_id (the view or the vkn_tex it returns),
+// vkn_sampler_by_id or vkn_sampler_cmp_by_id answer differently for some id: a pool-id cell set or cleared (creation, attach to shared
+// storage, a name dropped / handed over, destroy, replacement), a texture slot taken or freed, a mip-reduction swap, a private texture
+// freed, a sampler created / replaced / destroyed, a comparison twin installed or dropped. Texel writes (uploads, updates, GPU writes)
+// and layout changes do not count: they change no answer. A plain atomic load; read it BEFORE the lookups it is to guard.
+uint32_t vkn_tex_bind_gen(void);
 
 #ifdef __cplusplus
 }

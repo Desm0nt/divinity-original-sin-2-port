@@ -15,7 +15,9 @@
 //     vkCreateShaderModule under gpguard::ModuleLock)        the read check of NR-08b, the module lock of this library (below)
 //   xpack::open_once / get / check / read_translated     -> sl_pack (same index checks, CRC-32, DM_GFX_SHADER_PACK 0 / 1 / 2)
 //     4821-4915
-//   xpack::read 4903: NR-ONCHIP oc_apply, NR-04 nrsh::apply -> dropped: DM_NR_ONCHIP / DM_NR_SH are forced 0 in mode 1 (dm_dos2_vkn_pre)
+//   xpack::read 4903: NR-ONCHIP oc_apply                 -> dropped: DM_NR_ONCHIP is forced 0 in mode 1 (dm_dos2_vkn_pre)
+//   xpack::read 4903: NR-04 nrsh::apply (named bundles)  -> done by vkn_shlib_named (vkn_shlib_named.h, DM_VK_NATIVE_SH: the hook at the
+//                                                           head of read_bundle; the old name DM_NR_SH stays forced 0 in mode 1)
 //   xpack::native 4853 (DM_GFX_NATIVE_SHADERS swap/check)  -> sl_native, kept bit for bit (native.xgspack / native/<key>.xgs)
 //   nbpost::fused_key / read_bundle ("F1." keys)          -> dropped: engine stage keys are 16 hex digits, never "F1.<key>"
 //   spv_may_exist / spv_override 4919-4935               -> sl_spv_override (the listing of spv-override once)
@@ -36,7 +38,8 @@
 //   vertex input classes (xbg_vertex_input_classes,       -> the same call (a failure: unusable instead of the translator's abort)
 //     xbg_vertex.c)
 //   nrubd::mark (xbg_nr_ubodyn.inc 51)                   -> sl_ubd_mark: XBG_BIND_SCANNED / _UNREAD flags (nr_spv_binding_reads)
-//   discards / empty_fs / raster facts / vindex / pos /   -> not built: none of them reaches xbg_vkn_stage (translator draws only)
+//   vindex (NR-09 "vi" scan)                              -> vkn_shlib_vs_vindex (stage 5.1 G, for the draw path's vertex fold)
+//   discards / empty_fs / raster facts / pos /           -> not built: none of them reaches xbg_vkn_stage (translator draws only)
 //     storage writes / pass graph / posonly / preskin /
 //     xlq masks / idvs_stripped / nrmat / nrsurf / nrheat
 //   warm::register_module                                -> dropped (the translator's warm-up list)
@@ -158,6 +161,11 @@ const char *vkn_shlib_translator_entry_name(int which);
 // The "#at" alpha-test variants discard on top of this (the caller knows from the draw's alpha reference). Any thread.
 enum { VKN_SHLIB_FS_KILL = 1, VKN_SHLIB_FS_DEPTH = 2, VKN_SHLIB_FS_MASK = 4 };
 int vkn_shlib_fs_facts(const void *shader);
+// ==== [DOS2] VK-NATIVE stage 5.1 G (vkn_shader_vindex, the vertex fold of vkn_draw.c DM_VK_NATIVE_COST bit VFOLD) ====
+// A vertex shader object of this library (vkn_shader.xs[VKN_SRC_VS] while vkn_shlib_on()): 1 = its final words (every load-time
+// rewrite applied; the "#vi" variants add no BuiltIn) read BuiltIn VertexIndex / VertexId / BaseVertex (the NR-09 scan; a malformed
+// stream counts as reading), 0 = they do not, -1 = not a vertex shader of this library. Any thread.
+int vkn_shlib_vs_vindex(const void *shader);
 
 // ---- host tests: the words handed to vkCreateShaderModule are what the comparison test checks (it mocks that entry point) ----
 #ifdef __cplusplus

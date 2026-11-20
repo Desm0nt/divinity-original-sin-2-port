@@ -115,6 +115,13 @@ uint32_t vkn_shader_each(int (*fn)(const vkn_shader *s, void *ctx), void *ctx);
 const vkn_shader *vkn_shader_find_keys(const char *vs_key, const char *fs_key);
 uint64_t vkn_shader_epoch(void);   // + 1 for every record that entered the table (a new shader may be there)
 
+// ==== [DOS2] VK-NATIVE stage 5.1 G (vkn_draw.h "stage 5 draw cost": the vertex fold, DM_VK_NATIVE_COST bit VFOLD) ====
+// 1 = the vertex stage of s (every module the draw path can use for it: the base module and its "#vi" retype variants) reads BuiltIn
+// VertexIndex / VertexId / BaseVertex, which include vertexOffset / firstVertex (changed by the fold), or that is not known: a piece's
+// shader (vkn_fx_shader_is), the translator's loader (DM_VK_NATIVE_SHLIB=0 / mode 2), no vertex object, NULL. 0 = known not to read them
+// (the shader library's scan of the final words, vkn_shlib_vs_vindex). Lock-free; any thread.
+int vkn_shader_vindex(const vkn_shader *s);
+
 #ifdef __cplusplus
 }
 #endif

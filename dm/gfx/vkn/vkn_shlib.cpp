@@ -540,10 +540,26 @@ uint32_t fs_facts_of(const std::vector<uint32_t> &w) {
     }
     return f;
 }
+// [DOS2] VK-NATIVE stage 5.1 G (vkn_shlib_vs_vindex, vkn_shader_vindex, vkn_draw.c's vertex fold): 1 = a vertex module's final
+// words read BuiltIn VertexId (5) / VertexIndex (42) / BaseVertex (4424) - an OpDecorate (71) / OpMemberDecorate (72) BuiltIn (11) with
+// one of them, the translator's NR-09 scan (xbg_game.cpp load_shader_key "vi") word for word. Those values include vertexOffset /
+// firstVertex in Vulkan, which the fold changes; InstanceIndex / BaseInstance / DrawIndex do not depend on them. A malformed stream
+// answers 1 (no fold).
+uint32_t vs_vindex_of(const std::vector<uint32_t> &w) {
+    for (size_t i = 5; i < w.size();) {
+        const uint32_t n = w[i] >> 16, op = w[i] & 65535;
+        if (!n || i + n > w.size()) return 1u;
+        if (op == 71 && n >= 4 && w[i + 2] == 11 && (w[i + 3] == 42 || w[i + 3] == 5 || w[i + 3] == 4424)) return 1u;
+        if (op == 72 && n >= 5 && w[i + 3] == 11 && (w[i + 4] == 42 || w[i + 4] == 5 || w[i + 4] == 4424)) return 1u;
+        i += n;
+    }
+    return 0u;
+}
 struct Sh {
     std::string key; uint32_t stage = 0; VkShaderModule module = VK_NULL_HANDLE; std::string unusable;
     std::vector<xbg_shader_binding> bindings; std::vector<uint32_t> inputs, input_classes; std::vector<uint8_t> c1;
     int32_t fs_facts = -1;         // [DOS2] stage 5.1 O2: fragment: fs_facts_of(final words), set once at load; -1 = other stage
+    int32_t vs_vindex = -1;        // [DOS2] stage 5.1 G: vertex: vs_vindex_of(final words), set once at load; -1 = other stage
     std::vector<uint32_t> words;   // vertex: the final words while DM_GFX_VTX_RETYPE is on (the "#vi" variants start from them)
     std::map<uint64_t, VkShaderModule> retyped, alpha;
 };
@@ -610,6 +626,9 @@ Sh *load(const std::string &key, const void *control, const void *code) {
     }
     ubd_mark(p->bindings, words, key.c_str(), h.stage);
     if (h.stage == 4) p->fs_facts = int32_t(fs_facts_of(words));   // [DOS2] stage 5.1 O2: the words the module is made of
+    // [DOS2] stage 5.1 G: the base module's words; the "#vi" retype variants are made from these same words by xbg_vertex_retype,
+    // which rewrites input variables / loads only (it adds no BuiltIn), so the answer holds for every module of this shader
+    if (h.stage == 0) p->vs_vindex = int32_t(vs_vindex_of(words));
     if (p->unusable.empty() && make_module(words, &p->module, key) != VK_SUCCESS) p->unusable = "vkCreateShaderModule failed";
     if (!p->unusable.empty()) ++st_unusable;
     Sh *out = p.get(); g_sh.emplace(key, std::move(p)); ++st_loads; st_ns += now_ns() - t0;
@@ -780,6 +799,11 @@ extern "C" VkShaderModule vkn_shlib_alpha_module(void *shader, uint32_t func, fl
 extern "C" int vkn_shlib_fs_facts(const void *shader) {
     const Sh *s = static_cast<const Sh *>(shader);
     return s && s->stage == 4 ? s->fs_facts : -1;
+}
+// [DOS2] stage 5.1 G: immutable after load (as fs_facts): no lock.
+extern "C" int vkn_shlib_vs_vindex(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 0 ? s->vs_vindex : -1;
 }
 extern "C" VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!shader) return VK_NULL_HANDLE;

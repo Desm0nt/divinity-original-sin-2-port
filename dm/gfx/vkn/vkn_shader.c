@@ -579,4 +579,11 @@ uint64_t vkn_shader_epoch(void) {
     pthread_mutex_lock(&g_mu); const uint64_t e = g_st.created + g_st.replaced; pthread_mutex_unlock(&g_mu);
     return e;
 }
+// [stage 5.1 G] vkn_shader.h: the library's NR-09 scan of the vertex object's final words (fixed at load, no lock); every other case
+// (a piece's shader of vkn_fx_shader_create, the translator's loader, no vertex object, a host test without the library) is "reads it".
+extern int vkn_shlib_vs_vindex(const void *shader) __attribute__((weak));
+int vkn_shader_vindex(const vkn_shader *s) {
+    if (!s || vkn_fx_shader_is(s) || !vkn_shlib_vs_vindex || loader()->shader != vkn_shlib_shader || !s->xs[VKN_SRC_VS]) return 1;
+    return vkn_shlib_vs_vindex(s->xs[VKN_SRC_VS]) == 0 ? 0 : 1;
+}
 #endif
