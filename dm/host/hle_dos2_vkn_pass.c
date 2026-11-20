@@ -35,6 +35,7 @@
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_pass.h"
+void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 static vkn_fn g_o_srt, g_o_ccl, g_o_cds, g_o_cpy;   // (never called: the originals record NVN commands)
@@ -196,6 +197,7 @@ VKN_HOOK vkn_h_cds(VKN_A) {
 
 // ---- texture copy ----
 VKN_HOOK vkn_h_cpy(VKN_A) {
+    if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: storage-written textures before this use
     VKN_UNUSED;
     g_c[C_CPY]++;
     // The engine caller's return address: the host-stack stub keeps it for the hook (dm_vkn_caller, hle_dos2_vkn_stack.c; this

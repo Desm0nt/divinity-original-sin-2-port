@@ -76,6 +76,7 @@
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/nvn/nvn_pace.h"
 #include "hle_dos2_vkn.h"
+void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define FH_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
 
@@ -354,6 +355,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (present && g_ft.render0) { g_ft.render = t0 - g_ft.render0; g_ft.render0 = 0; }
     if (present) g_fs.ends_presented++; else g_fs.ends_off++;
     if (mu_on()) mu_lock();
+    if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: a texture written through its storage after the frame's last draw
     if (present) {
         vkn_pass_end();
         const uint64_t h = vkn_rd64(win + WIN_BACK);

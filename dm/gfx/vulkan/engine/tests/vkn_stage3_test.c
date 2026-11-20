@@ -14,13 +14,16 @@
 //            ranges, the zero block, the null stream, placeholders (unknown / empty / feedback), unknown sampler, drops (missing
 //            stage, unknown state / shader / vertex buffer, index range, viewport), alpha variant, scissor clamp, arrays, index rewrite
 //            of fans / quads / line loops (generated indices checked), the set cache and its retirement, compute dispatch;
-//   end to end  one synthetic frame (targets A with clears, 3 draws, targets B sampling A, 1 draw, present B) checked as a whole.
+//   end to end  one synthetic frame (targets A with clears, 3 draws, targets B sampling A, 1 draw, present B) checked as a whole;
+//   queries  (stage 4, vkn_query.c) report pairs as occlusion queries inside a pass, a pair broken by a pass end, the copy + barrier
+//            after the pass, consumers visible / hidden (GPU predicate) / empty pair (CPU skip) / unknown / same pass / dropped draw /
+//            nesting / off-frame, slot reuse with the verdict readback, modes 0 / 2 / 3, a device without the extension.
 // Ends with "vkn_stage3_test: N checks passed" (exit 0) or the failures and exit 1.
 //
 // Build + run (WSL gcc, as vkn_stage2_test.c; <vk> = a directory holding only vulkan/ and vk_video/ of the NDK sysroot include):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
-//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_ui.c
+//       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c
 //       dm/gfx/nvn/nvn_tex.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -41,6 +44,7 @@
 #include "../../../vkn/vkn_pass.h"
 #include "../../../vkn/vkn_draw.h"
 #include "../../../vkn/vkn_ui.h"
+#include "../../../vkn/vkn_query.h"
 
 static int g_checks, g_fails;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -1054,6 +1058,175 @@ static void test_ui(void) {
     CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
 }
 
+// ================================================================================================================ queries (stage 4)
+// vkn_query.h: a report pair = one occlusion query inside one pass instance, results copied after the pass end, consumers drawn under
+// VK_EXT_conditional_rendering on their word; the exact CPU skip of an empty pair; unusable pairs (pass end inside, a draw dropped
+// inside, nesting) and unknown / same-pass / off-frame conditions drawn; slot reuse across frames with the verdict readback; modes
+// 0 / 2 / 3 and a device without the extension. The mock runs queries and predicates at record time (vkn_mock_vk.h [stage 4]).
+int dm_vk_cond_render = 1;   // the front end's flag (android/vulkan_present.cpp): the extension is enabled on the device
+static const mk_ev *q_reset_of(uint64_t from, VkCommandBuffer cb, uint64_t pool, uint32_t n) {   // the query reset of `pool` (any pool: 0) over n queries
+    for (uint64_t s = from; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && e->cb == cb && e->op == MK_E_RESET_QP && (!pool || e->a[0] == pool) && e->u[0] == 0 && e->u[1] == n) return e; }
+    return NULL;
+}
+static int q_draw(const vkn_draw_in *in) { return vkn_draw_indexed(in, 0, 3, 1); }
+static void test_query(void) {
+    if (!g_s1 || !g_a2 || !g_b2 || !g_d3) return;
+    enum { K1 = 0x51000, K2 = 0x51010, K3 = 0x51020, K4 = 0x51030, K5 = 0x51040, K6 = 0x51050, K7 = 0x51060, K8 = 0x51070, K99 = 0x5ff00 };
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    mk_cond_ext = 1; vkn_query_init(VKN_COND_ON);
+    CHECK_EQ(vkn_query_mode(), VKN_COND_ON);
+    vkn_query_stats a, b; vkn_query_stats_get(&a);
+    vkn_draw_in in = g_in;
+    uint64_t m0 = mark();
+    VkCommandBuffer cb = fbegin(1);
+    // ---- a new slot: its whole pool is reset before anything else of the frame
+    const mk_ev *rs = q_reset_of(m0, cb, 0, VKN_Q_CAP);
+    CHECK(rs != NULL); const uint64_t pool1 = rs ? rs->a[0] : 0;
+    CHECK(vkn_query_gpu());
+    targets(g_a2, NULL, g_d3);
+    // ---- 1. a pair inside one pass, 5 samples: begin lazily at the first draw (the pass is open then), end at the second report
+    mk_draw_samples = 5;
+    uint64_t m = mark();
+    vkn_query_begin(K1); vkn_query_cond(0); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1);
+    const mk_ev *rp = nth(m, cb, MK_E_BEGIN_RP, 0), *bq = nth(m, cb, MK_E_BEGIN_Q, 0), *dq = nth(m, cb, MK_E_DRAW_IDX, 0), *eq = nth(m, cb, MK_E_END_Q, 0);
+    CHECK(rp && bq && dq && eq);
+    if (rp && bq && dq && eq) {
+        CHECK(rp->seq < bq->seq && bq->seq < dq->seq && dq->seq < eq->seq);
+        CHECK_EQ(bq->a[0], pool1); CHECK_EQ(bq->u[0], 0); CHECK_EQ(bq->u[1], 0);   // query 0, not precise
+        CHECK_EQ(eq->u[1], 5);
+    }
+    // ---- 2. a pair with two draws and no sample passing (query 1)
+    mk_draw_samples = 0; m = mark();
+    vkn_query_begin(K2); CHECK_EQ(q_draw(&in), 0); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K2);
+    OPS(m, cb, MK_E_BEGIN_Q, MK_E_DRAW_IDX, MK_E_DRAW_IDX, MK_E_END_Q);
+    CHECK(nth(m, cb, MK_E_BEGIN_Q, 0) && nth(m, cb, MK_E_BEGIN_Q, 0)->u[0] == 1);
+    // ---- 3. a pair without a draw: no query at all (zero samples, exact)
+    m = mark(); vkn_query_begin(K3); vkn_query_end(K3); NO_OPS(m, cb);
+    // ---- 4. a pair broken by a pass end (query 2): its query ends before the pass; the copy of queries 0..2 follows the pass end
+    m = mark();
+    vkn_query_begin(K4); CHECK_EQ(q_draw(&in), 0);
+    targets(g_b2, NULL, g_d3);   // a different set: the pass ends now
+    mk_draw_samples = 9; CHECK_EQ(q_draw(&in), 0); vkn_query_end(K4);
+    const mk_ev *cp = nth(m, cb, MK_E_COPY_Q, 0), *cb_bar = cp ? nth(cp->seq, cb, MK_E_BARRIER, 0) : NULL, *er = nth(m, cb, MK_E_END_RP, 0);
+    eq = nth(m, cb, MK_E_END_Q, 0); rp = nth(m, cb, MK_E_BEGIN_RP, 0); dq = nth(m, cb, MK_E_DRAW_IDX, 1);
+    CHECK_EQ(cnt(m, cb, MK_E_BEGIN_Q), 1); CHECK_EQ(cnt(m, cb, MK_E_END_Q), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 2);
+    uint64_t base = 0;
+    CHECK(cp && cb_bar && er && eq && rp && dq);
+    if (cp && cb_bar && er && eq && rp && dq) {
+        CHECK(eq->seq < er->seq && er->seq < cp->seq && cp->seq + 1 == cb_bar->seq && cb_bar->seq < rp->seq && rp->seq < dq->seq);
+        CHECK_EQ(cp->a[0], pool1); CHECK_EQ(cp->u[0], 0); CHECK_EQ(cp->u[1], 3); CHECK_EQ(cp->u[2], 4); CHECK_EQ(cp->u[3], VK_QUERY_RESULT_WAIT_BIT);
+        base = cp->off[0]; CHECK_EQ(base % (4u * VKN_Q_CAP), 0);
+        mk_obj *pb = mk_obj_of(cp->a[1]);
+        CHECK(pb && (pb->usage & VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT));
+        CHECK(cb_bar->a[0] == 0 && cb_bar->u[0] == VK_PIPELINE_STAGE_TRANSFER_BIT && (cb_bar->u[1] & VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT));
+        CHECK(cb_bar->u[2] == VK_ACCESS_TRANSFER_WRITE_BIT && (cb_bar->u[3] & VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT));
+        const uint32_t *w = (const uint32_t *)buf_ptr(cp->a[1], base);
+        CHECK(w && w[0] == 5 && w[1] == 0 && w[2] == 0);   // the copied words: K1 5 samples, K2 none, K4 none before its pass ended
+    }
+    // ---- 5. consumers in the next pass
+    m = mark(); vkn_query_cond(K1); CHECK_EQ(q_draw(&in), 0);   // visible: drawn under its predicate
+    OPS(m, cb, MK_E_BEGIN_COND, MK_E_DRAW_IDX, MK_E_END_COND);
+    const mk_ev *bc = nth(m, cb, MK_E_BEGIN_COND, 0), *d1 = nth(m, cb, MK_E_DRAW_IDX, 0);
+    CHECK(bc && bc->off[0] == base + 0 && bc->u[0] == 0 && bc->u[1] == 5 && d1 && d1->u[7] == 0);
+    m = mark(); vkn_query_cond(K2); CHECK_EQ(q_draw(&in), 0);   // hidden: recorded, the GPU discards it
+    OPS(m, cb, MK_E_BEGIN_COND, MK_E_DRAW_IDX, MK_E_END_COND);
+    bc = nth(m, cb, MK_E_BEGIN_COND, 0); d1 = nth(m, cb, MK_E_DRAW_IDX, 0);
+    CHECK(bc && bc->off[0] == base + 4 && d1 && d1->u[7] == 1);
+    m = mark(); CHECK_EQ(q_draw(&in), 0); OPS(m, cb, MK_E_DRAW_IDX);   // a condition covers one draw only
+    m = mark(); vkn_query_cond(K3); CHECK_EQ(q_draw(&in), 0); NO_OPS(m, cb);   // the empty pair: skipped on the CPU, nothing recorded
+    m = mark(); vkn_query_cond(K4); CHECK_EQ(q_draw(&in), 0); OPS(m, cb, MK_E_DRAW_IDX);   // broken pair: drawn
+    m = mark(); vkn_query_cond(K99); CHECK_EQ(q_draw(&in), 0); OPS(m, cb, MK_E_DRAW_IDX);  // no pair of that name in this recording
+    // ---- 6. a consumer in its pair's own pass (query 3 not copied yet): drawn
+    mk_draw_samples = 0; m = mark();
+    vkn_query_begin(K5); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K5); vkn_query_cond(K5); CHECK_EQ(q_draw(&in), 0);
+    OPS(m, cb, MK_E_BEGIN_Q, MK_E_DRAW_IDX, MK_E_END_Q, MK_E_DRAW_IDX);
+    // ---- 7. a draw dropped inside a pair: the pair is unusable (the Switch may have drawn it), no query, its consumer drawn
+    vkn_draw_in bad = in; bad.shader = H(99, 1);
+    m = mark(); vkn_query_begin(K6); CHECK_EQ(vkn_draw_indexed(&bad, 0, 3, 1), 1); vkn_query_end(K6); NO_OPS(m, cb);
+    m = mark(); vkn_query_cond(K6); CHECK_EQ(q_draw(&in), 0); OPS(m, cb, MK_E_DRAW_IDX);
+    // ---- 8. nesting: the open pair's query (4) ends at the inner begin; the inner pair gets query 5; the outer end is unmatched
+    m = mark();
+    vkn_query_begin(K7); CHECK_EQ(q_draw(&in), 0); vkn_query_begin(K8); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K8); vkn_query_end(K7);
+    OPS(m, cb, MK_E_BEGIN_Q, MK_E_DRAW_IDX, MK_E_END_Q, MK_E_BEGIN_Q, MK_E_DRAW_IDX, MK_E_END_Q);
+    // ---- the recording ends: the pass end copies queries 3..5
+    m = mark(); fsubmit(0);
+    cp = nth(m, cb, MK_E_COPY_Q, 0);
+    CHECK(cp && cp->u[0] == 3 && cp->u[1] == 3 && cp->off[0] == base + 12);
+    CHECK_EQ(cnt(m, cb, MK_E_COPY_Q), 1);
+    vkn_query_stats_get(&b);
+    CHECK_EQ(b.begins - a.begins, 8); CHECK_EQ(b.ends - a.ends, 8); CHECK_EQ(b.queries - a.queries, 6); CHECK_EQ(b.empty - a.empty, 1);
+    CHECK_EQ(b.broken - a.broken, 1); CHECK_EQ(b.lost - a.lost, 1); CHECK_EQ(b.nested - a.nested, 1); CHECK_EQ(b.unmatched - a.unmatched, 1);
+    CHECK_EQ(b.copies - a.copies, 2); CHECK_EQ(b.copied - a.copied, 6);
+    CHECK_EQ(b.conds - a.conds, 7); CHECK_EQ(b.cond_gpu - a.cond_gpu, 2); CHECK_EQ(b.cond_cpu_skip - a.cond_cpu_skip, 1);
+    CHECK_EQ(b.drawn_no_query - a.drawn_no_query, 1); CHECK_EQ(b.drawn_unusable - a.drawn_unusable, 2); CHECK_EQ(b.drawn_same_pass - a.drawn_same_pass, 1);
+    CHECK_EQ(b.slots_taken - a.slots_taken, 1);
+    // ---- 9. slot reuse: frame 1's slot comes back after VKN_Q_SLOTS presented recordings (its recording finished: retirement rule);
+    // its 6 queries are reset, the verdicts on its 2 predicated draws are read (K1 drawn, K2 culled)
+    for (int i = 0; i < VKN_Q_SLOTS - 1; i++) { fbegin(1); fsubmit(0); }
+    vkn_query_stats_get(&a);
+    m = mark(); cb = fbegin(1);
+    CHECK(q_reset_of(m, cb, pool1, 6) != NULL);
+    vkn_query_stats_get(&b);
+    CHECK_EQ(b.results_read - a.results_read, 2); CHECK_EQ(b.gpu_culled - a.gpu_culled, 1); CHECK_EQ(b.gpu_drawn - a.gpu_drawn, 1);
+    CHECK_EQ(b.slots_busy, 0); CHECK_EQ(b.slots_taken - a.slots_taken, 1);
+    // the slot works again: a pair begins at query 0 of the same pool
+    targets(g_a2, NULL, g_d3); mk_draw_samples = 1;
+    m = mark(); vkn_query_begin(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1);
+    bq = nth(m, cb, MK_E_BEGIN_Q, 0); CHECK(bq && bq->a[0] == pool1 && bq->u[0] == 0);
+    fsubmit(0);
+    // ---- 10. an off-frame recording has no slot: the pair is unusable, its consumer drawn, no Vulkan query
+    vkn_query_stats_get(&a);
+    cb = fbegin(0); targets(g_a2, NULL, g_d3);
+    m = mark(); vkn_query_begin(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1); vkn_query_cond(K1); CHECK_EQ(q_draw(&in), 0);
+    CHECK_EQ(cnt(m, cb, MK_E_BEGIN_Q), 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_COND), 0); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 2);
+    fsubmit(1);
+    vkn_query_stats_get(&b); CHECK_EQ(b.no_slot - a.no_slot, 1); CHECK_EQ(b.drawn_no_slot - a.drawn_no_slot, 1);
+    // ---- 11. mode 2 (count): queries and copies, every draw recorded; mode 3 (poison): the predicate inverted
+    for (int mode = VKN_COND_COUNT; mode <= VKN_COND_POISON; mode++) {
+        vkn_query_init(mode); vkn_query_stats_get(&a);
+        cb = fbegin(1); targets(g_a2, NULL, g_d3);
+        mk_draw_samples = mode == VKN_COND_COUNT ? 0 : 5;
+        vkn_query_begin(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1);
+        targets(g_b2, NULL, g_d3);
+        m = mark(); vkn_query_cond(K1); CHECK_EQ(q_draw(&in), 0);
+        CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_COND), mode == VKN_COND_COUNT ? 0 : 1);
+        if (mode == VKN_COND_COUNT) { d1 = nth(m, cb, MK_E_DRAW_IDX, 0); CHECK(d1 && d1->u[7] == 0); }
+        else {
+            bc = nth(m, cb, MK_E_BEGIN_COND, 0); d1 = nth(m, cb, MK_E_DRAW_IDX, 0);
+            CHECK(bc && d1 && bc->seq < d1->seq && nth(m, cb, MK_E_END_COND, 0) && nth(m, cb, MK_E_END_COND, 0)->seq == d1->seq + 1);
+            CHECK(bc && bc->u[0] == VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT && d1 && d1->u[7] == 1);   // visible, so the poison hides it
+        }
+        fsubmit(0);
+        vkn_query_stats_get(&b);
+        if (mode == VKN_COND_COUNT) CHECK_EQ(b.cond_count - a.cond_count, 1); else CHECK_EQ(b.cond_gpu - a.cond_gpu, 1);
+    }
+    // ---- 12. a device without the extension: no Vulkan query is made (nothing could use it), the pair's consumer is drawn, the empty
+    // pair is still skipped
+    mk_cond_ext = 0; vkn_query_init(VKN_COND_ON); CHECK_EQ(vkn_query_gpu(), 0);
+    vkn_query_stats_get(&a);
+    const uint64_t m12 = mark();
+    cb = fbegin(1); targets(g_a2, NULL, g_d3); mk_draw_samples = 0;
+    vkn_query_begin(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1); vkn_query_begin(K3); vkn_query_end(K3);
+    targets(g_b2, NULL, g_d3);
+    m = mark();
+    vkn_query_cond(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_cond(K3); CHECK_EQ(q_draw(&in), 0);
+    CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_COND), 0);
+    fsubmit(0);
+    CHECK_EQ(cnt(m12, cb, MK_E_BEGIN_Q), 0); CHECK_EQ(cnt(m12, cb, MK_E_COPY_Q), 0);
+    vkn_query_stats_get(&b); CHECK_EQ(b.drawn_no_ext - a.drawn_no_ext, 1); CHECK_EQ(b.cond_cpu_skip - a.cond_cpu_skip, 1);
+    // ---- 13. mode 0 (the default): no Vulkan query work at all, conditions counted, every draw recorded
+    vkn_query_init(VKN_COND_OFF); vkn_query_stats_get(&a);
+    m0 = mark(); cb = fbegin(1); targets(g_a2, NULL, g_d3);
+    vkn_query_begin(K1); CHECK_EQ(q_draw(&in), 0); vkn_query_end(K1); vkn_query_cond(K1); CHECK_EQ(q_draw(&in), 0);
+    fsubmit(0);
+    CHECK_EQ(cnt(m0, cb, MK_E_BEGIN_Q), 0); CHECK_EQ(cnt(m0, cb, MK_E_COPY_Q), 0); CHECK_EQ(cnt(m0, cb, MK_E_BEGIN_COND), 0); CHECK(q_reset_of(m0, cb, 0, VKN_Q_CAP) == NULL);
+    CHECK_EQ(cnt(m0, cb, MK_E_DRAW_IDX), 2);
+    vkn_query_stats_get(&b); CHECK_EQ(b.begins - a.begins, 1); CHECK_EQ(b.conds - a.conds, 1); CHECK_EQ(b.queries - a.queries, 0);
+    CHECK_EQ(b.setup_fail, 0);
+    mk_draw_samples = 1;
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+}
+
 // ==== END OF AREAS ====
 
 int main(void) {
@@ -1075,6 +1248,7 @@ int main(void) {
     test_tex_update();
     test_e2e();
     test_ui();
+    test_query();
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
     CHECK_EQ(mk_qlock_depth, 0);

@@ -49,6 +49,7 @@
 #include "../gfx/nvn/nvn_obj.h"   // view_t: the HLE layout of NVNtextureView in guest memory (a view argument of ReadTexels)
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
+void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define RB_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own
 
@@ -148,6 +149,7 @@ static uint64_t nodata(int f, int why, uint64_t r, uint64_t h, const vkn_tex *t,
     return 0;
 }
 static inline __attribute__((always_inline)) uint64_t rb_pre(int f, VKN_A) {   // (inlined into each hook: no tail call there)
+    if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: storage-written textures before this use
     const uint64_t r = a0, h = a1;
     g_rs.calls[f]++;
     if (!g_read_on) return nodata(f, N_OFF, r, h, NULL, NULL);

@@ -85,12 +85,51 @@
 //   it (NR-02 census, work/logs/nr3_r1-dumps / nr4_b2-dumps nr_draw_sites.tsv): draws outside every command list at 0xaab224
 //   (0xaab150), 0x1241144 (0x1240ee0), 0xb0ae90 (0xb0aab0), 0xd1b2ec (0xd1ada0), thousands per 10 s; 0x941010 (0x940f90) none seen.
 //   So the immediate branches run in mode 1 and need replacements in the later wave.
+//
+// ---- Stage 4: visibility queries and conditional rendering (facts from the decompilations of 0x93e5f0 cases 0x15 0x23 0x3d 0x3e
+// 0x3f, 0x928e80, 0x9215f0, 0x938330, 0xb7e020, 0x90cbf0, 0xb87470, 0xb89330, 0xb23970, 0x142c870 and the disassembly of 0xb0c570;
+// docs/dos2/nr/NR-03.md section 1 read the same) ----
+//   Counter buffer: device init 0x938330 (0x938edc..0x939030) allocates 0x10000 bytes of CPU table at dev+0x25ab0 (window texture 0)
+//     / dev+0x25ab8 (= +0x8000, window texture 1): entry k (16 bytes) = {+0 GPU address [dev+0x25b18] + 0x20 * k, +8 frame}, 2048
+//     entries a half; the GPU buffer (0x20000, class 4) is mapped at dev+0x25ac8: two 16-byte counter reports per pair (begin at +0,
+//     end at +0x10).
+//   BeginFrame 0x9215f0(r, 1): after AcquireTexture, the CPU writes the counter words of this window texture's half through
+//     dev+0x25ac8 + (index << 12) * 16: begin.counter = 0, end.counter = -1 for all 2048 pairs, and dev+0x25ac0 (pairs taken) = 0.
+//   Allocation 0xb0c5c0..0xb0c61c (inside the per-object gather 0xb0c570(x0, object, x2)): object flags [obj+0x1d8] with bit 18
+//     (0x40000) and any other bit: k = atomic fetch_add(dev+0x25ac0, 1) (ldaxr / stlxr); k < 0x800: entry = [dev+0x25ab0 + 8 *
+//     [dev+0x31e0]] + 16 k, entry+8 = frame [dev+0x51f0], obj+0x268 = entry, obj+0x270 = frame; k >= 0x800 (0xb0dac0): obj+0x268 = 0,
+//     obj+0x270 = -1 (never valid).
+//   Users (0xb7e020, same shape in 0x90cbf0 0xb87470 0xb89330 0xb23970 0x142c870): q = obj+0x268 only when obj+0x270 == [dev+0x51f0]
+//     (THIS frame), else 0. The pass flags (list param +8): & 0x48002 -> no condition; else the full-state packet 0x15 carries q at
+//     +0x60 (immediate list: 0x92c3c0 + SetRenderEnableConditional through the game's NVN table, 0x2bbfcd8). Pass flag bit 18 with q
+//     != 0: the object's own draw (0x928fb0 / packet 0x25) is bracketed by packet 0x3d {+8 q} = ReportCounter(cb, 1 = SAMPLES_PASSED,
+//     *q) and packet 0x3e = ReportCounter(cb, 1, *q + 0x10) (immediate lists: ReportCounter through table slot 0x2bbfcb8 directly,
+//     i.e. hle_dos2_vkn_cmd.c's counted no-op - those pairs are not seen here and their consumers are drawn).
+//   Condition: packet 0x15 / 0x3f (and 0xb23970 / 0x142c870 inline) -> SetRenderEnableConditional(cb, 1 = RENDER_IF_NOT_EQUAL, *q):
+//     the GPU compares the counter words at *q and *q + 0x10 and renders when they differ, i.e. samples = end - begin != 0; q = 0 ->
+//     SetRenderEnable(cb, 1). Cache r+0x185c = (q != 0) / r+0x1860 = q (set only when either differs), r+0x185d = 0. The draw tail
+//     (0x928e80 / packet 0x23): r+0x185d && r+0x185c -> SetRenderEnable(1), both 0, r+0x1860 = 0; draw; r+0x185d = r+0x185c. So a
+//     condition covers exactly ONE draw (the next one) and at that draw r+0x185c != 0 <=> conditional.
+// Answers (a): the condition always names a pair of the SAME frame (both sides check obj+0x270 == frame; a pair address names
+//   another object every frame: allocation order, the halves alternate with the window texture). The bracket is drawn by the pass with
+//   flag 0x40000 earlier in the same recording (NR-03 phone 17.11, deck: all 263 pairs of a frame closed in ONE pass, 0 consumers in
+//   the pair's pass, 682 conditions a frame, the Switch skips 346 draws = 30 % of draws, 24 % of vertices). Compared: begin / end
+//   counter words, samples = end - begin; "render" when != 0. A pair never reported this frame still holds {0, -1}: renders. A
+//   consumer before its bracket (same frame) therefore renders. The CPU never reads the counters.
+// (b) Mode-1 phone run V3_e (20.11, 9 427 frames incl. menus): 4.53 M pairs (packets 0x3d / 0x3e), 4.77 M condition sets with a
+//   query (each covers one draw) = 481 pairs / 506 conditional draws a frame on average over the whole run; the Fort Joy census of
+//   the brief: ~800 pairs and ~870 conditional draws in a frame of ~2400 draws.
+// Native equivalent (dm/gfx/vkn/vkn_query.h, DM_VK_NATIVE_COND): a pair = one occlusion query around the draws recorded between the
+//   two packets, results copied into predicate words when the pass ends, the consumer drawn under VK_EXT_conditional_rendering on its
+//   word: exact, same frame. Entry points through vkGetDeviceProcAddr (it is in the trampoline table), the device extension by the
+//   front end (android/vulkan_present.cpp asks for it with DM_VK_NATIVE=1 and DM_VK_NATIVE_COND 1 / 3).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
+#include "../gfx/vkn/vkn_query.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_exec.h"
 #include "hle_dos2_vkn_stack.h"
@@ -330,6 +369,8 @@ typedef struct { uint64_t tex; uint32_t layer; float rgba[4]; int32_t x, y, w, h
 static uint64_t ex_clear_on_stack(void *p) { const ex_clear_job *j = p; dm_vkn_pass_clear_rect(j->tex, j->layer, j->rgba, j->x, j->y, j->w, j->h); return 0; }
 typedef struct { uint64_t r; uint32_t first, count; } ex_arrays_job;
 static uint64_t ex_arrays_on_stack(void *p) { const ex_arrays_job *j = p; return (uint64_t)(uint32_t)dm_vkn_exec_draw_arrays(j->r, j->first, j->count); }
+typedef struct { uint64_t q; int begin; } ex_query_job;
+static uint64_t ex_query_on_stack(void *p) { const ex_query_job *j = p; if (j->begin) vkn_query_begin(j->q); else vkn_query_end(j->q); return 0; }
 static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
     *len = ex_len(op);
     __atomic_add_fetch(&g_op[op & 63], 1, __ATOMIC_RELAXED);
@@ -391,10 +432,15 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         else red(D_BARRIER_BAD, s, vkn_rd64(pkt + 8), 0);
         return 1;   // the pass part tracks layouts itself; a full barrier is not needed between Vulkan passes of one queue here
     }
-    case 0x3d: case 0x3e:   // ReportCounter(cb, 1, **[+8] (+0x10 for the end)): occlusion query begin / end - not in this stage
-        if (!vkn_rd64(pkt + 8)) red(D_QUERY_NULL, op, pkt, 0);
+    case 0x3d: case 0x3e: {   // ReportCounter(cb, 1, **[+8] (+0x10 for the end)): the pair's begin / end -> vkn_query (key = q = [+8])
+        const uint64_t q = vkn_rd64(pkt + 8);
+        if (!q) { red(D_QUERY_NULL, op, pkt, 0); return 1; }
         st(op == 0x3d ? S_QUERY_BEGIN : S_QUERY_END);
+        ex_query_job j = {q, op == 0x3d};
+        if (vkn_query_mode()) dm_vkn_on_stack(ex_query_on_stack, &j);   // (may end a Vulkan query)
+        else ex_query_on_stack(&j);                                     // (mode 0: counted only, no Vulkan)
         return 1;
+    }
     case 0x3f: {   // conditional render: u8 +1 on, query pointer +8 -> r+0x185c / r+0x1860 when either differs; r+0x185d = 0 always
         const uint8_t on = vkn_rd8(pkt + 1); const uint64_t q = vkn_rd64(pkt + 8);
         if (vkn_rd8(r + R_REN_NEED) != on || vkn_rd64(r + R_REN_Q) != q) {
@@ -458,6 +504,31 @@ VKN_HOOK ex_h_arrays(VKN_A) {   // 0x940f90 DrawArrays(list, first, count)
     return 0;
 }
 
+// ---- stage 4: queries census (vkn_query.h) ----
+static vkn_query_stats g_qprev; static uint64_t g_qprev_frame;
+static void q_census(void) {
+    vkn_query_stats q; vkn_query_stats_get(&q);
+    const uint64_t f = vkn_frame(), df = f - g_qprev_frame ? f - g_qprev_frame : 1;
+#define QU(x) (unsigned long long)q.x
+#define QF(x) (double)(q.x - g_qprev.x) / (double)df
+    vkn_logf("query: DM_VK_NATIVE_COND=%d (GPU predicates %s); a frame: pairs %.1f, queries %.1f, conditional draws %.1f -> GPU-predicated %.1f, CPU-skipped %.1f, "
+             "counted %.1f, drawn %.1f; GPU verdicts culled %.1f / drawn %.1f; CPU %.3f ms (%llu frames)",
+             vkn_query_mode(), vkn_query_gpu() ? "on" : "off", QF(begins), QF(queries), QF(conds), QF(cond_gpu), QF(cond_cpu_skip), QF(cond_count),
+             QF(conds) - QF(cond_gpu) - QF(cond_cpu_skip) - QF(cond_count), QF(gpu_culled), QF(gpu_drawn), QF(cpu_ns) / 1e6, (unsigned long long)df);
+    vkn_logf("query: pairs begun %llu / ended %llu -> queries %llu, empty %llu, copied %llu in %llu copies; unusable: pass ended inside %llu, lost draws %llu, "
+             "nested %llu, open at the recording end %llu, table / pool full %llu, no slot %llu; unmatched ends %llu; conditional draws %llu: GPU %llu, "
+             "CPU-skipped %llu, counted %llu (empty %llu); drawn: no pair %llu, pair's pass still open %llu, inside its pair %llu, unusable pair %llu, "
+             "no extension %llu, no slot %llu, poison-empty %llu; dispatches with a condition %llu; verdicts read %llu (culled %llu, drawn %llu, lost %llu); "
+             "slots taken %llu, busy %llu; setup failures %llu",
+             QU(begins), QU(ends), QU(queries), QU(empty), QU(copied), QU(copies), QU(broken), QU(lost), QU(nested), QU(open_at_close), QU(pool_full),
+             QU(no_slot), QU(unmatched), QU(conds), QU(cond_gpu), QU(cond_cpu_skip), QU(cond_count), QU(count_empty), QU(drawn_no_query),
+             QU(drawn_same_pass), QU(drawn_open), QU(drawn_unusable), QU(drawn_no_ext), QU(drawn_no_slot), QU(drawn_poison_empty), QU(cond_dispatch),
+             QU(results_read), QU(gpu_culled), QU(gpu_drawn), QU(results_lost), QU(slots_taken), QU(slots_busy), QU(setup_fail));
+#undef QU
+#undef QF
+    g_qprev = q; g_qprev_frame = f;
+}
+
 // ---- census ----
 static uint64_t ld(const uint64_t *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
 static void ex_census(void) {
@@ -484,6 +555,7 @@ static void ex_census(void) {
              (unsigned long long)ld(&g_bar[1]), (unsigned long long)b212, (unsigned long long)ld(&g_st[S_QUERY_BEGIN]),
              (unsigned long long)ld(&g_st[S_QUERY_END]), (unsigned long long)ld(&g_st[S_COND]), (unsigned long long)ld(&g_st[S_COND_ON]),
              (unsigned long long)drops);
+    q_census();
     if (!drops) return;
     char line[700]; int k = 0; line[0] = 0;
     static const char *const nm[S_N] = {[D_NO_R] = "no-renderer", [D_STALE_SHADER] = "stale-shader", [D_STALE_BLEND] = "stale-blend",
@@ -519,6 +591,10 @@ void dm_vkn_exec_register(void) {
     else vkn_logf("exec: ExecuteRenderCommand opcodes 0x04 0x07 0x08 0x0a 0x0b 0x12 0x13 0x15 0x23 0x37 0x3d 0x3e 0x3f taken; BindShader, ApplyBlend, "
                   "ApplyDrawState, 0x92c130, SetRasterState / ListDrawArrays immediate branches replaced (cache fields only)");
     dm_vkn_census(ex_census);
+    // Stage 4: conditional rendering and visibility queries (vkn_query.h). DM_VK_NATIVE_COND 0 (default) = everything drawn, the
+    // pairs and conditions only counted (the shipping picture); 1 = on; 2 = count what the GPU would skip; 3 = poison (inverted).
+    const char *qc = getenv("DM_VK_NATIVE_COND");
+    vkn_query_init(qc && *qc ? atoi(qc) : VKN_COND_OFF);   // (its census lines come with this part's: q_census from ex_census)
 }
 
 // ---- mode 1 exclusivity ----

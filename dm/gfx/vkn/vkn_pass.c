@@ -92,8 +92,16 @@ static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout to) {
     g_st.transitions++;
 }
 
+// [stage 4: queries] a visibility query must end inside the pass instance it began in; results are copied after it (vkn_query.c, weak)
+void vkn_query_pass_closing(VkCommandBuffer cb) __attribute__((weak));
+void vkn_query_pass_closed(VkCommandBuffer cb) __attribute__((weak));
+// [/stage 4: queries]
 static void end_open(void) {
-    if (g_open && open_here()) vkCmdEndRenderPass(g_open_cb);
+    if (g_open && open_here()) {
+        if (vkn_query_pass_closing) vkn_query_pass_closing(g_open_cb);   // [stage 4: queries]
+        vkCmdEndRenderPass(g_open_cb);
+        if (vkn_query_pass_closed) vkn_query_pass_closed(g_open_cb);     // [stage 4: queries]
+    }
     g_open = 0; g_open_cb = VK_NULL_HANDLE;
 }
 static void on_begin(void) { g_open = 0; g_open_cb = VK_NULL_HANDLE; }   // a new recording: nothing of the last one is open
@@ -105,7 +113,7 @@ static void on_begin(void) { g_open = 0; g_open_cb = VK_NULL_HANDLE; }   // a ne
 // to 0..1; integer formats and depth are skipped. Costs nothing while the switch is unset. ----
 enum { DUMP_W = 480, DUMP_H = 216, DUMP_MAX = 64 };
 static struct {
-    int init, nat, active; uint32_t at[4], heavy, passes_frame, k;
+    int init, nat, active, off_on, off; uint32_t at[4], heavy, passes_frame, k, off_n;
     vkn_tex *t[DUMP_MAX]; uint32_t nt;
     VkImage img; VkDeviceMemory mem;
     int live; vkn_block b; uint64_t frame; uint32_t n, pk;
@@ -134,19 +142,23 @@ static void dump_begin(void) {   // begin listener: a new recording
     if (!g_dump.init) {
         g_dump.init = 1;
         const char *e = getenv("DM_VK_NATIVE_DUMP");
+        { const char *o = getenv("DM_VK_NATIVE_DUMP_OFF"); g_dump.off_on = o && atoi(o) > 0; }
         while (e && *e && g_dump.nat < 4) { char *end = NULL; const unsigned long v = strtoul(e, &end, 10); if (v) g_dump.at[g_dump.nat++] = (uint32_t)v; if (end && *end == ',') e = end + 1; else break; }
     }
-    if (!g_dump.nat) return;
+    if (!g_dump.nat && !g_dump.off_on) return;
     if (g_dump.live && vkn_frame() >= g_dump.frame + 4) dump_write();
     if (g_dump.passes_frame >= 40) g_dump.heavy++;
-    g_dump.passes_frame = 0; g_dump.active = 0; g_dump.nt = 0;
+    g_dump.passes_frame = 0; g_dump.active = 0; g_dump.nt = 0; g_dump.off = 0;
+    // DM_VK_NATIVE_DUMP_OFF=1: the first 4 off-frame recordings that draw anything (screenshots, save thumbnails) as dumps 9001...
+    if (!vkn_rec_presented() && g_dump.off_on && !g_dump.live && g_dump.off_n < 4) { g_dump.active = 1; g_dump.off = 1; g_dump.k = 9001 + g_dump.off_n; return; }
     if (!vkn_rec_presented() || g_dump.live) return;
     for (int i = 0; i < g_dump.nat; i++) if (g_dump.at[i] == g_dump.heavy + 1 && g_dump.k != g_dump.at[i]) { g_dump.active = 1; g_dump.k = g_dump.at[i]; }
 }
 static void dump_close(void) {   // close listener (after vkn_pass_end): the frame's targets are final
     if (!g_dump.active) return;
     g_dump.active = 0;
-    if (g_dump.passes_frame < 40) { g_dump.k = 0; return; }   // not a heavy frame after all: the next one is tried
+    if (g_dump.off) { if (!g_dump.passes_frame) return; g_dump.off_n++; }
+    else if (g_dump.passes_frame < 40) { g_dump.k = 0; return; }   // not a heavy frame after all: the next one is tried
     VkCommandBuffer cb = vkn_cb(); const vkn_dev *dv = vkn_device();
     if (!cb || !dv || !g_dump.nt) return;
     if (!g_dump.img) {
@@ -274,6 +286,7 @@ static int begin_set(const tset *s) {
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return -1; }
     end_open();
+    if (vkn_upload_pending_bytes()) (void)vkn_upload_run(cb);   // (a queued creation upload of an attachment must not land after this pass: see vkn_pass_copy)
     vkn_rp_key k; vkn_rp_key_init(&k);
     VkImageView views[VKN_PASS_COLORS + 1]; VkClearValue cv[VKN_PASS_COLORS + 1]; uint32_t nv = 0;
     memset(cv, 0, sizeof cv);
@@ -511,6 +524,7 @@ static int blit_ok(VkFormat f) {
 }
 void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     vkn_pass_init();
+    if (g_dump.active && dst && src) { dump_note(src); dump_note(dst); }
     if (g_dump.active && dst && src) vkn_logf("trace: copy %llx (%ux%u) -> %llx (%ux%u)", (unsigned long long)(src->handle & 0xffff), src->w, src->h, (unsigned long long)(dst->handle & 0xffff), dst->w, dst->h);
     if (!dst || !src || dst->dead || src->dead) {
         g_st2.copy_drop++;
@@ -556,6 +570,11 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
         if (!ncp) return;
     }
     end_open();
+    // A creation upload still queued for one of them (the texture was made after this recording began) would be recorded at the
+    // NEXT recording's start and overwrite what is copied here (phone run V4_a: save thumbnails all zero - the engine makes its
+    // read-back texture with initial data, copies the screenshot into it, and the read-back's own recording then began with that
+    // queued upload). So queued uploads run now, in order.
+    if (vkn_upload_pending_bytes()) (void)vkn_upload_run(cb);
     flush_clears(src); flush_clears(dst);
     if (src->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) barrier(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     if (dst->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) barrier(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);

@@ -221,6 +221,13 @@ int dm_vkn_glue_is_mine(uint64_t fn) { return fn == (uint64_t)(uintptr_t)stor_ge
 // Mirrors every texture noted on this thread. Host stack (it records uploads): the draw part before a draw, the writer hooks, the
 // packet model (through dm_vkn_on_stack); the frame part may call it at the end of the frame (hle_dos2_vkn_frame.c fh_end, after
 // its mu_lock and before vkn_pass_end / present: `if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();` with a weak declaration).
+// Audit U3: the engine destroyed a texture (0x91d630 returned "finalized") that still has a note: the note goes with it (its
+// storage is freed). Notes are per thread: the destroy walk of the render thread reaches the render thread's notes.
+void dm_vkn_glue_forget(uint64_t obj);
+void dm_vkn_glue_forget(uint64_t obj) {
+    for (uint32_t i = 0; i < t_nstor; i++)
+        if (t_stor[i].obj == obj) { memmove(&t_stor[i], &t_stor[i + 1], sizeof t_stor[0] * (t_nstor - 1 - i)); t_nstor--; i--; }
+}
 void dm_vkn_glue_flush_tex(void);
 void dm_vkn_glue_flush_tex(void) {
     if (!t_nstor) return;

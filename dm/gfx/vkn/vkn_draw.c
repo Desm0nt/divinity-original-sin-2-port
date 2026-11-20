@@ -66,6 +66,14 @@ static struct {
     VkBuffer ib; VkDeviceSize ib_off; VkIndexType ib_type;
     int vp_ok, sc_ok; VkViewport vp; VkRect2D sc;
 } g_b;
+// [stage 4: queries] conditional rendering / visibility queries (vkn_query.c; weak: a build without that file draws everything)
+int vkn_query_draw_enter(void) __attribute__((weak));
+void vkn_query_draw_pre(VkCommandBuffer cb) __attribute__((weak));
+void vkn_query_draw_post(VkCommandBuffer cb) __attribute__((weak));
+#define Q_ENTER() do { if (vkn_query_draw_enter && vkn_query_draw_enter()) return 0; } while (0)   // 1 = skipped by its condition
+#define Q_PRE(cb) do { if (vkn_query_draw_pre) vkn_query_draw_pre(cb); } while (0)
+#define Q_POST(cb) do { if (vkn_query_draw_post) vkn_query_draw_post(cb); } while (0)
+// [/stage 4: queries]
 static void forget_bound(void) { const uint32_t s = g_b.serial; memset(&g_b, 0, sizeof g_b); g_b.serial = s; }
 void vkn_draw_raw_begin(void) { forget_bound(); }
 
@@ -693,7 +701,9 @@ static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, 
         vkCmdBindIndexBuffer(cb, buf, off, it);
         g_b.ib = buf; g_b.ib_off = off; g_b.ib_type = it; g_st.ib_binds++;
     }
+    Q_PRE(cb);   // [stage 4: queries]
     vkCmdDrawIndexed(cb, (uint32_t)m, instances ? instances : 1, 0, ix ? 0 : (int32_t)first_vertex, 0);
+    Q_POST(cb);  // [stage 4: queries]
     g_st.draws++;
     if (ix) g_st.indexed++; else g_st.arrays++;
     g_rw_st.draws[ix][k]++; g_rw_st.indices += m;
@@ -704,6 +714,7 @@ void vkn_draw_rw_stats_get(vkn_draw_rw_stats *s) { if (s) *s = g_rw_st; }
 int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count, uint32_t instances) {
     if (!in) return 1;
     if (!count) return 0;
+    Q_ENTER();   // [stage 4: queries]
     // the index buffer first: no pass or pipeline work for a draw that cannot be made
     vkn_buf_info ib; memset(&ib, 0, sizeof ib);
     if (!in->ib || vkn_buf_lookup(VKN_BUF_IB, in->ib, &ib) || !ib.blk.size || !ib.blk.buf) {
@@ -731,7 +742,9 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
         vkCmdBindIndexBuffer(cb, ib.blk.buf, ib.blk.off, it);
         g_b.ib = ib.blk.buf; g_b.ib_off = ib.blk.off; g_b.ib_type = it; g_st.ib_binds++;
     }
+    Q_PRE(cb);   // [stage 4: queries]
     vkCmdDrawIndexed(cb, count, instances ? instances : 1, first_index, 0, 0);
+    Q_POST(cb);  // [stage 4: queries]
     g_st.draws++; g_st.indexed++;
     return 0;
 }
@@ -739,11 +752,14 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
 int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     if (!in) return 1;
     if (!count) return 0;
+    Q_ENTER();   // [stage 4: queries]
     if (rw_kind(in->prim) >= 0) return draw_rewritten(in, NULL, 0, first, count, 1);
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
+    Q_PRE(cb);   // [stage 4: queries]
     vkCmdDraw(cb, count, 1, first, 0);
+    Q_POST(cb);  // [stage 4: queries]
     g_st.draws++; g_st.arrays++;
     return 0;
 }

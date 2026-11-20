@@ -189,10 +189,11 @@ VKN_HOOK vkn_h_win(VKN_A) {
 }
 
 // ---- destroy: by the texture object of the record (live record or the pending copy) ----
+void dm_vkn_glue_forget(uint64_t obj) __attribute__((weak));   // hle_dos2_vkn_glue.c
 VKN_HOOK vkn_h_dt(VKN_A) {
     const uint64_t obj = a1 ? vkn_rd64(a1) : 0;   // before: the original clears the record
     const uint64_t v = g_o_dt(VKN_F);
-    if ((v & 1) && obj) vkn_tex_destroy_cookie(obj);
+    if ((v & 1) && obj) { if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj); vkn_tex_destroy_cookie(obj); }   // (audit U3: its storage note goes too)
     return v;
 }
 

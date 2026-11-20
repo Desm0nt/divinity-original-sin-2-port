@@ -43,8 +43,11 @@
 //   Both skip NVN when the cache already holds the values. So the effective scissor is the cache field that changed last: compared
 //   with the previous draw's copies (both changed between two draws: the scissor wins, the usual order; counted) - only when the
 //   exec part's dm_vkn_exec_scissor (exact: it sees the events in order) is not in the build.
-// Conditional rendering (r+0x185c / +0x1860, SetRenderEnableConditional in packet 0x15): the fields are kept exactly; the draw
-// itself is always recorded (no query in the native path yet).
+// Conditional rendering (r+0x185c / +0x1860, SetRenderEnableConditional in packet 0x15): the fields are kept exactly. Stage 4
+// (vkn_query.h, DM_VK_NATIVE_COND): after the tail's reset rule (r+0x185d && r+0x185c -> both 0) a draw is conditional exactly when
+// r+0x185c != 0, on the query object r+0x1860 (the pointer packets 0x3d / 0x3e bracket with; facts in hle_dos2_vkn_exec.c):
+// dm_vkn_draw_fill hands it to vkn_query_cond for the draw it fills (every draw path fills: this file, the immediate draws, the
+// direct NVN draws of hle_dos2_vkn_cmd.c, after the engine's own inline tail). A dispatch drops the condition (never skipped).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <sched.h>
@@ -53,6 +56,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_buf.h"
 #include "../gfx/vkn/vkn_draw.h"
+#include "../gfx/vkn/vkn_query.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
 
@@ -261,6 +265,7 @@ void dm_vkn_draw_fill(vkn_draw_in *in) {
     if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // textures the engine wrote through their mapped storage since the last draw
     const uint64_t r = vkn_renderer();
     memset(in, 0, sizeof *in);
+    vkn_query_cond(r && vkn_rd8(r + R_RENDER_EN) ? vkn_rd64(r + R_RENDER_QUERY) : 0);   // [stage 4: queries] the condition of this draw
     if (!r) return;
     in->shader = vkn_rd64(r + R_SHADER);
     // blend: 0 = what NVN still has (the last applied one); the default handle = NVN defaults = blending off
@@ -329,6 +334,7 @@ VKN_HOOK h_dispatch(VKN_A) {   // 0x9290f0(r, w1 x, w2 y, w3 z)
     const uint64_t r = a0;
     dm_vkn_draw_tail_pre(r);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
+    vkn_query_dispatch();   // [stage 4: queries] a dispatch is never skipped
     vkn_img_bind img[IMG_SLOTS]; uint32_t n = 0;
     for (uint32_t s = 0; s < IMG_SLOTS; s++) if (g_img[2][s]) { img[n].slot = s; img[n].tex = g_img[2][s]; n++; }
     g_c.dc++; g_c.dropped += vkn_draw_dispatch(&in, img, n, (uint32_t)a1, (uint32_t)a2, (uint32_t)a3) != 0;

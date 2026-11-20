@@ -63,6 +63,7 @@
 #include "../gfx/vkn/vkn_ui.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
+void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 
@@ -472,6 +473,7 @@ static void draw_state(uint64_t ctx, vkn_ui_draw_in *d) {
 
 // 0x1bf0cd0 DrawIndexedTriangles(ctx, r, GDrawPrimitive p, vertex buffer or NULL, stats)
 VKN_HOOK h_draw(VKN_A) {
+    if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: storage-written textures before this use
     VKN_UNUSED;
     const uint64_t ctx = a0, r = a1, p = a2, buf = a3, st = a4;
     const uint32_t vf = vkn_rd32(p + 0x18), nv = vkn_rd32(p + 0x10), ni = vkn_rd32(p + 0x14);
@@ -508,6 +510,7 @@ static void filter_composite(uint64_t ctx, uint64_t r, const int32_t dst[4], con
 // mode 4 = a filter (+0xe: 0 blur, 1 colour matrix, 2 / 3 bevel / drop shadow: NOT applied, see the top), else one v2tc2 quad with the
 // render state, identity world, uv = the rectangle over the frame; special blends (5) read the destination as unit 1 (placeholder here).
 VKN_HOOK h_filter(VKN_A) {
+    if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: storage-written textures before this use
     VKN_UNUSED;
     const uint64_t ctx = a0, r = a1;
     const int32_t ox = (int32_t)vkn_rd32(ctx + 0xf0), oy = (int32_t)vkn_rd32(ctx + 0xf4);

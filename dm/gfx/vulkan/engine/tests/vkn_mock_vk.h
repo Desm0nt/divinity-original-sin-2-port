@@ -86,6 +86,8 @@ typedef struct mk_obj {
     uint32_t max_sets, nsets;                                     // descriptor pool
     VkDescriptorSetLayout set_layout; uint64_t dpool; mk_dw *dw; uint32_t ndw;   // descriptor set
     uint64_t qv[64];                                              // query pool: values
+    // [stage 4: queries] occlusion pools: samples and state per query (0 undefined, 1 reset, 2 active, 3 available)
+    int qocclusion; uint32_t *qocc; uint8_t *qst;
 } mk_obj;
 
 static pthread_mutex_t mk_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -119,10 +121,13 @@ static mk_obj *mk_any(uint64_t h) {   // under mk_mu; dead ones too
 // ---------------------------------------------------------------- stage 3: the command log
 enum { MK_E_BEGIN_CB = 1, MK_E_END_CB, MK_E_SUBMIT, MK_E_PRESENT, MK_E_PRESENT_WAIT, MK_E_BARRIER, MK_E_COPY_BUF_IMG, MK_E_COPY_IMG, MK_E_BLIT_IMG,
        MK_E_CLEAR_COLOR_IMG, MK_E_CLEAR_DS_IMG, MK_E_BEGIN_RP, MK_E_END_RP, MK_E_CLEAR_ATT, MK_E_BIND_PIPE, MK_E_BIND_SETS, MK_E_BIND_VB,
-       MK_E_BIND_IB, MK_E_VIEWPORT, MK_E_SCISSOR, MK_E_DRAW, MK_E_DRAW_IDX, MK_E_DISPATCH, MK_E_RESET_QP, MK_E_TIMESTAMP, MK_E_WAIT, MK_E_N };
+       MK_E_BIND_IB, MK_E_VIEWPORT, MK_E_SCISSOR, MK_E_DRAW, MK_E_DRAW_IDX, MK_E_DISPATCH, MK_E_RESET_QP, MK_E_TIMESTAMP, MK_E_WAIT,
+       MK_E_BEGIN_Q, MK_E_END_Q, MK_E_COPY_Q, MK_E_BEGIN_COND, MK_E_END_COND,   // [stage 4: queries]
+       MK_E_N };
 static const char *const mk_ev_name[MK_E_N] MK_U = {"?", "begin", "end", "submit", "present", "present-wait", "barrier", "copy-buf-img", "copy-img",
     "blit", "clear-color-img", "clear-ds-img", "begin-rp", "end-rp", "clear-att", "bind-pipe", "bind-sets", "bind-vb", "bind-ib", "viewport",
-    "scissor", "draw", "draw-idx", "dispatch", "reset-qp", "timestamp", "fence-wait"};
+    "scissor", "draw", "draw-idx", "dispatch", "reset-qp", "timestamp", "fence-wait",
+    "begin-query", "end-query", "copy-query", "begin-cond", "end-cond"};   // [stage 4: queries]
 typedef struct mk_ev {
     int op; VkCommandBuffer cb; uint64_t seq;
     uint64_t a[4];                 // handles (image / buffer / pipeline / set / pass / framebuffer / fence), by op
@@ -571,7 +576,7 @@ void vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipeline
         mk_ev *e = mk_log(cb, MK_E_BARRIER); e->a[0] = (uint64_t)(uintptr_t)im[i].image; e->l0 = im[i].oldLayout; e->l1 = im[i].newLayout; e->r = im[i].subresourceRange;
         e->u[0] = s; e->u[1] = dst; e->u[2] = im[i].srcAccessMask; e->u[3] = im[i].dstAccessMask;
     }
-    if (!ni) mk_log(cb, MK_E_BARRIER)->u[0] = s;   // a memory / buffer barrier only (a[0] = 0)
+    if (!ni) { mk_ev *e = mk_log(cb, MK_E_BARRIER); e->u[0] = s; e->u[1] = dst; e->u[2] = nm ? m[0].srcAccessMask : 0; e->u[3] = nm ? m[0].dstAccessMask : 0; }   // a memory / buffer barrier only (a[0] = 0); [stage 4: queries] + dst stage, access
     pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer buf, VkImage img, VkImageLayout l, uint32_t n, const VkBufferImageCopy *c) {
@@ -664,12 +669,70 @@ void vkCmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkVi
 void vkCmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdSetScissor", MK_E_SCISSOR); e->u[0] = first; e->u[1] = n; e->rect = r[0]; pthread_mutex_unlock(&mk_mu);
 }
+// [stage 4: queries] occlusion queries and VK_EXT_conditional_rendering, executed at record time like the timestamps: a draw adds
+// mk_draw_samples to the active query unless the active predicate (read when the conditional block began) discards it; e->u[7] = 1
+// marks a draw the predicate discarded. mk_cond_ext: vkGetDeviceProcAddr hands out the two entry points.
+static uint32_t mk_draw_samples = 1; static int mk_cond_ext;
+static mk_obj *mk_q_pool; static uint32_t mk_q_idx; static int mk_q_on;
+static int mk_cond_on, mk_cond_pass; static uint64_t mk_cond_draws, mk_cond_discarded;
+static void mk_q_draw(mk_ev *e) {   // under mk_mu
+    if (mk_cond_on) { mk_cond_draws++; if (!mk_cond_pass) { e->u[7] = 1; mk_cond_discarded++; return; } }
+    if (mk_q_on && mk_q_pool) mk_q_pool->qocc[mk_q_idx] += mk_draw_samples;
+}
+void vkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t q, VkQueryControlFlags fl) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdBeginQuery", MK_E_BEGIN_Q); e->a[0] = MK_H(p); e->u[0] = q; e->u[1] = fl;
+    mk_obj *o = mk_find(MK_H(p), MK_QPOOL);
+    if (!o || !o->qocclusion || q >= o->size) mk_err("vkCmdBeginQuery: bad pool / query %u", q);
+    else if (mk_q_on) mk_err("vkCmdBeginQuery: query %u begun while query %u is active", q, mk_q_idx);
+    else if (o->qst[q] != 1) mk_err("vkCmdBeginQuery: query %u not reset (state %u)", q, o->qst[q]);
+    else { o->qst[q] = 2; o->qocc[q] = 0; mk_q_pool = o; mk_q_idx = q; mk_q_on = 1; }
+    pthread_mutex_unlock(&mk_mu);
+}
+void vkCmdEndQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t q) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdEndQuery", MK_E_END_Q); e->a[0] = MK_H(p); e->u[0] = q;
+    mk_obj *o = mk_find(MK_H(p), MK_QPOOL);
+    if (!o || !mk_q_on || mk_q_pool != o || mk_q_idx != q) mk_err("vkCmdEndQuery: query %u is not the active one", q);
+    else { o->qst[q] = 3; mk_q_on = 0; e->u[1] = o->qocc[q]; }
+    pthread_mutex_unlock(&mk_mu);
+}
+void vkCmdCopyQueryPoolResults(VkCommandBuffer cb, VkQueryPool p, uint32_t first, uint32_t n, VkBuffer dst, VkDeviceSize off, VkDeviceSize stride, VkQueryResultFlags fl) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdCopyQueryPoolResults", MK_E_COPY_Q); e->a[0] = MK_H(p); e->a[1] = MK_H(dst); e->u[0] = first; e->u[1] = n;
+    e->u[2] = (uint32_t)stride; e->u[3] = fl; e->off[0] = off;
+    mk_obj *o = mk_find(MK_H(p), MK_QPOOL), *b = mk_find(MK_H(dst), MK_BUFFER);
+    if (!o || !o->qocclusion || first + n > o->size || !b || (fl & VK_QUERY_RESULT_64_BIT) || stride != 4 || off + 4ull * n > b->size) mk_err("vkCmdCopyQueryPoolResults: bad arguments");
+    else for (uint32_t i = 0; i < n; i++) {
+        if (o->qst[first + i] != 3) { mk_err("vkCmdCopyQueryPoolResults: query %u is not available (state %u)%s", first + i, o->qst[first + i], (fl & VK_QUERY_RESULT_WAIT_BIT) ? ": the GPU would wait forever" : ""); continue; }
+        if (b->cpu) memcpy((uint8_t *)b->cpu + off + 4ull * i, &o->qocc[first + i], 4);
+    }
+    pthread_mutex_unlock(&mk_mu);
+}
+static void VKAPI_CALL mk_begin_cond(VkCommandBuffer cb, const VkConditionalRenderingBeginInfoEXT *bi) {
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdBeginConditionalRenderingEXT", MK_E_BEGIN_COND); e->a[0] = MK_H(bi->buffer); e->off[0] = bi->offset; e->u[0] = bi->flags;
+    mk_obj *b = mk_find(MK_H(bi->buffer), MK_BUFFER); uint32_t v = 1;
+    if (!b || !(b->usage & VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT) || bi->offset % 4 || bi->offset + 4 > b->size) mk_err("vkCmdBeginConditionalRenderingEXT: bad buffer / offset");
+    else if (b->cpu) memcpy(&v, (const uint8_t *)b->cpu + bi->offset, 4);
+    if (mk_cond_on) mk_err("vkCmdBeginConditionalRenderingEXT: already active");
+    mk_cond_on = 1; mk_cond_pass = (v != 0) != ((bi->flags & VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT) != 0); e->u[1] = v;
+    pthread_mutex_unlock(&mk_mu);
+}
+static void VKAPI_CALL mk_end_cond(VkCommandBuffer cb) {
+    pthread_mutex_lock(&mk_mu); mk_cmd(cb, "vkCmdEndConditionalRenderingEXT", MK_E_END_COND);
+    if (!mk_cond_on) mk_err("vkCmdEndConditionalRenderingEXT: not active");
+    mk_cond_on = 0; pthread_mutex_unlock(&mk_mu);
+}
+PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice d, const char *name) {
+    mk_dev_check(d, "vkGetDeviceProcAddr");
+    if (mk_cond_ext && !strcmp(name, "vkCmdBeginConditionalRenderingEXT")) return (PFN_vkVoidFunction)mk_begin_cond;
+    if (mk_cond_ext && !strcmp(name, "vkCmdEndConditionalRenderingEXT")) return (PFN_vkVoidFunction)mk_end_cond;
+    return NULL;
+}
+// [/stage 4: queries]
 void vkCmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
-    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDraw", MK_E_DRAW); e->u[0] = vc; e->u[1] = ic; e->u[2] = fv; e->u[3] = fi; pthread_mutex_unlock(&mk_mu);
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDraw", MK_E_DRAW); e->u[0] = vc; e->u[1] = ic; e->u[2] = fv; e->u[3] = fi; mk_q_draw(e); pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t ic, uint32_t inst, uint32_t fi, int32_t vo, uint32_t finst) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDrawIndexed", MK_E_DRAW_IDX);
-    e->u[0] = ic; e->u[1] = inst; e->u[2] = fi; e->u[3] = (uint32_t)vo; e->u[4] = finst; pthread_mutex_unlock(&mk_mu);
+    e->u[0] = ic; e->u[1] = inst; e->u[2] = fi; e->u[3] = (uint32_t)vo; e->u[4] = finst; mk_q_draw(e); pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDispatch", MK_E_DISPATCH); e->u[0] = x; e->u[1] = y; e->u[2] = z; pthread_mutex_unlock(&mk_mu);
@@ -683,15 +746,21 @@ VkResult vkCreateShaderModule(VkDevice d, const VkShaderModuleCreateInfo *ci, co
 void vkDestroyShaderModule(VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)a; (void)d; mk_del(MK_H(m), MK_SMOD); }
 VkResult vkCreateQueryPool(VkDevice d, const VkQueryPoolCreateInfo *ci, const VkAllocationCallbacks *a, VkQueryPool *out) {
     (void)a; mk_dev_check(d, "vkCreateQueryPool");
-    if (ci->queryType != VK_QUERY_TYPE_TIMESTAMP || ci->queryCount > 64) mk_err("vkCreateQueryPool: type %d count %u", (int)ci->queryType, ci->queryCount);
-    pthread_mutex_lock(&mk_mu); mk_obj *o; const uint64_t h = mk_new(MK_QPOOL, &o); o->size = ci->queryCount; pthread_mutex_unlock(&mk_mu);
+    const int occ = ci->queryType == VK_QUERY_TYPE_OCCLUSION;   // [stage 4: queries]
+    if ((ci->queryType != VK_QUERY_TYPE_TIMESTAMP || ci->queryCount > 64) && !(occ && ci->queryCount <= 4096)) mk_err("vkCreateQueryPool: type %d count %u", (int)ci->queryType, ci->queryCount);
+    pthread_mutex_lock(&mk_mu); mk_obj *o; const uint64_t h = mk_new(MK_QPOOL, &o); o->size = ci->queryCount;
+    if (occ) { o->qocclusion = 1; o->qocc = (uint32_t *)calloc(ci->queryCount, 4); o->qst = (uint8_t *)calloc(ci->queryCount, 1); }
+    pthread_mutex_unlock(&mk_mu);
     *out = (VkQueryPool)(uintptr_t)h; return VK_SUCCESS;
 }
 void vkDestroyQueryPool(VkDevice d, VkQueryPool p, const VkAllocationCallbacks *a) { (void)a; (void)d; mk_del(MK_H(p), MK_QPOOL); }
 void vkCmdResetQueryPool(VkCommandBuffer cb, VkQueryPool p, uint32_t first, uint32_t n) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdResetQueryPool", MK_E_RESET_QP); e->a[0] = MK_H(p); e->u[0] = first; e->u[1] = n;
     mk_obj *o = mk_find(MK_H(p), MK_QPOOL);
-    if (!o || first + n > o->size) mk_err("vkCmdResetQueryPool: bad pool / range"); else for (uint32_t i = 0; i < n; i++) o->qv[first + i] = 0;
+    if (!o || first + n > o->size) mk_err("vkCmdResetQueryPool: bad pool / range");
+    else if (o->qocclusion) {   // [stage 4: queries]
+        for (uint32_t i = 0; i < n; i++) { if (o->qst[first + i] == 2) mk_err("vkCmdResetQueryPool: query %u is active", first + i); o->qocc[first + i] = 0; o->qst[first + i] = 1; }
+    } else for (uint32_t i = 0; i < n; i++) o->qv[first + i] = 0;
     pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdWriteTimestamp(VkCommandBuffer cb, VkPipelineStageFlagBits st, VkQueryPool p, uint32_t q) {
@@ -808,6 +877,7 @@ typedef struct mk_vstate {
     uint64_t gpipe, cpipe, gset, cset, glayout, clayout; uint32_t gndyn, cndyn, gdyn[16], cdyn[16];
     uint64_t vb[8]; VkDeviceSize vboff[8]; uint64_t ib; VkDeviceSize iboff; uint32_t itype;
     int vp, sc; VkRect2D scr; VkViewport vpv;
+    int qon, condon;   // [stage 4: queries]
 } mk_vstate;
 static VkCommandBuffer mk_v_cb; static const mk_ev *mk_v_ev;
 #define MK_V(...) do { if (mk_validate_on) { mk_val_errors++; printf("VALIDATION (cb %#llx, #%llu %s): ", (unsigned long long)MK_H(mk_v_cb), (unsigned long long)mk_v_ev->seq, mk_ev_name[mk_v_ev->op]); \
@@ -878,12 +948,13 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
         const mk_ev *e = mk_ev_at(seq);
         if (e->cb != cb) continue;
         mk_v_ev = e;
-        if (e->op == MK_E_END_CB) { if (st.in) MK_V("command buffer ended inside a render pass"); break; }
+        if (e->op == MK_E_END_CB) { if (st.in) MK_V("command buffer ended inside a render pass"); if (st.qon || st.condon) MK_V("command buffer ended with a query / conditional block active"); break; }
         if (e->op == MK_E_SUBMIT || e->op == MK_E_BEGIN_CB) { MK_V("recording without its end"); break; }
         const int outside = e->op == MK_E_BARRIER || e->op == MK_E_COPY_BUF_IMG || e->op == MK_E_COPY_IMG || e->op == MK_E_BLIT_IMG || e->op == MK_E_CLEAR_COLOR_IMG ||
-                            e->op == MK_E_CLEAR_DS_IMG || e->op == MK_E_DISPATCH || e->op == MK_E_RESET_QP || e->op == MK_E_BEGIN_RP;
+                            e->op == MK_E_CLEAR_DS_IMG || e->op == MK_E_DISPATCH || e->op == MK_E_RESET_QP || e->op == MK_E_BEGIN_RP || e->op == MK_E_COPY_Q;
         if (outside && st.in) MK_V("not allowed inside a render pass");
-        const int inside = e->op == MK_E_END_RP || e->op == MK_E_CLEAR_ATT || e->op == MK_E_DRAW || e->op == MK_E_DRAW_IDX;
+        const int inside = e->op == MK_E_END_RP || e->op == MK_E_CLEAR_ATT || e->op == MK_E_DRAW || e->op == MK_E_DRAW_IDX ||
+                           e->op == MK_E_BEGIN_Q || e->op == MK_E_END_Q || e->op == MK_E_BEGIN_COND || e->op == MK_E_END_COND;   // [stage 4: queries] (the port's rule)
         if (inside && !st.in) MK_V("allowed only inside a render pass");
         switch (e->op) {
         case MK_E_BARRIER: {
@@ -965,7 +1036,13 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
             }
             break;
         }
+        case MK_E_BEGIN_Q: if (st.qon) MK_V("query begun while one is active"); st.qon = 1; break;   // [stage 4: queries]
+        case MK_E_END_Q: if (!st.qon) MK_V("query ended without one active"); st.qon = 0; break;
+        case MK_E_BEGIN_COND: if (st.condon) MK_V("conditional block nested"); st.condon = 1; break;
+        case MK_E_END_COND: if (!st.condon) MK_V("conditional block ended without one active"); st.condon = 0; break;
         case MK_E_END_RP:
+            if (st.qon) MK_V("render pass ended with an active query");
+            if (st.condon) MK_V("render pass ended inside a conditional block");
             if (st.rp && st.fb) for (uint32_t i = 0; i < st.rp->rp.natt && i < 9; i++) { mk_obj *im = st.att_img[i] ? mk_find(st.att_img[i], MK_IMAGE) : NULL; if (im) im->gpu_layout = st.rp->rp.att[i].finalLayout; }
             st.in = 0; st.rp = st.fb = NULL; memset(st.att_img, 0, sizeof st.att_img);
             break;
