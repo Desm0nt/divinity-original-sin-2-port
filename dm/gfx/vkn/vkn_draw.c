@@ -21,6 +21,7 @@
 #ifdef DM_GAME_DOS2
 #include "vkn_draw.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include "vkn_buf.h"
 #include "vkn_frame.h"
@@ -573,6 +574,45 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     if (x1 <= x0 || y1 <= y0) { g_st2.scissor_empty++; return 1; }
     const VkRect2D sc = {{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
     if (!g_b.sc_ok || memcmp(&sc, &g_b.sc, sizeof sc)) { vkCmdSetScissor(cb, 0, 1, &sc); g_b.sc = sc; g_b.sc_ok = 1; }
+    // Debug (DM_VK_NATIVE_DUMP): in the dumped frame, the whole state of every draw into a big RGBA8 target (the post chain, the
+    // window): what the pipeline was built from, where it draws, what it samples. At most 160 lines a dump.
+    if (vkn_pass_dump_active()) {
+        static uint32_t lines; static uint64_t lines_frame;
+        if (lines_frame != vkn_frame()) { lines_frame = vkn_frame(); lines = 0; }
+        vkn_tex *ct = vkn_pass_color(0);
+        if (ct && ct->format == VK_FORMAT_R8G8B8A8_UNORM && ct->w >= 1000 && lines++ < 160) {
+            const VkPipelineDepthStencilStateCreateInfo *di = did ? vkn_ds_info(did) : NULL;
+            const VkPipelineRasterizationStateCreateInfo *ri = rid ? vkn_raster_info(rid) : NULL;
+            const VkPipelineColorBlendAttachmentState *bi = bid ? vkn_blend_att(bid) : NULL;
+            char tx[384]; int n = 0; tx[0] = 0;
+            for (uint32_t i = 0; i < s->nbind && n < (int)sizeof tx - 48; i++) {
+                const vkn_bind *b = &s->bind[i]; if (b->kind != VKN_BK_TEXTURE) continue;
+                const int st = src_of_stage(b->stage);
+                const int32_t id = st >= 0 && in->tex[st] && b->slot < VKN_TEX_SLOTS ? in->tex[st][b->slot] : -1;
+                vkn_tex *t = NULL; if (id >= 0) vkn_tex_view_by_id((uint32_t)id, &t);
+                n += snprintf(tx + n, sizeof tx - (size_t)n, " s%d.%u=%llx(%ux%u f%d L%d)", st, b->slot, t ? (unsigned long long)(t->handle & 0xffff) : 0xffffull, t ? t->w : 0, t ? t->h : 0, t ? (int)t->format : 0, t ? (int)t->layout : -1);
+            }
+            {   // the uniform blocks the shader reads: stage.slot = ring offset / size, the first 4 floats and floats 52..59 (vec4 13, 14)
+                char ub[640]; int m = 0; ub[0] = 0; const float *ring = (const float *)vkn_ring_cpu();
+                for (uint32_t i = 0; i < s->nbind && m < (int)sizeof ub - 160; i++) {
+                    const vkn_bind *b = &s->bind[i]; if (b->kind != VKN_BK_UNIFORM) continue;
+                    const int st = src_of_stage(b->stage);
+                    if (st < 0 || b->slot >= VKN_UBO_SLOTS || !g_ubo[st][b->slot].valid || !ring) { m += snprintf(ub + m, sizeof ub - (size_t)m, " u%d.%u=none", st, b->slot); continue; }
+                    const uint32_t off = g_ubo[st][b->slot].off, sz = g_ubo[st][b->slot].size; const float *f = (const float *)((const uint8_t *)ring + off);
+                    m += snprintf(ub + m, sizeof ub - (size_t)m, " u%d.%u=@%x+%u[%g %g %g %g", st, b->slot, off, sz, sz >= 16 ? f[0] : 0, sz >= 16 ? f[1] : 0, sz >= 16 ? f[2] : 0, sz >= 16 ? f[3] : 0);
+                    if (sz >= 240) m += snprintf(ub + m, sizeof ub - (size_t)m, " | %g %g %g %g %g %g %g %g", f[52], f[53], f[54], f[55], f[56], f[57], f[58], f[59]);
+                    m += snprintf(ub + m, sizeof ub - (size_t)m, "]");
+                }
+                vkn_logf("trace: uniforms of the next line:%s", ub);
+            }
+            vkn_logf("trace: target %llx %ux%u (pass %ux%u, %u colours, depth %d) shader %llx vs %s fs %s | blend h %llx id %u en %d mask in pipe %x | ds id %u test %d write %d op %d stencil %d ref %u | cull %d front %d | prim %u vfmt %u vb0 %llx+%u | vp %g %g %g %g sc %d %d %u %u | alpha %g fsv %d |%s",
+                     (unsigned long long)(ct->handle & 0xffff), ct->w, ct->h, pi->width, pi->height, pi->ncolor, pi->has_depth, (unsigned long long)(in->shader & 0xffff), s->key[0], s->key[1],
+                     (unsigned long long)in->blend, bid, bi ? (int)bi->blendEnable : -1, (unsigned)pd.write_mask[0],
+                     did, di ? (int)di->depthTestEnable : -1, di ? (int)di->depthWriteEnable : -1, di ? (int)di->depthCompareOp : -1, di ? (int)di->stencilTestEnable : -1, in->stencil_ref,
+                     ri ? (int)ri->cullMode : -1, ri ? (int)ri->frontFace : -1, prim, vid, (unsigned long long)(in->vb[0] & 0xffff), in->vb_off[0],
+                     vp.x, vp.y, vp.width, vp.height, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height, in->alpha_ref, fsv, tx);
+        }
+    }
     *cb_out = cb; *vf_out = vf;
     return 0;
 }

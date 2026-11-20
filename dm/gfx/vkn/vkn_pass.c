@@ -183,6 +183,11 @@ static void dump_close(void) {   // close listener (after vkn_pass_end): the fra
     vkn_logf("dump: heavy frame %u (frame %llu): %u colour targets read back", g_dump.k, (unsigned long long)g_dump.frame, g_dump.n);
 }
 
+// For the draw trace of the dump frame (vkn_draw.c): 1 while the targets of this frame are being collected for a dump, and the
+// colour target of slot i of the current set (NULL = none).
+int vkn_pass_dump_active(void) { return g_dump.active; }
+vkn_tex *vkn_pass_color(uint32_t i) { return i < g_cur.n ? g_cur.c[i] : NULL; }
+
 void vkn_pass_init(void) {
     if (g_inited) return;
     g_inited = 1;
@@ -220,6 +225,7 @@ static int flush_clears(vkn_tex *t) {
     if (!cb) return -1;
     end_open();
     barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (g_dump.active && t->format == VK_FORMAT_R8G8B8A8_UNORM && t->w >= 1000) vkn_logf("trace: remembered clear of %llx runs as a command (%u colour, depth bits %u)", (unsigned long long)(t->handle & 0xffff), t->pass_nclr, (unsigned)t->pass_dclr);
     for (uint32_t i = 0; i < t->pass_nclr; i++) {
         const VkClearColorValue v = clear_color(t->format, t->pass_clr[i].rgba);
         const VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, t->pass_clr[i].layer, 1};
@@ -352,6 +358,8 @@ static int begin_set(const tset *s) {
     g_info = inf;
     g_st.passes++;
     g_dump.passes_frame++;
+    if (g_dump.active && s->n && s->c[0] && s->c[0]->format == VK_FORMAT_R8G8B8A8_UNORM && s->c[0]->w >= 1000)
+        vkn_logf("trace: pass begins on %llx (%ux%u) load %d, depth %llx load %d, area %ux%u", (unsigned long long)(s->c[0]->handle & 0xffff), s->c[0]->w, s->c[0]->h, (int)k.load[0], s->d ? (unsigned long long)(s->d->handle & 0xffff) : 0ull, (int)k.depth_load, W, H);
     if (g_dump.active) for (uint32_t i = 0; i < s->n; i++) dump_note(s->c[i]);
     return 0;
 }
@@ -429,6 +437,7 @@ void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
 // ---- clears ----
 void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const int32_t rect[4]) {
     vkn_pass_init();
+    if (g_dump.active && t && t->format == VK_FORMAT_R8G8B8A8_UNORM && t->w >= 1000) vkn_logf("trace: clear colour of %llx layer %u rect %d %d %d %d (%g %g %g %g), pass open %d", (unsigned long long)(t->handle & 0xffff), layer, rect ? rect[0] : 0, rect ? rect[1] : 0, rect ? rect[2] : -1, rect ? rect[3] : -1, rgba ? rgba[0] : 0, rgba ? rgba[1] : 0, rgba ? rgba[2] : 0, rgba ? rgba[3] : 0, open_here());
     if (!t || !rgba || is_depth(t) || layer >= t->layers) {
         g_st2.clear_bad++;
         if (red_ok(&g_red_clear)) vkn_logf(RED "pass: colour clear dropped (texture %#llx, layer %u of %u, depth format %d)", t ? (unsigned long long)t->handle : 0ull, layer, t ? t->layers : 0u, t ? is_depth(t) : 0);
@@ -502,6 +511,7 @@ static int blit_ok(VkFormat f) {
 }
 void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     vkn_pass_init();
+    if (g_dump.active && dst && src) vkn_logf("trace: copy %llx (%ux%u) -> %llx (%ux%u)", (unsigned long long)(src->handle & 0xffff), src->w, src->h, (unsigned long long)(dst->handle & 0xffff), dst->w, dst->h);
     if (!dst || !src || dst->dead || src->dead) {
         g_st2.copy_drop++;
         if (red_ok(&g_red_copy)) vkn_logf(RED "pass: copy dropped: %s texture %s", !dst || (dst && dst->dead) ? "destination" : "source", (!dst || !src) ? "unknown" : "destroyed");

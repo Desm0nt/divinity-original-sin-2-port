@@ -71,6 +71,10 @@ typedef struct vkn_pass_stats2 {
 } vkn_pass_stats2;
 void vkn_pass_stats2_get(vkn_pass_stats2 *s);
 
+// ---- debug (DM_VK_NATIVE_DUMP): see vkn_pass.c ----
+int vkn_pass_dump_active(void);
+vkn_tex *vkn_pass_color(uint32_t i);
+
 #ifdef __cplusplus
 }
 #endif
