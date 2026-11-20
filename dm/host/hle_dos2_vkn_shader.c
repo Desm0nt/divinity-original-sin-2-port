@@ -18,6 +18,8 @@
 //            (heap pointers, unique while alive): program -> handle map below, filled at creation.
 //   0x92d320 LoadShaderFile(path, flag): the engine's 16-byte string (byte 0 bit 0 clear: length byte0 >> 1, characters from +1; set:
 //            u32 length at +4, char * at +8) - the file name of the red lines (thread-local bracket; CreateShader runs inside it).
+// Stage 4 (mode 1, hle_dos2_vkn_create.c): 0x919090's MemoryPoolGetBufferAddress / ProgramInitialize / SetShaders and 0x91ce90's
+// ProgramFinalize are answered by the create part's stubs (program +0xe8 stays the host pointer of the code block, as above).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <pthread.h>

@@ -12,6 +12,8 @@
 // The state arguments are bytes in the engine (it compares and indexes with the low byte), so only the low byte is passed on.
 // The polygon offset values (0x93d9f0: SetPolygonOffsetClamp(-2.5, -5.0, 0) every frame) are the backend's defaults; the frame
 // piece may call vkn_state_set_depth_bias when it owns 0x93d9f0.
+// Stage 4 (mode 1, hle_dos2_vkn_create.c): the state / vertex-format setters the originals call (Blend / Color / ChannelMask /
+// Polygon / DepthStencil / VertexAttrib / VertexStream State*) are answered by the create part's stubs: no HLE NVN in these bodies.
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <string.h>

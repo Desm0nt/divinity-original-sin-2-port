@@ -18,6 +18,10 @@
 // Data pointers: initData (CreateTexture) and the image's level data (linear images) are read inside the hook, right after the
 // original returned - the caller frees them after the call; packaged storage is the image's own memory (kept by the texture). The
 // hooks run on the engine's loader threads and on the render thread (0x920460 from the window's begin): vkn_tex locks its tables.
+// Stage 4 (mode 1, hle_dos2_vkn_create.c, DM_VK_NATIVE_CREATE): the originals these hooks call no longer reach HLE NVN - their
+// builder / Initialize / pool registration / view / getter / WriteTexels entries are answered by the create part's stubs in the
+// game's NVN table (same in-place object layout, no translator side effects); WriteTexels copies nothing, the data reaches the
+// native image here from the engine arguments. The engine's own bookkeeping (pool-id bitmap, A at object +0xe0, records) is unchanged.
 // Not covered here: 0x914bb0 shared RT storage (every target gets its own memory, VK-NATIVE.md 3.3), texture updates after creation
 // (UI WriteTexels / CopyBufferToTexture, packets 0x2c / 0x2d: stage 3).
 #ifdef DM_GAME_DOS2
@@ -232,7 +236,9 @@ static void tex_census(void) {
 }
 
 void dm_vkn_tex_register(void);
+void dm_vkn_create_register(void) __attribute__((weak));   // hle_dos2_vkn_create.c: creation-time NVN entries (mode 1)
 void dm_vkn_tex_register(void) {
+    if (dm_vkn_create_register) dm_vkn_create_register();
     static const uint32_t k_ct[4] = {0xd105c3ff /* sub sp,sp,#0x170 */, 0xa9116ffc, 0xa91267fa, 0xa9135ff8};
     static const uint32_t k_cti[4] = {0xd10503ff /* sub sp,sp,#0x140 */, 0xa90e6ffc, 0xa90f67fa, 0xa9105ff8};
     static const uint32_t k_win[4] = {0xd10403ff /* sub sp,sp,#0x100 */, 0xa90a6ffc, 0xa90b67fa, 0xa90c5ff8};

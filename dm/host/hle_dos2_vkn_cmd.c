@@ -517,6 +517,9 @@ static const cmd_slot k_slots[] = { CMD_SLOTS(X_ROW) };
 static vkn_fn g_o_init;
 static int g_fills;
 void dm_vkn_glue_repoint(void) __attribute__((weak));
+int dm_vkn_glue_is_mine(uint64_t fn) __attribute__((weak));
+int dm_vkn_read_slot(unsigned slot_index, void **fn) __attribute__((weak));     // hle_dos2_vkn_read.c
+int dm_vkn_create_slot(unsigned slot_index, void **fn) __attribute__((weak));   // hle_dos2_vkn_create.c
 static void *g_stub[TABLE_SLOTS];   // the host-stack stub of each repointed slot's function (dm_vkn_cmd_register)
 static void repoint(uint64_t init) {
     uint64_t *tab = (uint64_t *)(void *)(dm_vkn_base() + M_TABLE);
@@ -531,6 +534,16 @@ static void repoint(uint64_t init) {
         __atomic_store_n(&tab[s->idx], mine, __ATOMIC_RELEASE);
         n++;
     }
+    // Stage 4 parts with table entries of their own: texture read-back (hle_dos2_vkn_read.c: nvnTextureReadTexels) and, as a second
+    // chance after its own early installation, the creation-time entries (hle_dos2_vkn_create.c). Before the glue below, which wraps
+    // whatever nvnTextureGetStride is by then.
+    for (unsigned i = 0; dm_vkn_read_slot && i < TABLE_SLOTS; i++) { void *f = NULL;
+        if (dm_vkn_read_slot(i, &f) && f && tab[i] != (uint64_t)(uintptr_t)f) { g_orig[i] = tab[i]; __atomic_store_n(&tab[i], (uint64_t)(uintptr_t)f, __ATOMIC_RELEASE); } }
+    for (unsigned i = 0; dm_vkn_create_slot && i < TABLE_SLOTS; i++) { void *f = NULL;
+        if (!g_stub[i] && dm_vkn_create_slot(i, &f) && f && tab[i] != (uint64_t)(uintptr_t)f && tab[i] != (uint64_t)(uintptr_t)0) {
+            if (dm_vkn_glue_is_mine && dm_vkn_glue_is_mine(tab[i])) continue;   // (the glue's wrapper around this very entry)
+            { void *g = NULL; if (dm_vkn_read_slot && dm_vkn_read_slot(i, &g) && g) continue; }   // (the read-back part owns this entry)
+            g_orig[i] = tab[i]; __atomic_store_n(&tab[i], (uint64_t)(uintptr_t)f, __ATOMIC_RELEASE); } }
     if (dm_vkn_glue_repoint) dm_vkn_glue_repoint();   // hle_dos2_vkn_glue.c: nvnTextureGetStride noted (textures written through their storage)
     cnt(A_REPOINT);
     vkn_logf("cmd: game NVN table main+%#x after device init %d (object %#llx): %d of %zu command / queue / sync entries repointed to the native "

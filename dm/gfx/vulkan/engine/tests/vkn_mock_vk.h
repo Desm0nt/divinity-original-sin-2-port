@@ -620,6 +620,8 @@ void vkCmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout 
     e->a[0] = MK_H(img); e->l1 = l; e->cv[0].depthStencil = *v; e->r = r[0]; e->u[0] = nr; e->n = 1;
     pthread_mutex_unlock(&mk_mu);
 }
+// (the warm-up's cache file, vkn_warm.c: no data in the mock)
+VkResult vkGetPipelineCacheData(VkDevice d, VkPipelineCache c, size_t *n, void *data) { (void)d; (void)c; (void)data; if (n) *n = 0; return VK_SUCCESS; }
 // (only the DM_VK_NATIVE_DUMP debug aid of vkn_pass.c calls it; the tests never set that switch)
 void vkCmdCopyImageToBuffer(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) { (void)cb; (void)src; (void)sl; (void)dst; (void)n; (void)r; }
 void vkCmdBlitImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageBlit *b, VkFilter f) {

@@ -49,6 +49,8 @@ void dm_vkn_glue_repoint(void) {   // after the game filled its NVN table (calle
     dm_vkn_census(dm_vkn_glue_census);
     vkn_logf("glue: nvnTextureGetStride (main+%#x) noted: textures the engine writes through their mapped storage are mirrored at the next draw", STOR_SLOT_OFF);
 }
+int dm_vkn_glue_is_mine(uint64_t fn);
+int dm_vkn_glue_is_mine(uint64_t fn) { return fn == (uint64_t)(uintptr_t)stor_get_stride; }
 void dm_vkn_glue_flush_tex(void);
 void dm_vkn_glue_flush_tex(void) {   // render thread: before a draw is built, and at the end of the frame
     if (!t_nstor) return;
