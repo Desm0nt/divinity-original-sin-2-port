@@ -31,6 +31,7 @@
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/syscall.h>   // [DOS2] PadSurface.nativePinLittle
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -755,6 +756,19 @@ JNIEXPORT jobject JNICALL Java_com_xiaoboluo_d2r_PadSurface_nativeWrap(JNIEnv *e
     jobject out = ANativeWindow_toSurface(env, w);   // holds its own reference
     ANativeWindow_release(w);
     return out;
+}
+
+// [DOS2] PadSurface's draw thread on the little cores (owner 20.11, Fort Joy: "dm-pad-draw" took 4-6 ms of CPU a frame, 55-66 % of it on the
+// prime core, while the game's threads waited ~21 ms a frame for a core). Pins the CALLING thread to the cpu-place plan's little cluster;
+// returns the mask (0 = no little cluster known: nothing changed). Raw syscall: no _GNU_SOURCE needed for CPU_SET in this C file.
+JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_PadSurface_nativePinLittle(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    const dm_cpu_plan_t *p = dm_cpu_plan();
+    uint32_t m = p ? p->little : 0;
+    if (!m) return 0;
+    unsigned long mask = m;
+    if (syscall(__NR_sched_setaffinity, 0, sizeof mask, &mask) != 0) return -1;
+    return (jint)m;
 }
 
 JNIEXPORT void JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeTouch(JNIEnv *env, jclass cls, jint n, jintArray ids, jfloatArray xs, jfloatArray ys) {

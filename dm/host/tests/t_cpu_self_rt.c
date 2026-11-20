@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
         snprintf(rel, sizeof rel, "sys/devices/system/cpu/cpu%d/regs/identification/midr_el1", c); snprintf(v, sizeof v, "0x00000000%08x\n", c >= 6 ? 0x410fd0b1u : 0x410fd051u); put(rel, v);
     }
     char ms_[8]; snprintf(ms_, sizeof ms_, "%d", mode);
-    setenv("DM_CPU_SYSFS_ROOT", g_root, 1); setenv("DM_CPU_CHECK_MS", "60000", 1); setenv("DM_CPU_REPORT_S", "2", 1); unsetenv("DM_CPU_CORES"); setenv("DM_CPU_SELF", ms_, 1);
+    setenv("DM_CPU_SYSFS_ROOT", g_root, 1); setenv("DM_CPU_CHECK_MS", "60000", 1); setenv("DM_CPU_REPORT_S", "2", 1); setenv("DM_CPU_CORES", "auto", 1); setenv("DM_CPU_SELF", ms_, 1);
     snprintf(g_log, sizeof g_log, "%s.log", g_root); if (!freopen(g_log, "w", stderr)) return 2; setvbuf(stderr, NULL, _IOLBF, 0);
     { uint64_t m[4] = {0xff, 0, 0, 0}; syscall(SYS_sched_setaffinity, 0, sizeof m, m); }
     pthread_t th[T_N];

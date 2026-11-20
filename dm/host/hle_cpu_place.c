@@ -74,7 +74,7 @@ static int g_self_mode = 1;
 static void plan_init(void) {
     { const char *r = getenv("DM_CPU_SYSFS_ROOT"); dm_cpu_topo_read(r ? r : "", &g_in); }   // a fake tree: the host test only
     const char *e = getenv("DM_CPU_TOPO"); g_legacy = e && (!strcmp(e, "index") || !strcmp(e, "legacy") || !strcmp(e, "old"));
-    int mode = dm_cpu_mode_parse(getenv("DM_CPU_CORES")); if (mode < 0) mode = DM_CPU_MODE_AUTO;
+    int mode = dm_cpu_mode_parse(getenv("DM_CPU_CORES")); if (mode < 0) mode = DM_CPU_MODE_ALL;   // [DOS2] 0.2.1 (owner 20.11, Fort Joy FP_all: run-queue wait -2 ms, fps +0.6 over auto): no affinity by default; DM_CPU_CORES=auto = the old plan
     if ((e = getenv("DM_CPU_CHECK_MS")) && atoi(e) >= 200) g_check_ms = atoi(e);
     if ((e = getenv("DM_CPU_REPORT_S")) && atoi(e) >= 2) g_report_s = atoi(e);
     if ((e = getenv("DM_CPU_JOB_NAMES")) && *e) snprintf(g_job_names, sizeof g_job_names, "%s", e);

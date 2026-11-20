@@ -201,10 +201,14 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     // this before the fields exist: surface is null then.)
     @Override public void invalidate() {
         if (surface == null) { super.invalidate(); return; }
-        if (recordPosted.compareAndSet(false, true)) postOnAnimation(record);
+        if (recordPosted.compareAndSet(false, true)) {   // [DOS2] at most DM_PAD_MAX_HZ recordings a second (PadSurface.maxHz, owner 20.11)
+            int hz = PadSurface.maxHz(); long wait = hz > 0 ? lastRecord + 1000 / hz - android.os.SystemClock.uptimeMillis() : 0;
+            if (wait > 0) postOnAnimationDelayed(record, wait); else postOnAnimation(record);
+        }
     }
+    private long lastRecord;   // UI thread: uptime of the last recording
     private final Runnable record = () -> {   // UI thread (Choreographer animation callback: draws nothing on the window)
-        recordPosted.set(false);
+        recordPosted.set(false); lastRecord = android.os.SystemClock.uptimeMillis();
         PadSurface s = surface; int w = getWidth(), h = getHeight();
         if (s == null || w <= 0 || h <= 0) return;
         Picture p = new Picture(); Canvas c = p.beginRecording(w, h);

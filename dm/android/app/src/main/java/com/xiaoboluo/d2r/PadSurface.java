@@ -44,6 +44,17 @@ final class PadSurface extends SurfaceView implements SurfaceHolder.Callback {
     static final long NOT_READY = Long.MIN_VALUE;
     static volatile int stallMs;   // debug: the draw thread sleeps this long holding a buffer (dmPadStallMs / DM_PAD_STALL_MS)
     static native Surface nativeWrap(Surface s);   // jni_android.c: a new Java Surface over the same ANativeWindow
+    static native int nativePinLittle();            // jni_android.c: the calling thread on the little cores (mask, 0 = none, -1 = failed)
+    // [DOS2] owner 20.11 (Fort Joy, walking with the stick: dm-pad-draw 4-6 ms of CPU a game frame, mostly on the prime core): the pad is drawn at
+    // most DM_PAD_MAX_HZ times a second (default 30; 0 = every request, as before) and its draw thread lives on the little cores
+    // (DM_PAD_LITTLE, default 1; re-applied every 2 s because the system rewrites thread masks). Input is not throttled: touches still go out at once.
+    private static int maxHz = -1, little = -1;
+    static int maxHz() { if (maxHz < 0) maxHz = envInt("DM_PAD_MAX_HZ", 30); return maxHz; }
+    private static int little() { if (little < 0) little = envInt("DM_PAD_LITTLE", 1); return little; }
+    private static int envInt(String k, int d) { try { String v = android.system.Os.getenv(k); return v == null || v.isEmpty() ? d : Integer.parseInt(v.trim()); } catch (RuntimeException e) { return d; } }
+    private static boolean pinMissing;
+    private volatile long lastDrawn;   // uptime of the last frame put on screen (draw thread writes, any thread reads)
+    private long lastPin; private boolean pinTold;   // draw thread
 
     private final Painter painter;
     private HandlerThread thread; private volatile Handler h;
@@ -69,7 +80,17 @@ final class PadSurface extends SurfaceView implements SurfaceHolder.Callback {
     }
 
     // Any thread: draw once more soon (requests made while one is queued fold into it).
-    void request() { Handler hh = h; if (hh != null && queued.compareAndSet(false, true)) { if (!hh.post(drawTask)) queued.set(false); } }
+    void request() {
+        Handler hh = h; if (hh == null || !queued.compareAndSet(false, true)) return;
+        int hz = maxHz(); long wait = hz > 0 ? lastDrawn + 1000 / hz - SystemClock.uptimeMillis() : 0;
+        if (!(wait > 0 ? hh.postDelayed(drawTask, wait) : hh.post(drawTask))) queued.set(false);
+    }
+    private void pin(long now) {   // draw thread
+        if (pinMissing || little() == 0 || (lastPin != 0 && now - lastPin < 2000)) return;
+        lastPin = now;
+        int m; try { m = nativePinLittle(); } catch (UnsatisfiedLinkError e) { pinMissing = true; return; }
+        if (!pinTold) { pinTold = true; android.util.Log.i("dm", "[java] pad draw thread: " + (m > 0 ? "on the little cores (mask 0x" + Integer.toHexString(m) + ")" : m == 0 ? "no little cluster known, not pinned" : "pin failed") + "; at most " + maxHz() + " frames a second (DM_PAD_MAX_HZ, DM_PAD_LITTLE)"); }
+    }
 
     // ---- SurfaceHolder.Callback (UI thread): hand the surface over and return; nothing here waits for the draw thread
     @Override public void surfaceCreated(SurfaceHolder holder) {}
@@ -96,6 +117,7 @@ final class PadSurface extends SurfaceView implements SurfaceHolder.Callback {
     }
     private void drawNow() {
         queued.set(false);
+        pin(SystemClock.uptimeMillis());
         Surface s = out; if (s == null || !s.isValid()) return;
         Object lock = painter.paintLock();
         synchronized (lock) { long sig = painter.paintSignature(); if (sig == NOT_READY || (!forced && sig == shownSig)) return; }
@@ -116,7 +138,7 @@ final class PadSurface extends SurfaceView implements SurfaceHolder.Callback {
         // the UI thread's touch handler waits for this lock while the pad is painted: say so when painting is slow (touch latency)
         if (p1 - p0 >= 8 && p0 - slowPaintTold >= 10000) { slowPaintTold = p0; android.util.Log.i("dm", "[java] pad paint took " + (p1 - p0) + " ms under the pad lock"); }
         if (sig == NOT_READY) return;
-        shownSig = sig; forced = false;
+        shownSig = sig; forced = false; lastDrawn = SystemClock.uptimeMillis();
         if (frames++ == 0) android.util.Log.i("dm", "[java] pad surface: first frame in " + (SystemClock.uptimeMillis() - t0) + " ms (paint " + (p1 - p0) + " ms)");
     }
 }
