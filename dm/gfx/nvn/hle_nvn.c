@@ -1590,6 +1590,7 @@ static int condr_rec(void) {
     return v;
 }
 static void condr_write(NVNcommandBuffer *c, int kind, int mode, uint64_t addr) { *REC(c, OP_X_RENDER_COND, p_render_cond) = (p_render_cond){kind, mode, addr}; }
+#include "nvn_nrn_d.inc"   // [DOS2] NR-NATIVE step D: DM_NRN_REC (the record of a card draw composed directly; nothing while it is 0)
 #include "nvn_nb_draw.inc"   // [DOS2] DM_NB_OPS (NB-09): one engine draw = one OP_X_NB_DRAW (shadow, flush, pack)
 #ifdef DM_GAME_DOS2
 #define NVN_NRN_PART 2

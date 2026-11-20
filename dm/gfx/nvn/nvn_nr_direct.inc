@@ -110,6 +110,7 @@ static inline uint32_t nrd_ext_take(void) {
     return x;
 }
 #define NRD_EXT_PUT(nr, p, size) do { if (__builtin_expect(g_nrd_mode, 0) && (nr)) { const uint32_t nrd_x_ = nrd_ext_take(); if (nrd_x_) nrd_tail_ext_put((p), (size), nrd_x_); } } while (0)
+#define NRND_EXT_TAKE() (__builtin_expect(g_nrd_mode, 0) ? nrd_ext_take() : 0u)   // [DOS2] NR-NATIVE step D DM_NRN_REC=1: the same word, for the composer
 #else
 // ======== second part: the mirror's hooks and the direct recorder ========
 static int nrdm_bind_hook(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
@@ -249,6 +250,7 @@ void nvn_nrd_draw(uint64_t cb, int32_t prim, uint32_t itype, int32_t count, uint
 #define NRD_BT_NESTED(o) ((void)0)
 #define NRD_WF_RESET() ((void)0)
 #define NRD_EXT_PUT(nr, p, size) ((void)0)
+#define NRND_EXT_TAKE() 0u
 #define NRUB_BIND1(c, st, i, a, n) 0
 #define NRUB_BINDS(c, st, first, n, rg) ((void)0)
 #define NRUB_FLAG(same) ((void)0)

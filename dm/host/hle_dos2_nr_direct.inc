@@ -160,9 +160,13 @@ static void nrd_op_draw(void *u, uint64_t cb, int32_t prim, uint32_t itype, int3
 static const nrnc_ops k_nrd_ops = {nrd_op_bind, nrd_op_ren, nrd_op_draw};
 static void *nrd_job(void *a) {   // on the big stack: [the flush], SetRenderEnable, the draw, the flag byte - in the machine code's order
     const nrd_job_t *j = (const nrd_job_t *)a;
+    NRND_TJ(1);   // [DOS2] NR-NATIVE step D DM_NRN_REC=2: the parts of this call, timed (nothing without the switch)
     if (j->ub) nru_job_calls(j->ub);   // NR-09U DM_NR_UBO=1: the uniform blocks' BindUniformBuffer calls (the engine made them before the flush)
+    NRND_TJ(2);   // [DOS2] NR-NATIVE step D
     if (j->p) nrnc_flush_run(j->R, j->p, j->cb, &k_nrd_ops, a);
+    NRND_TJ(3);   // [DOS2] NR-NATIVE step D
     nrnc_draw_tail(j->R, j->d, g_nrd_isz, &k_nrd_ops, a);
+    NRND_TJ(4);   // [DOS2] NR-NATIVE step D
     return NULL;
 }
 // The native handler of the shared draw hook (hle_dos2_native.c), inside the NB-09 bracket of the draw.
@@ -193,7 +197,9 @@ static int nrd_draw_take(unsigned op, uint64_t r, uint64_t a1, uint64_t a2, uint
     if (fcb && nrnc_flush_plan(R, &p)) { j.p = &p; j.cb = fcb; t_nrd.c[NRDC_BINDS] += (uint64_t)p.n; }
     else { g_o_tf(r, NC_Z); t_nrd.c[NRDC_FLUSH_ENGINE]++; }                              // the engine's flush (the original, past the hook)
     if (R[NRNC_R_REN_OFF] && R[NRNC_R_REN_NEED]) t_nrd.c[NRDC_REN]++;
+    NRND_TJ0(timed);   // [DOS2] NR-NATIVE step D DM_NRN_REC=2: the stack switch and the parts of the call
     nvn_on_bigstack(nrd_job, &j);
+    NRND_TJ5();   // [DOS2] NR-NATIVE step D
     NRN_POST();   // NR-NATIVE step B part 2: the record of the draw took the short flag (red line if it did not)
     if (g_nrd_ubd) nvn_nrub_scope(0);   // NR-UBD
     t_nrd.c[op == 37 ? NRDC_D37 : NRDC_D36]++;

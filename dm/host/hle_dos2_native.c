@@ -130,8 +130,13 @@ static int g_rc_nh;
 // executed (*len = its length), the original does not run; 0 - the original runs as before. The pre / post handlers run either way.
 static int (*g_rc_take)(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len);
 static uint64_t g_rc_take_ops;
+// [DOS2] NR-NATIVE step D (DM_NRN_LIST, hle_dos2_nrn_d.inc): the packet of opcode DN_OP_NOTE that the wrappers of the engine's
+// draw-yourself functions put into a list is ours - the engine's switch and the handlers never see it. NULL: no such packet exists.
+enum { DN_OP_NOTE = 0x40 };
+static uint64_t (*g_rc_note)(uint64_t list, uint64_t pkt);
 static uint64_t dn_rc_hook(uint64_t list, uint64_t op, uint64_t pkt, uint64_t a3, uint64_t a4, uint64_t a5) {
     const unsigned c = (unsigned)op & 0xff; const int n = g_rc_nh;
+    if (__builtin_expect(c == DN_OP_NOTE, 0) && g_rc_note) return g_rc_note(list, pkt);   // [DOS2] NR-NATIVE step D
     for (int i = 0; i < n; i++) if (g_rc_h[i]->pre) g_rc_h[i]->pre(list, c, pkt);
     uint64_t len;
     if (!(__builtin_expect(g_rc_take_ops != 0, 0) && c < 64 && (g_rc_take_ops >> c & 1) && g_rc_take(list, c, pkt, &len))) len = g_rc_orig(list, op, pkt, a3, a4, a5);
@@ -233,6 +238,14 @@ int dn_install_rc_take(uint64_t mask, int (*take)(uint64_t list, unsigned op, ui
     static const dn_rc_handler none = {NULL, NULL};
     if (!g_rc_orig && dn_install_rc(&none)) return -1;   // the hook itself (with an empty handler)
     g_rc_take = take; g_rc_take_ops = mask;
+    return 0;
+}
+// [DOS2] NR-NATIVE step D: the handler of the note packet (only once the ExecuteRenderCommand hook is in: without it the engine's
+// switch would return length 0 for the opcode and the list walker would never advance). Install time only. 0 = in.
+int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt));
+int dn_install_rc_note(uint64_t (*note)(uint64_t list, uint64_t pkt)) {
+    if (!g_rc_orig || g_rc_note) return -1;
+    g_rc_note = note;
     return 0;
 }
 // NR-09S DM_NR_STATE=2: the engine's own handler of one packet, from inside a native handler (the original past the hook).

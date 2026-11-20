@@ -144,12 +144,19 @@ static int nbd_draw(NVNcommandBuffer *c, int kind, int prim, int itype, int coun
     const int e = t_nbd.emitting; t_nbd.emitting = 1;
     uint8_t *p = (uint8_t *)rec(c, OP_X_NB_DRAW, size);
     t_nbd.emitting = e;
+    const int nrnd_direct = NRND_REC_APPLY(nr, nrn);   // [DOS2] NR-NATIVE step D DM_NRN_REC=1: the payload of a card draw's record is composed in one pass
+    if (nrnd_direct) {                                  // [DOS2] NR-NATIVE step D: header + binds + NR-09 tail (+ NR-09R's word) + card tail + short ext
+        nrnd_rec_in nrnd_in; nrnd_rec_fill(&nrnd_in, &t_nbd.s, nr_key, nr_ts, nr_why, nr_site, NRND_EXT_TAKE(), nrn_card, nrn_pass, nrn_seq, nrn_rsv | (nrn_sh ? (unsigned)NRN_T_SHORT : 0u), nrn_sh ? &t_nrn_sx : NULL);
+        nrnd_rec_put(p, size, &nrnd_in); __atomic_fetch_add(&g_nrnd_recs[0], 1, __ATOMIC_RELAXED);
+    } else {   // [DOS2] NR-NATIVE step D
     nbd_pack(&t_nbd.s, p, size);
     if (nr) nrd_tail_put(p, size, nr_key, nr_ts, nr_why, nr_site);
     if (nrn) nrn_tail_put(p, size, nrn_tail_off(&t_nbd.s.h), nrn_card, (int)nrn_pass, nrn_seq, nrn_rsv | (nrn_sh ? (unsigned)NRN_T_SHORT : 0u));
     if (nrn_sh) nrn_short_ext_put(p, size, nrn_tail_off(&t_nbd.s.h) + NRN_TAIL_BYTES, &t_nrn_sx);
+    }   // [DOS2] NR-NATIVE step D
     if (__builtin_expect(t_nrn_short, 0)) { if (!nrn) LOG("【红】[nr] native: a short draw was written without its card - the backend cannot draw it"); t_nrn_short = 0; __atomic_fetch_add(&g_nrnps[NRNPS_SHORT], 1, __ATOMIC_RELAXED); }
-    NRD_EXT_PUT(nr, p, size);   // [DOS2] NR-09R DM_NR_DIRECT: the tail's spare word (nothing without the switch)
+    if (!nrnd_direct) NRD_EXT_PUT(nr, p, size);   // [DOS2] NR-09R DM_NR_DIRECT: the tail's spare word (nothing without the switch); [DOS2] NR-NATIVE step D: the composer wrote it
+    NRND_REC_CHECK(nr, nrn, p, size, nr_key, nr_ts, nr_why, nr_site, nrn_card, nrn_pass, nrn_seq, nrn_rsv | (nrn_sh ? (unsigned)NRN_T_SHORT : 0u), nrn_sh ? &t_nrn_sx : NULL);   // [DOS2] NR-NATIVE step D DM_NRN_REC=2: the composed bytes against these
     Z5G_DRAW(nr && !t_nbd_chk, c, p, nr_key);   // [DOS2] NR-ZERO Z5 DM_NR_Z5: the mark and the slot of this record (nothing without the switch)
     if (__builtin_expect(g_nrd_on, 0)) __atomic_fetch_add(&g_nrds[nr ? 0 : 1], 1, __ATOMIC_RELAXED);
     nbds_add(NBDS_DRAWS, 1); nbds_add(NBDS_BINDS, h->nbind); nbds_add(NBDS_BYTES, (size + 8 + 7) & ~7u);

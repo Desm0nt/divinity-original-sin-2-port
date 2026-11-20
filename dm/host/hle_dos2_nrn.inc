@@ -38,6 +38,17 @@ static uint64_t g_nrn_pre_differs;              // atomic: =2 only - the card ta
 const void *xbg_nrn_pub(void) __attribute__((weak));   // the backend's published table of cards that have a row (xbg_nr_nrn.inc)
 static const nrn_pub *g_nrn_pub;
 static int nrn_on(void) { return g_nrn_any; }
+// [DOS2] NR-NATIVE step D (hle_dos2_nrn_d.inc, DM_NRN_LIST; 0 = off: nrn_pre pays one load): the note of the draw from list construction
+static int g_nrnd;
+static const void *nrnd_take(void); static int nrnd_pass(const void *note, const uint8_t *R); static uint64_t nrnd_card(const void *note, const uint8_t *R);
+static void nrnd_skip(const void *note); static void nrnd_report(uint64_t frames);
+// [DOS2] NR-NATIVE step D half b (DM_NRN_REC=2): the clock at the parts of a direct draw's big-stack call (hle_dos2_nr_direct.inc nrd_job)
+static int g_nrnd_rec;
+static __thread uint64_t t_nrnd_tj[6]; static __thread int t_nrnd_tj_on;
+static void nrnd_tj_done(void);
+#define NRND_TJ0(timed) do { if (__builtin_expect(g_nrnd_rec == 2, 0) && (timed)) { t_nrnd_tj_on = 1; t_nrnd_tj[0] = nr_now(); } } while (0)
+#define NRND_TJ(k) do { if (__builtin_expect(t_nrnd_tj_on, 0)) t_nrnd_tj[k] = nr_now(); } while (0)
+#define NRND_TJ5() do { if (__builtin_expect(t_nrnd_tj_on, 0)) { t_nrnd_tj[5] = nr_now(); t_nrnd_tj_on = 0; nrnd_tj_done(); } } while (0)
 #define NRN_NOTE(r) do { if (__builtin_expect(g_nrn_any, 0)) t_nrn_r = (r); } while (0)
 
 // Opcode 55 (from nr_rc_pre): the handle is the resource the engine calls `name`.
@@ -63,9 +74,11 @@ static void nrn_rc55(uint64_t handle, uint64_t name) {
 // From nrd_draw_take (this thread; R = the renderer of the draw about to be recorded directly).
 static void nrn_pre(const uint8_t *R) {
     t_nrn_pre.valid = 0;
-    const int p = nrn_pass_of_r(R, &g_nrn_rt);
-    if (!g_nrn_mode[p]) return;
-    t_nrn_pre.card = nrn_card_of(R, g_nrn_words); t_nrn_pre.pass = (uint8_t)p; t_nrn_pre.valid = 1;
+    const int ld = __builtin_expect(g_nrnd, 0);                              // [DOS2] NR-NATIVE step D: the pass and the card from the note of list construction
+    const void *note = ld ? nrnd_take() : NULL;                               // [DOS2] NR-NATIVE step D
+    const int p = ld ? nrnd_pass(note, R) : nrn_pass_of_r(R, &g_nrn_rt);      // [DOS2] NR-NATIVE step D
+    if (!g_nrn_mode[p]) { if (ld) nrnd_skip(note); return; }                  // [DOS2] NR-NATIVE step D
+    t_nrn_pre.card = ld ? nrnd_card(note, R) : nrn_card_of(R, g_nrn_words); t_nrn_pre.pass = (uint8_t)p; t_nrn_pre.valid = 1;   // [DOS2] NR-NATIVE step D
     t_nrn_pre.ready = g_nrn_pub && nrn_pub_ready(g_nrn_pub, t_nrn_pre.card);
     t_nrn_pre.shrt = g_nrn_short && g_nrn_mode[p] == 1 && t_nrn_pre.ready;
     if (t_nrn_pre.shrt) nvn_nrn_short(1);
@@ -137,6 +150,7 @@ static void nrn_arm(int draw_on) {
 // From nr_report (every 10 s).
 static void nrn_report(uint64_t frames) {
     if (!g_nrn_any) return;
+    nrnd_report(frames);   // [DOS2] NR-NATIVE step D
     uint64_t c[NRN_P_N], o[NRN_P_N], nm[NRN_RC_N], total = 0;
     for (int p = 0; p < NRN_P_N; p++) { c[p] = __atomic_exchange_n(&g_nrnc.cards[p], 0, __ATOMIC_RELAXED); o[p] = __atomic_exchange_n(&g_nrnc.off[p], 0, __ATOMIC_RELAXED); total += c[p]; }
     for (int k = 0; k < NRN_RC_N; k++) nm[k] = __atomic_exchange_n(&g_nrnc.named[k], 0, __ATOMIC_RELAXED);
