@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -2708,6 +2708,7 @@ static void test_post(void) {
 static void test_b1_pass(void);   // [stage 5.2 B1] (end of file)
 static void test_occ_a(void);     // [stage 5] technique A (end of file)
 static void test_v2_drv(void);    // [stage 5.3 V2] driver corrections (end of file)
+static void test_v1_preskin(void);   // [stage 5.3 V1] PRESKIN (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
 // without it (render pass of one attachment), re-attaches it for the first draw that tests depth (LOAD of the colour drawn so far), keeps
@@ -3094,6 +3095,7 @@ int main(void) {
     test_b5_mat();   // [stage 5.2 B5] MAT + XLQ (vkn_mat.c)
     test_b4_prepass();   // [stage 5.2 B4] the pre-pass hybrid (vkn_prepass.c)
     test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
+    test_v1_preskin();   // [stage 5.3 V1] PRESKIN (vkn_preskin.c)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
@@ -3925,4 +3927,173 @@ static void test_v2_drv(void) {
     CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
     vkn_drv_test_facts(NULL); vkn_drv_test_set(NULL);   // the next use resolves from the mock again (Adreno: nothing)
     CHECK(!vkn_drv()->noout && !vkn_drv()->serial);
+}
+
+// ================================================================================================================ [stage 5.3 V1] PRESKIN
+// vkn_preskin.c with a stand-in library (vkn_preskin_test_setup: candidate flag, plan, slice / consumer words): the skinned draw of g_s1
+// gets the consumer module and the record stream (stream 2: R32G32B32_UINT at location 0, stride 12, bound at the record's block);
+// the same mesh drawn again in the frame (depth-only, then colour) reads the same record (one slice); new bones make a second record;
+// the frame begins with the VERTEX_SHADER -> VERTEX_INPUT barrier and the prologue (a no-attachment pass: the slice pipeline with
+// rasterizer discard / POINT_LIST over the draw's own stream 0 with its offset, its set: the bone block + the record as storage) is
+// submitted before the frame; a new frame makes a new record; a 6-word record takes two groups; MAT's variant-B object keeps the
+// consumer (composed); verify mode draws the engine's module and runs no slice; poison submits no prologue; off-frame recordings, a
+// non-candidate, a refused plan and points are counted; the replay door; the draw-cost comparison of the effect output sees the override.
+#include "../../../vkn/vkn_preskin.h"
+static struct { int cand, plan_fail, nslice, ncons; uint32_t m, bone_binding; } g_v1;
+static const uint32_t k_v1_spv[5] = {0x07230203u, 0x00010000u, 0, 1, 0};
+static uint32_t *v1_words(size_t *n) { uint32_t *w = (uint32_t *)malloc(sizeof k_v1_spv); if (w) memcpy(w, k_v1_spv, sizeof k_v1_spv); *n = 5; return w; }
+static int v1_cand(const void *s) { return s == (const void *)g_s1 ? g_v1.cand : 0; }
+static int v1_plan(const void *s, uint64_t code, vkn_psk_plan *p) {
+    (void)s; (void)code; memset(p, 0, sizeof *p);
+    if (g_v1.plan_fail) { snprintf(p->why, sizeof p->why, "test refusal"); return 1; }
+    p->ok = 1; p->m = g_v1.m; p->nvals = 1; p->val[0].hash = 0x1100u + g_v1.m; p->val[0].comps = g_v1.m; p->val[0].loc_mask = 1; p->val[0].ubo_mask = 1;
+    uint32_t bb = 0; for (uint32_t i = 0; i < g_s1->nbind; i++) if (g_s1->bind[i].kind == VKN_BK_UNIFORM && g_s1->bind[i].stage == 0 && g_s1->bind[i].slot == 2) bb = g_s1->bind[i].binding;
+    g_v1.bone_binding = bb;
+    p->nubo = 1; p->ubo_binding[0] = bb; p->ubo_key[0] = 1u << 16 | 2;   // g_s1's vertex binding of engine uniform slot 2 (the bone block)
+    p->slice_locs = 1; p->cons_locs = 0x12; p->orig_locs = 0x13; p->free_locs = 0xffedu; p->ssbo_binding = 60; p->bone_binding = bb;
+    p->ops_orig = 100; p->ops_cons = 30; p->ops_slice = 60;
+    return 0;
+}
+static int v1_slice(const vkn_psk_plan *p, uint32_t **out, size_t *n, const char **why) { (void)p; (void)why; g_v1.nslice++; *out = v1_words(n); return 0; }
+static int v1_cons(const vkn_psk_plan *p, const uint32_t *pos, uint32_t **out, size_t *n, vkn_psk_layout *lay, const char **why) {
+    (void)why; g_v1.ncons++; memset(lay, 0, sizeof *lay);
+    uint32_t fr = p->free_locs, j = 0;   // xbg_spirv_preskin_layout: runs of consecutive record words (<= 4) at the lowest free locations
+    while (j < p->m) {
+        const uint32_t p0 = pos ? pos[j] : j; uint32_t w = 1;
+        while (j + w < p->m && w < 4 && (pos ? pos[j + w] : j + w) == p0 + w) w++;
+        const uint32_t l = (uint32_t)__builtin_ctz(fr); fr &= fr - 1;
+        lay->loc[lay->groups] = l; lay->first[lay->groups] = p0; lay->width[lay->groups] = w; lay->groups++; j += w;
+    }
+    *out = v1_words(n); return 0;
+}
+static const vkn_preskin_test_lib k_v1_lib = {v1_cand, v1_plan, v1_slice, v1_cons};
+static const VkVertexInputAttributeDescription *v1_attr(const mk_gp *p, uint32_t loc) {
+    for (uint32_t i = 0; p && i < p->nattr; i++) if (p->attr[i].location == loc) return &p->attr[i];
+    return NULL;
+}
+static uint32_t v1_stride(const mk_gp *p, uint32_t b) { for (uint32_t i = 0; p && i < p->nbind; i++) if (p->bind[i].binding == b) return p->bind[i].stride; return 0; }
+static const mk_ev *v1_vb2(uint64_t from, VkCommandBuffer cb) {   // the last bind that covers binding 2 since `from`
+    const mk_ev *r = NULL;
+    for (uint64_t q = from; q < mk_seq; q++) { const mk_ev *e = mk_ev_at(q); if (e && e->cb == cb && e->op == MK_E_BIND_VB && e->u[0] <= 2 && e->u[0] + e->u[1] > 2) r = e; }
+    return r;
+}
+static int v1_vtx_barrier(uint64_t from, VkCommandBuffer cb) {   // barriers VERTEX_SHADER -> VERTEX_INPUT in cb since `from`
+    int n = 0;
+    for (int k = 0; nth(from, cb, MK_E_BARRIER, k); k++) { const mk_ev *x = nth(from, cb, MK_E_BARRIER, k); if (x->u[0] == VK_PIPELINE_STAGE_VERTEX_SHADER_BIT && x->u[1] == VK_PIPELINE_STAGE_VERTEX_INPUT_BIT) n++; }
+    return n;
+}
+static void test_v1_preskin(void) {
+    if (!g_s1 || !g_d3 || !g_a2) { CHECK(0); return; }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_draw_in in = g_in; in.alpha_ref = -1.0f;
+    memset(&g_v1, 0, sizeof g_v1); g_v1.cand = 1; g_v1.m = 3;
+    vkn_preskin_test_setup(1, &k_v1_lib); CHECK_EQ(vkn_preskin_mode(), 1);
+    vkn_preskin_stats s0, s1; vkn_preskin_stats_get(&s0);
+    uint32_t bone2 = 0; CHECK_EQ(vkn_ring_alloc(512, &bone2), 0);
+    // ---- frame 1
+    uint64_t m = mark(); VkCommandBuffer cb = fbegin(1);
+    CHECK_EQ(v1_vtx_barrier(m, cb), 1);
+    vkn_draw_ubo(0, 2, g_off2, 512); vkn_draw_ubo(0, 9, g_off9, 128); vkn_draw_ubo(1, 0, g_offf0, 32);
+    targets(NULL, NULL, g_d3);
+    uint64_t m1 = mark(); vkn_draw_indexed(&in, 0, 3, 1);
+    const mk_gp *p = b5_pipe(cb); const VkShaderModule cons = p ? p->module[0] : VK_NULL_HANDLE;
+    CHECK(p && cons && cons != g_vs1_mod && p->nst == 2);
+    {   const VkVertexInputAttributeDescription *a = v1_attr(p, 0), *a1 = v1_attr(p, 1), *a4 = v1_attr(p, 4);
+        CHECK(a && a->binding == 2 && a->format == VK_FORMAT_R32G32B32_UINT && a->offset == 0); CHECK_EQ(v1_stride(p, 2), 12);
+        CHECK(a1 && a1->binding == 0 && a1->offset == 12); CHECK(a4 && a4->binding == 1); }   // the engine's other attributes as they were
+    const mk_ev *vb = v1_vb2(m1, cb); CHECK(vb != NULL);
+    const uint64_t rbuf = vb ? vb->a[2 - vb->u[0]] : 0, roff = vb ? vb->off[2 - vb->u[0]] : 0;
+    CHECK(rbuf && !(rbuf == VH(g_vb0.buf) && roff >= g_vb0.off && roff < g_vb0.off + 4096) && !(rbuf == VH(g_vb2.buf) && roff >= g_vb2.off && roff < g_vb2.off + 4096));   // (an arena block of its own)
+    targets(g_a2, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1);                     // colour pass, same mesh and bones: the same record
+    p = b5_pipe(cb); CHECK(p && p->module[0] == cons);
+    vkn_draw_ubo(0, 2, bone2, 512); m1 = mark(); vkn_draw_indexed(&in, 0, 3, 1);   // other bones: a second record
+    vb = v1_vb2(m1, cb); CHECK(vb && (vb->a[2 - vb->u[0]] != rbuf || vb->off[2 - vb->u[0]] != roff));
+    vkn_draw_ubo(0, 2, g_off2, 512);
+    vkn_preskin_stats_get(&s1);
+    CHECK_EQ(s1.recs[0] - s0.recs[0], 2); CHECK_EQ(s1.slices - s0.slices, 2); CHECK_EQ(s1.own[0] - s0.own[0], 1); CHECK_EQ(s1.served[0] - s0.served[0], 1);
+    CHECK_EQ(s1.served[1] - s0.served[1], 2); CHECK_EQ(g_v1.ncons, 1); CHECK_EQ(g_v1.nslice, 1);
+    CHECK_EQ(s1.rec_verts[0] - s0.rec_verts[0], 2 * 255);   // stream 0 from offset 16 of 4096 bytes, stride 16, a 12-byte attribute at 0
+    {   // the effect output's comparison (draw cost) sees the override
+        vkn_fx_out a, b; memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
+        CHECK(vkn_fx_out_same(&a, &b)); a.vin.vs = cons; CHECK(!vkn_fx_out_same(&a, &b)); CHECK(!vkn_fx_out_same(&a, NULL));
+        b = a; CHECK(vkn_fx_out_same(&a, &b)); b.vin.off = 4; CHECK(!vkn_fx_out_same(&a, &b));
+    }
+    m1 = mark(); fsubmit(0);
+    {   // the prologue: its own command buffer, submitted before the frame's
+        const mk_ev *sd = NULL, *fsub = nth(m1, cb, MK_E_SUBMIT, 0);
+        for (uint64_t q = m; q < mk_seq; q++) { const mk_ev *e = mk_ev_at(q); if (e && e->op == MK_E_DRAW && e->cb != cb && !sd) sd = e; }
+        CHECK(sd != NULL);
+        if (sd) {
+            CHECK_EQ(sd->u[0], 255); CHECK_EQ(sd->u[1], 1);
+            const mk_ev *sub = nth(m1, sd->cb, MK_E_SUBMIT, 0); CHECK(sub && fsub && sub->seq < fsub->seq);
+            CHECK_EQ(cnt(m, sd->cb, MK_E_DRAW), 2); CHECK_EQ(cnt(m, sd->cb, MK_E_BEGIN_RP), 1); CHECK_EQ(cnt(m, sd->cb, MK_E_END_RP), 1);
+            const mk_obj *sp = pipe_of(nth(m, sd->cb, MK_E_BIND_PIPE, 0));
+            CHECK(sp && sp->gp.nst == 1 && sp->gp.rs.rasterizerDiscardEnable && sp->gp.topo == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+            CHECK(sp && v1_attr(&sp->gp, 0) && v1_attr(&sp->gp, 0)->format == VK_FORMAT_R32G32B32_SFLOAT && v1_attr(&sp->gp, 0)->binding == 0 && sp->gp.nattr == 1);
+            const mk_ev *bv = nth(m, sd->cb, MK_E_BIND_VB, 0); CHECK(bv && bv->u[0] == 0 && bv->a[0] == VH(g_vb0.buf) && bv->off[0] == g_vb0.off + 16);
+            const mk_ev *bs = nth(m, sd->cb, MK_E_BIND_SETS, 0);
+            const mk_dw *wu = dw_of(bs, g_v1.bone_binding), *ws = dw_of(bs, 60);
+            CHECK(wu && wu->buf == vkn_ring_buffer() && wu->off == vkn_ring_base() + g_off2 && wu->range == 256);   // the binding's 256 bytes
+            CHECK(ws && ws->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && VH(ws->buf) == rbuf && ws->off == roff && ws->range == 255 * 12);
+        }
+    }
+    vkn_preskin_stats_get(&s1); CHECK_EQ(s1.submits - s0.submits, 1);
+    // ---- frame 2: the records were of frame 1
+    vkn_preskin_stats_get(&s0);
+    cb = fbegin(1); targets(NULL, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb); CHECK(p && p->module[0] == cons);                                 // the same consumer (made once)
+    vkn_preskin_stats_get(&s1); CHECK_EQ(s1.recs[0] - s0.recs[0], 1); CHECK_EQ(g_v1.ncons, 1);
+    // a 6-word record: two groups (locations 0 and 2), stride 24
+    vkn_preskin_test_setup(1, &k_v1_lib); g_v1.m = 6; vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb);
+    CHECK(p && v1_attr(p, 0) && v1_attr(p, 0)->format == VK_FORMAT_R32G32B32A32_UINT && v1_attr(p, 0)->binding == 2 && v1_attr(p, 0)->offset == 0);
+    CHECK(p && v1_attr(p, 2) && v1_attr(p, 2)->format == VK_FORMAT_R32G32_UINT && v1_attr(p, 2)->offset == 16); CHECK_EQ(v1_stride(p, 2), 24);
+    // MAT variant B in the same depth-only set: its cut-down object, the consumer as its vertex module (composed)
+    vkn_preskin_stats_get(&s0);
+    memset(&g_b5, 0, sizeof g_b5); g_b5.applied = 1; g_b5.vsm = g_fs1_mod;   // (any module of the mock: MAT's would-be cut-down vertex shader)
+    vkn_mat_test_setup(2, 0, b5_facts);
+    vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb); CHECK(p && p->nst == 1 && p->module[0] != g_fs1_mod && p->module[0] != g_vs1_mod && v1_attr(p, 0) && v1_attr(p, 0)->binding == 2);
+    vkn_mat_test_setup(0, 0, NULL);
+    // refusals: a plan the split refuses, a shader that is no candidate (g_s1 with the flag off), points
+    vkn_preskin_test_setup(1, &k_v1_lib); g_v1.m = 3; g_v1.plan_fail = 1; vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod);
+    g_v1.plan_fail = 0; vkn_preskin_test_setup(1, &k_v1_lib); g_v1.cand = 0; vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod);
+    g_v1.cand = 1; vkn_preskin_test_setup(1, &k_v1_lib);
+    { vkn_draw_in pt = in; pt.prim = 0; vkn_draw_arrays(&pt, 0, 3); }                 // points: refused
+    {   // the replay door (vkn_shc.c replay)
+        vkn_fx_ctx c; memset(&c, 0, sizeof c); c.shader = g_s1; c.depth = g_d3; c.vfmt = vkn_vfmt_id(g_in.vfmt); c.prim = 1; c.count = 3; c.instances = 1;
+        vkn_fx_out o; memset(&o, 0, sizeof o);
+        CHECK_EQ(vkn_preskin_apply(&in, &c, &o), 1); CHECK(o.vin.vs && o.vin.vs_id && o.vin.vfmt && o.vin.stream == 2 && o.vin.buf);
+    }
+    fsubmit(0);
+    vkn_preskin_stats_get(&s1);
+    CHECK_EQ(s1.why[VKN_PSK_W_PLAN] - s0.why[VKN_PSK_W_PLAN], 2); CHECK_EQ(s1.why[VKN_PSK_W_PRIM] - s0.why[VKN_PSK_W_PRIM], 1);
+    CHECK_EQ(s1.composed - s0.composed, 1); CHECK_EQ(s1.plans_refused - s0.plans_refused, 1);
+    // ---- off-frame recording: refused
+    vkn_preskin_stats_get(&s0);
+    cb = fbegin(0); targets(NULL, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1); p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod); fsubmit(1);
+    vkn_preskin_stats_get(&s1); CHECK_EQ(s1.why[VKN_PSK_W_OFFFRAME] - s0.why[VKN_PSK_W_OFFFRAME], 1);
+    // ---- verify: planned and counted, the engine's module drawn, no slice, no prologue
+    vkn_preskin_test_setup(2, &k_v1_lib); CHECK_EQ(vkn_preskin_mode(), 2); vkn_preskin_stats_get(&s0);
+    m = mark(); cb = fbegin(1); CHECK_EQ(v1_vtx_barrier(m, cb), 0);
+    targets(NULL, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1); vkn_draw_indexed(&in, 0, 3, 1);
+    p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod); fsubmit(0);
+    vkn_preskin_stats_get(&s1);
+    CHECK_EQ(s1.served[0] - s0.served[0], 2); CHECK_EQ(s1.recs[0] - s0.recs[0], 1); CHECK_EQ(s1.slices, s0.slices); CHECK_EQ(s1.submits, s0.submits);
+    { int other = 0; for (uint64_t q = m; q < mk_seq; q++) { const mk_ev *e = mk_ev_at(q); if (e && e->op == MK_E_DRAW && e->cb != cb) other++; } CHECK_EQ(other, 0); }
+    // ---- poison: the consumer drawn, the prologue never submitted
+    vkn_preskin_test_setup(3, &k_v1_lib); vkn_preskin_stats_get(&s0);
+    cb = fbegin(1); targets(NULL, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1); p = b5_pipe(cb); CHECK(p && p->module[0] != g_vs1_mod); fsubmit(0);
+    vkn_preskin_stats_get(&s1); CHECK_EQ(s1.slices - s0.slices, 1); CHECK_EQ(s1.submits, s0.submits);
+    vkn_preskin_census();
+    // ---- off: nothing of this piece in the frame
+    vkn_preskin_test_setup(0, NULL); CHECK_EQ(vkn_preskin_mode(), 0);
+    m = mark(); cb = fbegin(1); targets(g_a2, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1); p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod);
+    CHECK_EQ(v1_vtx_barrier(m, cb), 0); fsubmit(0);
+    CHECK_EQ(vkn_fx_drop("preskin"), 1); CHECK_EQ(vkn_fx_drop("preskin-late"), 1);
+    targets(NULL, NULL, NULL); frames_n(4);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+    CHECK(vkn_preskin_reason_name(VKN_PSK_W_LATE)[0] != '?');
 }

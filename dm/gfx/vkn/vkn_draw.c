@@ -760,6 +760,19 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     uint16_t vs_inputs = 0;
     for (uint32_t i = 0; i < s->ninputs && i < 16; i++) if (s->inputs[i] < VKN_VFMT_LOCS) vs_inputs |= (uint16_t)(1u << s->inputs[i]);
     const uint64_t code = fxs ? 0 : retype_code(s, vf);
+    // [stage 5.3 V1] a per-draw vertex module (vkn_fx.h vkn_fx_out.vin): the code above stays the engine format's (the module is made for
+    // it); its own vertex format (content id) feeds the pipeline and the stream binds, its stream `vin->stream` is bound at its buffer
+    const vkn_fx_vin *vin = g_fx && g_fx_out.vin.vs ? &g_fx_out.vin : NULL;
+    uint16_t vid_p = vid; uint32_t vin_st = 0xff;
+    if (vin && vin->vfmt) {
+        const vkn_vfmt *ov = vkn_vfmt_info(vin->vfmt);
+        if (!ov || vin->stream >= VKN_VFMT_STREAMS || !vin->buf) {
+            g_st.dropped_state++; g_fx_drop++;
+            DRAW_RED(R_STATE, "effect vertex input: format id %u, stream %u, buffer %p is not usable (shader %#llx, draw dropped)", vin->vfmt, vin->stream, (void *)vin->buf, (unsigned long long)in->shader);
+            return -1;
+        }
+        vf = ov; vid_p = vin->vfmt; vin_st = vin->stream;
+    }
     const int has_fs = (s->stages & (1u << VKN_SRC_FS)) && !(fxbits & VKN_PIPE_FX_NO_FS);
     const int vsv = variant_vs(code), fsv = has_fs && !fxs ? variant_fs(in->alpha_ref) : 0;
     if (vsv < 0 || fsv < 0) { g_st2.dropped_variant++; DRAW_RED(R_VARIANT, "more than %d module variants (retype %#llx, alpha reference %g): draw dropped", VARIANTS - 1, (unsigned long long)code, in->alpha_ref); return -1; }
@@ -770,11 +783,16 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     const vkn_block *vblk[VKN_VFMT_STREAMS]; uint32_t nvfound = 0;
     if (vf && cvb) {   // [stage 5, draw cost] every stream the format reads under one lock (stops where the loop below drops)
         uint64_t vh[VKN_VFMT_STREAMS]; uint32_t nh = 0;
-        for (uint32_t i = 0; i < vf->nbind; i++) if (vf->bind[i].binding < VKN_VFMT_STREAMS && nh < VKN_VFMT_STREAMS) vh[nh++] = in->vb[vf->bind[i].binding];
+        for (uint32_t i = 0; i < vf->nbind; i++) if (vf->bind[i].binding < VKN_VFMT_STREAMS && vf->bind[i].binding != vin_st && nh < VKN_VFMT_STREAMS) vh[nh++] = in->vb[vf->bind[i].binding];
         nvfound = nh ? vkn_buf_get_n(VKN_BUF_VB, vh, nh, vblk) : 0; g_cs.vb_batched++;
     }
     for (uint32_t i = 0, j = 0; vf && i < vf->nbind; i++) {
         const uint32_t st = vf->bind[i].binding; if (st >= VKN_VFMT_STREAMS) continue;
+        if (st == vin_st) {   // [stage 5.3 V1] the effect's stream (its own buffer, no engine handle)
+            vbuf[st] = vin->buf; voff[st] = vin->off; vuse |= (uint8_t)(1u << st);
+            vstride[st] = vf->bind[i].stride; if (vf->bind[i].inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) vinst |= (uint8_t)(1u << st);
+            continue;
+        }
         const vkn_block *blk = cvb ? (j < nvfound ? vblk[j] : NULL) : in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL;
         j++;
         if (!blk || !blk->buf) {
@@ -817,10 +835,11 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     vkn_prof_mark(VKN_PROF_PASS);   // [stage 5 A0 probes]
     // pipeline
     vkn_pipe_desc pd; memset(&pd, 0, sizeof pd);
-    pd.shader = s->id; pd.vs_variant = (uint8_t)vsv; pd.fs_variant = (uint8_t)fsv; pd.blend = bid; pd.ds = did; pd.raster = rid; pd.vfmt = vid;
+    pd.shader = s->id; pd.vs_variant = (uint8_t)vsv; pd.fs_variant = (uint8_t)fsv; pd.blend = bid; pd.ds = did; pd.raster = rid; pd.vfmt = vid_p;
     pd.prim = prim; pd.stencil_ref = in->stencil_ref; pd.pass = pi->compat; pd.fx = fxbits;
     for (int i = 0; i < 8; i++) pd.write_mask[i] = (uint8_t)(pi->write_mask[i] & 0xf);
-    const vkn_pipe_key key = vkn_pipe_key_pack(&pd);
+    vkn_pipe_key key = vkn_pipe_key_pack(&pd);
+    if (vin) key.w[2] |= (uint64_t)vin->vs_id << 48;   // [stage 5.3 V1] the per-draw vertex module (bits 48..63 are 0 in every packed key)
     if (!g_b.gpipe_ok || memcmp(&key, &g_b.gkey, sizeof key)) {
         VkPipeline p = VK_NULL_HANDLE; uint32_t fslot = 0, fgen = 0; int fhit = 0;
         if (g_cost & VKN_COST_PIPE) {   // [stage 5, draw cost] the front cache (generation read before the lookup / build below)
@@ -831,10 +850,10 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         if (!p) p = vkn_pipe_get(&key, NULL);
         if (!p) {
             vkn_pipe_src src; memset(&src, 0, sizeof src);
-            src.vs = fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);
+            src.vs = vin ? vin->vs : fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);   // [stage 5.3 V1] vin
             src.fs = !has_fs ? VK_NULL_HANDLE : fxs ? s->module[VKN_SRC_FS] : vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0);
             src.layout = s->layout; src.pass = pi->pass; src.vs_inputs = vs_inputs;
-            src.shader = fxs || fxbits ? NULL : s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable (an effect's variant is not listed)
+            src.shader = fxs || fxbits || vin ? NULL : s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable (an effect's variant is not listed)
             if (src.vs && (src.fs || !has_fs)) p = vkn_pipe_get(&key, &src);
         }
         if (!p) {

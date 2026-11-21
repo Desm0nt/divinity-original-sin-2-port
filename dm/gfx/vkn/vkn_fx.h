@@ -69,6 +69,14 @@ typedef struct vkn_fx_ubo {
     VkBuffer buf;                                  // VK_NULL_HANDLE = the constant ring (off = ring offset, as vkn_draw_ubo)
     uint64_t off; uint32_t size;                   // size 0 = not given (the 64 KiB zero block is bound, counted)
 } vkn_fx_ubo;
+// [stage 5.3 V1] PRESKIN: a per-draw vertex module with its own vertex input (vkn_fx_out.vin; head comment of the block at the end)
+typedef struct vkn_fx_vin {
+    VkShaderModule vs;                             // VK_NULL_HANDLE = none (everything below ignored)
+    uint16_t vs_id;                                // vkn_fx_vs_id(): the module's id in the pipeline key (one id per module, never reused)
+    uint16_t vfmt;                                 // 0 = the engine's vertex format; else a content id (vkn_vfmt_put(0, ...)) drawn instead
+    uint8_t stream;                                // with vfmt: the stream (0..2) bound at (buf, off) instead of the engine's vertex buffer
+    VkBuffer buf; uint64_t off;
+} vkn_fx_vin;
 typedef struct vkn_fx_out {
     uint8_t skip, discard, no_fs;
     uint16_t ds;                                   // 0 = keep
@@ -76,6 +84,7 @@ typedef struct vkn_fx_out {
     uint32_t cmp_mask[VKN_STAGE_SLOTS];            // per draw-path stage (0 vertex, 1 fragment): bit = engine texture slot
     vkn_fx_tex tex[VKN_FX_TEX];
     vkn_fx_ubo ubo[VKN_FX_UBO];
+    vkn_fx_vin vin;                                // [stage 5.3 V1] PRESKIN (zero = the shader object's own vertex module and input)
 } vkn_fx_out;
 
 typedef void (*vkn_fx_fn)(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
@@ -133,6 +142,18 @@ void vkn_fx_census(void);                          // one line through vkn_logf 
 // the chain call of the engine draw it replaces, then sets out->skip. *o must not be the `out` the chain hands the function (the
 // draw path's own output: the forced draw overwrites it). Recording thread; not nested (the last call wins). Counted by the caller.
 void vkn_fx_force(const vkn_fx_out *o);
+
+// ==== [stage 5.3 V1] PRESKIN (vkn_preskin.c): a per-draw vertex module + vertex input (vkn_fx_out.vin) ====
+// A function may replace the VERTEX MODULE of the draw without a shader object of its own: out->vin.vs is drawn as the vertex stage of
+// whatever object the chain ends with (the engine shader, or a later function's swapped shader: its binding table, pipeline layout and
+// fragment module stay), so a module that reads the same descriptor bindings (a subset) needs no vkn_fx_shader_create (no table, no
+// layout, no effect-shader id). The pipeline key carries vin.vs_id (w[2] bits 48..63; ids from vkn_fx_vs_id, one per module): the
+// shader id + vs_id name the module. Optionally the VERTEX INPUT too: vin.vfmt is a vertex-format content id (vkn_vfmt_put(0, elems, n):
+// content only, no engine handle) used for the pipeline (key field vfmt) and the stream binds, and vin.stream (0..2, a stream that format
+// reads) is bound at (vin.buf, vin.off) instead of in->vb[stream]. The retype code (vkn_draw.c retype_code) stays the one of the
+// engine's format: the module given must already be made for it (vkn_shlib_b5_words with that code). The warm-up does not list such
+// pipelines. MAT (vkn_mat.c) can adopt it for its cut-down vertex shaders (vs + vs_id, vfmt 0) instead of an effect-shader object each.
+uint16_t vkn_fx_vs_id(void);                       // 1..65535 (thread safe); 0 = exhausted (65535 modules)
 
 #ifdef __cplusplus
 }

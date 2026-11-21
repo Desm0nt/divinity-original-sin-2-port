@@ -55,6 +55,7 @@
 #include "../vulkan/engine/xbg_spirv_raster.h"   // [stage 5.2 B1] fragment output locations (vkn_shlib_fs_outputs)
 #include "vkn_policy.h"                          // [stage 5.2 B1] DM_VK_NATIVE_LOAD by family
 #include "vkn_occ.h"                             // [stage 5 technique A] read masks of constant blocks (vkn_shlib_read_mask)
+#include "../vulkan/engine/xbg_spirv_preskin.h"  // [stage 5.3 V1] PRESKIN: the skinning-candidate test of the final words (vkn_shlib_preskin_candidate)
 
 extern "C" const char *dm_vk_driver_status(void) __attribute__((weak));   // vk_driver.c: the running driver (pipeguard list suffix)
 extern "C" int xbg_sha256_hex16(const void *data, size_t n, char out_hex17[17]);   // xbg_shader_key.c (pure)
@@ -78,6 +79,7 @@ struct Cfg {
     int ubd_mode = 0; bool ubd_ro = false, ubd_scan = false;   // NR-08b (nrubd::init)
     bool pos_on = false;   // [stage 5.2 B1] DM_VK_NATIVE_LOAD != 0 for the policy family: position programs / output masks built at load
     bool noout = false;    // [stage 5.3 V2] DM_GFX_NOOUT_MASK for the policy family (vkn_drv.c): the "no colour output" fact built at load
+    bool psk_on = false;   // [stage 5.3 V1] DM_VK_NATIVE_PRESKIN != 0 for the policy family (vkn_preskin_switch): the candidate test at load
 };
 Cfg g;
 std::mutex g_mu;          // the shader map and every load
@@ -563,6 +565,11 @@ uint32_t vs_vindex_of(const std::vector<uint32_t> &w) {
     }
     return 0u;
 }
+// [DOS2] VK-NATIVE stage 5.3 V1 (vkn_preskin.c DM_VK_NATIVE_PRESKIN): the load-time step of NR-PRESKIN (xbg_nr_preskin.inc on_at_load +
+// the translator's vs->psk): a vertex shader whose final words read a uniform block with an index that depends on a vertex input is a
+// skinning candidate (xbg_spirv_preskin_candidate); the plan itself needs the draw's retype code and is made at its first draw from
+// vkn_shlib_b5_words. The words are not changed.
+int sl_preskin(const std::vector<uint32_t> &w) { return xbg_spirv_preskin_candidate(w.data(), w.size()) ? 1 : 0; }
 struct Sh {
     std::string key; uint32_t stage = 0; VkShaderModule module = VK_NULL_HANDLE; std::string unusable;
     std::vector<xbg_shader_binding> bindings; std::vector<uint32_t> inputs, input_classes; std::vector<uint8_t> c1;
@@ -573,6 +580,7 @@ struct Sh {
     int64_t fs_out = -1;               // [stage 5.2 B1] fragment, g.pos_on: Output locations of the final words (bit = location), -1 = not built
     int8_t fs_noout = -1;              // [stage 5.3 V2] fragment, g.noout: 1 = no colour output and no sample-mask write (xbg_game.cpp draw's
                                        // !fs->raster.outputs && !fs->raster.sample_mask), 0 = writes colour, -1 = not built
+    int8_t psk = -1;                   // [stage 5.3 V1] vertex, g.psk_on: sl_preskin of the final words (1 = skinning candidate), -1 = not built
     std::map<uint64_t, VkShaderModule> retyped, alpha;
     // [stage 5 technique A] DM_VK_NATIVE_COND 5 / 6: per Uniform block (Binding), the 16-byte elements the final words read
     // (vkn_occ_spv_read_mask); kind 1 = bits, 0 = the whole block, set once at load
@@ -653,6 +661,7 @@ Sh *load(const std::string &key, const void *control, const void *code) {
         if (g.pos_on) p->fs_out = int64_t(rf.outputs);
         if (g.noout) p->fs_noout = int8_t(!rf.outputs && !rf.sample_mask ? 1 : 0);
     }
+    if (g.psk_on && h.stage == 0) p->psk = int8_t(sl_preskin(words));   // [stage 5.3 V1] PRESKIN (vkn_preskin.h): no other shader is looked at at a draw
     {   // [stage 5 technique A] the read masks (only when technique A is asked for: DM_VK_NATIVE_COND 5 / 6)
         static const bool occ_on = [] { const char *e = getenv("DM_VK_NATIVE_COND"); return e && (atoi(e) == 5 || atoi(e) == 6); }();
         if (occ_on && (h.stage == 0 || h.stage == 4))
@@ -723,6 +732,8 @@ void d3perf(uint32_t timestamp_bits) {
 } // namespace
 
 extern "C" void vkn_b5_install(uint32_t vendor, const char *device_name) __attribute__((weak));   // [stage 5.2 B5 / B4] vkn_mat.c (it installs vkn_prepass.c too)
+extern "C" int vkn_preskin_switch(int family) __attribute__((weak));                              // [stage 5.3 V1] vkn_preskin.c
+extern "C" void vkn_preskin_install(uint32_t vendor, const char *device_name) __attribute__((weak));
 extern "C" unsigned dm_vkn_nonvn_mask(void) __attribute__((weak));   // hle_dos2_vkn_nonvn.c (reads its env itself: valid before the install)
 // Mode 1, DM_VK_NATIVE_SHLIB not 0, and the no-NVN device start (DM_VK_NATIVE_NONVN step B): without B, HLE NVN answers the device start
 // and its bodies reach the translator, which then must be initialised (the old doors are used).
@@ -802,6 +813,7 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
     { const char *e = getenv("DM_GFX_SPV_OPT"); g.spv_opt = e && *e ? atoi(e) : 0; if (g.spv_opt > 0) xbg_spvopt_init((g.base + "/spvopt").c_str(), g.spv_opt); }
     g.pos_on = vkn_policy_load(int(g.policy)) != 0;   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with)
     g.noout = vkn_policy_env_or("DM_GFX_NOOUT_MASK", vkn_policy_noout_mask_default(int(g.policy)), nullptr) != 0;   // [stage 5.3 V2] (vkn_drv.c reads it the same way)
+    g.psk_on = vkn_preskin_switch && vkn_preskin_switch(int(g.policy)) != 0;   // [stage 5.3 V1] (vkn_preskin.c's own reader)
     g.ready = true;
     L("initialised (DM_VK_NATIVE_SHLIB: the translator is not initialised): gpu \"%s\" vendor %#x family %s policy %s sim %#x; subgroup %u stages %#x ops %#x; "
       "rewrites: quad %d warp32 %d ldc_fold %d forward_temps %d nan_minmax %d nan_sat %d ldc_canon %d f2i_notrunc %d texcoord_unguard %d ubovec %d idvs %d early_z %d "
@@ -812,6 +824,7 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
       g.spv_opt, int(g.ubd_scan), int(g.ubd_ro), int(g.serial), int(g.ffl2));
     L("lone-lane for every stage with subgroup operations: %s (DM_GFX_WARP_MODE, subgroup size %u)", g.warp_mode ? "yes" : "no (native subgroups)", g.subgroup.subgroupSize);
     if (vkn_b5_install) vkn_b5_install(g.props.vendorID, g.props.deviceName);   // [stage 5.2 B5 / B4] MAT + XLQ and the pre-pass hybrid (vkn_mat.c / vkn_prepass.c): their chain functions (mode 1)
+    if (g.psk_on && vkn_preskin_install) vkn_preskin_install(g.props.vendorID, g.props.deviceName);   // [stage 5.3 V1] PRESKIN (vkn_preskin.c): its chain function
     return 0;
 }
 
@@ -870,6 +883,12 @@ extern "C" int vkn_shlib_read_mask(const void *shader, uint32_t binding, const u
     return -1;
 }
 // ==== [/stage 5.2 B1]
+// ==== [DOS2] VK-NATIVE stage 5.3 V1 (vkn_preskin.c DM_VK_NATIVE_PRESKIN): a vertex shader object's sl_preskin verdict; immutable after load
+// (as fs_facts): no lock. 1 = skinning candidate, 0 = not, -1 = not built (the switch off at init) / not a vertex shader of this library.
+extern "C" int vkn_shlib_preskin_candidate(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 0 ? s->psk : -1;
+}
 extern "C" VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!shader) return VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(g_mu); Sh &s = *static_cast<Sh *>(shader);

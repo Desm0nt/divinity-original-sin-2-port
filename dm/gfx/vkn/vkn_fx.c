@@ -18,6 +18,7 @@ static fx_fn g_fn[VKN_FX_CHAIN]; static uint32_t g_nfn;
 static int g_bypass;                               // recording thread
 static vkn_fx_stats g_st;
 static uint64_t g_frame; static uint32_t g_draw_no;
+static uint64_t g_vin_draws;                       // [stage 5.3 V1] draws the chain gave a vertex module of their own (vkn_fx_out.vin)
 
 int vkn_fx_register(const char *name, vkn_fx_fn fn, void *user, int order) {
     if (!fn) return -1;
@@ -73,6 +74,7 @@ void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
     if (out->discard) g_st.discards++;
     if (out->no_fs) g_st.no_fs++;
     if (out->cmp_mask[0] | out->cmp_mask[1]) g_st.cmp_slots++;
+    if (out->vin.vs) g_vin_draws++;   // [stage 5.3 V1]
 }
 int vkn_fx_out_same(const vkn_fx_out *a, const vkn_fx_out *b) {
     static const vkn_fx_out zero;
@@ -82,7 +84,17 @@ int vkn_fx_out_same(const vkn_fx_out *a, const vkn_fx_out *b) {
     if (memcmp(a->cmp_mask, b->cmp_mask, sizeof a->cmp_mask)) return 0;
     for (int i = 0; i < VKN_FX_TEX; i++) if (a->tex[i].view != b->tex[i].view || a->tex[i].sampler != b->tex[i].sampler || a->tex[i].tex != b->tex[i].tex) return 0;
     for (int i = 0; i < VKN_FX_UBO; i++) if (a->ubo[i].buf != b->ubo[i].buf || a->ubo[i].off != b->ubo[i].off || a->ubo[i].size != b->ubo[i].size) return 0;
+    // [stage 5.3 V1] the vertex module / input override (vkn_fx_out.vin): a different module, format, stream or record buffer binds otherwise
+    if (a->vin.vs != b->vin.vs || a->vin.vs_id != b->vin.vs_id || a->vin.vfmt != b->vin.vfmt || a->vin.stream != b->vin.stream || a->vin.buf != b->vin.buf ||
+        a->vin.off != b->vin.off) return 0;
     return 1;
+}
+// [stage 5.3 V1] ids of per-draw vertex modules (vkn_fx_out.vin.vs_id): one per module, never reused
+static uint32_t g_vs_ids;
+uint16_t vkn_fx_vs_id(void) {
+    const uint32_t n = __atomic_add_fetch(&g_vs_ids, 1, __ATOMIC_RELAXED);
+    if (n > 0xffffu) { static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf(RED "fx: more than 65535 per-draw vertex modules: refused"); return 0; }
+    return (uint16_t)n;
 }
 
 // ---- shaders of the pieces ----
@@ -158,10 +170,12 @@ void vkn_fx_census(void) {
     char by[384]; int k = 0; by[0] = 0;
     for (uint32_t i = 0; i < s.nfn && k < (int)sizeof by - 48; i++)
         k += snprintf(by + k, sizeof by - (size_t)k, "%s%s skipped %llu", i ? ", " : "", g_fn[i].name, (unsigned long long)(s.by_fn_skip[i] - last.by_fn_skip[i]));
+    static uint64_t last_vin;   // [stage 5.3 V1]
     vkn_logf("fx: %u functions (%s); since the last line: draws seen %llu, skipped %llu, shader swaps %llu, depth-state swaps %llu, discard %llu, no fragment stage %llu, "
-             "comparison slots asked %llu, own draws of the pieces %llu; %u shaders of the pieces",
+             "comparison slots asked %llu, own vertex modules %llu, own draws of the pieces %llu; %u shaders of the pieces, %u per-draw vertex modules",
              s.nfn, by, (unsigned long long)(s.calls - last.calls), (unsigned long long)(s.skipped - last.skipped), (unsigned long long)(s.shader_swaps - last.shader_swaps),
              (unsigned long long)(s.ds_swaps - last.ds_swaps), (unsigned long long)(s.discards - last.discards), (unsigned long long)(s.no_fs - last.no_fs),
-             (unsigned long long)(s.cmp_slots - last.cmp_slots), (unsigned long long)(s.bypassed - last.bypassed), s.nshaders);
-    last = s;
+             (unsigned long long)(s.cmp_slots - last.cmp_slots), (unsigned long long)(g_vin_draws - last_vin), (unsigned long long)(s.bypassed - last.bypassed), s.nshaders,
+             __atomic_load_n(&g_vs_ids, __ATOMIC_RELAXED));
+    last = s; last_vin = g_vin_draws;
 }
