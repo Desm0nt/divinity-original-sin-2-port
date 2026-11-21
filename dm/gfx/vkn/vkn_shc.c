@@ -19,6 +19,7 @@
 #include "../nr/nr_shc.h"
 #include "../nr/nr_sort.h"
 #include "../nr/nr_hacks.h"
+#include "vkn_mat.h"   // [stage 5.2 B5 fixpp] vkn_mat_apply: the MAT decision for a replayed caster
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,7 +165,24 @@ static int read_tile(vkn_tex *t, const int32_t r[4], vkn_block *b) {
 // ---- replay: kept draws of the cascade drawn again into dst (the atlas, S or X), between vkn_fx_bypass(1) / (0) at a safe point.
 // clear_rect: the tile is first cleared to clear_bits (vkCmdClearAttachments in dst's pass). The engine's target set, its textures and
 // the announced constant blocks are put back afterwards. Returns the draws that could not be made (0 = every one). ----
+// [stage 5.2 B5 fixpp] A replayed caster gets the MAT decision its engine draw got from the chain (vkn_mat.h vkn_mat_apply: no fragment
+// stage / the cut-down vertex shader, both bit-equal depth), drawn under vkn_fx_force. A forced draw copies its output into the draw
+// path's effect output, which inside the chain IS the `out` of the engine draw in hand (vkn_fx.h): shc_fx keeps a pointer to it and
+// the replay puts its contents back before it returns. Weak: a build / test without vkn_mat.c replays with the engine's shaders.
+extern int vkn_mat_apply(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) __attribute__((weak));
+static vkn_fx_out *g_chain_out;   // shc_fx's `out` while it runs (NULL: a replay from the close listener, outside the chain)
+static int mat_replay(const vkn_draw_in *in, vkn_tex *dst, const struct sdraw *sd, vkn_fx_out *mo) {
+    if (!vkn_mat_apply) return 0;
+    const vkn_shader *sh = vkn_shader_get(in->shader); if (!sh) return 0;
+    vkn_fx_ctx c; memset(&c, 0, sizeof c);
+    c.shader = sh; c.depth = dst; c.blend = in->blend ? vkn_blend_id(in->blend) : 0; c.ds = in->ds ? vkn_ds_id(in->ds) : 0;
+    c.raster = in->raster ? vkn_raster_id(in->raster) : 0; c.vfmt = in->vfmt ? vkn_vfmt_id(in->vfmt) : 0; c.prim = in->prim;
+    c.indexed = sd->indexed; c.first = sd->first; c.count = sd->count; c.instances = sd->instances; c.frame = vkn_frame(); c.draw_no = 1;
+    memset(mo, 0, sizeof *mo);
+    return vkn_mat_apply(in, &c, mo);
+}
 static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, int filter) {
+    vkn_fx_out chain_keep; if (g_chain_out) chain_keep = *g_chain_out;   // [fixpp]
     uint32_t n0 = 0, lay[VKN_PASS_COLORS], mip[VKN_PASS_COLORS]; vkn_tex *col[VKN_PASS_COLORS], *dep = NULL, *held[VKN_PASS_COLORS + 1];
     vkn_pass_cur_get(&n0, col, lay, mip, &dep);
     for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) { vkn_tex *t = i < VKN_PASS_COLORS ? col[i] : dep; held[i] = t && vkn_tex_ref(t) ? t : NULL; }
@@ -199,7 +217,10 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
         vkn_draw_in in = sd->in;
         in.tex[0] = tex[0]; in.tex[1] = tex[1]; in.tex[2] = NULL; in.smp[0] = smp[0]; in.smp[1] = smp[1]; in.smp[2] = NULL;
         for (uint32_t i = 0; i < sd->nubo; i++) vkn_draw_ubo(sd->ub[i].st, sd->ub[i].slot, sd->ub[i].off, sd->ub[i].size);
+        vkn_fx_out mo; const int forced = mat_replay(&in, dst, sd, &mo);   // [fixpp] after the blocks are announced (the gate reads them)
+        if (forced) vkn_fx_force(&mo);
         const int rc = sd->indexed ? vkn_draw_indexed(&in, sd->first, sd->count, sd->instances) : vkn_draw_arrays(&in, sd->first, sd->count);
+        if (forced) vkn_fx_force(NULL);
         if (rc) { bad++; g.s.replay_drop++; } else g.s.replayed++;
     }
     for (int st = 0; st < 2; st++) for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) {
@@ -209,6 +230,7 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
     vkn_pass_targets(n0, col, lay, mip, dep);
     for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) if (held[i]) vkn_tex_unref(held[i]);
     vkn_fx_bypass(0); g.self = 0;
+    if (g_chain_out) *g_chain_out = chain_keep;   // [fixpp] the engine draw's effect output as the chain had it
     return bad < 0 ? (int)n + 1 : bad;
 }
 
@@ -570,7 +592,11 @@ static void on_close(void) {
 }
 
 // ---- the chain function ----
-static void shc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
+static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
+static void shc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {   // [fixpp] g_chain_out around the body
+    g_chain_out = out; shc_fx_draw(in, ctx, out, user); g_chain_out = NULL;
+}
+static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
     (void)user;
     vkn_tex *d = ctx->depth;
     if (d != g.atlas) {                       // every draw that is not into the atlas

@@ -700,6 +700,7 @@ void d3perf(uint32_t timestamp_bits) {
 }
 } // namespace
 
+extern "C" void vkn_b5_install(uint32_t vendor, const char *device_name) __attribute__((weak));   // [stage 5.2 B5 / B4] vkn_mat.c (it installs vkn_prepass.c too)
 extern "C" unsigned dm_vkn_nonvn_mask(void) __attribute__((weak));   // hle_dos2_vkn_nonvn.c (reads its env itself: valid before the install)
 // Mode 1, DM_VK_NATIVE_SHLIB not 0, and the no-NVN device start (DM_VK_NATIVE_NONVN step B): without B, HLE NVN answers the device start
 // and its bodies reach the translator, which then must be initialised (the old doors are used).
@@ -787,6 +788,7 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
       int(g.f2i_notrunc), int(g.texcoord_unguard), g.ubovec, g.idvs, g.early_z, g.invariant, g.gather_snap, unsigned(g.gscull), int(g.alpha), int(g.retype_keep),
       g.spv_opt, int(g.ubd_scan), int(g.ubd_ro), int(g.serial), int(g.ffl2));
     L("lone-lane for every stage with subgroup operations: %s (DM_GFX_WARP_MODE, subgroup size %u)", g.warp_mode ? "yes" : "no (native subgroups)", g.subgroup.subgroupSize);
+    if (vkn_b5_install) vkn_b5_install(g.props.vendorID, g.props.deviceName);   // [stage 5.2 B5 / B4] MAT + XLQ and the pre-pass hybrid (vkn_mat.c / vkn_prepass.c): their chain functions (mode 1)
     return 0;
 }
 
@@ -865,5 +867,55 @@ extern "C" int vkn_shlib_report(char *out, size_t bytes) {
                     (unsigned long long)s.native_used, (unsigned long long)s.unusable, (unsigned long long)s.missing, (unsigned long long)s.alpha_variants,
                     (unsigned long long)s.alpha_refused, (unsigned long long)s.retype_variants, (unsigned long long)s.retype_refused, (unsigned long long)s.module_fail,
                     s.ns / 1e6, g.serial ? "on" : "off");
+}
+// ==== [DOS2] VK-NATIVE stage 5.2 B5 / B4 (dm/gfx/vkn/vkn_mat.c, vkn_prepass.c; vkn_shlib.h block "stage 5.2 B5"): the words a technique's
+// module is made from, its module, and a record of a pack next to the shader packs. Same steps as words_of / retype_variant /
+// make_module / pack_get above (nothing new is decided here).
+extern "C" int vkn_shlib_b5_words(void *shader, uint64_t code64, uint32_t **words, size_t *nwords, uint8_t **raw, size_t *nraw) {
+    if (words) *words = nullptr; if (nwords) *nwords = 0; if (raw) *raw = nullptr; if (nraw) *nraw = 0;
+    if (!shader || !words || !nwords) return -1;
+    std::lock_guard<std::mutex> lock(g_mu); if (!g.ready) return -1;
+    const Sh &s = *static_cast<const Sh *>(shader);
+    if (!s.unusable.empty() || (code64 && s.stage != 0)) return 1;
+    // words_of, keeping the bundle's own SPIR-V bytes (what the NR-33B gate records are proven on: xbg_nr_mat.inc note's `raw`)
+    std::vector<uint8_t> b; bool from_pack = false;
+    if (!read_bundle(s.key, b, from_pack) || b.size() < 32 || b.size() > 16 * 1024 * 1024) return 1;
+    xbg_shader_header h; memcpy(&h, b.data(), sizeof h); if (h.magic != 0x31534758 || h.version != 1 || h.spirv_bytes % 4 || h.stage != s.stage) return 1;
+    const size_t off = sizeof h + size_t(h.binding_count) * sizeof(xbg_shader_binding) + size_t(h.input_count) * 4 + h.c1_bytes; if (off + h.spirv_bytes != b.size()) return 1;
+    std::vector<uint32_t> w(h.spirv_bytes / 4); memcpy(w.data(), b.data() + off, h.spirv_bytes); spv_override(s.key, w);
+    chain(w, h.stage, s.key.c_str(), nullptr, nullptr);
+    if (code64) {   // retype_variant's words (xbg_game.cpp vtx_retype_words)
+        const uint32_t code = uint32_t(code64), conv = uint32_t(code64 >> 32); std::vector<uint32_t> loc, want, out; std::string why;
+        for (uint32_t l = 0; l < 16; l++) { const uint32_t cv = (conv >> (2 * l)) & 3, rc = (code >> (2 * l)) & 3; if (!cv && !rc) continue; loc.push_back(l); want.push_back(cv == 1 ? XBG_VTX_WANT_SINT_TO_FLOAT : cv ? XBG_VTX_WANT_UINT_TO_FLOAT : rc - 1); }
+        if (!xbg_vertex_retype(w, loc.data(), loc.size(), want.data(), out, &why)) return 1;
+        w.swap(out);
+    }
+    uint32_t *wo = static_cast<uint32_t *>(malloc(w.size() * 4 + 4)); if (!wo) return 1;
+    memcpy(wo, w.data(), w.size() * 4); *words = wo; *nwords = w.size();
+    if (raw && nraw) { uint8_t *r = static_cast<uint8_t *>(malloc(h.spirv_bytes + 1)); if (r) { memcpy(r, b.data() + off, h.spirv_bytes); *raw = r; *nraw = h.spirv_bytes; } }
+    return 0;
+}
+extern "C" VkShaderModule vkn_shlib_b5_module(const uint32_t *w, size_t n, const char *key) {
+    if (!w || !n || !key || !g.ready) return VK_NULL_HANDLE;
+    VkShaderModule m = VK_NULL_HANDLE; const std::vector<uint32_t> v(w, w + n);
+    return make_module(v, &m, key) == VK_SUCCESS ? m : VK_NULL_HANDLE;
+}
+extern "C" int vkn_shlib_b5_record(const char *pack, const char *key, uint8_t **out, size_t *n) {
+    if (out) *out = nullptr; if (n) *n = 0;
+    if (!pack || !key || !out || !n) return -1;
+    static std::mutex mu; static std::map<std::string, std::pair<int, std::vector<Ent>>> open;   // pack name -> (fd, index); fd -1 = none, -2 = damaged
+    std::lock_guard<std::mutex> l(mu);
+    auto it = open.find(pack);
+    if (it == open.end()) {
+        if (!g.ready) return -1;
+        int fd = -1; std::vector<Ent> idx; bool damaged = false;
+        const bool ok = pack_open(g.dir + "/" + pack, fd, idx, damaged);
+        it = open.emplace(pack, std::make_pair(ok ? fd : damaged ? -2 : -1, std::move(idx))).first;
+    }
+    if (it->second.first < 0) return it->second.first == -2 ? -3 : -2;   // -2 = no such pack, -3 = damaged / another version
+    std::vector<uint8_t> v; const int r = pack_get(it->second.first, it->second.second, key, v);
+    if (r <= 0) return r;   // 0 = not listed, -1 = unreadable / CRC differs
+    uint8_t *o = static_cast<uint8_t *>(malloc(v.size() + 1)); if (!o) return -1;
+    memcpy(o, v.data(), v.size()); *out = o; *n = v.size(); return 1;
 }
 #endif

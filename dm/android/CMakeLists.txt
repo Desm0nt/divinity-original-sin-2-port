@@ -186,7 +186,7 @@ add_library(dmcore STATIC ${HOST_SRCS} ${HLE_SRCS} ${GFX_SRCS} ${LIBDEFLATE_SRCS
 # reference them weakly, and a weak reference pulls no archive member. C++17 and the engine's include directories come with
 # dm_vulkan_engine (PUBLIC); DM_SPVOPT=1 as the engine is built with it (the same xbg_spvopt lookup as the translator's bundle_module).
 if(DM_GAME STREQUAL "dos2")
-  set(VKN_CXX_SRCS ${DM}/gfx/vkn/vkn_shlib.cpp ${DM}/gfx/vkn/vkn_shlib_bc.cpp ${DM}/gfx/vkn/vkn_shlib_named.cpp ${DM}/gfx/vkn/vkn_post_pack.cpp)
+  set(VKN_CXX_SRCS ${DM}/gfx/vkn/vkn_shlib.cpp ${DM}/gfx/vkn/vkn_shlib_bc.cpp ${DM}/gfx/vkn/vkn_shlib_named.cpp ${DM}/gfx/vkn/vkn_post_pack.cpp ${DM}/gfx/vkn/vkn_mat_lib.cpp)
   target_sources(dmcore PRIVATE ${VKN_CXX_SRCS})
   set_source_files_properties(${VKN_CXX_SRCS} PROPERTIES COMPILE_OPTIONS "-O2;-Wall;-Wextra;-Wno-missing-field-initializers;-fno-strict-aliasing"
                               COMPILE_DEFINITIONS "DM_SPVOPT=1")

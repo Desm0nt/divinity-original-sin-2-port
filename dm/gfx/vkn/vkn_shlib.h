@@ -176,6 +176,19 @@ const struct nr_cv_prog *vkn_shlib_vs_pos(const void *shader);
 int64_t vkn_shlib_fs_outputs(const void *shader);
 int vkn_shlib_policy(void);
 
+// ==== [DOS2] VK-NATIVE stage 5.2 B5 / B4 (dm/gfx/vkn/vkn_mat.c MAT + XLQ, vkn_prepass.c): the library's steps for a technique's module ====
+// vkn_shlib_b5_words: a vertex / fragment shader object of this library (vkn_shader.xs[]): its final words (every load-time rewrite,
+//   as words_of: the words its base module is made of) with the "#vi" retype of code (vkn_shader_module's code; vertex only, 0 = none)
+//   applied as retype_variant does, and (raw != NULL) the bundle's own SPIR-V bytes as read (before spv-override and the rewrites).
+//   malloc'd copies (free()). Re-reads and re-runs the chain: a thread with an 8 MB stack. 0 = ok, 1 = unusable / reload / retype
+//   failed, -1 = not ready / bad arguments.
+// vkn_shlib_b5_module: vkCreateShaderModule of words as make_module (spvopt lookup, the module lock); key for the logs and the cache.
+// vkn_shlib_b5_record: the entry `key` of the xgspack <shader directory>/<pack> (index checks and CRC-32 as the shader pack): 1 = *out
+//   (malloc'd, *n bytes), 0 = not listed, -1 = unreadable / CRC differs, -2 = no such pack, -3 = damaged / another version.
+int vkn_shlib_b5_words(void *shader, uint64_t retype, uint32_t **words, size_t *nwords, uint8_t **raw, size_t *nraw);
+VkShaderModule vkn_shlib_b5_module(const uint32_t *words, size_t nwords, const char *key);
+int vkn_shlib_b5_record(const char *pack, const char *key, uint8_t **out, size_t *n);
+
 // ---- host tests: the words handed to vkCreateShaderModule are what the comparison test checks (it mocks that entry point) ----
 #ifdef __cplusplus
 }
