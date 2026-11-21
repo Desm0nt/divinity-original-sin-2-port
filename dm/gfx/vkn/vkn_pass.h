@@ -99,7 +99,11 @@ void vkn_pass_watch(vkn_tex *t, vkn_pass_watch_fn fn);
 //   tilebar  DM_VK_NATIVE_TILEBAR 0 / 1 fragment-stage read barriers of fragment-only draws
 //   area, ubo (DM_VK_NATIVE_LOAD_AREA / _LOAD_UBO): a proven part of the target as render area / positions from uniform blocks (1 = on)
 //   store_frames (DM_VK_NATIVE_STORE_FRAMES): frames of "not read" before a store is discarded (default 8)
-typedef struct vkn_pass_policy { int8_t load, store, fresh, tilebar, area, ubo; uint16_t store_frames; } vkn_pass_policy;
+// [mgpu P4] store_key (DM_VK_NATIVE_STORE_KEY): 0 = the history key is the chain of every earlier set of the recording (stage 5.2: a UI
+// pass count that moves by one re-keys every later pass - the 0 / 143 discards of U13r); 1 = (the set, how many times this set began a
+// pass before in this recording). [mgpu P6.1] join (DM_VK_NATIVE_PASSJOIN): 0 off / 1 a depth-only pass opens as the G-buffer pass that
+// followed it in the last frames (vkn_pass.c "pass join") / 2 count only / 3 = 1 + checks. Both 0 in a vkn_pass_policy_set of zeros.
+typedef struct vkn_pass_policy { int8_t load, store, fresh, tilebar, area, ubo; uint16_t store_frames; int8_t join, store_key; } vkn_pass_policy;
 // Exact values now (host tests; NULL = all off). A request (the host at install, from the environment) may carry -1 = the family
 // default: it is applied at the first recording begin with a device (the family is known then: vkn_shlib_policy, else vkn_policy_family_from),
 // with one log line. The effect function (vkn_fx.h, "pass-cover", order 900) is registered when load or tilebar is on.
@@ -151,6 +155,27 @@ void vkn_pass_stats3_get(vkn_pass_stats3 *s);
 int vkn_pass_area_hint(const VkRect2D *area);
 // 1 + the render area of the pass open in vkn_cb() for the current set; 0 = none open.
 int vkn_pass_area_get(VkRect2D *out);
+
+// ==== [mgpu P0] the pass journal (VK-MOBILE-GPU-PLAN.md П0) ====
+// Every pass that ends is counted by WHY it ended (always on: the census line "pass ends"), with its tile-traffic model bytes (load +
+// store of its attachments over its render area) and its draws (engine + UI). DM_VK_NATIVE_PASSLOG=k: the k-th heavy presented frame
+// (>= 40 passes) prints one line per pass in order (targets by name, size, area, load / store of each attachment, MB, draws, why it
+// ended) and one line of MB by reason. Recording thread.
+enum { VKN_PE_TARGETS, VKN_PE_SAMPLE, VKN_PE_COPY, VKN_PE_CLEAR, VKN_PE_AREA, VKN_PE_LAYOUT, VKN_PE_STORAGE, VKN_PE_BARRIER, VKN_PE_END, VKN_PE_OTHER, VKN_PE_N };
+const char *vkn_pass_end_name(int why);
+typedef struct vkn_pass_stats4 {
+    uint64_t frames, passes, draws, ui_draws;
+    uint64_t ended[VKN_PE_N], ended_bytes[VKN_PE_N];
+    uint64_t join_tried, joined, join_hit, join_miss, join_early, join_would, join_refused[6];   // [mgpu P6.1] (vkn_pass.c "pass join")
+    uint64_t ord_full;                                                                        // [mgpu P4] ordinal table full (chain key used)
+} vkn_pass_stats4;
+void vkn_pass_stats4_get(vkn_pass_stats4 *s);
+// ==== [mgpu P2] a region copy between two colour textures of one format (the UI filter cache, vkn_ui.c): layouts by this module ====
+// (dst x, y) <- src (x, y, w, h), level 0 layer 0; the open pass ends. 0 = recorded.
+int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32_t sx, int32_t sy, uint32_t w, uint32_t h);
+// [mgpu P2] a function run at the entry of every vkn_pass_* call that records or changes state (targets, clears, copies, layouts,
+// samples, ready, end): the UI cache flushes the calls it holds back. NULL = none. The hook is cleared while it runs.
+void vkn_pass_before(void (*fn)(void));
 
 #ifdef __cplusplus
 }

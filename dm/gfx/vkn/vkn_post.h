@@ -96,6 +96,7 @@ typedef struct vkn_post_stats {
     uint64_t recovered, recovered_close, materialized, overwritten, late_aa, violations;
     uint64_t armed_frames[4], refused_total;                                   // armed now [F1, F2, route A, -]
     uint64_t dump_reads;                                                       // watched images copied out by DM_VK_NATIVE_DUMP (not violations)
+    uint64_t cleared;                                                          // [mgpu P4] watches ended by a whole clear the engine asked for after them
 } vkn_post_stats;
 void vkn_post_stats_get(vkn_post_stats *s);
 // Host tests: a stand-in for the fused bundles' door (the library load of "F1.<host>" ... and vkn_post_pack.cpp's parsed table). fn fills

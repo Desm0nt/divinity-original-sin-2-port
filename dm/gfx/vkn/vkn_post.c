@@ -107,7 +107,7 @@ enum {
     R_BUNDLE, R_RT, R_ALPHA, R_EKEY, R_EXTRA, R_REQ_E, R_SIZE_E, R_NOHOST, R_HKEY, R_NOREAD, R_BASE, R_HSIZE, R_REQ_H, R_HCOVER,
     R_HOSTWRITE, R_STEP_SHAPE, R_STEP_INPUT, R_STEP_SIZE, R_STEP_COVER, R_STEP_SHARED, R_STEP_COPY, R_CARRY, R_OTHER_READER,
     R_NOSTEP, R_PART, R_TWIN, R_LATE_STEP, R_UNSEEN_USE, R_STALE_READ, R_OTHER_WRITE, R_BUILD, R_WATCH_FULL, R_SERIAL, R_REPLAY_FIRST,
-    R_EDRAWS, R_N
+    R_EDRAWS, R_NOVIG, R_N
 };
 static const char *const k_why[R_N] = {
     "fused bundle not ready / unusable", "targets not one colour without depth", "alpha test", "elided key differs from the bundle's",
@@ -122,6 +122,7 @@ static const char *const k_why[R_N] = {
     "a draw of another class writes a watched image", "fused / twin shader build failed", "more than 4 watched images",
     "a stash of another recording", "a replay before an arrays draw with another first vertex",
     "the skipped pass has more than one draw",
+    "CombineUI without a Vignette draw before it (the scene draws no vignette: F2 has nothing to fuse)",   // [mgpu P4]
 };
 
 typedef struct dcopy {
@@ -144,7 +145,7 @@ typedef struct fused {
     uint8_t tfeed[VKN_FX_TEX], targ[VKN_FX_TEX], ufeed[VKN_FX_UBO], uarg[VKN_FX_UBO];
 } fused;
 typedef struct twin { const vkn_shader *r; uint32_t rid; uint64_t mask; const vkn_shader *sh; uint8_t tfeed[VKN_FX_TEX], targ[VKN_FX_TEX], ufeed[VKN_FX_UBO], uarg[VKN_FX_UBO]; int bad; } twin;
-typedef struct watch { vkn_tex *t; uint8_t kind, pair, bad; vkn_tex *holder; stash *st; uint32_t serial; const vkn_tex *ht; } watch;   // ht: a probe host target (pointer only)
+typedef struct watch { vkn_tex *t; uint8_t kind, pair, bad; vkn_tex *holder; stash *st; uint32_t serial; const vkn_tex *ht; uint64_t clr_ns; } watch;   // clr_ns: [mgpu P4]   // ht: a probe host target (pointer only)
 typedef struct cls_ent { const vkn_shader *s; uint8_t cls; } cls_ent;
 
 static struct {
@@ -299,6 +300,7 @@ static int watch_put(vkn_tex *t, int kind, int pair, vkn_tex *holder, stash *st)
     } else if (g.w[i].holder) { vkn_tex_unref(g.w[i].holder); g.w[i].holder = NULL; }
     watch *w = &g.w[i];
     w->kind = (uint8_t)kind; w->pair = (uint8_t)pair; w->bad = 0; w->st = st; w->serial = vkn_cb_serial();
+    w->clr_ns = t->pass_nclr ? t->pass_clr_ns : 0;   // [mgpu P4] a clear remembered BEFORE the skip is not one after it
     if (holder && vkn_tex_ref(holder)) w->holder = holder;
     // (already GENERAL: a clear the engine asked for since stays remembered - the skipped draw would have overwritten it - and costs nothing)
     if (t->layout != VK_IMAGE_LAYOUT_GENERAL) vkn_pass_layout(t, VK_IMAGE_LAYOUT_GENERAL);
@@ -340,6 +342,15 @@ static void violation(uint32_t i, int why, const vkn_fx_ctx *c, const char *what
     if (w->pair == PR_F1) disarm(PR_RA, c ? c->frame : vkn_frame());
     watch_end(i);
 }
+// [mgpu P4] the engine cleared the watched image whole AFTER its watch began (a remembered clear of its only level / layer, newer than the
+// watch): what the skipped draw / the alias would have left there is overwritten by that clear anyway - nothing to materialise; the
+// watch ends (was: the content was copied / replayed first, a full-screen copy a frame in U02h, and it landed after the flushed clear).
+static int cleared_since(const watch *w) {
+    const vkn_tex *t = w->t;
+    if (w->kind == W_PROBE || t->mips != 1 || t->layers != 1 || !t->pass_nclr || t->pass_clr_ns <= w->clr_ns) return 0;
+    for (uint32_t i = 0; i < t->pass_nclr; i++) if (t->pass_clr[i].layer == 0) return 1;
+    return 0;
+}
 // Every draw while a watch is live: a use the module did not see (the layout moved) and a write into a watched image / an alias holder.
 static void watch_cheap(const vkn_fx_ctx *c, int post) {
     for (uint32_t i = 0; i < g.nw;) {
@@ -350,6 +361,7 @@ static void watch_cheap(const vkn_fx_ctx *c, int post) {
         int hit = 0, hold = 0;
         for (int k = 0; k < VKN_PASS_COLORS && c->color[k]; k++) { hit |= c->color[k] == w->t; hold |= w->holder && c->color[k] == w->holder; }
         hit |= c->depth == w->t;
+        if ((hit || hold) && cleared_since(w)) { g.s.cleared++; watch_end(i); continue; }   // [mgpu P4]
         if (!post && (hit || hold)) {   // a draw of another class writes it: the content first, then the watch ends
             count(R_OTHER_WRITE);
             if (w->kind == W_PROBE || materialize(i, c)) violation(i, R_OTHER_WRITE, c, "written by a draw of another class");
@@ -601,7 +613,10 @@ static void at_elided(int p, const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_
 // H of pair p: the fused draw (or the observation in probation / verify).
 static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_out *out) {
     stash *s = &g.st[p];
-    if (g.pend != p || !s->valid || s->serial != vkn_cb_serial()) { count(R_NOHOST); disarm_on(p, NULL, c->frame); return; }
+    if (g.pend != p || !s->valid || s->serial != vkn_cb_serial()) {
+        count(p == PR_F2 && g.pend < 0 && g.lastE[PR_F2].serial != vkn_cb_serial() ? R_NOVIG : R_NOHOST);   // [mgpu P4] F2's refusal by its true reason
+        disarm_on(p, NULL, c->frame); return;
+    }
     g.pend = -1;
     vkn_tex *O = s->O;
     // which binding samples O
@@ -727,6 +742,7 @@ static void watch_reads(const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_out *
         if (m && out->shader && vkn_fx_shader_is(out->shader))   // a fused host: the skipped target's slot is fed by the stash already
             for (int p = 0; p < 2; p++) if (g.st[p].valid && g.st[p].skipped && g.st[p].O == w->t) m = 0;
         if (!m) { i++; continue; }
+        if (cleared_since(w)) { g.s.cleared++; watch_end(i); continue; }   // [mgpu P4] the read sees the engine's clear (run before the sample)
         if (w->kind == W_PROBE) { violation(i, R_OTHER_READER, c, "read in the window"); continue; }
         if (w->kind == W_ALIAS && w->holder) {
             twin *t = !out->shader && in->alpha_ref < 0 ? twin_get(c->shader, m) : NULL;
@@ -751,6 +767,7 @@ static void watch_writes(const vkn_draw_in *in, const vkn_fx_ctx *c) {
         for (int k = 0; k < VKN_PASS_COLORS && c->color[k]; k++) { hit |= c->color[k] == w->t; hold |= w->holder && c->color[k] == w->holder; }
         hit |= c->depth == w->t;
         if (!hit && !hold) { i++; continue; }
+        if (cleared_since(w)) { g.s.cleared++; watch_end(i); continue; }   // [mgpu P4]
         int32_t r[4] = {0, 0, 0, 0};
         if (hit && c->color[0] == w->t) cover_of(in, w->t, r);
         const int full = hit && !hold && one_target(c) && c->color[0] == w->t && rect_whole(r, w->t) && blend_off(c) && !reads_of(c->shader, in, w->t);
@@ -866,10 +883,10 @@ void vkn_post_census(void) {
 #define D(f) (unsigned long long)(s.f - last.f)
     vkn_logf("post: level %d%s: post draws %llu; skipped %llu (would %llu), fused F1 %llu / F1A %llu / F2 %llu (would %llu); AA steps skipped %llu (would %llu), carried %llu; "
              "alias reads redirected %llu, twins %u; recovered %llu (at close %llu), materialised %llu, watches ended by an overwrite %llu, double AA frames %llu, "
-             "violations %llu, dump reads %llu; armed F1 %d F2 %d route A %d; refusals %s",
+             "violations %llu, dump reads %llu; armed F1 %d F2 %d route A %d; watches ended by an engine clear %llu; refusals %s",
              s.level, s.verify == 1 ? " verify" : s.verify == 2 ? " poison" : "", D(draws_post), D(skipped), D(would_skip), D(fused[0]), D(fused[1]), D(fused[2]), D(would_fuse),
              D(step_skipped), D(step_would), D(carried), D(redirected), (unsigned)s.twins, D(recovered), D(recovered_close), D(materialized), D(overwritten),
-             D(late_aa), D(violations), D(dump_reads), g.arm[PR_F1].armed, g.arm[PR_F2].armed, g.arm[PR_RA].armed, k ? by : "none");
+             D(late_aa), D(violations), D(dump_reads), g.arm[PR_F1].armed, g.arm[PR_F2].armed, g.arm[PR_RA].armed, D(cleared), k ? by : "none");
 #undef D
     last = s; memcpy(lwhy, g.why, sizeof lwhy);
 }

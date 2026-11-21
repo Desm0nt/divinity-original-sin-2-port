@@ -52,6 +52,7 @@ int vkn_prepass_mode(void);                 // in effect (0 = off / not installe
 
 typedef struct vkn_prepass_stats {
     uint64_t pre_seen, gb_seen, skipped, overrides, lost, reads, counting_open, ds_full, facts_unknown, fallbacks, tables, bad_frames, bad_keys, reds;
+    uint64_t nofs;   // [mgpu P4] pre-pass draws whose fragment stage an earlier piece (MAT) dropped: class 0 (DM_VK_NATIVE_PREPASS_NOFS, default 1)
 } vkn_prepass_stats;
 void vkn_prepass_stats_get(vkn_prepass_stats *s);
 void vkn_prepass_census(void);              // the line of the last retired table now

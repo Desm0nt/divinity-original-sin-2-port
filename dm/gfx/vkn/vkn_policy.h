@@ -38,6 +38,10 @@ static inline const char *vkn_policy_family_name(int f) {
                  case VKN_FAM_XCLIPSE: return "xclipse"; case VKN_FAM_MALEOON: return "maleoon"; default: return "other"; }
 }
 static inline int vkn_policy_tiler(int f) { return f == VKN_FAM_MALI || f == VKN_FAM_POWERVR; }   // xbg_tile_family
+// [mgpu P0] the RENDER-PASS policy's tilers (load / store / fresh / tile barrier / UI pass / UI region / pass join defaults only; shader
+// defaults keep vkn_policy_tiler): + Maleoon, + Adreno on Qualcomm's own driver (driverID 8: it picks GMEM by itself). Xclipse and
+// Turnip (sysmem on the Mi 14) stay "not a tiler".
+static inline int vkn_policy_tile_pass(int f, uint32_t driver_id) { return vkn_policy_tiler(f) || f == VKN_FAM_MALEOON || (f == VKN_FAM_ADRENO && driver_id == 8u); }
 
 // xbg_gpu_family (vendor first, then the device name) + xbg_effective_family (the family bit of a DM_GFX_SIM_GPU profile wins:
 // "mali" / "family-mali" -> Mali, "powervr" / "pvr" / "family-powervr" -> PowerVR, "xclipse" / "family-xclipse" -> Xclipse, in that

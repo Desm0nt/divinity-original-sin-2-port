@@ -34,6 +34,7 @@ static struct {
     // [fixpp] one chain function only (the chain has 12 places and the merged tree uses 10 of them): the override of the draw in hand
     // is checked at the next call of this function against the chain's skip counter (vkn_fx_stats.skipped) taken when it was given
     int pend; uint64_t pend_key, pend_skipped;
+    int nofs_rule;   // [mgpu P4] DM_VK_NATIVE_PREPASS_NOFS
     vkn_prepass_test_fn test;
 } g;
 static const vkn_shader *g_fs_s[IDS]; static uint64_t g_fs_h[IDS]; static int8_t g_fs_c[IDS];
@@ -125,7 +126,7 @@ static void line_of(const prepass_result *r) {
              "df never=%u less=%u equal=%u lequal=%u greater=%u notequal=%u gequal=%u always=%u override=%u refused func=%u blend=%u kill=%u raster=%u stencil=%u lost=%u "
              "vbdiff=%u hazards stencil=%u bounds=%u func=%u pass=%u blendw=%u read=%u | keys=%u ok=%u unsafe_keys=%u bad=%u unmatched=%u ambiguous=%u refused_keys=%u "
              "unsafe=%u | total skipped=%llu override=%llu bad_frames=%llu bad_keys=%llu fallbacks=%llu; backend: facts unknown %llu, pre-pass draws kept in an open "
-             "report pair %llu, overrides lost after the chain %llu, ds table full %llu, red lines %llu",
+             "report pair %llu, overrides lost after the chain %llu, ds table full %llu, red lines %llu; [mgpu] fragment stage dropped by an earlier piece %llu (rule %d)",
              g.mode, g.pp->gate, (unsigned long long)r->frame, r->pre_draws, r->pre_cand, r->pre_skip, (unsigned long long)r->pre_verts, (unsigned long long)r->cand_verts,
              (unsigned long long)r->skip_verts, (unsigned long long)r->keep_verts, r->keep[PREPASS_K_KILL], r->keep[PREPASS_K_FS], r->keep[PREPASS_K_STATE],
              r->keep[PREPASS_K_STENCIL], r->keep[PREPASS_K_ALPHA], r->keep[PREPASS_K_COUNTING], r->keep[PREPASS_K_NOTINDEXED], r->keep[PREPASS_K_LATE],
@@ -136,7 +137,7 @@ static void line_of(const prepass_result *r) {
              r->hazard[PREPASS_H_BLENDW], r->hazard[PREPASS_H_READ], r->keys, r->ok_keys, r->unsafe_keys, r->bad_keys, r->unmatched, r->ambiguous, r->refused, r->unsafe,
              (unsigned long long)g.pp->total_skipped, (unsigned long long)g.pp->total_override, (unsigned long long)g.pp->total_bad_frames, (unsigned long long)g.pp->total_bad_keys,
              (unsigned long long)g.s.fallbacks, (unsigned long long)g.s.facts_unknown, (unsigned long long)g.s.counting_open, (unsigned long long)g.s.lost,
-             (unsigned long long)g.s.ds_full, (unsigned long long)g.s.reds);
+             (unsigned long long)g.s.ds_full, (unsigned long long)g.s.reds, (unsigned long long)g.s.nofs, g.nofs_rule);
 }
 static void retired(void) {
     const prepass_result *r = &g.pp->last; const uint32_t bad = g.pp->prev_frame_bad;
@@ -183,6 +184,10 @@ static void pp_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
         g.s.pre_seen++;
         int fsc = s && !vkn_fx_shader_is(s) ? fs_class(s) : 3;
         if (fsc < 0) fsc = 3;
+        // [mgpu P4] an earlier piece dropped the fragment stage (MAT, order 200: proven without effect - no kill, no depth / mask
+        // output): the draw has no fragment stage, class 0, whatever the engine shader's words say (was: 338 of 673 kept as "fs",
+        // U13r). DM_VK_NATIVE_PREPASS_NOFS=0: the old rule.
+        if (out->no_fs && g.nofs_rule && !out->discard) { if (fsc != 0) g.s.nofs++; fsc = 0; }
         int counting = 0;
         if (pair_open()) { counting = 1; g.s.counting_open++; }
         prepass_pre_in pi; memset(&pi, 0, sizeof pi);
@@ -239,6 +244,7 @@ void vkn_prepass_install(uint32_t vendor, const char *device_name) {
     const char *h = getenv("DM_VK_NATIVE_PREPASS_HIST"); g.hist = h && *h ? atol(h) != 0 : 1;
     const char *ad = getenv("DM_VK_NATIVE_PREPASS_ADMIT"); g.admit = ad && *ad && atol(ad) >= 0 ? (uint32_t)atol(ad) : 32u;
     const char *l = getenv("DM_VK_NATIVE_PREPASS_LOG"); g.log_every = l && *l && atol(l) > 0 ? (uint64_t)atol(l) : 300u;
+    { const char *nf = getenv("DM_VK_NATIVE_PREPASS_NOFS"); g.nofs_rule = nf && *nf ? atol(nf) != 0 : 1; }   // [mgpu P4]
     vkn_logf("DM_VK_NATIVE_PREPASS=%d (stage 5.2 B4, replaces DM_DOS2_PREPASS; %s; family default %d): %s; history gate %d, new meshes admitted a frame %u (0 = all); "
              "line every %llu frames", g.mode, e && *e ? "env" : "family default", def,
              g.mode == PREPASS_SKIP ? "opaque pre-pass draws skipped, their G-buffer draws LEQUAL + depth write" : g.mode == PREPASS_COUNT ? "compare - decisions and their check, nothing changes" :
@@ -253,7 +259,7 @@ void vkn_prepass_stats_get(vkn_prepass_stats *s) { if (s) *s = g.s; }
 void vkn_prepass_census(void) { if (g.inst && g.pp && g.pp->last_valid) line_of(&g.pp->last); }
 void vkn_prepass_test_setup(int mode, vkn_prepass_test_fn fn) {
     memset(g_fs_s, 0, sizeof g_fs_s);
-    g.test = fn; g.mode = prepass_clamp_mode(mode); g.hist = 1; g.admit = 32; g.log_every = 1; g.logged = 0; g.pend = 0;
+    g.test = fn; g.mode = prepass_clamp_mode(mode); g.hist = 1; g.admit = 32; g.log_every = 1; g.logged = 0; g.pend = 0; g.nofs_rule = 1;
     memset(g.leq, 0, sizeof g.leq);
     g.inst = g.mode && alloc_ctx() && reg_fn();
     if (!g.inst) g.mode = 0;

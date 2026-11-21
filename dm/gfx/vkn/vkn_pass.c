@@ -26,7 +26,7 @@
 #include "vkn_draw.h"
 #include "vkn_buf.h"
 #include "vkn_shader.h"
-#include "vkn_drv.h"    // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments
+#include "vkn_drv.h"    // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments; [mgpu P0] driverID
 #include "../nr/nr_cover.h"   // [stage 5.2 B1] NR-10b: position programs, nr_cv_cover
 #include "../nr/nr_frame.h"   // [stage 5.2 B1] NR-FRAME: write mask full for the format
 #include "../nb/nb_uiarea.h"  // [stage 5.2 B1] draw rect of a later draw of an area pass
@@ -74,6 +74,97 @@ static int color_slot(const tset *s, const vkn_tex *t, uint32_t mip, uint32_t la
 }
 static int open_here(void) { return g_open && g_open_cb == vkn_cb() && g_open_serial == vkn_cb_serial() && g_open_cb != VK_NULL_HANDLE; }
 
+// ==== [mgpu P0] the pass journal (vkn_pass.h): why each pass ended, its model bytes and draws; DM_VK_NATIVE_PASSLOG=k prints frame k ====
+static int g_pe_why = VKN_PE_OTHER;   // the reason the next end_open() is for (END_W); back to OTHER after every end
+static void end_open(void);
+static int g_join; static void jn_end(void);   // [mgpu P6.1] (vkn_pass.c 'pass join')
+#define END_W(w) do { g_pe_why = (w); end_open(); } while (0)
+static const char *const k_pe_name[VKN_PE_N] = {"targets changed", "a texture sampled", "copy", "clear / zero fill", "render area left",
+    "layout for present / transfer", "storage image", "barrier", "pass end (recording close / a piece)", "other"};
+const char *vkn_pass_end_name(int why) { return why >= 0 && why < VKN_PE_N ? k_pe_name[why] : "?"; }
+static vkn_pass_stats4 g_s4;
+struct vkn_ui_stats;
+extern void vkn_ui_stats_get(struct vkn_ui_stats *s) __attribute__((weak));
+typedef struct pj_att { char name[24]; uint32_t fmt; uint8_t load, store, depth; } pj_att;
+typedef struct pj_ent { pj_att a[VKN_PASS_COLORS + 1]; uint8_t na, why, joined; uint32_t w, h; VkRect2D area; uint64_t lb, sb; uint32_t draws; } pj_ent;
+static struct { int init, target, armed; uint32_t heavy, n, cap, passes; pj_ent *e; uint64_t d0, u0, lb, sb; int open; } g_pj;
+static int pj_cfg(void) {
+    if (!g_pj.init) { g_pj.init = 1; const char *e = getenv("DM_VK_NATIVE_PASSLOG"); g_pj.target = e && *e && atoi(e) > 0 ? atoi(e) : 0; }
+    return g_pj.target;
+}
+static void draw_counts(uint64_t *d, uint64_t *u) {
+    vkn_draw_stats a; vkn_draw_stats_get(&a); *d = a.draws;
+    *u = 0;
+    if (vkn_ui_stats_get) { uint64_t b[64]; memset(b, 0, sizeof b); vkn_ui_stats_get((struct vkn_ui_stats *)(void *)b); *u = b[0]; }   // (vkn_ui_stats.draws is its first field; 64 words > its size)
+}
+static void pj_name(char *o, const vkn_tex *t) { if (t->sname[0]) snprintf(o, 24, "%s", t->sname); else snprintf(o, 24, "tex#%04llx", (unsigned long long)(t->handle & 0xffff)); }
+// begin_set, after vkCmdBeginRenderPass: the pass's attachments and model bytes (lb / sb: load / store over the render area)
+static void pj_begin(const tset *s, const vkn_rp_key *k, uint32_t W, uint32_t H, VkRect2D area, uint64_t lb, uint64_t sb, int joined) {
+    draw_counts(&g_pj.d0, &g_pj.u0); g_pj.lb = lb; g_pj.sb = sb; g_pj.open = 1;
+    g_s4.passes++; g_pj.passes++;
+    if (!g_pj.armed) return;
+    if (g_pj.n >= g_pj.cap) {
+        const uint32_t nc = g_pj.cap ? g_pj.cap * 2 : 256;
+        pj_ent *ne = nc <= 4096 ? (pj_ent *)realloc(g_pj.e, nc * sizeof *ne) : NULL;
+        if (!ne) { g_pj.armed = 0; return; }
+        g_pj.e = ne; g_pj.cap = nc;
+    }
+    pj_ent *e = &g_pj.e[g_pj.n++]; memset(e, 0, sizeof *e);
+    for (uint32_t i = 0; i <= s->n && e->na < VKN_PASS_COLORS + 1; i++) {
+        const vkn_tex *t = i < s->n ? s->c[i] : s->d; if (!t) continue;
+        pj_att *a = &e->a[e->na++]; pj_name(a->name, t); a->fmt = (uint32_t)t->format; a->depth = i == s->n;
+        a->load = a->depth ? k->depth_load : k->load[i]; a->store = a->depth ? k->depth_store : k->store[i];
+    }
+    e->w = W; e->h = H; e->area = area; e->lb = lb; e->sb = sb; e->joined = (uint8_t)joined; e->why = VKN_PE_OTHER;
+}
+// end_open, the pass still open: why it ends
+static void pj_end(int why) {
+    if (!g_pj.open) return;
+    g_pj.open = 0;
+    uint64_t d, u; draw_counts(&d, &u);
+    g_s4.draws += d - g_pj.d0; g_s4.ui_draws += u - g_pj.u0;
+    if (why < 0 || why >= VKN_PE_N) why = VKN_PE_OTHER;
+    g_s4.ended[why]++; g_s4.ended_bytes[why] += g_pj.lb + g_pj.sb;
+    if (g_pj.armed && g_pj.n) { pj_ent *e = &g_pj.e[g_pj.n - 1]; e->why = (uint8_t)why; e->draws = (uint32_t)((d - g_pj.d0) + (u - g_pj.u0)); }
+}
+static const char *pj_op(uint8_t load, uint8_t store) {   // L load / C clear / - dont care, then S store / - dont care
+    static const char *const k[3][2] = {{"L/S", "L/-"}, {"C/S", "C/-"}, {"-/S", "-/-"}};
+    return k[load < 3 ? load : 2][store ? 1 : 0];
+}
+static void pj_rec_begin(void) {   // (begin listener) the frame journal: armed for presented recordings until frame k was printed
+    g_pj.n = 0; g_pj.passes = 0; g_pj.open = 0;
+    g_pj.armed = pj_cfg() > 0 && vkn_rec_presented();
+}
+static void pj_rec_close(void) {   // (close listener, after vkn_pass_end) a heavy frame is counted; the k-th is printed
+    if (vkn_rec_presented()) g_s4.frames++;
+    if (!vkn_rec_presented() || g_pj.passes < 40) { g_pj.n = 0; return; }
+    g_pj.heavy++;
+    if (!g_pj.armed || (int)g_pj.heavy != g_pj.target) { g_pj.n = 0; return; }
+    const double mb = 1048576.0; double by[VKN_PE_N]; uint32_t nb[VKN_PE_N]; memset(by, 0, sizeof by); memset(nb, 0, sizeof nb);
+    double tl = 0, ts = 0; uint64_t td = 0;
+    for (uint32_t i = 0; i < g_pj.n; i++) {
+        const pj_ent *e = &g_pj.e[i]; char b[700]; int o = 0; b[0] = 0;
+        const int w = e->why < VKN_PE_N ? e->why : VKN_PE_OTHER;
+        for (uint32_t j = 0; j < e->na && o < (int)sizeof b - 80; j++)
+            o += snprintf(b + o, sizeof b - (size_t)o, "%s%s%s f%u %s", j ? ", " : "", e->a[j].depth ? "+" : "", e->a[j].name, e->a[j].fmt, pj_op(e->a[j].load, e->a[j].store));
+        vkn_logf("passlog %d #%03u: %s | %ux%u area %d,%d %ux%u | draws %u | %.2f MB load + %.2f MB store | ended: %s%s", g_pj.target, i, b, e->w, e->h, e->area.offset.x, e->area.offset.y,
+                 e->area.extent.width, e->area.extent.height, e->draws, e->lb / mb, e->sb / mb, k_pe_name[w], e->joined ? " (joined pass)" : "");
+        by[w] += (double)(e->lb + e->sb) / mb; nb[w]++;
+        tl += e->lb / mb; ts += e->sb / mb; td += e->draws;
+    }
+    char r[900]; int o = 0; r[0] = 0;
+    for (int i = 0; i < VKN_PE_N && o < (int)sizeof r - 80; i++) if (nb[i]) o += snprintf(r + o, sizeof r - (size_t)o, "%s%s %u (%.1f MB)", o ? ", " : "", k_pe_name[i], nb[i], by[i]);
+    vkn_logf("passlog %d: heavy frame %u (frame %llu): %u passes, %llu draws, model %.1f MB load + %.1f MB store; ended by: %s (ops: L load / C clear / - dont care, then S store / - dont care)",
+             g_pj.target, g_pj.heavy, (unsigned long long)vkn_frame(), g_pj.n, (unsigned long long)td, tl, ts, r);
+    g_pj.n = 0; g_pj.armed = 0; g_pj.target = -1;
+}
+void vkn_pass_stats4_get(vkn_pass_stats4 *s) { if (s) *s = g_s4; }
+// [mgpu P2] the hook run before every recording entry point (vkn_pass.h vkn_pass_before)
+static void (*g_before)(void);
+#define BEFORE() do { if (g_before) { void (*f_)(void) = g_before; g_before = NULL; f_(); } } while (0)
+void vkn_pass_before(void (*fn)(void)) { g_before = fn; }
+// ==== [/mgpu P0 journal]
+
 // Integer formats take an integer clear value (the engine's floats converted).
 static int fmt_int(VkFormat f) {   // 0 float / normalized, 1 unsigned integer, 2 signed integer
     switch (f) {
@@ -117,6 +208,7 @@ void vkn_query_pass_closed(VkCommandBuffer cb) __attribute__((weak));
 void xbg_safe_mode_vkn_tick(int where) __attribute__((weak));   // [VK-DRV] gfx/vulkan/engine/xbg_safe_mode.inc: DM_GFX_FAKE_GPU_CRASH=<s>:rec in mode 1
 static void end_open(void) {
     if (g_open && open_here()) {
+        pj_end(g_pe_why);    // [mgpu P0]
         b1_pass_closing();   // [stage 5.2 B1] store poison, the first-draw check
         if (vkn_query_pass_closing) vkn_query_pass_closing(g_open_cb);   // [stage 4: queries]
         if (xbg_safe_mode_vkn_tick) xbg_safe_mode_vkn_tick(0);           // [VK-DRV] (nothing unless the test armed it)
@@ -124,10 +216,11 @@ static void end_open(void) {
         vkn_prof_pass_end(g_open_cb);                                     // [stage 5 A0]
         if (vkn_query_pass_closed) vkn_query_pass_closed(g_open_cb);     // [stage 4: queries]
     }
-    g_open = 0; g_open_cb = VK_NULL_HANDLE;
+    g_open = 0; g_open_cb = VK_NULL_HANDLE; g_pe_why = VKN_PE_OTHER; g_pj.open = 0;
+    jn_end();   // [mgpu P6.1]
     b1_pass_closed();
 }
-static void on_begin(void) { g_open = 0; g_open_cb = VK_NULL_HANDLE; b1_rec_begin(); }   // a new recording: nothing of the last one is open
+static void on_begin(void) { g_open = 0; g_open_cb = VK_NULL_HANDLE; jn_end(); b1_rec_begin(); pj_rec_begin(); }   // a new recording: nothing of the last one is open
 
 // ---- debug aid: DM_VK_NATIVE_DUMP=k1[,k2,k3,k4] - the colour targets of the k-th "heavy" presented frame (40 passes or more: a
 // level frame) as small pictures. At the end of that frame every texture that was a colour attachment in it (first 64, in the order
@@ -191,7 +284,7 @@ static void dump_close(void) {   // close listener (after vkn_pass_end): the fra
         if (vkCreateImage(dv->dev, &ci, NULL, &g_dump.img) != VK_SUCCESS || vkn_image_mem(g_dump.img, &g_dump.mem, NULL)) { g_dump.img = VK_NULL_HANDLE; return; }
     }
     if (vkn_block_alloc(VKN_ARENA_STAGING, (uint64_t)g_dump.nt * DUMP_W * DUMP_H * 4, 16, &g_dump.b)) return;
-    end_open();
+    END_W(VKN_PE_END);
     VkImageMemoryBarrier sb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = g_dump.img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
@@ -224,15 +317,16 @@ static void dump_close(void) {   // close listener (after vkn_pass_end): the fra
 int vkn_pass_dump_active(void) { return g_dump.active; }
 vkn_tex *vkn_pass_color(uint32_t i) { return i < g_cur.n ? g_cur.c[i] : NULL; }
 
+static void close2(void) { dump_close(); pj_rec_close(); }
 void vkn_pass_init(void) {
     if (g_inited) return;
     g_inited = 1;
     vkn_rec_on_close(vkn_pass_end);
-    vkn_rec_on_close(dump_close);
+    vkn_rec_on_close(close2);   // dump_close, then [mgpu P0] the journal (one listener: vkn_frame holds 8)
     vkn_rec_on_begin(on_begin);
     vkn_rec_on_begin(dump_begin);
 }
-void vkn_pass_end(void) { disarm(); end_open(); }
+void vkn_pass_end(void) { BEFORE(); disarm(); END_W(VKN_PE_END); }
 
 // A render target that was never written and never cleared is about to be read (sampled, or loaded by a pass that blends into it).
 // On the Switch its memory is fresh pool memory: zeros. A new VkImage holds garbage, and garbage in a history target (adapted
@@ -243,7 +337,7 @@ static uint32_t g_red_zero;
 static int zero_fill(VkCommandBuffer cb, vkn_tex *t) {
     if (!cb || t->layout != VK_IMAGE_LAYOUT_UNDEFINED || t->pass_ever) return 0;
     if (t->cls != VKN_TC_COLOR && t->cls != VKN_TC_WINDOW && t->cls != VKN_TC_DEPTH) return 0;   // (a sampled texture without data: its format may be compressed)
-    end_open();
+    END_W(VKN_PE_CLEAR);
     barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     const VkImageSubresourceRange rg = {t->aspect, 0, t->mips, 0, t->layers};
     if (is_depth(t)) { const VkClearDepthStencilValue v = {0.0f, 0}; vkCmdClearDepthStencilImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &rg); }
@@ -290,6 +384,7 @@ static struct {
     vkn_pass_policy req;   // vkn_pass_policy_request (-1 = family default); applied at the first recording begin with a device
     vkn_pass_policy cur;   // in effect (all 0 = stage-4 behaviour: the module default for host tests and other callers)
     int pending, family, fx_reg;
+    int tile_pass; uint32_t driver_id;   // [mgpu P0]
 } g_pol;
 // first-draw facts (pass_fx -> begin_set)
 typedef struct ffacts {
@@ -357,11 +452,16 @@ void vkn_pass_policy_get(vkn_pass_policy *p, int *family) { if (p) *p = g_pol.cu
 static void pol_resolve(void) {
     if (!g_pol.pending || !vkn_device()) return;
     const int f = policy_family(); vkn_pass_policy p = g_pol.req;
+    // [mgpu P0] the render-pass defaults of a tiler also for Maleoon and Adreno on Qualcomm's own driver (vkn_policy_tile_pass)
+    const uint32_t drv = vkn_drv()->driver_id; const int pf = vkn_policy_tile_pass(f, drv) && !vkn_policy_tiler(f) ? VKN_FAM_MALI : f;
+    g_pol.tile_pass = vkn_policy_tile_pass(f, drv); g_pol.driver_id = drv;
     const int dl = p.load < 0, ds = p.store < 0, df = p.fresh < 0, dt = p.tilebar < 0;
-    if (dl) p.load = (int8_t)vkn_policy_load_default(f);
-    if (ds) p.store = (int8_t)vkn_policy_store_default(f);
-    if (df) p.fresh = (int8_t)vkn_policy_fresh_default(f);
-    if (dt) p.tilebar = (int8_t)vkn_policy_tilebar_default(f);
+    if (dl) p.load = (int8_t)vkn_policy_load_default(pf);
+    if (ds) p.store = (int8_t)vkn_policy_store_default(pf);
+    if (df) p.fresh = (int8_t)vkn_policy_fresh_default(pf);
+    if (dt) p.tilebar = (int8_t)vkn_policy_tilebar_default(pf);
+    if (p.join < 0) p.join = (int8_t)(g_pol.tile_pass ? 1 : 0);   // [mgpu P6.1]
+    if (p.store_key < 0) p.store_key = 1;                         // [mgpu P4]
     if (p.area < 0) p.area = 1;
     if (p.ubo < 0) p.ubo = 1;
     g_pol.family = f;
@@ -371,6 +471,10 @@ static void pol_resolve(void) {
              p.area ? ", area passes" : "", p.ubo ? ", positions from uniforms" : "", p.store, ds ? "family default" : "env", (unsigned)p.store_frames,
              p.fresh, df ? "family default" : "env", p.tilebar, dt ? "family default" : "env",
              p.load && !(vkn_shlib_vs_pos && vkn_shlib_on && vkn_shlib_on()) ? "no shader library position programs: every proof refuses (no position program)" : "census line [vkn] pass policy every 10 s");
+    vkn_logf("pass policy (mgpu): driverID %u, render-pass tiler %d%s; DM_VK_NATIVE_STORE_KEY=%d (%s), DM_VK_NATIVE_PASSJOIN=%d (%s), DM_VK_NATIVE_PASSLOG=%d",
+             (unsigned)drv, g_pol.tile_pass, g_pol.tile_pass && !vkn_policy_tiler(f) ? " (Maleoon / Qualcomm's own driver: the tiler defaults)" : "",
+             p.store_key, p.store_key ? "store history keyed by the target set and its ordinal in the recording" : "the chain of every earlier set (stage 5.2)",
+             p.join, p.join == 0 ? "off" : p.join == 1 ? "depth pre-pass + G-buffer one pass" : p.join == 2 ? "count only" : "on + checks", pj_cfg());
 }
 
 // ---- bytes of one texel (the tile-traffic model of the census: w x h x this per loaded / stored attachment) ----
@@ -400,6 +504,16 @@ typedef struct id_ent { uint64_t block, off; const vkn_tex *writer; } id_ent;
 static st_ent g_st_tab[ST_N]; static sk_ent g_sk_tab[SK_N]; static id_ent g_id_tab[ID_N];
 static uint32_t g_fragvis_n;
 static uint64_t g_prefix;
+// [mgpu P4] the per-recording ordinal of a target set (store_key 1): open addressing, reset at every recording begin
+static struct { uint64_t h; uint32_t n; } g_ord[512]; static uint64_t g_rec_key;
+static uint32_t ord_take(uint64_t h) {
+    for (uint32_t i = 0, j = (uint32_t)h & 511u; i < 64; i++, j = (j + 1) & 511u) {
+        if (g_ord[j].h == h) return ++g_ord[j].n;
+        if (!g_ord[j].h) { g_ord[j].h = h ? h : 1; g_ord[j].n = 1; return 1; }
+    }
+    g_s4.ord_full++;
+    return 0xffffu;   // (full: one shared key for the rest: those passes learn together, a violation bans it)
+}
 static uint64_t mix64(uint64_t h, uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); h *= 0xff51afd7ed558ccdull; return h ^ (h >> 33); }
 static uint32_t frame32(void) { return (uint32_t)vkn_frame(); }
 // The record of t (create: make one; a record whose image differs belongs to an earlier texture at this address: reset). NULL = none / full.
@@ -539,11 +653,12 @@ static void pass_fx(const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_out *out,
     (void)user;
     if (g_pol.cur.tilebar) g_frag_only = frag_only(out->shader ? out->shader : c->shader);
     if (!g_pol.cur.load) return;
+    if (g_join && open_here()) return;   // [mgpu P6.1] the joined pass is open for the depth-only draws
     if (g_open && open_here() && same_set(&g_open_set, &g_cur)) {   // the pass is open: only an area pass has something to check
         if (!g_area_on) return;
         const nb_ua_rect a = {g_area.offset.x, g_area.offset.y, g_area.offset.x + (int32_t)g_area.extent.width, g_area.offset.y + (int32_t)g_area.extent.height};
         if (nb_ua_contains(a, draw_rect(in->viewport, in->scissor, in->prim, g_info.width, g_info.height))) { g_area_ok = 1; return; }
-        end_open(); g_s3.area_restart_draw++;   // this draw begins the pass again (full area): its facts below
+        END_W(VKN_PE_AREA); g_s3.area_restart_draw++;   // this draw begins the pass again (full area): its facts below
     }
     ffacts *f = &g_ff;
     f->armed = 1; f->stamp = draw_stamp(); f->set = g_cur;
@@ -709,7 +824,8 @@ static void b1_pass_closing(void) {
 static void b1_pass_closed(void) { g_area_on = 0; g_area_ok = 0; g_area_src = 0; g_open_poison = g_open_dpoison = 0; g_cov_chk = 0; }
 // (a recording begin: the host's request is applied here, outside every draw - registering the effect function inside a running chain
 // would move the entries vkn_fx_run is walking)
-static void b1_rec_begin(void) { pol_resolve(); b1_pass_closed(); disarm(); g_hint_on = 0; g_prefix = mix64(0x51, vkn_rec_presented() ? 1 : 2); }
+static void b1_rec_begin(void) { pol_resolve(); b1_pass_closed(); disarm(); g_hint_on = 0; g_prefix = mix64(0x51, vkn_rec_presented() ? 1 : 2);
+                                g_rec_key = g_prefix; if (g_pol.cur.store_key) memset(g_ord, 0, sizeof g_ord); }
 // tile barrier bookkeeping: t got a full barrier (barrier()): no fragment-only visibility left
 static void b1_on_barrier(vkn_tex *t) {
     if (!g_fragvis_n) return;
@@ -741,7 +857,7 @@ static void fragvis_fix(vkn_tex *t) {
     st_ent *e = st_get(t, 0);
     if (!e || !e->fragvis) return;
     VkCommandBuffer cb = vkn_cb(); if (!cb) return;
-    if (g_open) { end_open(); g_st.breaks_sample++; }
+    if (g_open) { END_W(VKN_PE_BARRIER); g_st.breaks_sample++; }
     const VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, .oldLayout = t->layout, .newLayout = t->layout,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = t->image,
@@ -758,7 +874,7 @@ static int flush_clears(vkn_tex *t) {
     if (!t->pass_nclr && !t->pass_dclr) return 0;
     VkCommandBuffer cb = vkn_cb();
     if (!cb) return -1;
-    end_open();
+    END_W(VKN_PE_CLEAR);
     barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (g_dump.active && t->format == VK_FORMAT_R8G8B8A8_UNORM && t->w >= 1000) vkn_logf("trace: remembered clear of %llx runs as a command (%u colour, depth bits %u)", (unsigned long long)(t->handle & 0xffff), t->pass_nclr, (unsigned)t->pass_dclr);
     for (uint32_t i = 0; i < t->pass_nclr; i++) {
@@ -808,13 +924,80 @@ static int clr_find(vkn_tex *t, uint32_t layer, float rgba[4], int take) {
     return 0;
 }
 
+// ==== [mgpu P6.1] pass join (DM_VK_NATIVE_PASSJOIN, vkn_pass.h): the depth pre-pass and the G-buffer as ONE render pass ====
+// Learned: a depth-only set on depth D that was followed by a set S with colours on the same D, the same S in consecutive frames (a
+// streak of 2). When the depth-only pass of D is about to begin and S's colour attachments would all begin with a CLEAR the engine
+// already asked for (remembered full clears: begin_set folds them - the same clear the S pass would have folded, only earlier: every
+// use of those textures in between ends the pass, and a remembered clear runs before any use anyway), the pass begins as S's pass; the
+// depth-only draws get S's compatibility class with colour write masks 0 (they write nothing to the colours: the same depth). When the
+// engine then sets S, the pass stays open (hit: one depth store + load and one pass fewer); any other set ends it (miss: exact, the
+// colours hold the clears the engine asked for). Exact by construction; refusals counted by reason. Recording thread.
+enum { JR_HIST, JR_TARGET, JR_LOAD, JR_HINT, JR_MODE, JR_MS };
+typedef struct jn_ent { vkn_tex *d; tset s; uint32_t frame; uint8_t streak, live; } jn_ent;
+static jn_ent g_jn[8];
+static vkn_pass_info g_info_join; static tset g_join_set;
+static int depth_only(const tset *t) { if (!t->d) return 0; for (uint32_t i = 0; i < t->n; i++) if (t->c[i]) return 0; return 1; }
+static void jn_drop(jn_ent *e) {
+    if (!e->live) return;
+    for (uint32_t i = 0; i < e->s.n; i++) if (e->s.c[i]) vkn_tex_unref(e->s.c[i]);
+    if (e->s.d) vkn_tex_unref(e->s.d);
+    vkn_tex_unref(e->d);
+    memset(e, 0, sizeof *e);
+}
+static jn_ent *jn_find(const vkn_tex *d) { for (int i = 0; i < 8; i++) if (g_jn[i].live && g_jn[i].d == d) return &g_jn[i]; return NULL; }
+// vkn_pass_targets: the set changes from `old` to `nw`
+static void jn_learn(const tset *old, const tset *nw) {
+    if (!old->d || !depth_only(old) || nw->d != old->d || depth_only(nw)) return;
+    const uint32_t f = (uint32_t)vkn_frame();
+    jn_ent *e = jn_find(old->d);
+    if (e && same_set(&e->s, nw)) { if (e->frame + 1 == f && e->streak < 255) e->streak++; else if (e->frame != f) e->streak = 1; e->frame = f; return; }
+    if (!e) { for (int i = 0; i < 8 && !e; i++) if (!g_jn[i].live) e = &g_jn[i]; }
+    if (!e) { uint32_t o = ~0u; for (int i = 0; i < 8; i++) if (g_jn[i].frame < o) { o = g_jn[i].frame; e = &g_jn[i]; } }
+    jn_drop(e);
+    vkn_tex *held[VKN_PASS_COLORS + 2]; uint32_t nh = 0; int ok = 1;   // (references: the learned textures stay objects while learned)
+    if (vkn_tex_ref(old->d)) held[nh++] = old->d; else ok = 0;
+    for (uint32_t i = 0; ok && i < nw->n; i++) if (nw->c[i]) { if (vkn_tex_ref(nw->c[i])) held[nh++] = nw->c[i]; else ok = 0; }
+    if (ok && nw->d) { if (vkn_tex_ref(nw->d)) held[nh++] = nw->d; else ok = 0; }
+    if (!ok) { for (uint32_t i = 0; i < nh; i++) vkn_tex_unref(held[i]); return; }
+    e->d = old->d; e->s = *nw; e->live = 1; e->frame = f; e->streak = 1;
+}
+// vkn_pass_ready, before a depth-only pass of g_cur begins: the set to begin instead (1 = *out filled), the refusal counted
+static int jn_pick(tset *out) {
+    if (!g_pol.cur.join || !depth_only(&g_cur)) return 0;
+    jn_ent *e = jn_find(g_cur.d);
+    g_s4.join_tried++;
+    int why = -1;
+    if (!e || e->streak < 2 || e->frame + 1 < (uint32_t)vkn_frame()) why = JR_HIST;
+    else if (g_hint_on) why = JR_HINT;
+    else {
+        for (uint32_t i = 0; i < e->s.n && why < 0; i++) {
+            const vkn_tex *t = e->s.c[i]; if (!t) continue;
+            if (t->dead || t->w != g_cur.d->w || t->h != g_cur.d->h || e->s.mip[i]) why = JR_TARGET;
+            else if (t->samples != g_cur.d->samples) why = JR_MS;
+            else if (!clr_find((vkn_tex *)t, e->s.layer[i], NULL, 0)) why = JR_LOAD;
+        }
+        if (why < 0 && g_pol.cur.join == 2) why = JR_MODE;
+    }
+    if (why >= 0) { if (why == JR_MODE) g_s4.join_would++; else g_s4.join_refused[why]++; return 0; }
+    *out = e->s;
+    return 1;
+}
+static void jn_end(void) {   // end_open of a joined pass before S came
+    if (!g_join) return;
+    g_join = 0; g_s4.join_early++;
+    for (uint32_t i = 0; i < g_join_set.n; i++) if (g_join_set.c[i]) vkn_tex_unref(g_join_set.c[i]);
+    memset(&g_join_set, 0, sizeof g_join_set);
+}
+// ==== [/mgpu P6.1 pass join helpers]
+
 // Opens a pass for s in vkn_cb() (ending the open one). 0 = open, g_info / g_area filled; -1 = dropped (counted).
 // [stage 5.2 B1] load / store ops by the policy block above (cover proof, fresh targets, store history); consumes the first-draw facts.
 static uint32_t g_red_zclr;
+static int g_begin_join;   // [mgpu P6.1] begin_set begins a joined pass
 static int begin_set(const tset *s) {
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; g_ff.armed = 0; return -1; }
-    end_open();
+    END_W(VKN_PE_CLEAR);
     if (vkn_upload_pending_bytes()) (void)vkn_upload_run(cb);   // (a queued creation upload of an attachment must not land after this pass: see vkn_pass_copy)
     vkn_rp_key k; vkn_rp_key_init(&k);
     VkImageView views[VKN_PASS_COLORS + 1]; VkClearValue cv[VKN_PASS_COLORS + 1]; uint32_t nv = 0;
@@ -896,7 +1079,11 @@ static int begin_set(const tset *s) {
     const uint32_t AW = area.extent.width, AH = area.extent.height;
     // [B1] the store-history key of this pass: the chain of the recording's target sets so far
     { uint64_t h = (uint64_t)s->n; for (uint32_t i = 0; i < s->n; i++) h = mix64(h, (uint64_t)(uintptr_t)s->c[i] ^ ((uint64_t)s->layer[i] << 48) ^ ((uint64_t)s->mip[i] << 56));
-      g_prefix = mix64(g_prefix, mix64(h, (uint64_t)(uintptr_t)s->d)); }
+      h = mix64(h, (uint64_t)(uintptr_t)s->d);
+      // [mgpu P4] store_key 1: (the set, its ordinal among this recording's passes of the same set) - stable when the number of passes
+      // before it moves (the UI's 60..75 filter passes); 0: the chain of every earlier set (stage 5.2)
+      if (g_pol.cur.store_key) { g_prefix = mix64(mix64(g_rec_key, h), ord_take(h)); }
+      else g_prefix = mix64(g_prefix, h); }
     uint32_t poison_cov = 0, poison_alias = 0, spoison = 0; int dpoison_cov = 0, dpoison_alias = 0, dspoison = 0, chk = 0;
     // load / store ops (the rule of vkn_pass.h + stage 5.2 B1) and the layouts, before the pass begins
     nv = 0;
@@ -984,6 +1171,12 @@ static int begin_set(const tset *s) {
     vkn_prof_pass_begin(cb, s->c, s->n, s->d, W, H);   // [stage 5 A0] (after every failure point above)
     vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
     g_open = 1; g_open_cb = cb; g_open_serial = vkn_cb_serial(); g_open_set = *s;
+    {   // [mgpu P0] the journal: this pass's model bytes (load / store of its attachments over the render area)
+        uint64_t lb = 0, sb = 0;
+        for (uint32_t i = 0; i < s->n; i++) if (s->c[i]) { const uint64_t b = att_bytes(s->c[i], AW, AH); if (k.load[i] == VK_ATTACHMENT_LOAD_OP_LOAD) lb += b; if (k.store[i] == VK_ATTACHMENT_STORE_OP_STORE) sb += b; }
+        if (s->d) { const uint64_t b = att_bytes(s->d, AW, AH); if (k.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || k.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD) lb += b; if (k.depth_store == VK_ATTACHMENT_STORE_OP_STORE) sb += b; }
+        pj_begin(s, &k, W, H, bi.renderArea, lb, sb, g_begin_join);
+    }
     g_area = bi.renderArea;
     // [B1] poison of what a rule began DONT_CARE (the first draw must paint the proven rect over; an alias's readers show magenta)
     if (poison_cov || dpoison_cov) poison_now(poison_cov, dpoison_cov, s, cw == VKN_PCV_AREA || hinted ? area : (VkRect2D){{cr.r.x0, cr.r.y0}, {(uint32_t)(cr.r.x1 - cr.r.x0), (uint32_t)(cr.r.y1 - cr.r.y0)}}, &g_s3.poison_load);
@@ -1008,6 +1201,7 @@ static int begin_set(const tset *s) {
 
 void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const uint32_t layer[VKN_PASS_COLORS], const uint32_t mip[VKN_PASS_COLORS], vkn_tex *depth) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     tset s; memset(&s, 0, sizeof s);
     s.n = n > VKN_PASS_COLORS ? VKN_PASS_COLORS : n;
@@ -1017,10 +1211,19 @@ void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const u
     }
     s.d = depth;
     if (same_set(&s, &g_cur)) {   // the open pass (if any) stays open - unless it is narrowed ([B1 + B2]: the caller may draw anywhere next)
-        if (g_open && g_area_on) { end_open(); g_s3.area_restart_targets++; }
+        if (g_open && g_area_on) { END_W(VKN_PE_AREA); g_s3.area_restart_targets++; }
         return;
     }
-    end_open();
+    const int jhit = g_join && open_here() && same_set(&s, &g_open_set);   // [mgpu P6.1] the predicted G-buffer set: the joined pass stays open
+    if (g_pol.cur.join) jn_learn(&g_cur, &s);
+    if (jhit) {
+        g_join = 0; g_s4.join_hit++;
+        for (uint32_t i = 0; i < g_join_set.n; i++) if (g_join_set.c[i]) vkn_tex_unref(g_join_set.c[i]);
+        memset(&g_join_set, 0, sizeof g_join_set);
+    } else {
+        if (g_join) g_s4.join_miss++;
+        END_W(VKN_PE_TARGETS);
+    }
     g_hint_on = 0;   // [B1 + B2] a hint belongs to the set it was given for
     // [B1 + B2] the same colours with and without a depth target (the UI's depth-stencil detach, vkn_ui.c level 1): the depth's content
     // must survive the detached passes for a later re-attach with LOAD, whatever the history saw before - its store is never discarded
@@ -1059,15 +1262,31 @@ int vkn_pass_area_get(VkRect2D *out) {
 
 int vkn_pass_ready(vkn_pass_info *info) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     if (!vkn_cb()) { g_st2.no_cb++; disarm(); return -1; }
+    if (g_join && open_here()) { disarm(); if (info) *info = g_info_join; return 0; }   // [mgpu P6.1] the joined pass serves the depth-only draws
     if (open_here() && same_set(&g_open_set, &g_cur)) {
         // [stage 5.2 B1] an area pass serves only draws the effect chain saw inside it (pass_fx); any other draw (the UI, a piece's
         // own, one whose facts went stale) ends it, and it begins again full with LOAD
         // ([B1 + B2] a hinted pass: the UI keeps its draws inside the area itself; engine draws pass pass_fx's check)
         if (!g_area_on || g_area_ok || g_area_src == 2) { g_area_ok = 0; disarm(); if (info) *info = g_info; return 0; }
-        end_open(); g_s3.area_restart_other++;
+        END_W(VKN_PE_AREA); g_s3.area_restart_other++;
     }
     g_area_ok = 0;
+    {   // [mgpu P6.1] a depth-only pass that the learned G-buffer set followed: begun as that set's pass
+        tset js;
+        if (jn_pick(&js)) {
+            g_begin_join = 1; const int rj = begin_set(&js); g_begin_join = 0;
+            if (!rj) {
+                g_join = 1; g_join_set = js; g_s4.joined++;
+                for (uint32_t i = 0; i < js.n; i++) if (js.c[i] && !vkn_tex_ref(js.c[i])) g_join_set.c[i] = NULL;
+                g_info_join = g_info; memset(g_info_join.write_mask, 0, sizeof g_info_join.write_mask);
+                disarm();
+                if (info) *info = g_info_join;
+                return 0;
+            }
+        }
+    }
     const int r = begin_set(&g_cur);   // (uses the first-draw facts once)
     disarm();
     if (r) return -1;
@@ -1077,6 +1296,7 @@ int vkn_pass_ready(vkn_pass_info *info) {
 
 int vkn_pass_sample(vkn_tex *t) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     if (!t) return 0;
     WATCH(t, VKN_PASS_EV_SAMPLE, 0.0f);   // [stage 5 A3]
     if (in_set(&g_cur, t)) { g_st.feedback++; return 1; }
@@ -1089,7 +1309,7 @@ int vkn_pass_sample(vkn_tex *t) {
     }
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return 0; }
-    if (g_open) { end_open(); g_st.breaks_sample++; }
+    if (g_open) { END_W(VKN_PE_SAMPLE); g_st.breaks_sample++; }
     flush_clears(t);
     if (t->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return 0;
     hist_read(t, RD_SAMPLE);   // [stage 5.2 B1]
@@ -1101,12 +1321,13 @@ int vkn_pass_sample(vkn_tex *t) {
 
 void vkn_pass_storage(vkn_tex *t) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     if (!t) return;
     WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     disarm();   // [stage 5.2 B1]
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return; }
-    end_open();
+    END_W(VKN_PE_STORAGE);
     flush_clears(t);
     hist_read(t, RD_STORAGE);   // [stage 5.2 B1]
     if (t->layout != VK_IMAGE_LAYOUT_GENERAL) barrier(cb, t, VK_IMAGE_LAYOUT_GENERAL);
@@ -1115,13 +1336,14 @@ void vkn_pass_storage(vkn_tex *t) {
 
 void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     if (!t) return;
     WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     disarm();   // [stage 5.2 B1]
     if (!t->pass_nclr && !t->pass_dclr && t->layout == to) { if (g_fragvis_n && to == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) fragvis_fix(t); return; }
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st2.no_cb++; return; }
-    end_open();   // (any barrier ends the pass, not only one on its attachments)
+    END_W(VKN_PE_LAYOUT);   // (any barrier ends the pass, not only one on its attachments)
     flush_clears(t);
     // [stage 5.2 B1] a transfer / present / read-back / sampling layout reads (or partly rewrites) the content; GENERAL is the sentinel of
     // vkn_post.c (its later real use comes through this module again)
@@ -1132,6 +1354,7 @@ void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
 // ---- clears ----
 void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const int32_t rect[4]) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (g_dump.active && t && t->format == VK_FORMAT_R8G8B8A8_UNORM && t->w >= 1000) vkn_logf("trace: clear colour of %llx layer %u rect %d %d %d %d (%g %g %g %g), pass open %d", (unsigned long long)(t->handle & 0xffff), layer, rect ? rect[0] : 0, rect ? rect[1] : 0, rect ? rect[2] : -1, rect ? rect[3] : -1, rgba ? rgba[0] : 0, rgba ? rgba[1] : 0, rgba ? rgba[2] : 0, rgba ? rgba[3] : 0, open_here());
     if (!t || !rgba || is_depth(t) || layer >= t->layers) {
@@ -1149,7 +1372,7 @@ void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const
     const int full = x0 == 0 && y0 == 0 && x1 == (int32_t)t->w && y1 == (int32_t)t->h;
     int slot = open_here() ? color_slot(&g_open_set, t, 0, layer) : -1;
     if (slot >= 0 && g_area_on && (x0 < g_area.offset.x || y0 < g_area.offset.y || x1 > g_area.offset.x + (int32_t)g_area.extent.width ||
-                                   y1 > g_area.offset.y + (int32_t)g_area.extent.height)) { end_open(); slot = -1; g_s3.area_restart_clear++; g_hint_on = 0; }   // [stage 5.2 B1] outside the area (a hint is dropped: its promise is broken, the UI drops it too)
+                                   y1 > g_area.offset.y + (int32_t)g_area.extent.height)) { END_W(VKN_PE_AREA); slot = -1; g_s3.area_restart_clear++; g_hint_on = 0; }   // [stage 5.2 B1] outside the area (a hint is dropped: its promise is broken, the UI drops it too)
     if (slot < 0 && !full && color_slot(&g_cur, t, 0, layer) >= 0 && vkn_cb()) {   // a region of a current target: its pass serves
         if (!vkn_pass_ready(NULL)) slot = color_slot(&g_open_set, t, 0, layer);
     }
@@ -1174,11 +1397,12 @@ void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const
         g_st.clears_att++;
     }
     written(t);
-    if (!same_set(&g_open_set, &g_cur)) end_open();   // (the one-attachment pass)
+    if (!same_set(&g_open_set, &g_cur) && !g_join) END_W(VKN_PE_CLEAR);   // (the one-attachment pass; [mgpu P6.1] not a joined pass)
 }
 
 void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (!t || !is_depth(t)) {
         g_st2.clear_bad++;
@@ -1190,7 +1414,7 @@ void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
     if ((what & 2) && (t->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) a |= VK_IMAGE_ASPECT_STENCIL_BIT;
     if (!a) return;
     if (a & VK_IMAGE_ASPECT_DEPTH_BIT) WATCH(t, VKN_PASS_EV_CLEAR, depth);   // [stage 5 A3]
-    if (open_here() && g_open_set.d == t && g_area_on) { end_open(); g_s3.area_restart_clear++; }   // [stage 5.2 B1] (a whole-level clear: not inside an area pass)
+    if (open_here() && g_open_set.d == t && g_area_on) { END_W(VKN_PE_AREA); g_s3.area_restart_clear++; }   // [stage 5.2 B1] (a whole-level clear: not inside an area pass)
     if (open_here() && g_open_set.d == t) {
         const VkClearAttachment ca = {.aspectMask = a, .clearValue.depthStencil = {depth, stencil}};
         const VkClearRect cr = {g_area, 0, 1};
@@ -1216,6 +1440,7 @@ static int blit_ok(VkFormat f) {
 }
 void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     vkn_pass_init();
+    BEFORE();   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (g_dump.active && dst && src) { dump_note(src); dump_note(dst); }
     if (g_dump.active && dst && src) vkn_logf("trace: copy %llx (%ux%u) -> %llx (%ux%u)", (unsigned long long)(src->handle & 0xffff), src->w, src->h, (unsigned long long)(dst->handle & 0xffff), dst->w, dst->h);
@@ -1263,7 +1488,7 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
         nbl = 0;
         if (!ncp) return;
     }
-    end_open();
+    END_W(VKN_PE_COPY);
     // A creation upload still queued for one of them (the texture was made after this recording began) would be recorded at the
     // NEXT recording's start and overwrite what is copied here (phone run V4_a: save thumbnails all zero - the engine makes its
     // read-back texture with initial data, copies the screenshot into it, and the read-back's own recording then began with that
@@ -1279,6 +1504,31 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     if (nbl) { vkCmdBlitImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nbl, bl, VK_FILTER_NEAREST); g_st2.copy_blit++; }
     written(dst);
     g_st.copies++;
+}
+
+// ==== [mgpu P2] a region copy (vkn_pass.h vkn_pass_copy_rect) ====
+int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32_t sx, int32_t sy, uint32_t w, uint32_t h) {
+    vkn_pass_init();
+    BEFORE();
+    disarm();
+    if (!dst || !src || dst == src || dst->dead || src->dead || dst->format != src->format || dst->samples != src->samples || is_depth(dst) || is_depth(src)) return -1;
+    if (dx < 0 || dy < 0 || sx < 0 || sy < 0 || !w || !h || (uint64_t)dx + w > dst->w || (uint64_t)dy + h > dst->h || (uint64_t)sx + w > src->w || (uint64_t)sy + h > src->h) return -1;
+    VkCommandBuffer cb = vkn_cb();
+    if (!cb) { g_st2.no_cb++; return -1; }
+    WATCH(dst, VKN_PASS_EV_USE, 0.0f); WATCH(src, VKN_PASS_EV_USE, 0.0f);
+    END_W(VKN_PE_COPY);
+    if (vkn_upload_pending_bytes()) (void)vkn_upload_run(cb);
+    flush_clears(src); flush_clears(dst);
+    hist_read(src, RD_COPY); hist_read(dst, RD_COPY);   // (a part of dst stays: its old content is kept)
+    if (src->layout == VK_IMAGE_LAYOUT_UNDEFINED) zero_fill(cb, src);
+    if (dst->layout == VK_IMAGE_LAYOUT_UNDEFINED) zero_fill(cb, dst);   // (the texels outside the rect: zeros, as fresh memory on the Switch)
+    if (src->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) barrier(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    if (dst->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) barrier(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkImageCopy cp = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {sx, sy, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {dx, dy, 0}, {w, h, 1}};
+    vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+    written(dst);
+    g_st.copies++;
+    return 0;
 }
 
 void vkn_pass_stats_get(vkn_pass_stats *s) { if (s) *s = g_st; }

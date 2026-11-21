@@ -35,6 +35,8 @@
 #include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the backend calls of this part are records (vkn_rt_pass_*)
 #include "../gfx/vkn/vkn_policy.h"   // [stage 5.2 B1] the load / store policy switches
 #include "../gfx/vkn/vkn_drv.h"      // [stage 5.3 V2] the driver corrections' census line
+#include "../gfx/vkn/vkn_state.h"    // [mgpu P6] vkn_rp_mode_get
+#include <stdio.h>
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_pass.h"
@@ -259,6 +261,22 @@ static void vkn_pass_census(void) {
                  D(would_dc), D(would_bytes) / mb, D(store_would), D(store_would_bytes) / mb);
 #undef D
     p0 = p;
+    {   // [mgpu P0] the pass journal (vkn_pass.h): why passes ended, their model MB; [mgpu P6.1] the pass join
+        static vkn_pass_stats4 q0; vkn_pass_stats4 q; vkn_pass_stats4_get(&q);
+        const double fq = q.frames > q0.frames ? (double)(q.frames - q0.frames) : 1.0;
+        char by[1200]; int o = 0; by[0] = 0;
+        for (int i = 0; i < VKN_PE_N && o < (int)sizeof by - 90; i++)
+            if (q.ended[i] != q0.ended[i]) o += snprintf(by + o, sizeof by - (size_t)o, "%s%s %.2f (%.1f MB)", o ? ", " : "", vkn_pass_end_name(i), (double)(q.ended[i] - q0.ended[i]) / fq, (double)(q.ended_bytes[i] - q0.ended_bytes[i]) / fq / mb);
+        int dep = 0, te = 0; vkn_rp_mode_get(&dep, &te);
+#define DQ(x) ((double)(q.x - q0.x) / fq)
+        vkn_logf("pass ends (a presented frame over %.0f): passes %.2f, engine draws %.1f, UI draws %.1f; ended by: %s; join (DM_VK_NATIVE_PASSJOIN=%d): tried %.2f, joined %.2f, "
+                 "hit %.2f, miss %.2f, ended early %.2f, would %.2f; refused: no history %.2f, target %.2f, a colour would load %.2f, UI hint %.2f, multisample %.2f; "
+                 "store-key ordinal table full %.2f; passes built: narrow dependency %d, initial layout kept %d", fq, DQ(passes), DQ(draws), DQ(ui_draws), o ? by : "none", pol.join,
+                 DQ(join_tried), DQ(joined), DQ(join_hit), DQ(join_miss), DQ(join_early), DQ(join_would), DQ(join_refused[0]), DQ(join_refused[1]), DQ(join_refused[2]),
+                 DQ(join_refused[3]), DQ(join_refused[5]), DQ(ord_full), dep, te);
+#undef DQ
+        q0 = q;
+    }
 }
 
 void dm_vkn_pass_register(void);
@@ -282,10 +300,13 @@ void dm_vkn_pass_register(void) {
         rq.load = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD", -1, 0, 3, NULL);
         rq.store = (int8_t)vkn_policy_env("DM_VK_NATIVE_STORE", -1, 0, 3, NULL);
         rq.fresh = (int8_t)vkn_policy_env("DM_VK_NATIVE_FRESH", -1, 0, 3, NULL);
-        rq.tilebar = (int8_t)vkn_policy_env("DM_VK_NATIVE_TILEBAR", -1, 0, 1, NULL);
+        rq.tilebar = (int8_t)vkn_policy_env("DM_VK_NATIVE_TILEBAR", -1, 0, 2, NULL);   // ([mgpu P6.2] 2 = 1 + narrow pass dependencies, vkn_state.c)
+        if (rq.tilebar == 2) rq.tilebar = 1;
         rq.area = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD_AREA", 1, 0, 1, NULL);
         rq.ubo = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD_UBO", 1, 0, 1, NULL);
         rq.store_frames = (uint16_t)vkn_policy_env("DM_VK_NATIVE_STORE_FRAMES", 8, 1, 255, NULL);
+        rq.join = (int8_t)vkn_policy_env("DM_VK_NATIVE_PASSJOIN", -1, 0, 3, NULL);        // [mgpu P6.1] -1 = render-pass tilers 1, others 0
+        rq.store_key = (int8_t)vkn_policy_env("DM_VK_NATIVE_STORE_KEY", -1, 0, 1, NULL);  // [mgpu P4] -1 = 1
         vkn_pass_policy_request(&rq);
     }
     dm_vkn_census(vkn_pass_census);
