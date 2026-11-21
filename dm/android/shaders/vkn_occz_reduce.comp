@@ -1,0 +1,30 @@
+#version 450
+// [DOS2] VK-NATIVE technique Z (dm/gfx/vkn/vkn_occz.h): the max depth of every 16 x 16 pixel cell of the depth pre-pass target and
+// ([v2] the reprojection, 22.11) its min depth.
+// One workgroup = one cell; 8 x 8 threads read 2 x 2 texels each (pixels outside the target do not count). Output: cell[y * gw + x] = max,
+// cell[plane + y * gw + x] = min.
+// Build: glslc -fshader-stage=compute --target-env=vulkan1.0 -O vkn_occz_reduce.comp -mfmt=num -o vkn_occz_reduce.comp.spv.inc
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D dep;
+layout(binding = 1, std430) writeonly buffer Out { float cell[]; } o;
+layout(push_constant) uniform P { ivec2 size; int gw; int plane; } pc;
+shared float sx[64];
+shared float sn[64];
+void main() {
+    const ivec2 c = ivec2(gl_WorkGroupID.xy);
+    const ivec2 p0 = c * 16 + ivec2(gl_LocalInvocationID.xy) * 2;
+    float mx = 0.0, mn = 1.0;
+    for (int dy = 0; dy < 2; dy++)
+        for (int dx = 0; dx < 2; dx++) {
+            const ivec2 p = p0 + ivec2(dx, dy);
+            if (p.x < pc.size.x && p.y < pc.size.y) { const float d = texelFetch(dep, p, 0).r; mx = max(mx, d); mn = min(mn, d); }
+        }
+    const uint i = gl_LocalInvocationIndex;
+    sx[i] = mx; sn[i] = mn;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (i < s) { sx[i] = max(sx[i], sx[i + s]); sn[i] = min(sn[i], sn[i + s]); }
+        barrier();
+    }
+    if (i == 0u) { const int at = c.y * pc.gw + c.x; o.cell[at] = sx[0]; o.cell[pc.plane + at] = sn[0]; }
+}

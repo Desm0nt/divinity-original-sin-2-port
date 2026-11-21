@@ -157,6 +157,18 @@ static inline int vkn_cond_is_b(int m) { return m == VKN_COND_B || m == VKN_COND
 // 1 = the mode in effect may record GPU predicates (1, 3, 7, 9) or redraw captured draws at a pass end (7, 8, 9): the pass module's
 // cover proof of the first draw refuses then (a predicated or replayed draw can be the pass's first). Modes 2 / 4 / 5 / 6 record neither.
 int vkn_query_gpu_pred(void);
+// ==== [stage 5 technique Z] depth snapshot + engine boxes, decided on the engine thread (vkn_occz.h; docs/dos2/nr/VK-OCCLUSION-CHEAP.md) ====
+//   10 count   the pairs are tracked without any query; the engine thread decides every pair of every presented frame and counts what it
+//              would skip (and its own cost against the engine's slack); everything drawn. The self-check runs on every snapshot.
+//   11 verify  as 10 + a query on every pair every frame (as 2): the GPU's own verdict of the pairs Z called hidden is counted.
+//   12 on      the worker skips the pre-pass draws and the conditional draws of the pairs Z called hidden (one verdict lookup a pair
+//              draw), and the conditional draws of empty pairs (exact, as 1). A self-check violation turns the skips off for the session.
+//   13 poison  the worker skips the pairs Z trusts but sees VISIBLE: visible objects vanish (the decisions reach the draws).
+// Never the default: the count-only mode decides (net gain > 0 at the measured own cost, owner rule 21.11).
+enum { VKN_COND_Z = 10, VKN_COND_Z_VERIFY = 11, VKN_COND_Z_ON = 12, VKN_COND_Z_POISON = 13, VKN_COND_MODES_Z = 14 };
+static inline int vkn_cond_is_z(int m) { return m >= VKN_COND_Z && m <= VKN_COND_Z_POISON; }
+uint64_t vkn_query_occ_key(uint32_t rec);   // the pair key (the engine's report object) of record rec of this recording, 0 = none
+
 // For vkn_occb.c (recording thread): a query of this recording's slot for B's own bracket (0 = ok, -1 = no slot / pool full; its
 // result is copied with the pass's others and handed to vkn_occb_q_result), the predicate word of a query of this slot, a
 // conditional-rendering bracket on a word (on 1 begin / 0 end; -1 = no extension), "pair rec gets its own query" (a learning pair:

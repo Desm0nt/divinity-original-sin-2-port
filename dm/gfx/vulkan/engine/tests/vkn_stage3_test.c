@@ -4761,9 +4761,18 @@ static void test_g_hacks(void) {
 //            before the decision in RT=0 and stay); then cells 1 (as if the depth had opened): the self-check of a frame decided on the
 //            old cells finds the violation and the skips stop for the session (auto-fallback);
 //   mode 13: cells 1: the trusted visible objects' conditional draws are skipped (poison); cells 0: nothing is.
+//   [v2] mode 12 with a MOVING camera (a perspective camera whose eye slides 0.02 a frame; the cells 0.5 = a continuous surface at view
+//   depth ~2, the boxes at view depth 5..6): the decisions come from the reprojection (the snapshot is older than the camera), the
+//   conditional draws go, the opened depth (cells 1) is still caught by the self-check.
 #include "../../../vkn/vkn_occz.h"
 enum { OZ_F = 14 };
-typedef struct oz_res { int checks, fails, ran; int pre[OZ_F], cond[OZ_F], disp[OZ_F]; int off, val; } oz_res;
+typedef struct oz_res { int checks, fails, ran; int pre[OZ_F], cond[OZ_F], disp[OZ_F]; int off, val; uint64_t moved, moved_hidden; } oz_res;
+static int g_oz_move;   // [v2] the camera moves every frame
+static void oz_cam(int f, float vp[16]) {   // eye (0.02 f, 0, 0) looking +z; Vulkan depth, near 1, far 100; row vectors
+    const float a = 100.0f / 99.0f, b = -100.0f / 99.0f, ex = 0.02f * (float)f;
+    const float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, a, 1, -ex, 0, b, 0};
+    memcpy(vp, m, sizeof m);
+}
 static void oz_frame(int f, int *pre, int *cond, int *disp) {
     vkn_rt_rec_begin(1);
     VkCommandBuffer cb = vkn_cb();
@@ -4773,10 +4782,12 @@ static void oz_frame(int f, int *pre, int *cond, int *disp) {
     vkn_draw_in in = g_in; in.ds = H(97, 1);
     const uint64_t base[2] = {0x7000000, 0x8000000}, b = base[f & 1];
     vkn_occz_gather_bases(base[0], base[1]);
-    static const float vp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    static const float vp_id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float vp_mv[16]; oz_cam(f, vp_mv);
     for (int i = 0; i < 3; i++) {
         const float box[6] = {-0.9f + 0.6f * (float)i, -0.5f, 0.5f, -0.5f + 0.6f * (float)i, 0.5f, 0.6f};
-        vkn_occz_gather(b + 16u * (uint32_t)i, 100u + (uint64_t)f, 0x9100 + (uint64_t)i, box, vp);
+        const float boxm[6] = {-1.5f + 1.2f * (float)i, -0.8f, 5.0f, -0.9f + 1.2f * (float)i, 0.8f, 6.0f};
+        vkn_occz_gather(b + 16u * (uint32_t)i, 100u + (uint64_t)f, 0x9100 + (uint64_t)i, g_oz_move ? boxm : box, g_oz_move ? vp_mv : vp_id);
     }
     for (int i = 0; i < 3; i++) {
         vkn_rt_query_begin(b + 16u * (uint32_t)i);
@@ -4795,12 +4806,13 @@ static void oz_run(int mode, oz_res *r) {
     vkn_rt_install(0, 1);
     vkn_query_init(mode); vkn_occz_test_reset();
     for (int f = 0; f < OZ_F; f++) {
-        if (f == 1) vkn_occz_test_fill(mode == VKN_COND_Z_POISON ? 1.0f : 0.0f);   // (the slots exist after the first dispatch)
+        if (f == 1) vkn_occz_test_fill(mode == VKN_COND_Z_POISON ? 1.0f : g_oz_move ? 0.5f : 0.0f);   // (the slots exist after the first dispatch)
         if (f == 9) vkn_occz_test_fill(mode == VKN_COND_Z_POISON ? 0.0f : 1.0f);
         oz_frame(f, &r->pre[f], &r->cond[f], &r->disp[f]);
     }
     vkn_query_census_occ();
     r->off = vkn_occz_test_off(); r->val = mk_val_errors - v0;
+    { vkn_oz_stats zs; vkn_ozm_stats_get(&zs); r->moved = zs.moved_frames; r->moved_hidden = zs.moved_hidden; }
     vkn_query_init(VKN_COND_OFF);
 }
 static int oz_child(int mode, oz_res *out) {
@@ -4855,6 +4867,18 @@ static void test_occ_z(void) {
         CHECK_EQ(R.off, 1);                // the opened depth: the self-check of an old decision -> off for the session
         CHECK_EQ(R.cond[OZ_F - 1], 3);
     }
+    g_oz_move = 1;
+    if (!oz_child(VKN_COND_Z_ON, &R)) {
+        oz_print("mode 12, moving camera", &R);
+        CHECK_EQ(R.val, 0);
+        int first = -1;
+        for (int f = 0; f < 9; f++) { CHECK_EQ(R.pre[f], 3); CHECK_EQ(R.disp[f], 1); if (R.cond[f] == 0 && first < 0) first = f; }
+        CHECK(first >= 2 && first <= 7);
+        if (first >= 0) for (int f = first; f < 9; f++) CHECK_EQ(R.cond[f], 0);
+        CHECK(R.moved > 0); CHECK(R.moved_hidden > 0);   // (decided through the reprojection: every snapshot is older than the camera)
+        CHECK_EQ(R.off, 1); CHECK_EQ(R.cond[OZ_F - 1], 3);
+    }
+    g_oz_move = 0;
     if (!oz_child(VKN_COND_Z_POISON, &R)) {
         oz_print("mode 13", &R);
         CHECK_EQ(R.val, 0);

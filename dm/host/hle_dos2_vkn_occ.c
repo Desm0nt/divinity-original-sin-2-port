@@ -1,5 +1,7 @@
 // [DOS2] VK-NATIVE stage 5 technique A, piece A-1 (docs/dos2/nr/VK-OCCLUSION-ALT.md 4.3, section 8): the engine object's world bounds
 // and the pair -> object link, handed to dm/gfx/vkn/vkn_occ.c. Registered only for DM_VK_NATIVE=1 with DM_VK_NATIVE_COND 5 / 6.
+// [stage 5 technique Z] also for DM_VK_NATIVE_COND 10..13: the same facts handed to dm/gfx/vkn/vkn_occz.c (vkn_occz_gather projects the
+// box there, on the job thread: the engine thread and the recording worker do none of it).
 // main = main.raw of update v786432, build 4979b200; r = [main+0x2bbdc68], dev = [r+0xb70]. Facts (decompilations of 0xb0c570,
 // 0xb0df20, 0xb0ea00, 0x8e40b0, 0x8e3710, 0x8e6dd0, 0x8e60f0, 0x90cbb0, 0xb238e0, 0xb867d0, 0xa4b400, 0xa4be10, 0xa4c030, 0xa4b090
 // and the disassembly of 0xb0c570..0xb0c620):
@@ -35,12 +37,14 @@
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_occ.h"
+#include "../gfx/vkn/vkn_occz.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 
 enum { O_FLAGS = 0x1d8, O_ENTRY = 0x268, O_FRAME = 0x270, O_BOX = 0x14c, ST_CAMERA = 0x36b0, CAM_STALE = 0x90, CAM_VP = 0x1e0,
        R_DEV = 0xb70, DEV_HALF0 = 0x25ab0, DEV_HALF1 = 0x25ab8, DEV_FRAME = 0x51f0 };
 static vkn_fn g_o_gather;
+static int g_oc_cond;   // the DM_VK_NATIVE_COND it was registered for
 static uint64_t g_calls, g_took, g_noentry, g_badframe, g_stale_cam, g_nocam;
 
 VKN_HOOK oc_h_gather(VKN_A) {   // 0xb0c570(stage, obj, x2): void
@@ -53,14 +57,16 @@ VKN_HOOK oc_h_gather(VKN_A) {   // 0xb0c570(stage, obj, x2): void
     if (!entry) { __atomic_add_fetch(&g_noentry, 1, __ATOMIC_RELAXED); return rc; }   // beyond 2048 pairs this frame
     if (vkn_rd64(entry + 8) != fr) { __atomic_add_fetch(&g_badframe, 1, __ATOMIC_RELAXED); return rc; }
     const uint64_t r = vkn_renderer(), dev = r ? vkn_rd64(r + R_DEV) : 0;
-    if (dev) vkn_occ_gather_bases(vkn_rd64(dev + DEV_HALF0), vkn_rd64(dev + DEV_HALF1));
+    if (dev && g_oc_cond < 10) vkn_occ_gather_bases(vkn_rd64(dev + DEV_HALF0), vkn_rd64(dev + DEV_HALF1));
+    else if (dev) vkn_occz_gather_bases(vkn_rd64(dev + DEV_HALF0), vkn_rd64(dev + DEV_HALF1));   // [stage 5 technique Z]
     float box[6], vp[16]; memcpy(box, (const void *)(uintptr_t)(a1 + O_BOX), sizeof box);
     const uint64_t cam = vkn_rd64(a0 + ST_CAMERA);
     const float *v = NULL;
     if (!cam) __atomic_add_fetch(&g_nocam, 1, __ATOMIC_RELAXED);
     else if (vkn_rd8(cam + CAM_STALE)) __atomic_add_fetch(&g_stale_cam, 1, __ATOMIC_RELAXED);   // matrices not recomputed yet: unknown
     else { memcpy(vp, (const void *)(uintptr_t)(cam + CAM_VP), sizeof vp); v = vp; }
-    (void)vkn_occ_gather(entry, fr, a1, box, v);
+    if (g_oc_cond >= 10) vkn_occz_gather(entry, fr, a1, box, v);   // [stage 5 technique Z]
+    else (void)vkn_occ_gather(entry, fr, a1, box, v);
     return rc;
 }
 static void oc_census(void) {
@@ -73,7 +79,12 @@ void dm_vkn_occ_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;
     const char *qc = getenv("DM_VK_NATIVE_COND");
     const int cond = qc && *qc ? atoi(qc) : 0;
-    if (cond != 5 && cond != 6) return;
+    if (cond != 5 && cond != 6 && !(cond >= 10 && cond <= 13)) return;
+    g_oc_cond = cond;
+    // [stage 5 technique Z v2] the engine's per-view constant block: PerView, NVN uniform binding 12 (= the engine slot), row-major View
+    // @0, Projection @64, ViewProjection @128, ViewPos @192 (tools/dos2_nx_headers/Shaders/GlobalConstants_NX.shdh, from the GLSLC
+    // reflection of the .bshd files). vkn_occz.c checks the block itself (VP = V x P) before it leaves a projection row out.
+    if (cond >= 10) vkn_occz_cam_block(12, 0);
     // First 4 instructions (python <scratchpad>/vk/re/pro.py b0c570; none PC-relative, checked with capstone).
     static const uint32_t k_gather[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9026ffc, 0xa90367fa, 0xa9045ff8};
     dm_vkn_stack_flag((void *)oc_h_gather, DM_VKN_SF_ENC);
