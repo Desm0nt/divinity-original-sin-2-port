@@ -277,10 +277,13 @@ void vkn_prof_census(void) {
     const double cpf = (double)dcalls / fr, draw_ms = per * cpf / 1000.0;
     char pl[400]; int m = 0; pl[0] = 0;
     for (int i = 0; i < VKN_PROF_PARTS && m < (int)sizeof pl - 32; i++) m += snprintf(pl + m, sizeof pl - (size_t)m, "%s%s %.2f", i ? ", " : "", k_part[i], part[i]);
+    // [rt2 F2] the draw command per DRAWN draw: calls the chain skipped (shadow cache, far cascade, sky / fog / post fusions) end before
+    // it, so the per-call figure moves with the skipped share (W01: 72.5 % drawn, W02: 70.1 %) - compare runs by this one
+    const double drawn = (double)(d.draws - o.d.draws) / fr;
     vkn_logf("draw by part (%.1f s, 1 of %d draws: %llu sampled of %llu calls, %llu unended): per draw %.2f us = %s us; per frame %.2f ms (%.0f calls a frame, %llu frames); "
-             "timer %.0f ns a probe subtracted",
+             "timer %.0f ns a probe subtracted; drawn %.0f a frame (%.1f %% of the calls): draw-cmd %.2f us a drawn draw",
              secs, DRAW_PERIOD, (unsigned long long)dsamp, (unsigned long long)dcalls, (unsigned long long)(g.unended - o.unended), per, pl, draw_ms, cpf,
-             (unsigned long long)frames, g.timer_ns);
+             (unsigned long long)frames, g.timer_ns, drawn, cpf > 0 ? 100.0 * drawn / cpf : 0.0, drawn > 0 ? part[VKN_PROF_CMD] * cpf / drawn : 0.0);
     if (g.level == 3) {   // [rt P0] the split
         char fl[900]; int k = 0; fl[0] = 0; double drv = 0, fine_sum = 0;
         for (int i = 0; i < VKN_PROF_FINE && k < (int)sizeof fl - 48; i++) {

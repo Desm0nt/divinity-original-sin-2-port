@@ -36,7 +36,7 @@
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
-//       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
+//       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/vkn/vkn_sort.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
 //       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_occz.c dm/gfx/vkn/vkn_occz_model.c dm/gfx/vkn/vkn_hacks.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -1418,7 +1418,7 @@ static void rt_targets(vkn_tex *c, vkn_tex *d) { vkn_tex *cc[VKN_PASS_COLORS] = 
 // DM_VK_NATIVE_UIPASS 1 / 3 with a GDraw epoch on a target + DS (depth-tested draws, masked stencil clears, fences); RTX_POL the
 // load / store policy LOAD=1 STORE=1 FRESH=2; RTX_MAT MAT variant B with a gate word changing between draws of a depth-only pass;
 // RTX_SHC the shadow cache (an atlas pass of static casters + moving ones); RTX_LF LIGHTFUSE (Sky + Light every frame).
-enum { RTX_UI1 = 1, RTX_UI3 = 2, RTX_POL = 4, RTX_MAT = 8, RTX_SHC = 16, RTX_LF = 32 };
+enum { RTX_UI1 = 1, RTX_UI3 = 2, RTX_POL = 4, RTX_MAT = 8, RTX_SHC = 16, RTX_LF = 32, RTX_SORT = 64 };   // [rt2 R7] RTX_SORT: DM_VK_NATIVE_SORT=1, a depth-only pass of three pipelines
 static int g_rtx;
 static void rtx_setup(void);
 static void rtx_on(int ext);
@@ -1650,7 +1650,7 @@ static void test_rt(void) {
     pthread_mutex_lock(&mk_mu); mk_jr_on = 1; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);   // (the log restarts after each submission; records not kept)
     for (uint32_t f = 0; f < 60; f++) rt_frame(f);
     rtx_setup();   // [stage 5.2 audit] and every extension's objects / pipelines (the shadow cache only in its children: installed once a process)
-    { static const int wx[] = {RTX_UI1, RTX_UI3, RTX_POL, RTX_MAT, RTX_LF}; for (size_t i = 0; i < sizeof wx / sizeof wx[0]; i++) { rtx_on(wx[i]); g_rtx = wx[i]; for (uint32_t f = 0; f < 30; f++) rt_frame(f); rtx_off(); g_rtx = 0; } }
+    { static const int wx[] = {RTX_UI1, RTX_UI3, RTX_POL, RTX_MAT, RTX_LF, RTX_SORT}; for (size_t i = 0; i < sizeof wx / sizeof wx[0]; i++) { rtx_on(wx[i]); g_rtx = wx[i]; for (uint32_t f = 0; f < 30; f++) rt_frame(f); rtx_off(); g_rtx = 0; } }
     pthread_mutex_lock(&mk_mu); mk_jr_on = 0; mk_jr_n = 0; pthread_mutex_unlock(&mk_mu);
     rt_dyn_head = 0;
     rt_slots_init();
@@ -1732,7 +1732,7 @@ static void test_rt(void) {
     }
     {   // [stage 5.2 audit] the pieces merged after stage 5.5: a reference per extension, the modes against it
         static const struct { int ext; const char *what; } ex[] = {{RTX_UI1, "UIPASS=1"}, {RTX_UI3, "UIPASS=3"}, {RTX_POL, "LOAD=1 STORE=1 FRESH=2"},
-                                                                   {RTX_MAT, "MAT=2 gate"}, {RTX_SHC, "SHCACHE=1"}, {RTX_LF, "LIGHTFUSE"}};
+                                                                   {RTX_MAT, "MAT=2 gate"}, {RTX_SHC, "SHCACHE=1"}, {RTX_LF, "LIGHTFUSE"}, {RTX_SORT, "SORT=1"}};
         static rt_res xr;
         {   // [rt P3-GPU] DM_VK_NATIVE_SHC_MASK=1 with the test's mask: its own reference (more hits than without the mask), the threaded modes against it
             const rt_cfg m0 = {0, 1, 0, 160, 0, RTX_SHC, 0, 0, 0, 0, 0, 0, 0, 1}, mm[2] = {{1, 1, 1, 160, 0, RTX_SHC, 1, 1, VKN_COST_ALL2, 0, 1, 1, 1, 1}, {2, 1, 1, 160, 0, RTX_SHC, 1, 2, VKN_COST_ALL2, 1, 2, 2, 2, 1}};
@@ -2260,6 +2260,94 @@ static void a5_shc(a5_res *r) {
     r->model_draws = mk_depth_draws - md0;
     vkn_shc_census(); vkn_fx_census();
     CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+// ================================================================================================ [rt2 R7] DM_VK_NATIVE_SORT (vkn_sort.c)
+// A depth-only pass of a D16 target (the mock's depth content model: a draw writes one z over one rectangle, both from what it reads, by
+// content) with draws of three pipelines interleaved (LESS and LEQUAL, other vertex offsets / viewports / constants each), a GREATER draw
+// in the middle (order-dependent: it ends the run), a colour pass in between (a new pass instance: its first draw stays first), arrays and
+// indexed draws, a draw whose scissor is empty (its binds stay without a draw). Children: SORT 0 (the reference), 1 (sorted: the texels
+// equal every frame, fewer pipeline binds, the journal differs), 2 (verify: texels AND journal equal to 0, the would-be savings counted).
+#include "../../../vkn/vkn_sort.h"
+enum { SO_F = 12, SO_N = 40 };
+static void sort_scn(a5_res *r) {
+    mk_depth_on = 1;
+    { const char *e = getenv("DM_VK_NATIVE_SORT"); vkn_sort_mode_set(e && *e ? atoi(e) : 0); }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_tex *D = mktex(520, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 256, 256, 1, 1, 520, 0);
+    CHECK(D != NULL); if (!D) return;
+    static const uint64_t sh[3] = {H(30, 1), H(120, 1), H(121, 1)};
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);
+    const uint64_t md0 = mk_depth_draws;
+    vkn_sort_stats s0; vkn_sort_stats_get(&s0);
+    for (int f = 0; f < SO_F; f++) {
+        fbegin(1);
+        targets(NULL, NULL, D); vkn_pass_clear_depth(D, 1, 1.0f, 0);
+        for (int k = 0; k < SO_N; k++) {
+            if (k == 26) {   // a colour pass in between: the depth pass begins again after it (its first draw is not moved)
+                targets(g_a2, NULL, g_d3);
+                vkn_draw_in c = g_in; c.ds = H(122, 1); CHECK_EQ(vkn_draw_indexed(&c, 0, 3, 1), 0);
+                targets(NULL, NULL, D);
+            }
+            uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+            uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = (uint32_t)k; u[1] = (uint32_t)(f % 3); u[2] = 0x534f5254u;
+            vkn_draw_ubo(0, 2, off, 64);
+            vkn_draw_in in = g_in; in.shader = sh[k % 3]; in.blend = 0; in.tex[2] = NULL; in.smp[2] = NULL;
+            in.ds = k == 15 ? H(124, 1) : (k % 4 == 1 ? H(123, 1) : H(122, 1));                // k 15: GREATER
+            in.vb_off[0] = 16u * (uint32_t)(k % 7);
+            in.viewport[0] = (float)(8 * (k % 5)); in.viewport[1] = (float)(4 * (k % 3)); in.viewport[2] = 160.0f + (float)(k % 4) * 16.0f; in.viewport[3] = 120.0f;
+            in.scissor[0] = 0; in.scissor[1] = 0; in.scissor[2] = 256; in.scissor[3] = 256;
+            if (k == 33) { in.scissor[0] = 300; in.scissor[2] = 8; }                     // empty after the clamp: binds without a draw
+            if (k % 6 == 5) CHECK_EQ(vkn_draw_arrays(&in, (uint32_t)(k % 5), 3), 0);
+            else CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)(k % 10), 3, 1), 0);
+        }
+        fsubmit(0);
+        r->h[f] = a5_hash_rect(D, 0, 0, 256, 256, NULL);
+        pthread_mutex_lock(&mk_mu); r->th[f][0] = mk_jr_n ? mk_jr[mk_jr_n - 1].h : 0; pthread_mutex_unlock(&mk_mu);
+    }
+    frames_n(4); mk_gpu_finish_all(); frames_n(1);
+    vkn_sort_stats s1; vkn_sort_stats_get(&s1);
+    r->cp[0] = (uint32_t)(s1.moved - s0.moved); r->cp[1] = (uint32_t)(s1.pipe_rec - s0.pipe_rec); r->cp[2] = (uint32_t)(s1.pipe_sort - s0.pipe_sort);
+    r->cp[3] = (uint32_t)(s1.pipe_emit - s0.pipe_emit); r->cp[4] = (uint32_t)(s1.windows - s0.windows); r->cp[5] = (uint32_t)(s1.why_not[VKN_SORT_W_DEPTH] - s0.why_not[VKN_SORT_W_DEPTH]);
+    r->cp[6] = (uint32_t)(s1.why_not[VKN_SORT_W_FIRST] - s0.why_not[VKN_SORT_W_FIRST]); r->cp[7] = (uint32_t)(s1.packets - s0.packets);
+    { vkn_draw_stats d; vkn_draw_stats_get(&d); r->cp[8] = (uint32_t)d.pipe_binds; }   // (the draw path's own count: binds in the recorded order)
+    r->model_draws = mk_depth_draws - md0;
+    vkn_sort_census();
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 0; mk_jr_n = 0; pthread_mutex_unlock(&mk_mu);
+    CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 520), 1);   // (the parent's warm-up leaves nothing behind)
+    vkn_sort_mode_set(0); mk_depth_on = 0;
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_sort(void) {
+    static const char *const e0[][2] = {{"DM_VK_NATIVE_SORT", "0"}, {NULL, NULL}}, *const e1[][2] = {{"DM_VK_NATIVE_SORT", "1"}, {NULL, NULL}}, *const e2[][2] = {{"DM_VK_NATIVE_SORT", "2"}, {NULL, NULL}};
+    CHECK(mkshader(H(120, 1), "v300000000000001", "f300000000000001", NULL) != NULL); CHECK(mkshader(H(121, 1), "v300000000000002", "f300000000000001", NULL) != NULL);
+    CHECK(vkn_ds_put(H(122, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // LESS with writes
+    CHECK(vkn_ds_put(H(123, 1), 1, 1, 3, 0, 0, 0, 0, 0) != 0);   // LESS_OR_EQUAL with writes
+    CHECK(vkn_ds_put(H(124, 1), 1, 1, 4, 0, 0, 0, 0, 0) != 0);   // GREATER with writes
+    {   // the pipelines of the scenario exist before the children (a child has no shader worker): one frame of every draw kind here
+        static a5_res w; sort_scn(&w); frames_n(2);
+    }
+    static a5_res R0, R1, R2;
+    a5_child(e0, sort_scn, &R0); a5_child(e1, sort_scn, &R1); a5_child(e2, sort_scn, &R2);
+    if (!R0.ran || !R1.ran || !R2.ran) return;
+    CHECK(R0.model_draws >= (uint64_t)SO_F * (SO_N - 4));   // the model drew (else equal texels would prove nothing)
+    { int differ = 0; for (int f = 1; f < SO_F; f++) differ += R0.h[f] != R0.h[f - 1]; CHECK(differ >= 1); }   // (the constants change with f % 3)
+    int jd1 = 0;
+    for (int f = 0; f < SO_F; f++) {
+        CHECK_EQ(R1.h[f], R0.h[f]); CHECK_EQ(R2.h[f], R0.h[f]);   // the depth texels: every frame
+        CHECK_EQ(R2.th[f][0], R0.th[f][0]);                        // verify: the very same journal
+        jd1 += R1.th[f][0] != R0.th[f][0];
+    }
+    CHECK(jd1 > 0);                 // sorted: another command order
+    CHECK_EQ(R1.cp[8], R0.cp[8]); CHECK_EQ(R2.cp[8], R0.cp[8]);   // the draw path decided the same binds in every mode
+    CHECK(R1.cp[3] < R1.cp[1]); CHECK_EQ(R2.cp[3], R2.cp[1]);
+    CHECK(R1.cp[0] > 0); CHECK(R2.cp[0] > 0);   // moved (mode 2: would move)
+    CHECK(R2.cp[2] < R2.cp[1]);     // verify: the sorted order binds fewer pipelines than the recorded one
+    CHECK_EQ(R1.cp[3], R1.cp[2]);   // sorted: emitted = the sorted order's count
+    CHECK(R1.cp[5] > 0); CHECK(R1.cp[6] > 0);   // the GREATER draw and the passes' first draws stayed out
+    CHECK_EQ(R0.cp[4], 0);
+    printf("sort: %d frames, the draw path's pipeline binds %u in every mode; SORT=1: windows %u, draws in them %u, moved %u, binds recorded / sorted / emitted %u / %u / %u; "
+           "SORT=2: would move %u, recorded / sorted / emitted %u / %u / %u; depth texels equal in all %d frames, the verify journal equal\n", SO_F, R0.cp[8], R1.cp[4], R1.cp[7], R1.cp[0],
+           R1.cp[1], R1.cp[2], R1.cp[3], R2.cp[0], R2.cp[1], R2.cp[2], R2.cp[3], SO_F);
 }
 static void test_a5_shc(void) {
 #define A5_BASE {"DM_HACK_SHFAR", NULL}, {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}
@@ -3218,6 +3306,7 @@ int main(void) {
     test_query();
     test_occ_a();   // [stage 5] technique A (vkn_occ.c, DM_VK_NATIVE_COND 5 / 6; forked children: here, while the effect chain has room)
     test_a5_shc();      // [stage 5.1 A5] (forked children: the cache's switches are read once per process)
+    test_sort();        // [rt2 R7] DM_VK_NATIVE_SORT (forked children; the depth content model)
     test_a5_fx();
     test_a5_oracle();
     test_post();   // [stage 5.2 B3] it installs the post effect for the rest of the process
@@ -3613,6 +3702,7 @@ static void rtx_setup(void) {
         uint8_t *v = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(58, 1))->cpu; for (int i = 0; i < 4096; i++) v[i] = (uint8_t)(i * 11 + 3);
     }
     CHECK(vkn_ds_put(H(76, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // LESS with writes: the casters
+    CHECK(vkn_ds_put(H(125, 1), 1, 1, 3, 0, 0, 0, 0, 0) != 0);  // [rt2 R7] LESS_OR_EQUAL with writes
     CHECK(mkshader(H(82, 1), "v300000000000001", "f300000000000001", NULL) != NULL);   // the casters' shader (test_a5_shc's H(80, 1))
     // MAT: fragment block slot 0 (bank 3) word 1 == 1.0f gates the kill (test_b5_mat's gate); variant B's cut-down vertex module
     memset(&g_rx_gate, 0, sizeof g_rx_gate);
@@ -3652,9 +3742,11 @@ static void rtx_on(int ext) {
         vkn_shc_install();
     }
     if (ext & RTX_LF) vkn_lf_test_setup(1, 1);
+    if (ext & RTX_SORT) vkn_sort_mode_set(1);   // [rt2 R7]
 }
 static void rtx_off(void) {
     vkn_ui_pass_config(0, 0, 0, 0); vkn_pass_policy_set(NULL); vkn_mat_test_setup(0, 0, NULL); vkn_lf_test_setup(0, 0);
+    if (vkn_sort_mode()) vkn_sort_mode_set(0);   // [rt2 R7]
 }
 static uint64_t rtx_metric(int ext) {   // how often the piece acted (the same in every mode: its decisions are the recording's)
     if (ext & (RTX_UI1 | RTX_UI3)) { vkn_ui_pass_stats u; vkn_ui_pass_stats_get(&u); return u.detached + u.reattach * 1000; }
@@ -3662,6 +3754,7 @@ static uint64_t rtx_metric(int ext) {   // how often the piece acted (the same i
     if (ext & RTX_MAT) { vkn_mat_stats m; vkn_mat_stats_get(&m); return m.no_fs + m.vs_swaps * 1000; }
     if (ext & RTX_SHC) { vkn_shc_stats c; vkn_shc_stats_get(&c); if (getenv("VKN_RTX_LOG")) { vkn_shc_census(); vkn_draw_stats d; vkn_draw_stats2 d2; vkn_draw_stats_get(&d); vkn_draw_stats2_get(&d2); printf("rtx draws %llu idx %llu drop shader %llu state %llu pipe %llu pass %llu prim %llu vb %llu ib %llu vp %llu sc_empty %llu\n", (unsigned long long)d.draws, (unsigned long long)d.indexed, (unsigned long long)d.dropped_shader, (unsigned long long)d.dropped_state, (unsigned long long)d.dropped_pipe, (unsigned long long)d.dropped_pass, (unsigned long long)d.dropped_prim, (unsigned long long)d2.dropped_vb, (unsigned long long)d2.dropped_ib, (unsigned long long)d2.dropped_viewport, (unsigned long long)d2.scissor_empty); } return c.skipped + c.copies * 1000; }
     if (ext & RTX_LF) { vkn_lf_stats l; vkn_lf_stats_get(&l); return l.fused + l.sky_skipped * 1000; }
+    if (ext & RTX_SORT) { vkn_sort_stats s; vkn_sort_stats_get(&s); return s.moved + s.windows * 1000; }   // [rt2 R7]
     return 0;
 }
 static void rtx_frame(uint32_t f) {
@@ -3716,6 +3809,20 @@ static void rtx_frame(uint32_t f) {
         rt_targets(g_a2, g_d3);
         vkn_draw_in l = g_in; l.tex[0] = NULL; l.smp[0] = NULL; l.tex[1] = g_rx_atex; l.smp[1] = rt_fsmp; l.tex[2] = NULL; l.smp[2] = NULL; l.ib = H(52, 1);
         vkn_rt_query_cond(0); vkn_rt_draw_indexed(&l, 0, 3, 1);
+    }
+    if (g_rtx & RTX_SORT) {   // [rt2 R7] a depth-only pass: 12 draws of three pipelines interleaved, LESS / LEQUAL, own constants each
+        rt_targets(NULL, g_d3); vkn_rt_pass_clear_depth(g_d3, 1, 1.0f, 0);
+        static const uint64_t ssh[3] = {H(30, 1), H(31, 1), H(82, 1)};
+        for (uint32_t i = 0; i < 12; i++) {
+            uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+            uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = i; u[1] = f % 5; u[2] = 0x534f5254u;
+            vkn_rt_ubo(0, 2, off, 64);
+            vkn_draw_in in = g_in; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = NULL; in.smp[2] = NULL;
+            in.shader = ssh[i % 3]; in.blend = 0; in.ds = i % 4 == 1 ? H(125, 1) : H(76, 1); in.ib = H(52, 1); in.vb_off[0] = 16u * (i % 5);
+            in.viewport[0] = (float)(2 * (i % 3));
+            vkn_rt_query_cond(0);
+            if (i % 5 == 4) vkn_rt_draw_arrays(&in, i % 3, 3); else vkn_rt_draw_indexed(&in, 3u * (i % 4), 3, 1);
+        }
     }
     if (g_rtx & RTX_LF) {   // DeferredSky into [Sp, Df], then ClusteredLightingWithSSAO into [Df]: learned, then fused
         vkn_tex *c2[VKN_PASS_COLORS] = {g_rx_sp, g_rx_df}; const uint32_t z[VKN_PASS_COLORS] = {0};

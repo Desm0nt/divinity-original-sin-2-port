@@ -77,6 +77,7 @@ static vkn_query_occ_stats g_os, g_os_prev; static uint64_t g_os_frame;
 static struct { vkn_tex *c, *d; char name[44]; } g_kind[KINDS]; static uint32_t g_nkind; static int g_lastk = -1;
 
 int vkn_query_mode(void) { return g_mode; }
+int vkn_query_idle(void) { return !g_mode && !g_track; }   // [rt2 R7] no bracket, predicate or count can touch a draw (vkn_sort.h)
 int vkn_query_gpu(void) { return g_gpu; }
 void vkn_query_stats_get(vkn_query_stats *s) { if (s) *s = g_st; }
 void vkn_query_occ_stats_get(vkn_query_occ_stats *s) { if (s) *s = g_os; }

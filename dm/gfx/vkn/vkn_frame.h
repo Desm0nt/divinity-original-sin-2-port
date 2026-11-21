@@ -16,7 +16,8 @@ extern "C" {
 // one. Queued uploads (vkn_upload_run) are recorded first thing. Runs the begin listeners. 0 = ok; -1 = no device / Vulkan failure
 // (then vkn_cb() stays VK_NULL_HANDLE and every recorder must do nothing).
 int vkn_rec_begin(int presented);
-VkCommandBuffer vkn_cb(void);          // the open recording's command buffer, VK_NULL_HANDLE = none open
+VkCommandBuffer vkn_cb(void);
+VkCommandBuffer vkn_cb_peek(void);     // [rt2 R7] the same handle without emitting a waiting sort window (vkn_sort.h): checks, the draw path          // the open recording's command buffer, VK_NULL_HANDLE = none open
 uint32_t vkn_cb_serial(void);          // changes with every vkn_rec_begin: "what I bound is gone" for the recorders' caches
 int vkn_rec_presented(void);           // 1 = the open recording is a presented frame
 // Listeners (registered once, at install): begin runs right after the command buffer began (state caches reset); close runs right

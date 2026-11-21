@@ -60,6 +60,7 @@
 #include "../gfx/vkn/vkn_prof.h"   // [stage 5.1 G] the measurement probes (DM_VK_NATIVE_PROF "draw by part")
 #include "../gfx/vkn/vkn_query.h"
 #include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: every backend call of this part is a record
+#include "../gfx/vkn/vkn_sort.h"   // [rt2 R7]
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
 #include "hle_dos2_vkn_stack.h"
@@ -542,6 +543,11 @@ void dm_vkn_draw_register(void) {
             vkn_fx_gate_mode(g && *g ? atoi(g) : 1);
             vkn_rt_ehash_set(h && *h ? atoi(h) : 1);
             vkn_logf("draw: DM_VK_NATIVE_FXGATE=%s, DM_VK_NATIVE_SHC_EHASH=%d%s", g && *g ? g : "1 (default)", vkn_rt_ehash(), h && *h ? "" : " (default)");
+        }
+        {   // [rt2 R7] DM_VK_NATIVE_SORT (vkn_sort.h: 0 off, 1 depth-only LESS / LEQUAL runs grouped by pipeline, 2 verify; default 1)
+            const char *e = getenv("DM_VK_NATIVE_SORT");
+            vkn_sort_mode_set(e && *e ? atoi(e) : 1);
+            dm_vkn_census(vkn_sort_census);
         }
         // [stage 5.1 G] bit 0x80 VFOLD (default on): the vertex fold alone (it changes vertexOffset / firstVertex; needs bit VB);
         // DM_VK_NATIVE_COST=0x7f = everything but the fold (the A/B run). The generations it and the texture / state caches need:

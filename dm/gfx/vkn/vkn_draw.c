@@ -32,6 +32,10 @@
 #include "vkn_state.h"
 #include "vkn_tex.h"
 #include "../nr/nr_draw.h"   // [stage 5, draw cost] nr_fold_index / nr_fold_vertex / nr_vb_runs (the old path's folds, pure C)
+#include "vkn_sort.h"         // [rt2 R7] DM_VK_NATIVE_SORT: the graphics commands below go through vkn_sort while it is on (weak: absent = off)
+extern int vkn_sort_on __attribute__((weak)); extern int vkn_sort_cap __attribute__((weak));
+uint64_t vkn_pass_begins(void) __attribute__((weak));
+#define SORT (&vkn_sort_on && vkn_sort_on)
 
 #define VKN_DRAW_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark as a literal of its own
 
@@ -146,7 +150,7 @@ void vkn_query_draw_post(VkCommandBuffer cb) __attribute__((weak));
 #define Q_PRE(cb) do { if (!g_fx_nest && vkn_query_draw_pre) vkn_query_draw_pre(cb); } while (0)     // (a piece's nested draw: not the engine's)
 #define Q_POST(cb) do { if (!g_fx_nest && vkn_query_draw_post) vkn_query_draw_post(cb); } while (0)
 // [/stage 4: queries]
-static void forget_bound(void) { const uint32_t s = g_b.serial; memset(&g_b, 0, sizeof g_b); g_b.serial = s; g_ppd_ok = 0; }
+static void forget_bound(void) { if (SORT) vkn_sort_forget(); const uint32_t s = g_b.serial; memset(&g_b, 0, sizeof g_b); g_b.serial = s; g_ppd_ok = 0; }   // [rt2 R7]
 void vkn_draw_raw_begin(void) { forget_bound(); }
 
 // ---- static helpers of this module: zero uniform block, null stream, default samplers, placeholders ----
@@ -870,8 +874,8 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
 // ---- recording state ----
 static void on_begin(void) { forget_bound(); g_b.serial = vkn_cb_serial(); g_b.valid = 1; death_check(); }
 void vkn_draw_install(void) { vkn_rec_on_begin(on_begin); }
-static VkCommandBuffer cb_ready(void) {
-    VkCommandBuffer cb = vkn_cb();
+static VkCommandBuffer cb_ready(int graphics) {
+    VkCommandBuffer cb = graphics && SORT ? vkn_cb_peek() : vkn_cb();   // [rt2 R7] a graphics draw may join the sort window: no flush here
     if (!cb) return VK_NULL_HANDLE;
     if (!g_b.valid || g_b.serial != vkn_cb_serial()) on_begin();   // a recording this module was not told about (no listener)
     if (__atomic_exchange_n(&g_forget_req, 0, __ATOMIC_ACQ_REL)) forget_now();
@@ -906,7 +910,7 @@ static void bind_set(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
     if (!set) return;
     if (*bs == set && *bl == layout && *bn == ndyn && !memcmp(bd, dyn, ndyn * sizeof *dyn)) return;
     vkn_prof_mark_f(VKN_PROF_F_SET_FIND);   // [rt P0]
-    vkCmdBindDescriptorSets(cb, bp, layout, 0, 1, &set, ndyn, ndyn ? dyn : NULL);
+    if (g && SORT) vkn_sort_sets(cb, layout, set, ndyn, dyn); else vkCmdBindDescriptorSets(cb, bp, layout, 0, 1, &set, ndyn, ndyn ? dyn : NULL);   // [rt2 R7]
     vkn_prof_mark_f(VKN_PROF_F_SET_CMD); vkn_prof_driver_calls(1);
     *bs = set; *bl = layout; *bn = ndyn; memcpy(bd, dyn, ndyn * sizeof *dyn);
     g_st.set_binds++;
@@ -916,8 +920,9 @@ static void bind_set(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
 // prim: the primitive the pipeline draws (in->prim, or vkn_prim_rewrite(in->prim) for a rewritten draw).
 static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out, vkn_pass_info *pi, const vkn_vfmt **vf_out) {
     const uint8_t call_indexed = g_call.indexed; const uint32_t call_first = g_call.first;   // [stage 5.1 G] (a nested draw rewrites g_call)
-    VkCommandBuffer cb = cb_ready();
+    VkCommandBuffer cb = cb_ready(1);
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "draw without an open recording (dropped)"); return -1; }
+    if (SORT) vkn_sort_cap = 0;   // [rt2 R7] (decided after vkn_pass_ready below)
     g_tm_cur = NULL;   // [rt P3]
     const vkn_draw_pre *const pre = pre_of(in); const int puse = pre && !vkn_draw_rt_res_verify;   // [rt P2]
     const vkn_shader *s = shader_for(in, 0, pre); if (!s) return -1;
@@ -1048,6 +1053,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
     vkn_prof_mark(VKN_PROF_TEX);   // [stage 5 A0 probes]
     if (vkn_pass_ready(pi)) { g_st.dropped_pass++; DRAW_RED(R_PASS, "no render pass for the current targets (shader %#llx, draw dropped)", (unsigned long long)in->shader); return -1; }
+    if (SORT) (void)vkn_sort_eligible(did, pi->ncolor, pi->write_mask, pi->has_depth, s, g_fx_nest > 0, prim != in->prim, vkn_pass_begins ? vkn_pass_begins() : 0);   // [rt2 R7]
     vkn_prof_mark(VKN_PROF_PASS);   // [stage 5 A0 probes]
     // pipeline
     vkn_pipe_desc pd; memset(&pd, 0, sizeof pd);
@@ -1095,7 +1101,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         }
         if ((g_cost & VKN_COST_PIPE) && !fhit) { g_pfc[fslot].k = key; g_pfc[fslot].p = p; g_pfc[fslot].gen = fgen; }
         vkn_prof_mark_f(VKN_PROF_F_PIPE_FIND);   // [rt P0]
-        if (p != g_b.gpipe) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); g_st.pipe_binds++; vkn_prof_driver_calls(1); }
+        if (p != g_b.gpipe) { if (SORT) vkn_sort_pipe(cb, p); else vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); g_st.pipe_binds++; vkn_prof_driver_calls(1); }   // [rt2 R7]
         vkn_prof_mark_f(VKN_PROF_F_PIPE_CMD);
         g_b.gpipe = p; g_b.gkey = key; g_b.gpipe_ok = 1;
     }
@@ -1119,14 +1125,14 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         uint8_t rf[8], rc[8]; const unsigned nrun = nr_vb_runs(changed, vuse, rf, rc);
         vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK); vkn_prof_driver_calls(nrun);   // [rt P0]
         for (unsigned r = 0; r < nrun; r++) {
-            vkCmdBindVertexBuffers(cb, rf[r], rc[r], &vbuf[rf[r]], &voff[rf[r]]);
+            if (SORT) vkn_sort_vb(cb, rf[r], rc[r], &vbuf[rf[r]], &voff[rf[r]]); else vkCmdBindVertexBuffers(cb, rf[r], rc[r], &vbuf[rf[r]], &voff[rf[r]]);   // [rt2 R7]
             for (uint32_t b = rf[r]; b < (uint32_t)rf[r] + rc[r]; b++) { g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; }
             g_st.vb_binds++; g_cs.vb_calls++;
         }
     } else
     for (uint32_t b = 0; b <= VKN_VFMT_NULL_BINDING; b++) {
         if (!(vuse >> b & 1) || (g_b.vb[b] == vbuf[b] && g_b.vb_off[b] == voff[b])) continue;
-        vkCmdBindVertexBuffers(cb, b, 1, &vbuf[b], &voff[b]);
+        if (SORT) vkn_sort_vb(cb, b, 1, &vbuf[b], &voff[b]); else vkCmdBindVertexBuffers(cb, b, 1, &vbuf[b], &voff[b]);   // [rt2 R7]
         g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; g_st.vb_binds++; vkn_prof_driver_calls(1);
     }
     vkn_prof_mark_f(VKN_PROF_F_BUF_CMD);   // [rt P0]
@@ -1137,7 +1143,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     // (First phone run V3_a: without the flip every back-face-culled draw vanished - a black frame with 0 dropped draws.) Depth 0..1.
     // Scissor is in framebuffer rows already (upper-left origin in both APIs), clamped to the pass.
     const VkViewport vp = {in->viewport[0], in->viewport[1] + in->viewport[3], in->viewport[2], -in->viewport[3], 0.0f, 1.0f};
-    if (!g_b.vp_ok || memcmp(&vp, &g_b.vp, sizeof vp)) { vkCmdSetViewport(cb, 0, 1, &vp); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.vp = vp; g_b.vp_ok = 1; g_st.viewport_sets++; }
+    if (!g_b.vp_ok || memcmp(&vp, &g_b.vp, sizeof vp)) { if (SORT) vkn_sort_vp(cb, &vp); else vkCmdSetViewport(cb, 0, 1, &vp); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.vp = vp; g_b.vp_ok = 1; g_st.viewport_sets++; }
     int64_t x0 = in->scissor[0], y0 = in->scissor[1], x1 = x0 + in->scissor[2], y1 = y0 + in->scissor[3];
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -1145,7 +1151,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     if (y1 > (int64_t)pi->height) y1 = pi->height;
     if (x1 <= x0 || y1 <= y0) { g_st2.scissor_empty++; return 1; }
     const VkRect2D sc = {{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
-    if (!g_b.sc_ok || memcmp(&sc, &g_b.sc, sizeof sc)) { vkCmdSetScissor(cb, 0, 1, &sc); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.sc = sc; g_b.sc_ok = 1; }
+    if (!g_b.sc_ok || memcmp(&sc, &g_b.sc, sizeof sc)) { if (SORT) vkn_sort_sc(cb, &sc); else vkCmdSetScissor(cb, 0, 1, &sc); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.sc = sc; g_b.sc_ok = 1; }
     // Debug (DM_VK_NATIVE_DUMP): in the dumped frame, the whole state of every draw into a big RGBA8 target (the post chain, the
     // window): what the pipeline was built from, where it draws, what it samples. At most 160 lines a dump.
     if (vkn_pass_dump_active()) {
@@ -1252,7 +1258,7 @@ static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, 
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
     g_call.indexed = (uint8_t)ix; g_call.first = first_vertex; g_call.count = n; g_call.instances = instances ? instances : 1;
     const int r = prepare(in, q, &cb, &pi, &vf);
-    if (r) return r < 0 ? 1 : 0;
+    if (r) { if (SORT && vkn_sort_cap) vkn_sort_nodraw(); return r < 0 ? 1 : 0; }   // [rt2 R7] (binds of a captured draw that ended)
     VkBuffer buf; VkDeviceSize off;
     void *dst = rw_alloc(m * (out32 ? 4u : 2u), &buf, &off);
     if (!dst) {
@@ -1270,14 +1276,15 @@ static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, 
         if (g_b.oib != buf || g_b.oib_off != roff || g_b.oib_type != it) { g_b.oib = buf; g_b.oib_off = roff; g_b.oib_type = it; g_cs.ib_calls_old++; }
     }
     if (g_b.ib != buf || g_b.ib_off != off || g_b.ib_type != it) {   // the engine's next indexed draw sees the difference and rebinds
-        vkCmdBindIndexBuffer(cb, buf, off, it);
+        if (SORT) vkn_sort_ib(cb, buf, off, it); else vkCmdBindIndexBuffer(cb, buf, off, it);   // [rt2 R7]
         g_b.ib = buf; g_b.ib_off = off; g_b.ib_type = it; g_st.ib_binds++;
         if (g_cost & VKN_COST_IB) g_cs.ib_calls++;
     }
     vkn_prof_mark(VKN_PROF_BUF);   // [stage 5 A0 probes]
     Q_PRE(cb);   // [stage 4: queries]
     // vertexOffset: the arrays' first vertex (+ the vertex fold of prepare); indexed: 0 (+ the fold)
-    vkCmdDrawIndexed(cb, (uint32_t)m, instances ? instances : 1, fi, (ix ? 0 : (int32_t)first_vertex) + (int32_t)g_vfold, 0);
+    if (SORT) vkn_sort_draw_idx(cb, (uint32_t)m, instances ? instances : 1, fi, (ix ? 0 : (int32_t)first_vertex) + (int32_t)g_vfold, 0);   // [rt2 R7]
+    else vkCmdDrawIndexed(cb, (uint32_t)m, instances ? instances : 1, fi, (ix ? 0 : (int32_t)first_vertex) + (int32_t)g_vfold, 0);
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
     g_st.draws++;
@@ -1326,7 +1333,7 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
     g_call.indexed = 1; g_call.first = first_index; g_call.count = count; g_call.instances = instances ? instances : 1;
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
-    if (r) return r < 0 ? 1 : 0;
+    if (r) { if (SORT && vkn_sort_cap) vkn_sort_nodraw(); return r < 0 ? 1 : 0; }   // [rt2 R7] (binds of a captured draw that ended)
     const VkIndexType it = vkn_buf_index_type(ib.index_size);
     VkDeviceSize ioff = ib.blk.off; uint32_t fi = first_index;
     if (g_cost & VKN_COST_IB) {
@@ -1338,7 +1345,7 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
         if (g_b.oib != ib.blk.buf || g_b.oib_off != ib.blk.off || g_b.oib_type != it) { g_b.oib = ib.blk.buf; g_b.oib_off = ib.blk.off; g_b.oib_type = it; g_cs.ib_calls_old++; }
     }
     if (g_b.ib != ib.blk.buf || g_b.ib_off != ioff || g_b.ib_type != it) {
-        vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK); vkCmdBindIndexBuffer(cb, ib.blk.buf, ioff, it); vkn_prof_driver_calls(1);   // [rt P0]
+        vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK); if (SORT) vkn_sort_ib(cb, ib.blk.buf, ioff, it); else vkCmdBindIndexBuffer(cb, ib.blk.buf, ioff, it); vkn_prof_driver_calls(1);   // [rt P0] [rt2 R7]
         g_b.ib = ib.blk.buf; g_b.ib_off = ioff; g_b.ib_type = it; g_st.ib_binds++;
         if (g_cost & VKN_COST_IB) g_cs.ib_calls++;
     }
@@ -1346,7 +1353,8 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
     vkn_prof_mark_f(VKN_PROF_F_BUF_CMD);   // [rt P0]
     Q_PRE(cb);   // [stage 4: queries]
     vkn_prof_mark_f(VKN_PROF_F_Q_PRE);
-    vkCmdDrawIndexed(cb, count, instances ? instances : 1, fi, (int32_t)g_vfold, 0);   // vertexOffset: the vertex fold of prepare (0 without)
+    if (SORT) vkn_sort_draw_idx(cb, count, instances ? instances : 1, fi, (int32_t)g_vfold, 0);   // [rt2 R7]
+    else vkCmdDrawIndexed(cb, count, instances ? instances : 1, fi, (int32_t)g_vfold, 0);   // vertexOffset: the vertex fold of prepare (0 without)
     vkn_prof_mark_f(VKN_PROF_F_DRAW_CMD); vkn_prof_driver_calls(1);
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
@@ -1362,10 +1370,11 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
     g_call.indexed = 0; g_call.first = first; g_call.count = count; g_call.instances = 1;
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
-    if (r) return r < 0 ? 1 : 0;
+    if (r) { if (SORT && vkn_sort_cap) vkn_sort_nodraw(); return r < 0 ? 1 : 0; }   // [rt2 R7] (binds of a captured draw that ended)
     Q_PRE(cb);   // [stage 4: queries]
     vkn_prof_mark_f(VKN_PROF_F_Q_PRE);   // [rt P0]
-    vkCmdDraw(cb, count, 1, first + g_vfold, 0);   // firstVertex + the vertex fold of prepare (0 without; nr_fold_vertex keeps it in int32)
+    if (SORT) vkn_sort_draw(cb, count, 1, first + g_vfold, 0);   // [rt2 R7]
+    else vkCmdDraw(cb, count, 1, first + g_vfold, 0);   // firstVertex + the vertex fold of prepare (0 without; nr_fold_vertex keeps it in int32)
     vkn_prof_mark_f(VKN_PROF_F_DRAW_CMD); vkn_prof_driver_calls(1);
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
@@ -1376,7 +1385,7 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
 int vkn_draw_dispatch(const vkn_draw_in *in, const vkn_img_bind *img, uint32_t nimg, uint32_t x, uint32_t y, uint32_t z) {
     g_fx = NULL;   // [stage 5] dispatches do not pass the effect chain
     if (!in) return 1;
-    VkCommandBuffer cb = cb_ready();
+    VkCommandBuffer cb = cb_ready(0);
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "dispatch without an open recording (dropped)"); return 1; }
     g_tm_cur = NULL;   // [rt P3]
     const vkn_shader *s = shader_for(in, 1, NULL); if (!s) return 1;

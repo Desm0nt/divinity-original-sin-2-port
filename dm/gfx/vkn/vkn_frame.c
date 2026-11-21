@@ -201,7 +201,11 @@ int vkn_rec_begin(int presented) {
     return 0;
 }
 
-VkCommandBuffer vkn_cb(void) { return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
+// [rt2 R7] every recorder asks vkn_cb() for the handle: a waiting window of DM_VK_NATIVE_SORT goes in first (vkn_sort.h); the draw path
+// and vkn_pass's checks ask vkn_cb_peek (no flush). vkn_sort_flush itself records through vkn_cb_peek.
+extern uint32_t vkn_sort_n __attribute__((weak)); void vkn_sort_flush(void) __attribute__((weak));
+VkCommandBuffer vkn_cb(void) { if (&vkn_sort_n && vkn_sort_n && vkn_sort_flush) vkn_sort_flush(); return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
+VkCommandBuffer vkn_cb_peek(void) { return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
 uint32_t vkn_cb_serial(void) { return g.serial; }
 int vkn_rec_presented(void) { return g.cur >= 0 && g.cur_presented; }
 
@@ -277,6 +281,7 @@ int vkn_rec_submit(int wait) {
     }
     const int k = g.cur, presented = g.cur_presented;
     fr_slot *s = &g.s[k];
+    if (&vkn_sort_n && vkn_sort_n && vkn_sort_flush) vkn_sort_flush();   // [rt2 R7]
     for (int i = 0; i < g.nclose; i++) g.on_close[i]();
     // A close listener may have moved images to their resting layouts: the presented image must stay TRANSFER_SRC (the presenter's contract).
     if (g.pres.have && g.pres.tex && g.pres.tex->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) vkn_pass_layout(g.pres.tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
