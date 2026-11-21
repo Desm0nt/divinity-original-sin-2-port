@@ -66,8 +66,13 @@ typedef struct vkn_shc_stats {
     uint64_t verify_runs, verify_eq, verify_ne, verify_skip;
     uint64_t far_draws, far_skipped;
     uint64_t img_bytes, model_bytes;                                           // layer (+ verify) images, model tables + kept draws (alive)
+    uint64_t far_not_sun;                                                      // [stage 5.4 G2] atlas draws the far rule left alone: not square >= 1024
 } vkn_shc_stats;
 void vkn_shc_stats_get(vkn_shc_stats *s);   // the current window (since the last census)
+// [stage 5.4 G2] DM_VK_NATIVE_SHFAR in effect (0 / 1 / 2), -1 = not installed yet. The far-cascade rule is the old path's
+// (xbg_nr_hacks.inc far_draw): only the sun-shadow atlas - square, >= 1024 (ShadowQuality 0 / 1 / 2 = 2048 / 1536 / 1024) - has its
+// cascades as tiles; another depth-only image the cache adopted (>= 256, any shape) is left alone (counted far_not_sun).
+int vkn_shc_far(void);
 
 #ifdef __cplusplus
 }

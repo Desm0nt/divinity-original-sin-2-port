@@ -1,9 +1,11 @@
 // [DOS2] VK-NATIVE stage 5.1 piece A1: engine shaders by name + Dref in the backend's shader library (vkn_shlib_named.h: the design,
 // switches and contract). Ported from xbg_nr_sh.inc (namespace nrsh: on / dref_device / open_pack / get / apply / marked) and
 // xbg_nr_sh_pass.inc (nrpass::choose); the table, the head / interface / descriptor checks and the pass check are dm/gfx/nr/nr_sh.c as
-// it is. What differs from the old path: the switches' names (DM_VK_NATIVE_SH / _PCF), no DM_HACK_FSR / DM_HACK_LIGHTS swaps (not this
-// piece), a pack without the 'd' bundles falls back to 'm' (the old path kept the translated one), and the translated module for a pass
-// outside the verified one is a library shader of its own key ("<key>#nrt") instead of a second module on the translator's object.
+// it is. What differs from the old path: the switches' names (DM_VK_NATIVE_SH / _PCF), a pack without the 'd' bundles falls back to
+// 'm' (the old path kept the translated one), and the translated module for a pass outside the verified one is a library shader of
+// its own key ("<key>#nrt") instead of a second module on the translator's object.
+// [stage 5.4 G1] the DM_HACK_FSR / DM_HACK_LIGHTS module swaps of xbg_nr_sh.inc (hack_apply / hacks) are ported below (section
+// "stage 5.4 G1"; the end block of vkn_shlib_named.h says how they compose with LIGHTFUSE and the fused post).
 #ifdef DM_GAME_DOS2
 #include "vkn_shlib_named.h"
 #include "vkn_shlib.h"
@@ -29,6 +31,9 @@
 extern "C" void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed, uint32_t *alive) __attribute__((weak));
 // [stage 5.2 B3] DM_VK_NATIVE_POST=0 keeps the post entries translated (vkn_post.h; weak: the library test links without vkn_post.c)
 extern "C" int vkn_post_mobile(void) __attribute__((weak));
+// [stage 5.4 G1] DM_VK_NATIVE_LCAP (vkn_hacks.c; weak: the library test links without it - then 1, the default)
+extern "C" int vkn_hacks_lcap_mode(void) __attribute__((weak));
+extern "C" void vkn_hacks_census(void) __attribute__((weak));
 
 #define NS_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 namespace {
@@ -75,6 +80,31 @@ bool dref_device(VkPhysicalDevice phys, bool ffl2) {
       ok ? "hardware compare used" : "NOT usable - DM_VK_NATIVE_SH_PCF=2 (mobile, textureGather) used instead");
     return ok;
 }
+// ---- [stage 5.4 G1] DM_HACK_FSR / DM_HACK_LIGHTS: the values (xbg_nr_sh.inc on), read with the library's other switches ----
+int g_fsr = 0, g_lights = 0, g_lcap = 1;         // written once under g_init, read after it
+std::atomic<int> g_hk_st[2];                     // per hack (0 FSR, 1 light cap): 0 not seen, 1 swapped / checked, -1 refused
+std::atomic<uint64_t> c_hk_swapped[2], c_hk_refused[2], c_hk_checked{0};
+void hacks_init(XbgGpuFamily fam, int m) {
+    char hf = 0; g_fsr = nrh_value(NRH_FSR, &hf);
+    if (g_fsr && hf == 't' && !xbg_hack_fsr_tier_default(fam)) {
+        g_fsr = 0; L("DM_HACK_TIER: FSR 1 EASU not used on the %s family (DM_HACK_FSR=1 forces it)", xbg_gpu_family_name(fam));
+    }
+    if (g_fsr) L("DM_HACK_FSR=%d%s: PPFXAA bundle -> %s (FXAA as before at a 1:1 stretch, FSR 1 EASU when the 3D is below 100 %%: "
+                 "tools/dos2_post/PPFXAA_fsr.frag; RCAS = the gear's sharpening)%s", g_fsr, hf == 't' ? " (tier)" : "",
+                 g_fsr == 1 ? "the FXAA + EASU half-precision module" : g_fsr == 3 ? "the FXAA + EASU fp32 module" : "check only",
+                 m == 1 ? "" : m == 2 ? " - DM_VK_NATIVE_SH=2 (verify): not used" : " - DM_VK_NATIVE_SH=0: NOT used");
+    char lf = 0; g_lights = nrh_value(NRH_LIGHTS, &lf);
+    if (vkn_hacks_lcap_mode) g_lcap = vkn_hacks_lcap_mode();
+    else { const char *e = getenv("DM_VK_NATIVE_LCAP"); g_lcap = e && *e ? atoi(e) : 2; if (g_lcap < 0 || g_lcap > 2) g_lcap = 2; }   // (vkn_hacks.c's rule)
+    if (g_lights && !g_lcap) {
+        red("DM_HACK_LIGHTS=%d%s set, DM_VK_NATIVE_LCAP=0: the light cap is NOT applied (all clustered lights)", g_lights, lf == 't' ? " (tier)" : "");
+        g_lights = 0;
+    } else if (g_lights)
+        L("DM_HACK_LIGHTS=%d%s: ClusteredLightingWithSSAO -> the first %d clustered lights that light a pixel (points, then spots, list order); "
+          "DM_VK_NATIVE_LCAP=%d%s", g_lights, lf == 't' ? " (tier)" : "", g_lights <= 2 ? 2 : 4, g_lcap,
+          m == 1 ? " (LIGHTFUSE yields while the cap is in use: vkn_hacks.h)" : m == 2 ? " - DM_VK_NATIVE_SH=2 (verify): not used" : " - DM_VK_NATIVE_SH=0: NOT used");
+    if ((g_fsr || g_lights) && m != 1) red("DM_HACK_FSR=%d / DM_HACK_LIGHTS=%d need DM_VK_NATIVE_SH=1 (it is %d): not applied", g_fsr, g_lights, m);
+}
 void init(VkPhysicalDevice phys, bool ffl2, int policy) {
     const XbgGpuFamily fam = XbgGpuFamily(policy);
     const char *e = getenv("DM_VK_NATIVE_SH"); int m = e && *e ? atoi(e) : xbg_nr_sh_default(fam);
@@ -86,6 +116,7 @@ void init(VkPhysicalDevice phys, bool ffl2, int policy) {
         if (hq && !(p && *p)) { q = hq; L("DM_HACK_SHPCF=%d%s: shadow resolve %s (as DM_VK_NATIVE_SH_PCF=%d)", hq, hf == 't' ? " (tier)" : "", pcf_name(hq), hq); }
     }
     if (m && q == NR_SH_PCF_DREF && phys && !dref_device(phys, ffl2)) { q = NR_SH_PCF_MOBILE; c_d2m++; }
+    hacks_init(fam, m);   // [stage 5.4 G1] DM_HACK_FSR / DM_HACK_LIGHTS
     g_pcf = q; g_mode = m;
     if (m) L("DM_VK_NATIVE_SH=%d (%s; replaces DM_NR_SH): engine shaders by name, %d in the table (shadows: DM_VK_NATIVE_SH_PCF=%d %s, policy family %s); "
              "source <shaders>/native-nr.xgspack (setup stage 8)", m, m == 1 ? "replace" : "verify: translated used", nr_sh_count, q, pcf_name(q), xbg_gpu_family_name(fam));
@@ -125,6 +156,76 @@ void io(const std::vector<uint8_t> &b, uint32_t &in, uint32_t &out) {
     if (nr_sh_io(w.data(), w.size(), &in, &out)) in = out = ~0u;
 }
 int entry(const std::string &key) { const int i = key.size() == 16 ? nr_sh_find_key(key.c_str()) : -1; return i >= 0 && i < ENTRIES ? i : -1; }
+// ---- [stage 5.4 G1] xbg_nr_sh.inc hack_apply / hacks: an entry's bundle -> a module built into the backend (no setup run) behind the
+// translated bundle's own head - the same checks as a pack bundle (head byte for byte by construction, interface, descriptors);
+// swapped = the entry is marked as replaced (the pass check of vkn_shlib_named_pass applies at pipeline creation, its "#nrt" twin is
+// the translated module). A refusal keeps the usual path (the pack's named bundle, or the translated one).
+//   DM_HACK_FSR    PPFXAA -> tools/dos2_post/PPFXAA_fsr.frag: its FXAA half = PPFXAA_mobile.frag (bit for bit), FSR 1 EASU when the 3D
+//                  is below 100 % (stretch ratio = coordinate derivative x texture width). 1 = half precision (FsrEasuH form),
+//                  3 = fp32 (FsrEasuF), 2 = checked only.
+//   DM_HACK_LIGHTS ClusteredLightingWithSSAO -> ClusteredLightingWithSSAO_mobile.frag + LCAP 2 / 4 (tools/dos2_light_cap.py): the
+//                  first N clustered lights that light the pixel, then the loops stop; = the 'x' bundle on a prefix of the list, bit for bit.
+const uint32_t k_fsr_spv[] = {
+#include "../../android/shaders/ppfxaa_fsr.frag.spv.inc"
+};
+const uint32_t k_fsrh_spv[] = {
+#include "../../android/shaders/ppfxaa_fsrh.frag.spv.inc"
+};
+const uint32_t k_lcap2_spv[] = {
+#include "../../android/shaders/light_lcap2.frag.spv.inc"
+};
+const uint32_t k_lcap4_spv[] = {
+#include "../../android/shaders/light_lcap4.frag.spv.inc"
+};
+// DM_VK_NATIVE_LCAP=2 (vkn_hacks.h): the cap inside the fused Sky -> Light module ('f') and with the fog ('g'); tools/dos2_light_cap_fused.py
+// (proof: = Sky -> q11 -> the capped Light -> blend, bit for bit). Compiled with the DeferredSky c1 bits k_lcf_c1 (their first line).
+const uint32_t k_lcap2f_spv[] = {
+#include "../../android/shaders/light_lcap2_f.frag.spv.inc"
+};
+const uint32_t k_lcap2g_spv[] = {
+#include "../../android/shaders/light_lcap2_g.frag.spv.inc"
+};
+const uint32_t k_lcap4f_spv[] = {
+#include "../../android/shaders/light_lcap4_f.frag.spv.inc"
+};
+const uint32_t k_lcap4g_spv[] = {
+#include "../../android/shaders/light_lcap4_g.frag.spv.inc"
+};
+const uint32_t k_lcf_c1[2] = {0x40638bacu, 0x3db851ecu};   // SKY_C1 of light_lcap*_{f,g}.frag.spv.inc (the player's bundle: 3.5554, 0.09)
+std::atomic<int> g_lcf{0};                                  // 0 not checked, 1 the player's Sky c1 = k_lcf_c1, -1 differs / unreadable
+std::atomic<uint64_t> c_lcf{0};                             // capped fused bundles handed out
+bool hack_apply(int i, int slot, const std::string &key, std::vector<uint8_t> &bytes, const uint32_t *spv, size_t spv_bytes, const char *what, bool use) {
+    const size_t th = nr_sh_head(bytes.data(), bytes.size()); if (!th) return false;
+    std::vector<uint8_t> nb(bytes.begin(), bytes.begin() + th); nb.resize(th + spv_bytes); memcpy(nb.data() + th, spv, spv_bytes);
+    const uint32_t len = uint32_t(spv_bytes); memcpy(nb.data() + 24, &len, 4);   // the SPIR-V length word (h[6])
+    uint32_t ti, to, ni, no; io(bytes, ti, to); io(nb, ni, no);
+    const bool binds = nr_sh_bindings_ok(nb.data(), nb.size()) != 0, head = nr_sh_head_equal(bytes.data(), bytes.size(), nb.data(), nb.size()) != 0;
+    if (!head || !binds || ti != ni || to != no) {
+        c_hk_refused[slot]++;
+        if (g_hk_st[slot].exchange(-1) != -1)
+            red("%s (%s): %s refused - head %s, inputs %#x/%#x, outputs %#x/%#x, descriptors %s: the usual path", nr_sh_table[i].name, key.c_str(), what,
+                head ? "equal" : "DIFFERS", ti, ni, to, no, binds ? "in the table" : "NOT in the binding table");
+        return false;
+    }
+    int was = 0;
+    if (g_hk_st[slot].compare_exchange_strong(was, 1))
+        L("%s: %s (%s) %s (%zu -> %zu words), inputs %#x outputs %#x", what, nr_sh_table[i].name, key.c_str(), use ? "->" : "check only:", (bytes.size() - th) / 4, spv_bytes / 4, ti, to);
+    if (!use) { c_hk_checked++; return false; }
+    was = 0;
+    if (g_st[i].compare_exchange_strong(was, 1)) g_dref[i].store(0);   // marked: the pass check at pipeline creation (no Dref binding)
+    bytes = std::move(nb); c_hk_swapped[slot]++; c_swapped++; return true;
+}
+bool hacks(int i, const std::string &key, std::vector<uint8_t> &bytes) {
+    if (g_mode != 1 || !nr_sh_enabled(i)) return false;
+    const char *n = nr_sh_table[i].name;
+    if (g_fsr && !strcmp(n, "PPFXAA"))
+        return g_fsr == 3 ? hack_apply(i, 0, key, bytes, k_fsr_spv, sizeof k_fsr_spv, "DM_HACK_FSR=3 FXAA + EASU fp32 module", true)
+                          : hack_apply(i, 0, key, bytes, k_fsrh_spv, sizeof k_fsrh_spv, "DM_HACK_FSR FXAA + EASU half module", g_fsr == 1);
+    if (g_lights && !strcmp(n, "ClusteredLightingWithSSAO"))
+        return g_lights <= 2 ? hack_apply(i, 1, key, bytes, k_lcap2_spv, sizeof k_lcap2_spv, "DM_HACK_LIGHTS=2 light cap module", true)
+                             : hack_apply(i, 1, key, bytes, k_lcap4_spv, sizeof k_lcap4_spv, "DM_HACK_LIGHTS=4 light cap module", true);
+    return false;
+}
 // xbg_nr_sh.inc apply: with the translated bundle in hand, mode 1 may swap in the named one (true), mode 2 checks it.
 bool apply(int i, const std::string &key, std::vector<uint8_t> &bytes) {
     const nr_sh_entry &e = nr_sh_table[i]; char v = nr_sh_variant(i, g_pcf); int was = 0;
@@ -178,10 +279,21 @@ bool apply(int i, const std::string &key, std::vector<uint8_t> &bytes) {
 std::atomic<vkn_shlib_reader> g_read{nullptr};   // the library's reader (saved at its first bundle read)
 std::atomic<uint64_t> c_lf_ok{0}, c_lf_refused{0};
 // The fused bundle "<v>.ClusteredLightingWithSSAO" for the translated bundle `tr` of the Light key: 1 = `nb` holds it and it passes.
+int lcf_ok();   // [stage 5.4 G1] below
 int lf_bundle(int i, char v, const std::vector<uint8_t> &tr, std::vector<uint8_t> &nb, const char **why) {
     char pk[32]; *why = NULL;
+    if (g_lights && g_lcap == 2) {   // [stage 5.4 G1] DM_VK_NATIVE_LCAP=2: the capped fused module (built in) behind the translated head
+        if (!lcf_ok()) { *why = "DM_VK_NATIVE_LCAP=2: the player's DeferredSky c1 differs from the built-in capped modules' (the cap module draws, no fusion)"; return 0; }
+        const uint32_t *spv = g_lights <= 2 ? (v == 'g' ? k_lcap2g_spv : k_lcap2f_spv) : (v == 'g' ? k_lcap4g_spv : k_lcap4f_spv);
+        const size_t sb = g_lights <= 2 ? (v == 'g' ? sizeof k_lcap2g_spv : sizeof k_lcap2f_spv) : (v == 'g' ? sizeof k_lcap4g_spv : sizeof k_lcap4f_spv);
+        const size_t th = nr_sh_head(tr.data(), tr.size()); if (!th) { *why = "no translated head"; return 0; }
+        nb.assign(tr.begin(), tr.begin() + th); nb.resize(th + sb); memcpy(nb.data() + th, spv, sb);
+        const uint32_t len = uint32_t(sb); memcpy(nb.data() + 24, &len, 4);   // the SPIR-V length word (h[6])
+        c_lcf++;
+    } else {
     if (!nr_sh_pack_key(i, v, pk, sizeof pk)) { *why = "no pack key"; return 0; }
     if (!get(pk, nb)) { *why = g_fd < 0 ? "no native-nr.xgspack" : "no such bundle in native-nr.xgspack (run setup again)"; return 0; }
+    }
     uint32_t ti, to, ni, no; io(tr, ti, to); io(nb, ni, no);
     if (!nr_sh_head_equal(tr.data(), tr.size(), nb.data(), nb.size())) *why = "head differs from the translated bundle";
     else if (!nr_lf_bindings_ok(nb.data(), nb.size())) *why = "descriptors outside the head table + the extras, or an extra missing";
@@ -190,6 +302,26 @@ int lf_bundle(int i, char v, const std::vector<uint8_t> &tr, std::vector<uint8_t
     return *why ? 0 : 1;
 }
 int lf_light_entry(const std::string &key16) { const int i = entry(key16); return i >= 0 && i == nr_sh_find_name("ClusteredLightingWithSSAO") ? i : -1; }
+// [stage 5.4 G1] DM_VK_NATIVE_LCAP=2: the player's DeferredSky bundle (read past this module) carries the c1 bits the capped fused
+// modules were compiled with (tools/dos2_lightfuse.py sky_c1: XGS1 head h[8], c1 at 32 + h[3] * 32 + h[4] * 4 when h[5] >= 8). Once.
+int lcf_ok() {
+    const int st = g_lcf.load(); if (st) return st > 0;
+    const vkn_shlib_reader read = g_read.load(); const int sky = nr_sh_find_name("DeferredSky");
+    std::vector<uint8_t> b; bool fp = false; uint32_t c[2] = {0, 0}; bool ok = false, have = false;
+    if (read && sky >= 0) { t_bypass++; have = read(std::string(nr_sh_table[sky].key, 16), b, fp); t_bypass--; }
+    if (have && b.size() >= 32) {
+        uint32_t h[8]; memcpy(h, b.data(), sizeof h); const size_t o = 32 + size_t(h[3]) * 32 + size_t(h[4]) * 4;
+        if (h[5] >= 8 && o + 8 <= b.size()) { memcpy(c, b.data() + o, 8); ok = c[0] == k_lcf_c1[0] && c[1] == k_lcf_c1[1]; }
+    }
+    int was = 0;
+    if (g_lcf.compare_exchange_strong(was, ok ? 1 : -1)) {
+        if (ok) L("DM_VK_NATIVE_LCAP=2: DeferredSky c1 %08x %08x = the built-in capped fused modules': LIGHTFUSE draws the first %d lights (light_lcap%d_f / _g)", c[0], c[1],
+                  g_lights <= 2 ? 2 : 4, g_lights <= 2 ? 2 : 4);
+        else red("DM_VK_NATIVE_LCAP=2: DeferredSky bundle %s (c1 %08x %08x, built-in %08x %08x): no capped fusion - the cap module draws, LIGHTFUSE refuses its Light draws",
+                 have ? "of another c1" : "not readable", c[0], c[1], k_lcf_c1[0], k_lcf_c1[1]);
+    }
+    return g_lcf.load() > 0;
+}
 // read_bundle's door for "<key>#nlf" / "<key>#nlg": the checked fused bundle in place of a file (from_pack: it comes from a pack)
 int lf_read(const std::string &key, std::vector<uint8_t> &out, bool &from_pack, vkn_shlib_reader read) {
     const std::string k16 = key.substr(0, 16); const char v = key[19] == 'g' ? 'g' : 'f';
@@ -213,7 +345,7 @@ int vkn_shlib_named_read(const std::string &key, std::vector<uint8_t> &out, bool
     if (key.size() == 20 && !key.compare(16, 4, "#nrt")) { t_bypass++; const bool have = read(key.substr(0, 16), out, from_pack); t_bypass--; return have ? 1 : 0; }
     const int i = entry(key); if (i < 0) return -1;
     t_bypass++; const bool have = read(key, out, from_pack); t_bypass--;
-    if (have && !out.empty()) apply(i, key, out);
+    if (have && !out.empty() && !((g_fsr || g_lights) && hacks(i, key, out))) apply(i, key, out);   // [stage 5.4 G1] the hacks first (xbg_nr_sh.inc apply)
     return have ? 1 : 0;
 }
 
@@ -269,7 +401,15 @@ extern "C" void vkn_shlib_named_stats_get(vkn_shlib_named_stats *s) {
     { std::lock_guard<std::mutex> l(g_pass_mu); s->passes = uint32_t(g_seen.size()); }
     s->reds = c_reds;
 }
+extern "C" void vkn_shlib_named_hacks_get(vkn_shlib_named_hacks *h) {   // [stage 5.4 G1]
+    if (!h) return;
+    memset(h, 0, sizeof *h);
+    h->read = g_mode >= 0; h->sh_mode = g_mode; h->fsr = g_fsr; h->lights = g_lights; h->lcap = g_lcap; h->checked = c_hk_checked;
+    h->lcf = g_lcf.load(); h->lcf_bundles = c_lcf;
+    for (int k = 0; k < 2; k++) { h->state[k] = g_hk_st[k].load(); h->swapped[k] = c_hk_swapped[k]; h->refused[k] = c_hk_refused[k]; }
+}
 extern "C" void vkn_shlib_named_census(void) {
+    if (vkn_hacks_census) vkn_hacks_census();   // [stage 5.4 G3] the DM_HACK_* lines ride on this census (dm_vkn_census has 16 slots)
     vkn_shlib_named_stats s; vkn_shlib_named_stats_get(&s);
     if (s.mode < 0) return;   // the library read no bundle yet (or is not the loader: modes 0 / 2, DM_VK_NATIVE_SHLIB=0)
     uint64_t tm = 0, tg = 0, tf = 0; uint32_t ta = 0; if (vkn_sampler_cmp_stats) vkn_sampler_cmp_stats(&tm, &tg, &tf, &ta);

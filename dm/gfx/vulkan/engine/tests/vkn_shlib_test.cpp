@@ -23,6 +23,10 @@
 // replaced entry (vkn_shlib_named_pass: verified pass kept; another colour count / colour-0 format / sample count -> the translated twin in
 // mode 1 unless Dref, counted only in mode 2; unknown pass kept; the counters). Without "+nr" both sides run with
 // the replacement off (DM_NR_SH=0 / DM_VK_NATIVE_SH=0: the stage-4 column).
+// [stage 5.4 G1] "+nr<q>-fsr<N>" (N 1 / 2 / 3) and / or "-lc<N>" (N 2 / 4): DM_HACK_FSR / DM_HACK_LIGHTS on both sides (the translator's
+// xbg_nr_sh.inc hacks, the library's vkn_shlib_named.cpp port): the PPFXAA / ClusteredLightingWithSSAO modules are the built-in FSR /
+// light-cap modules behind the player's head, and every compare above covers them (words = the translator's); the summary adds the
+// library's hack states (each asked hack swapped - FSR=2: checked, not swapped) and PASS needs them.
 // Build + run (WSL; tests/vkn_shlib_test.sh does exactly this, and copies the pack into the Linux file system first):
 //   g++ -std=c++17 -O1 -w -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -DVK_USE_PLATFORM_ANDROID_KHR
 //       -DDM_ASTC_LAZY=1 -I<shim: android/hardware_buffer.h, zlib.h> -I<NDK vulkan headers> -Idm/gfx/vulkan -Idm/gfx/nvn/include -Idm/host -Idm
@@ -256,13 +260,23 @@ int main(int argc, char **argv) {
     // [stage 5 A1] "<model>+nr<q>" / "+nrv" / "+nr3nl": the named-bundle replacement on both sides (head comment)
     std::string mname = argc > 1 ? argv[1] : "", nr; const size_t plus = mname.find('+');
     if (plus != std::string::npos) { nr = mname.substr(plus + 1); mname.resize(plus); }
+    std::string hk_fsr, hk_lc;   // [stage 5.4 G1] "-fsr<N>" / "-lc<N>" after "+nr..."
+    for (size_t d; (d = nr.rfind('-')) != std::string::npos;) {
+        const std::string o = nr.substr(d + 1); nr.resize(d);
+        if (o == "fsr1" || o == "fsr2" || o == "fsr3") hk_fsr = o.substr(3);
+        else if (o == "lc2" || o == "lc4") hk_lc = o.substr(2);
+        else { fprintf(stderr, "unknown option -%s\n", o.c_str()); return 2; }
+    }
     const bool nr_on = !nr.empty();
     if (nr_on && !(nr == "nr0" || nr == "nr1" || nr == "nr2" || nr == "nr3" || nr == "nrv" || nr == "nr3nl")) { fprintf(stderr, "unknown option +%s\n", nr.c_str()); return 2; }
-    if (argc < 3 || !pick_model(mname.c_str())) { fprintf(stderr, "usage: %s adreno|mali|powervr|adreno-simmali|adreno-native|adreno-files[+nr0..3|+nrv|+nr3nl] <shader dir> [limit]\n", argv[0]); return 2; }
+    if ((!hk_fsr.empty() || !hk_lc.empty()) && !nr_on) { fprintf(stderr, "-fsr / -lc need +nr<q>\n"); return 2; }
+    if (argc < 3 || !pick_model(mname.c_str())) { fprintf(stderr, "usage: %s adreno|mali|powervr|adreno-simmali|adreno-native|adreno-files[+nr0..3|+nrv|+nr3nl[-fsr1..3][-lc2|-lc4]] <shader dir> [limit]\n", argv[0]); return 2; }
     if (nr_on) {
         const char *q = nr == "nrv" ? "3" : nr == "nr3nl" ? "3" : nr.c_str() + 2, *m = nr == "nrv" ? "2" : "1";
         g_m.env.push_back({"DM_NR_SH", m}); g_m.env.push_back({"DM_NR_SH_PCF", q}); g_m.env.push_back({"DM_VK_NATIVE_SH", m}); g_m.env.push_back({"DM_VK_NATIVE_SH_PCF", q});
         g_d16_nolinear = nr == "nr3nl";
+        if (!hk_fsr.empty()) g_m.env.push_back({"DM_HACK_FSR", hk_fsr.c_str()});
+        if (!hk_lc.empty()) g_m.env.push_back({"DM_HACK_LIGHTS", hk_lc.c_str()});
     }
     signal(SIGSEGV, on_crash); signal(SIGBUS, on_crash); signal(SIGILL, on_crash);
     const std::string dir = argv[2]; const size_t limit = argc > 3 ? size_t(atol(argv[3])) : 0;
@@ -409,10 +423,36 @@ int main(int argc, char **argv) {
            (unsigned long long)st.native_used, (unsigned long long)g_mod_creates, (unsigned long long)g_digest, s,
            nr_on ? nr.c_str() : "off", (unsigned long long)g_nr_keys, (unsigned long long)g_nr_replaced, (unsigned long long)g_nr_same, (unsigned long long)g_nr_dref,
            (unsigned long long)g_nr_alt, (unsigned long long)g_nr_alt_bad, (unsigned long long)g_nr_pass, (unsigned long long)g_nr_pass_bad);
+    bool hk_ok = true;   // [stage 5.4 G1] the asked hacks reached the library (the words compares above held them against the translator)
+    if (!hk_fsr.empty() || !hk_lc.empty()) {
+        vkn_shlib_named_hacks h; vkn_shlib_named_hacks_get(&h);
+        const bool want_f = !hk_fsr.empty(), want_l = !hk_lc.empty(), check_f = hk_fsr == "2";
+        const bool fok = !want_f || (h.fsr == atoi(hk_fsr.c_str()) && h.state[0] == 1 && (check_f ? h.swapped[0] == 0 && h.checked > 0 : h.swapped[0] > 0));
+        const bool lok = !want_l || (h.lights == atoi(hk_lc.c_str()) && h.state[1] == 1 && h.swapped[1] > 0);
+        hk_ok = fok && lok && !h.refused[0] && !h.refused[1];
+        if (want_l && h.lcap == 2) {   // DM_VK_NATIVE_LCAP=2 (default): the capped fused modules behind the Light head, for 'f' and 'g'
+            const int li = nr_sh_find_name("ClusteredLightingWithSSAO"); int made = 0;
+            for (char v : {'f', 'g'}) {
+                xbg_vkn_stage *sf = new xbg_vkn_stage; uint64_t decl[4], dr = 0;
+                const int rc = li >= 0 ? vkn_shlib_named_fused(nr_sh_table[li].key, v, sf, decl, &dr) : -2;
+                made += rc == 0 && sf->module && sf->stage == 4 && (decl[3] >> (254 - 192) & 1);   // binding 254 (Sky's c6 extra) declared
+                if (sf->module) forget(sf->module);
+                delete sf;
+            }
+            vkn_shlib_named_hacks_get(&h);
+            const bool fused_ok = made == 2 && h.lcf == 1 && h.lcf_bundles >= 2;
+            printf("hacks: DM_VK_NATIVE_LCAP=2: capped fused modules made %d of 2 (Sky c1 check %d, bundles %llu): %s\n", made, h.lcf, (unsigned long long)h.lcf_bundles, fused_ok ? "ok" : "BAD");
+            hk_ok = hk_ok && fused_ok;
+        }
+        printf("hacks: DM_HACK_FSR=%s (library %d: state %d, swapped %llu, checked %llu, refused %llu), DM_HACK_LIGHTS=%s (library %d: state %d, swapped %llu, refused %llu): %s\n",
+               want_f ? hk_fsr.c_str() : "0", h.fsr, h.state[0], (unsigned long long)h.swapped[0], (unsigned long long)h.checked, (unsigned long long)h.refused[0],
+               want_l ? hk_lc.c_str() : "0", h.lights, h.state[1], (unsigned long long)h.swapped[1], (unsigned long long)h.refused[1], hk_ok ? "ok" : "BAD");
+    }
     if (nr_on) vkn_shlib_named_census();
     if (g_log) fclose(g_log);
     if (!ovr.empty()) remove(ovr.c_str());
-    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && !g_nr_pass_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit);
+    const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && !g_nr_pass_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit) &&
+                      (hk_ok || limit);   // [stage 5.4 G1]
     printf("%s\n", pass ? "PASS" : "FAIL");
     fflush(stdout); _exit(pass ? 0 : 1);   // no static destructors: the translator's state is not shut down
 }

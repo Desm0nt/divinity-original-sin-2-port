@@ -21,6 +21,7 @@
 #include "vkn_fx.h"      // [stage 5 A1] vkn_sampler_cmp_by_id (the comparison twin of a sampler)
 #include "vkn_drv.h"     // [stage 5.3 V2] the SIM model's sampler anisotropy
 #include "vkn_policy.h"  // [stage 5.3 V2] DM_GFX_SIM_GPU tokens
+#include "../nr/nr_hacks.h"   // [stage 5.4 G2] DM_HACK_TEXBIAS / DM_HACK_ANISO values and tiers
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,6 +177,10 @@ static uint64_t g_up_serial;                      // [stage 5 A3] the upload num
 // comparison twins. A reader loads it before its lookups (which take g_mu): a write it did not see makes its record stale.
 static uint32_t g_bind_gen;
 static inline void bind_gen_bump(void) { __atomic_add_fetch(&g_bind_gen, 1, __ATOMIC_RELEASE); }
+// [stage 5.4 G2] DM_HACK_TEXBIAS / DM_HACK_ANISO (section "samplers", vkn_tex.h end block): the values in effect (on = a twin can differ
+// from its game sampler), and the texture of this thread's last vkn_tex_view_by_id (consumed by its next vkn_sampler_by_id).
+static struct { int read, mode, aniso, on; float bias; } g_hk;
+static __thread vkn_tex *t_hk_last;
 uint32_t vkn_tex_bind_gen(void) { return __atomic_load_n(&g_bind_gen, __ATOMIC_ACQUIRE); }
 // Shared render-target storage (vkn_tex_create_shared): an engine texture attached to another one's image is a name record - its
 // handle, cookie and pool ids resolve to that vkn_tex (cookie hash of names g_ncookie; the handle table and the pool-id cells hold the
@@ -815,6 +820,7 @@ VkImageView vkn_tex_view_by_id(uint32_t pool_id, vkn_tex **tex) {
     }
     pthread_mutex_unlock(&g_mu);
     if (tex) *tex = t;
+    if (__builtin_expect(g_hk.on, 0)) t_hk_last = t;   // [stage 5.4 G2] the texture of the sampler lookup that follows (DM_VK_NATIVE_TEXHACK=1)
     return v;
 }
 int vkn_tex_destroy_cookie(uint64_t cookie) {
@@ -986,8 +992,73 @@ static VkSamplerCreateInfo samp_info(const vkn_dev *d, uint32_t filter, uint32_t
         .minLod = 0.0f, .maxLod = VK_LOD_CLAMP_NONE, .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, .unnormalizedCoordinates = VK_FALSE};
     return si;
 }
+// ---- [stage 5.4 G2] DM_HACK_TEXBIAS / DM_HACK_ANISO: the hack twin of a sampler (vkn_tex.h end block). Under g_mu unless noted. ----
+// g_samp_hk[id]: the game sampler of the id with mipLodBias + bias and anisotropy min(game, cap); VK_NULL_HANDLE = none (the values
+// change nothing for this sampler, mode 2 rule not met, or hacks off). Twins count as samplers in g_st (made / alive): the draw path's
+// death check (vkn_draw.c death_count: samplers_made - samplers) then sees a retired twin like a destroyed sampler.
+static VkSampler g_samp_hk[SAMP_IDS];
+static uint64_t g_hk_made, g_hk_failed, g_hk_retired, g_hk_picked, g_hk_kept, g_hk_cmp, g_hk_sets; static uint32_t g_hk_alive, g_hk_logged;
+static void hk_read_once(void) {   // the values, once (any thread; first sampler creation or vkn_tex_hack_get)
+    if (__atomic_load_n(&g_hk.read, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_mu);
+    if (!g_hk.read) {
+        const char *e = getenv("DM_VK_NATIVE_TEXHACK"); int m = e && *e ? atoi(e) : 1;
+        if (m < 0 || m > 2) m = 1;
+        g_hk.mode = m; g_hk.bias = (float)nrh_value(NRH_TEXBIAS, NULL) / 100.0f; g_hk.aniso = nrh_value(NRH_ANISO, NULL);
+        g_hk.on = m && (g_hk.bias != 0.0f || g_hk.aniso);
+        __atomic_store_n(&g_hk.read, 1, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+// Mode 2 (per sampler) rule: a sampler that repeats or mirrors in U or V (materials tile; targets, the post chain and the UI atlas clamp).
+static int hk_rule(const samp_args *a) { return a->wrap_u == 0 || a->wrap_u == 2 || a->wrap_v == 0 || a->wrap_v == 2; }
+// The old path's rule (xbg_nr_hacks.inc par): an image the CPU uploaded, never drawn into by the GPU, with mip levels - here: a sampled
+// texture (not a target class), no GPU write through vkn_pass (attachment, clear, copy destination), >= 2 levels.
+static int hk_material(const vkn_tex *t) { return t && t->cls == VKN_TC_SAMPLED && !t->pass_ever && !t->dead && t->mips >= 2; }
+// si with the hack's values; 1 = it differs from the game's (a twin is worth making).
+static int hk_apply(const vkn_dev *d, VkSamplerCreateInfo *si, float bias, int aniso) {
+    int ch = 0;
+    if (bias != 0.0f) {
+        const float lim = d->props.limits.maxSamplerLodBias;   // >= 2 by the spec (a device that reports less: not clamped)
+        si->mipLodBias += lim >= 2.0f && bias > lim ? lim : bias; ch = 1;
+    }
+    if (aniso > 0 && si->maxAnisotropy > (float)aniso) {   // min(game's (device-capped), N); 1 = off
+        si->maxAnisotropy = (float)aniso; si->anisotropyEnable = aniso > 1 && d->feat.samplerAnisotropy ? VK_TRUE : VK_FALSE; ch = 1;
+    }
+    return ch;
+}
+static void hk_drop_locked(uint32_t id) {   // the twin of id leaves with its game sampler (or with a live change of the values)
+    if (id >= SAMP_IDS || !g_samp_hk[id]) return;
+    vkn_retire(sampler_free, (void *)(uintptr_t)g_samp_hk[id]); g_samp_hk[id] = VK_NULL_HANDLE;
+    g_st.samplers--; g_hk_alive--; g_hk_retired++; bind_gen_bump();
+}
+// Makes the twin of id from its arguments (outside g_mu; the caller installs it). VK_NULL_HANDLE = none needed / failed (counted).
+static VkSampler hk_make(const vkn_dev *d, uint32_t id, const samp_args *a, int mode, float bias, int aniso) {
+    if (!mode || (bias == 0.0f && !aniso) || (mode == 2 && !hk_rule(a))) return VK_NULL_HANDLE;
+    VkSamplerCreateInfo si = samp_info(d, a->filter, a->wrap_u, a->wrap_v, a->wrap_w, a->max_aniso, a->compare, 0);
+    const float an0 = si.maxAnisotropy;
+    if (!hk_apply(d, &si, bias, aniso)) return VK_NULL_HANDLE;
+    VkSampler t = VK_NULL_HANDLE;
+    const VkResult r = vkCreateSampler(d->dev, &si, NULL, &t);
+    pthread_mutex_lock(&g_mu);
+    if (r != VK_SUCCESS) g_hk_failed++;
+    const uint32_t n = r == VK_SUCCESS && g_hk_logged < 40 ? ++g_hk_logged : 0;
+    pthread_mutex_unlock(&g_mu);
+    if (r != VK_SUCCESS) { vkn_logf(RED "tex: hack twin of sampler-pool id %u: vkCreateSampler %d (the game's sampler used)", id, (int)r); return VK_NULL_HANDLE; }
+    if (n) vkn_logf("tex: hack twin of sampler-pool id %u (game filter %u wrap %u/%u/%u anisotropy %u compare %u): mip LOD bias %+.2f, anisotropy %.0f -> %.0f, used %s",
+                    id, a->filter, a->wrap_u, a->wrap_v, a->wrap_w, a->max_aniso, a->compare, (double)si.mipLodBias, (double)an0, (double)si.maxAnisotropy,
+                    mode == 1 ? "for uploaded mipmapped textures (DM_VK_NATIVE_TEXHACK=1)" : "for every texture (DM_VK_NATIVE_TEXHACK=2: it repeats / mirrors)");
+    return t;
+}
+static void hk_install_locked(uint32_t id, VkSampler t, uint32_t gen) {   // a twin made from the arguments of generation gen
+    if (!t) return;
+    if (id < SAMP_IDS && g_samp_gen[id] == gen && g_samp_by_id[id] && !g_samp_hk[id]) {
+        g_samp_hk[id] = t; g_st.samplers++; g_st.samplers_made++; g_hk_alive++; g_hk_made++; bind_gen_bump();
+    } else vkn_retire(sampler_free, (void *)(uintptr_t)t);   // the id changed meanwhile: never used
+}
 int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint32_t wrap_u, uint32_t wrap_v, uint32_t wrap_w, uint32_t max_aniso, uint32_t compare) {
     const vkn_dev *d = vkn_device(); if (!d) { __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    hk_read_once();   // [stage 5.4 G2]
     pthread_mutex_lock(&g_mu); const int ti = tables_init_locked(); pthread_mutex_unlock(&g_mu);
     if (ti) return -1;
     const VkSamplerCreateInfo si = samp_info(d, filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 0);
@@ -996,24 +1067,31 @@ int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint3
     pthread_mutex_lock(&g_mu);
     int alive = 0; samp_rec *r = (samp_rec *)vkn_tab_put(&g_samp, handle, &alive);
     if (r && alive && r->s) {   // a record of this index we never saw destroyed
-        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); }
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); hk_drop_locked(r->id); }
         vkn_retire(sampler_free, (void *)(uintptr_t)r->s); g_st.samplers--;
     }
     if (r) { r->s = s; r->id = pool_id; g_st.samplers++; g_st.samplers_made++; }
+    uint32_t gen = 0; int hk_mode = 0, hk_an = 0; float hk_b = 0.0f;
     if (r && pool_id < SAMP_IDS) {
-        g_samp_by_id[pool_id] = s; cmp_drop_locked(pool_id);
+        g_samp_by_id[pool_id] = s; cmp_drop_locked(pool_id); hk_drop_locked(pool_id);
         g_samp_args[pool_id] = (samp_args){filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 1};
+        gen = g_samp_gen[pool_id]; hk_mode = g_hk.on ? g_hk.mode : 0; hk_b = g_hk.bias; hk_an = g_hk.aniso;   // [stage 5.4 G2]
     }
     bind_gen_bump();   // [stage 5.1 G] a sampler-pool id cell written / a replaced record's cell cleared
     pthread_mutex_unlock(&g_mu);
     if (!r) { vkDestroySampler(d->dev, s, NULL); __atomic_add_fetch(&g_st.samplers_failed, 1, __ATOMIC_RELAXED); return -1; }
+    if (hk_mode) {   // [stage 5.4 G2] the hack twin, made now (creation time, loader thread): no sampler creation on the draw path
+        const samp_args a = {filter, wrap_u, wrap_v, wrap_w, max_aniso, compare, 1};
+        const VkSampler t = hk_make(d, pool_id, &a, hk_mode, hk_b, hk_an);
+        if (t) { pthread_mutex_lock(&g_mu); hk_install_locked(pool_id, t, gen); pthread_mutex_unlock(&g_mu); }
+    }
     return 0;
 }
 int vkn_sampler_destroy(uint64_t handle) {
     pthread_mutex_lock(&g_mu);
     samp_rec *r = g_init > 0 ? (samp_rec *)vkn_tab_get(&g_samp, handle) : NULL; int known = 0;
     if (r && r->s) {
-        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); g_samp_args[r->id].known = 0; }
+        if (r->id < SAMP_IDS && g_samp_by_id[r->id] == r->s) { g_samp_by_id[r->id] = VK_NULL_HANDLE; cmp_drop_locked(r->id); hk_drop_locked(r->id); g_samp_args[r->id].known = 0; }
         vkn_retire(sampler_free, (void *)(uintptr_t)r->s); r->s = VK_NULL_HANDLE; g_st.samplers--; known = 1;
     }
     if (r) vkn_tab_kill(&g_samp, handle);
@@ -1022,8 +1100,17 @@ int vkn_sampler_destroy(uint64_t handle) {
     return known;
 }
 VkSampler vkn_sampler_by_id(uint32_t id) {
+    // [stage 5.4 G2] the texture this thread looked up last (vkn_tex_view_by_id: the draw path asks view then sampler per binding)
+    vkn_tex *const lt = g_hk.on ? t_hk_last : NULL;
+    if (lt) t_hk_last = NULL;
     if (id >= SAMP_IDS) return VK_NULL_HANDLE;
-    pthread_mutex_lock(&g_mu); const VkSampler s = g_samp_by_id[id]; pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu);
+    VkSampler s = g_samp_by_id[id];
+    if (g_hk.on && s && g_samp_hk[id]) {   // mode 2: a twin exists only where the rule holds; mode 1: only for a material texture
+        if (g_hk.mode == 2 || hk_material(lt)) { s = g_samp_hk[id]; g_hk_picked++; }
+        else g_hk_kept++;
+    }
+    pthread_mutex_unlock(&g_mu);
     return s;
 }
 // [stage 5 A1] vkn_fx.h: the comparison twin of the engine sampler of this pool id, made on first use (on the recording thread: one
@@ -1043,7 +1130,10 @@ VkSampler vkn_sampler_cmp_by_id(uint32_t id) {
         if (red) vkn_logf(RED "tex: comparison twin of sampler-pool id %u: no engine sampler there (sampled without the comparison)", id);
         return c;
     }
-    const VkSamplerCreateInfo si = samp_info(d, a.filter, a.wrap_u, a.wrap_v, a.wrap_w, a.max_aniso, 0, 1);
+    VkSamplerCreateInfo si = samp_info(d, a.filter, a.wrap_u, a.wrap_v, a.wrap_w, a.max_aniso, 0, 1);
+    // [stage 5.4 G2] the hack values reach a comparison twin by the rule of the mode: 2 (per sampler) - when the game sampler repeats /
+    // mirrors, as its twin; 1 (per texture) - never: a Dref binding samples the shadow atlas, a GPU-written target (the old rule leaves it)
+    if (g_hk.on && g_hk.mode == 2 && hk_rule(&a) && hk_apply(d, &si, g_hk.bias, g_hk.aniso)) __atomic_add_fetch(&g_hk_cmp, 1, __ATOMIC_RELAXED);
     VkSampler t = VK_NULL_HANDLE;
     const VkResult vr = vkCreateSampler(d->dev, &si, NULL, &t);
     pthread_mutex_lock(&g_mu);
@@ -1067,6 +1157,50 @@ void vkn_sampler_cmp_stats(uint64_t *made, uint64_t *game_cmp, uint64_t *failed,
     if (failed) *failed = g_cmp_failed;
     if (alive) *alive = g_cmp_alive;
     pthread_mutex_unlock(&g_mu);
+}
+// [stage 5.4 G2] vkn_tex.h end block
+int vkn_tex_hack_set(int mode, float bias, int aniso) {
+    const vkn_dev *d = vkn_device();
+    hk_read_once();
+    if (mode < 0 || mode > 2) mode = 1;
+    if (aniso < 0) aniso = 0;
+    static uint32_t gens[SAMP_IDS]; static samp_args args[SAMP_IDS];   // (static: 112 KB off the stack; callers are rare, serialised by g_hk_set_mu)
+    static pthread_mutex_t g_hk_set_mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&g_hk_set_mu);
+    pthread_mutex_lock(&g_mu);
+    for (uint32_t id = 0; id < SAMP_IDS; id++) {
+        hk_drop_locked(id);   // retired (3 frames): a draw recorded before this call may still use it
+        if (g_samp_cmp[id] && g_samp_cmp_own[id]) cmp_drop_locked(id);   // a comparison twin is made again on its next use, with the new values
+        args[id] = g_samp_args[id]; gens[id] = g_samp_gen[id];
+    }
+    g_hk.mode = mode; g_hk.bias = bias; g_hk.aniso = aniso; g_hk.on = mode && (bias != 0.0f || aniso); g_hk_sets++;
+    const int on = g_hk.on;
+    bind_gen_bump();
+    pthread_mutex_unlock(&g_mu);
+    int made = 0;
+    for (uint32_t id = 0; on && d && id < SAMP_IDS; id++) {
+        if (!args[id].known) continue;
+        const VkSampler t = hk_make(d, id, &args[id], mode, bias, aniso);
+        if (!t) continue;
+        pthread_mutex_lock(&g_mu); const int before = (int)g_hk_alive; hk_install_locked(id, t, gens[id]); made += (int)g_hk_alive - before; pthread_mutex_unlock(&g_mu);
+    }
+    pthread_mutex_unlock(&g_hk_set_mu);
+    vkn_logf("tex: hack values changed live: DM_VK_NATIVE_TEXHACK=%d, mip LOD bias %+.2f, anisotropy cap %d: %d twins made (the old ones retired)", mode, (double)bias, aniso, made);
+    return made;
+}
+void vkn_tex_hack_get(vkn_tex_hack_stats *s) {
+    if (!s) return;
+    hk_read_once();
+    pthread_mutex_lock(&g_mu);
+    s->mode = g_hk.mode; s->on = g_hk.on; s->bias = g_hk.bias; s->aniso = g_hk.aniso;
+    s->twins = g_hk_alive; s->made = g_hk_made; s->failed = g_hk_failed; s->retired = g_hk_retired; s->picked = g_hk_picked; s->kept = g_hk_kept;
+    s->cmp = __atomic_load_n(&g_hk_cmp, __ATOMIC_RELAXED); s->sets = g_hk_sets;
+    pthread_mutex_unlock(&g_mu);
+}
+VkSampler vkn_sampler_hack_by_id(uint32_t id) {
+    if (id >= SAMP_IDS) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_mu); const VkSampler s = g_samp_hk[id]; pthread_mutex_unlock(&g_mu);
+    return s;
 }
 
 void vkn_tex_get_stats(vkn_tex_stats *s) {

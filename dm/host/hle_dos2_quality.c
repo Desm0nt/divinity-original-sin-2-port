@@ -175,6 +175,16 @@ static volatile uint8_t *dq_gs(void) {   // GraphicSettings, checked by its vtab
 }
 __attribute__((weak)) double xbg_recent_gpu_ms(void);   // the Vulkan backend's GPU ms a frame over its last report window (-1: none yet)
 __attribute__((weak)) double xbg_recent_draws(void);    // [DOS2] NR-DRIFT: its draws a frame over the same window (-1: none yet)
+// [stage 5.4 G3] DM_VK_NATIVE=1: the translator is not initialised, so the two above stay -1 for the whole run (the NB-18b-12 line printed
+// "backend measured -1.00"; DM_DOS2_DRS_SETTLE took every moment for a load screen: "< 64 draws a frame" - a target held at 100 ms).
+// The backend's own signals instead (dm/gfx/vkn/vkn_hacks.h): the GPU ms of the newest finished presented recording (its top / bottom
+// timestamps: the pair the engine's GPU ms r+0x18f0 is made of in mode 1, dm/host/hle_dos2_vkn_frame.c) and the draws a frame since the
+// previous ask. Weak: absent outside DOS2 / without the backend.
+__attribute__((weak)) double vkn_hacks_gpu_ms(void);
+__attribute__((weak)) double vkn_hacks_draws(void);
+static int g_vkn_native;   // DM_VK_NATIVE=1 (read at install)
+static double dq_backend_gpu_ms(void) { return g_vkn_native && vkn_hacks_gpu_ms ? vkn_hacks_gpu_ms() : xbg_recent_gpu_ms ? xbg_recent_gpu_ms() : -1; }
+static double dq_backend_draws(void) { return g_vkn_native && vkn_hacks_draws ? vkn_hacks_draws() : xbg_recent_draws ? xbg_recent_draws() : -1; }
 static float dq_gpu_ms(void) {
     uint8_t *r = *(uint8_t *volatile *)(g_main->base + DQ_RENDERER_PTR);
     return r ? *(volatile float *)(r + DQ_GPU_MS) : NAN;
@@ -316,7 +326,7 @@ static void *dq_monitor(void *arg) {
           if (g == g && (g > 2000.f || g < 0.f) && insane < 3 && seen) { insane++;
               LOG("\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91[quality] the game's GPU frame time reads %.2f ms: not a frame time - its dynamic resolution will sit at the minimum "
                   "(current %.0fx%.0f of %dx%d)", (double)g, d->cur_w, d->cur_h, d->max_w, d->max_h); } }
-        { const float g = dq_gpu_ms(); const double h = xbg_recent_gpu_ms ? xbg_recent_gpu_ms() : -1; const uint64_t t = now_ns();
+        { const float g = dq_gpu_ms(); const double h = dq_backend_gpu_ms(); const uint64_t t = now_ns();   // [stage 5.4 G3] mode 1: the backend's
           if (g == g && g >= 0.f && g < 2000.f) { gs_sum += g; gs_n++; if (g < gs_min) gs_min = g; if (g > gs_max) gs_max = g; }
           if (h >= 0) { hs_sum += h; hs_n++; }
           if (!gs_next) gs_next = t + 10000000000ull;
@@ -333,7 +343,7 @@ static void *dq_monitor(void *arg) {
               gs_sum = hs_sum = 0; gs_n = hs_n = 0; gs_min = 1e30; gs_max = 0;
           } }
         if (g_settle.mode) {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SETTLE: hold the target at 100 ms around a load screen
-            const double dr = xbg_recent_draws ? xbg_recent_draws() : -1;
+            const double dr = dq_backend_draws();   // [stage 5.4 G3] mode 1: the backend's draws a frame
             const int loading = d->off || dr < (double)NRD_LOAD_DRAWS;   // < 0 = no window yet (boot): a load too
             const float pct = d->max_h ? 100.0f * d->cur_h / (float)d->max_h : -1.0f;
             int ev = 0; const int hold = nrd_settle_step(&g_settle, loading, now_ns(), pct, &ev);
@@ -479,6 +489,7 @@ void dm_dos2_quality_install(void);   // main.c host_preload, right after load_m
 void dm_dos2_quality_install(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_main = &g_mod[i];
     if (!g_main) { LOG("【红】[quality] no main module: render settings untouched"); return; }
+    { const char *vn = getenv("DM_VK_NATIVE"); g_vkn_native = vn && atoi(vn) == 1; }   // [stage 5.4 G3] (dm_dos2_vkn_pre ran before: main.c)
     module_t *m = g_main;
     int ok_size = m->text_end >= DQ_GATE + sizeof k_gate && !memcmp(m->base + DQ_SETSIZE, k_setsize, sizeof k_setsize);
     int ok_gate = ok_size && !memcmp(m->base + DQ_GATE, k_gate, sizeof k_gate);

@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_hacks.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -2248,8 +2248,11 @@ static void test_a5_shc(void) {
     }
     // SHFAR 1: the far cascade is not drawn (its tile keeps the clear value), the other two are the truth; 2: counted only
     if (C4.ran) {
-        int clr = 0, eq = 0; for (int f = 0; f < A5_F; f++) { clr += C4.far_clear[f]; eq += C4.th[f][0] == T.th[f][0] && C4.th[f][1] == T.th[f][1]; }
-        CHECK_EQ(clr, A5_F); CHECK_EQ(eq, A5_F);
+        // [stage 5.4 G2] the old path's sun-atlas rule (xbg_nr_hacks.inc far_draw: square, >= 1024): the 512 atlas of frames 0..37 keeps
+        // all three tiles (counted far_not_sun), the 1024 atlas of frames 38.. loses its far tile
+        int clr = 0, eq = 0, eq_all = 0;
+        for (int f = 0; f < A5_F; f++) { clr += f >= 38 && C4.far_clear[f]; eq += C4.th[f][0] == T.th[f][0] && C4.th[f][1] == T.th[f][1]; eq_all += f < 38 && C4.h[f] == T.h[f]; }
+        CHECK_EQ(clr, A5_F - 38); CHECK_EQ(eq, A5_F); CHECK_EQ(eq_all, 38); CHECK(C4.st.far_not_sun > 0);
         CHECK(C4.st.far_draws > 0); CHECK_EQ(C4.st.far_skipped, C4.st.far_draws); CHECK_EQ(C4.st.armed, 0);
     }
     if (C5.ran) {
@@ -2710,6 +2713,7 @@ static void test_occ_a(void);     // [stage 5] technique A (end of file)
 static void test_v2_drv(void);    // [stage 5.3 V2] driver corrections (end of file)
 static void test_v1_preskin(void);   // [stage 5.3 V1] PRESKIN (end of file)
 static void test_occ_b(void);     // [stage 5] technique B (end of file)
+static void test_g_hacks(void);   // [stage 5.4] the DM_HACK_* settings in mode 1 (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
 // without it (render pass of one attachment), re-attaches it for the first draw that tests depth (LOAD of the colour drawn so far), keeps
@@ -3098,6 +3102,7 @@ int main(void) {
     test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
     test_v1_preskin();   // [stage 5.3 V1] PRESKIN (vkn_preskin.c)
     test_occ_b();  // [stage 5] technique B (vkn_occb.c, DM_VK_NATIVE_COND 7 / 8; forked children, the chain cleared of the earlier tests' functions)
+    test_g_hacks();   // [stage 5.4] sampler hack twins (live), the DRS signals, the hacks lines, targets re-made at another size (forked)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
@@ -4394,4 +4399,227 @@ static void test_occ_b(void) {
     }
     if (ran) { CHECK(J[0].njr >= OB_RT_F); CHECK(J[0].st.conds > 0); }
     g_ob_rt = 0; g_ob_jr = 0;
+}
+
+// ================================================================================================================ [stage 5.4]
+// The player's speed hacks in mode 1 (dm/gfx/vkn/vkn_hacks.h; plan VK-STAGE5-PLAN.md stage 5.4):
+//   twins    DM_HACK_TEXBIAS / DM_HACK_ANISO hack twins of vkn_tex.c set live (vkn_tex_hack_set: the gear itself applies them at the next
+//            launch): their VkSamplerCreateInfo (bias added, anisotropy min(game, N), N = 1 off), mode 1 per texture (a CPU-uploaded,
+//            never GPU-written texture with mips gets the twin; a one-level texture, a target, a copy destination, a lookup without a
+//            view keep the game sampler), mode 2 per sampler (repeat / mirror wrap: every texture; clamp: none), comparison twins (mode 1
+//            unchanged, mode 2 with the values), a twin made at sampler creation and retired with the sampler, the retire seen by the
+//            draw path's death counter, off again;
+//   DRS      vkn_hacks_draws (draws a presented frame between calls) and vkn_hacks_gpu_ms (the newest finished frame's timestamps);
+//   lines    forked children (the values are read once a process): the install line, a set-but-unimplemented hack in red
+//            (DM_HACK_TIER=3 -> SHFAR 1 against DM_VK_NATIVE_SHFAR=0), LIGHTFUSE yielding to the light cap with DM_VK_NATIVE_LCAP=1
+//            (and not with the default 2 - the capped fused module -, 0, or DM_VK_NATIVE_SH=0);
+//   resize   a forked child with the shadow cache and the store-history policy on: the 3D colour / depth targets, two names on one
+//            shared storage and the shadow atlas destroyed and re-made at another size between frames (a window / mode change: the
+//            engine re-creates its targets; DRS itself draws a part of full-size targets and re-makes nothing): passes of the new size,
+//            the new views sampled under the old pool ids, the shared names on one image again, the never-read depth's store discarded
+//            only by history, no violation, no validation error, no red line on stderr.
+#include "../../../vkn/vkn_hacks.h"
+#include "../../../nr/nr_hacks.h"
+static int32_t g_hk_t[VKN_TEX_SLOTS], g_hk_s[VKN_TEX_SLOTS];
+static VkSampler hk_base(uint32_t id) { (void)vkn_tex_view_by_id(0xfffff, NULL); return vkn_sampler_by_id(id); }   // no texture before it: the game sampler
+static const VkSamplerCreateInfo *hk_sci(VkSampler s) { mk_obj *o = s ? mk_obj_of(VH(s)) : NULL; return o && o->kind == MK_SAMPLER ? &o->sci : NULL; }
+// One draw of g_s1 in a recording of its own: fragment slot 0 = texture id t0, slot 3 = t3, both with sampler id sid; out: the
+// samplers bound for slot 0 (binding 22) and slot 3 (binding 16).
+static void hk_draw(int32_t t0, int32_t t3, int32_t sid, VkSampler *s0, VkSampler *s3) {
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) g_hk_t[i] = g_hk_s[i] = -1;
+    g_hk_t[0] = t0; g_hk_t[3] = t3; g_hk_s[0] = g_hk_s[3] = sid;
+    VkCommandBuffer cb = fbegin(1); targets(g_a2, NULL, g_d3);
+    vkn_draw_in in = g_in; in.shader = H(30, 1); in.tex[1] = g_hk_t; in.smp[1] = g_hk_s; in.tex[2] = NULL; in.smp[2] = NULL;
+    const uint64_t m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, 0); const mk_dw *w22 = dw_of(bs, 22), *w16 = dw_of(bs, 16);
+    CHECK(bs && w22 && w16);
+    *s0 = w22 ? w22->smp : VK_NULL_HANDLE; *s3 = w16 ? w16->smp : VK_NULL_HANDLE;
+    fsubmit(0);
+}
+// stderr into a file (vkn_logf writes there) and back; the red lines in it (printed to stdout for the log) and lines with `needle`.
+static int hk_cap(const char *path) { fflush(stderr); FILE *f = fopen(path, "w"); if (!f) return -1; const int old = dup(2); dup2(fileno(f), 2); fclose(f); return old; }
+static int hk_uncap(int old, const char *path, const char *needle, int *with) {
+    fflush(stderr); if (old >= 0) { dup2(old, 2); close(old); }
+    int reds = 0; if (with) *with = 0;
+    FILE *f = fopen(path, "r"); static char ln[8192];
+    while (f && fgets(ln, sizeof ln, f)) {
+        if (strstr(ln, "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91")) { reds++; printf("  captured: %.400s\n", ln); }
+        if (needle && with && strstr(ln, needle)) { (*with)++; printf("  captured: %.600s\n", ln); }
+    }
+    if (f) fclose(f);
+    remove(path);
+    return reds;
+}
+static void hk_lines_child(a5_res *r) {
+    (void)r;
+    char path[64]; snprintf(path, sizeof path, "/tmp/vkn_hk_lines_%d.txt", (int)getpid());
+    const int old = hk_cap(path);
+    vkn_shc_install();
+    const int lf = vkn_hacks_lightfuse_ok(), lc = vkn_hacks_lcap_mode();
+    vkn_hacks_census();   // the install line (first call)
+    int with = 0; const int reds = hk_uncap(old, path, "hacks (stage 5.4)", &with);
+    int v[NRH_N]; char from[NRH_N]; vkn_hacks_values(v, from);
+    const char *sf = getenv("DM_VK_NATIVE_SHFAR"), *lce = getenv("DM_VK_NATIVE_LCAP"), *sh = getenv("DM_VK_NATIVE_SH"), *tier = getenv("DM_HACK_TIER");
+    CHECK_EQ(with, 1);
+    if (tier && !strcmp(tier, "3")) {   // the max tier: SHFAR 1 from the tier, LIGHTS 2, TEXBIAS 1.00, ANISO 2, SCALE 75
+        CHECK_EQ(v[NRH_SHFAR], 1); CHECK_EQ(from[NRH_SHFAR], 't'); CHECK_EQ(v[NRH_LIGHTS], 2); CHECK_EQ(v[NRH_TEXBIAS], 100); CHECK_EQ(v[NRH_ANISO], 2); CHECK_EQ(v[NRH_SCALE], 75);
+        CHECK_EQ(vkn_shc_far(), sf && !strcmp(sf, "0") ? 0 : 1);
+        CHECK_EQ(reds, sf && !strcmp(sf, "0") ? 1 : 0);   // DM_VK_NATIVE_SHFAR=0 against the tier's SHFAR: one red line
+    } else CHECK_EQ(reds, 0);
+    const int want_lc = lce && *lce ? atoi(lce) : 2;   // DM_VK_NATIVE_LCAP default 2: the capped fused draw (LIGHTFUSE stays)
+    const int cap_used = v[NRH_LIGHTS] > 0 && want_lc == 1 && !(sh && strcmp(sh, "1"));   // only 1 makes LIGHTFUSE yield
+    CHECK_EQ(lf, cap_used ? 0 : 1); CHECK_EQ(lc, want_lc);
+}
+static void hk_resize_child(a5_res *r) {
+    (void)r;
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    char path[64]; snprintf(path, sizeof path, "/tmp/vkn_hk_resize_%d.txt", (int)getpid());
+    const int old = hk_cap(path);
+    vkn_shc_install();
+    b1_pol(0, 1, 0, 0);   // the store history on (3 frames)
+    vkn_pass_stats3 a3, c3; vkn_pass_stats3_get(&a3);
+    vkn_tex_stats ts0, ts1; vkn_tex_get_stats(&ts0);
+    vkn_shc_stats sc; vkn_shc_stats_get(&sc);
+    static const uint32_t W[2] = {64, 96}, Hh[2] = {32, 48}, AS[2] = {1024, 2048};
+    vkn_tex *B = mktex(989, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 989, 0); CHECK(B != NULL); if (!B) return;
+    int dstore[2][8], cstore[2][8]; uint64_t ach = 0;
+    for (int p = 0; p < 2; p++) {
+        const uint32_t base = 970u + 10u * (uint32_t)p;
+        vkn_tex *C = mktex(base, EF_RGBA16F, VKN_TC_COLOR, 1, W[p], Hh[p], 1, 1, 980, 0), *D = mktex(base + 1, EF_D32F, VKN_TC_DEPTH, 1, W[p], Hh[p], 1, 1, 981, 0);
+        vkn_tex *S1 = shtex(base + 2, W[p], Hh[p], 982, 0x40000, "HalfWidthBackBuffer"), *S2 = shtex(base + 3, W[p], Hh[p], 984, 0x40000, "ScreenshotBackBuffer");
+        vkn_tex *A = mktex(base + 4, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, AS[p], AS[p], 1, 1, 983, 0);
+        CHECK(C && D && S1 && S2 && A); CHECK(S1 == S2);   // the shared names on one image (the same shape), at each size
+        if (!C || !D || !S1 || !S2 || !A) return;
+        CHECK(vkn_tex_view_by_id(980, NULL) == C->view); CHECK(vkn_tex_view_by_id(984, NULL) == S1->view);   // the pool ids name the new images
+        CHECK_EQ(C->w, W[p]); CHECK_EQ(S1->h, Hh[p]);
+        for (int f = 0; f < 8; f++) {
+            VkCommandBuffer cb = fbegin(1);
+            targets(NULL, NULL, A); vkn_pass_clear_depth(A, 1, 1.0f, 0);   // three cascades of four casters
+            for (int k = 0; k < 3; k++) {
+                vkn_draw_in in = g_in; in.shader = H(30, 1); in.tex[2] = NULL; in.smp[2] = NULL;
+                const float q = (float)(AS[p] / 2); in.viewport[0] = k == 1 ? q : 0; in.viewport[1] = k == 2 ? q : 0; in.viewport[2] = in.viewport[3] = q;
+                in.scissor[0] = (int32_t)in.viewport[0]; in.scissor[1] = (int32_t)in.viewport[1]; in.scissor[2] = in.scissor[3] = (int32_t)q;
+                for (int i = 0; i < 4; i++) CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0);
+            }
+            const float z[4] = {0, 0, 0, 0};
+            targets(C, NULL, D); vkn_pass_clear_color(C, 0, z, NULL); vkn_pass_clear_depth(D, 1, 1.0f, 0);
+            vkn_draw_in in = g_in; in.shader = H(30, 1); in.viewport[2] = (float)W[p]; in.viewport[3] = (float)Hh[p]; in.scissor[2] = (int32_t)W[p]; in.scissor[3] = (int32_t)Hh[p];
+            uint64_t m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+            const mk_ev *rp = nth(m, cb, MK_E_BEGIN_RP, 0);
+            CHECK(rp && rp->rect.extent.width == W[p] && rp->rect.extent.height == Hh[p]);
+            { mk_obj *fb = fb_of(rp); CHECK(fb && fb->fb_view[0] == C->att); }
+            cstore[p][f] = b1_store(rp, 0); dstore[p][f] = b1_store(rp, 1);
+            targets(S1, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);   // into the shared storage
+            // the composite: samples the 3D colour (pool id 980) and the shared alias (984) into a target of the old size
+            for (int i = 0; i < VKN_TEX_SLOTS; i++) g_hk_t[i] = g_hk_s[i] = -1;
+            g_hk_t[0] = 980; g_hk_t[3] = 984; g_hk_s[0] = 10; g_hk_s[3] = 13;
+            vkn_draw_in c = g_in; c.shader = H(30, 1); c.tex[1] = g_hk_t; c.smp[1] = g_hk_s; c.tex[2] = NULL; c.smp[2] = NULL;
+            targets(B, NULL, NULL); m = mark(); CHECK_EQ(vkn_draw_indexed(&c, 0, 3, 1), 0);
+            const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, 0);
+            const mk_dw *w22 = dw_of(bs, 22), *w16 = dw_of(bs, 16);
+            CHECK(w22 && w22->view == C->view); CHECK(w16 && w16->view == S1->view);
+            fsubmit(0);
+        }
+        vkn_shc_stats_get(&sc); ach += sc.atlas_changes;   // (the window of the shadow cache: since its last census)
+        vkn_shc_census();
+        // the engine re-makes its targets (another window size): every old name destroyed first
+        if (p == 0) for (uint32_t k = 0; k < 5; k++) CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + base + k), 1);
+    }
+    frames_n(4);
+    vkn_pass_stats3_get(&c3); vkn_tex_get_stats(&ts1);
+    for (int p = 0; p < 2; p++) for (int f = 0; f < 8; f++) CHECK_EQ(cstore[p][f], VK_ATTACHMENT_STORE_OP_STORE);   // read every frame: always stored
+    for (int p = 0; p < 2; p++) CHECK_EQ(dstore[p][7], VK_ATTACHMENT_STORE_OP_DONT_CARE);   // never read, cleared every frame: discarded by its history
+    for (int f = 0; f < 3; f++) CHECK_EQ(dstore[0][f], VK_ATTACHMENT_STORE_OP_STORE);       // (stored until the history has 3 frames)
+    printf("  hacks resize: depth stores per frame (0 STORE, 1 DONT_CARE): %d%d%d%d%d%d%d%d -> %d%d%d%d%d%d%d%d; atlas changes %llu; violations %llu\n",
+           dstore[0][0], dstore[0][1], dstore[0][2], dstore[0][3], dstore[0][4], dstore[0][5], dstore[0][6], dstore[0][7], dstore[1][0], dstore[1][1], dstore[1][2],
+           dstore[1][3], dstore[1][4], dstore[1][5], dstore[1][6], dstore[1][7], (unsigned long long)ach, (unsigned long long)(c3.violations - a3.violations));
+    CHECK_EQ(c3.violations - a3.violations, 0); CHECK(c3.store_dc - a3.store_dc >= 8);
+    CHECK(ts1.sh_attached - ts0.sh_attached >= 2);   // the alias attached at both sizes
+    CHECK(ach >= 2);                                  // the first atlas taken, the bigger one of the new size taken over
+    b1_pol(0, 0, 1, 0);
+    const int reds = hk_uncap(old, path, NULL, NULL);
+    CHECK_EQ(reds, 0);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_g_hacks(void) {
+    if (!g_s1 || !g_a2 || !g_d3) { CHECK(0); return; }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    // ---- twins, live: samplers 40 (mip linear, repeat, anisotropy 8) and 41 (linear, clamp, anisotropy 1); textures: M uploaded
+    // with 4 levels (a material), N one level, T a colour target, M2 like M but a copy destination
+    CHECK_EQ(vkn_sampler_create(H(90, 1), 40, 3, 0, 0, 0, 8, 0), 0); CHECK_EQ(vkn_sampler_create(H(91, 1), 41, 1, 1, 1, 1, 1, 0), 0);
+    vkn_tex *M = mktex(950, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 4, 1, 950, 0), *N = mktex(951, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 951, 0);
+    vkn_tex *T = mktex(952, EF_RGBA8, VKN_TC_COLOR, 1, 16, 16, 1, 1, 952, 0), *M2 = mktex(953, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 4, 1, 953, 0);
+    CHECK(M && N && T && M2); if (!M || !N || !T || !M2) return;
+    { fbegin(1); vkn_pass_copy(M2, M); fsubmit(0); CHECK(M2->pass_ever && !M->pass_ever); }
+    vkn_tex_hack_stats h0, h1; vkn_tex_hack_get(&h0);
+    CHECK_EQ(vkn_sampler_hack_by_id(40), VK_NULL_HANDLE);   // off in this process (no DM_HACK_* at its first sampler)
+    vkn_tex_stats t0, t1; vkn_tex_get_stats(&t0);
+    const uint32_t g0 = vkn_tex_bind_gen();
+    // mode 1 (per texture), bias 0.5, cap 4
+    CHECK(vkn_tex_hack_set(1, 0.5f, 4) >= 2); CHECK(vkn_tex_bind_gen() != g0);
+    const VkSampler b40 = hk_base(40), b41 = hk_base(41), k40 = vkn_sampler_hack_by_id(40), k41 = vkn_sampler_hack_by_id(41);
+    CHECK(b40 && b41 && k40 && k41 && k40 != b40 && k41 != b41);
+    { const VkSamplerCreateInfo *a = hk_sci(b40), *b = hk_sci(k40), *c = hk_sci(k41);
+      CHECK(a && b && c);
+      if (a && b && c) {
+          CHECK_F(a->mipLodBias, 0.0); CHECK_F(a->maxAnisotropy, 8.0); CHECK(a->anisotropyEnable);
+          CHECK_F(b->mipLodBias, 0.5); CHECK_F(b->maxAnisotropy, 4.0); CHECK(b->anisotropyEnable); CHECK_EQ(b->mipmapMode, a->mipmapMode); CHECK_EQ(b->addressModeU, a->addressModeU);
+          CHECK_F(c->mipLodBias, 0.5); CHECK_F(c->maxAnisotropy, 1.0); CHECK(!c->anisotropyEnable); CHECK_EQ(c->addressModeU, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+      } }
+    VkSampler s0 = 0, s3 = 0;
+    hk_draw(950, 951, 40, &s0, &s3); CHECK(s0 == k40); CHECK(s3 == b40);   // the material gets the twin, the one-level texture the game sampler
+    hk_draw(952, 953, 40, &s0, &s3); CHECK(s0 == b40); CHECK(s3 == b40);   // a target, a copy destination: the game sampler
+    hk_draw(951, 950, 41, &s0, &s3); CHECK(s0 == b41); CHECK(s3 == k41);
+    CHECK(hk_base(40) == b40);                                              // a lookup without a view before it
+    { const VkSamplerCreateInfo *ci = hk_sci(vkn_sampler_cmp_by_id(40));
+      CHECK(ci && ci->compareEnable); if (ci) { CHECK_F(ci->mipLodBias, 0.0); CHECK_F(ci->maxAnisotropy, 8.0); } }   // mode 1: the atlas twin unchanged
+    vkn_tex_hack_get(&h1); CHECK(h1.picked - h0.picked >= 2); CHECK(h1.kept - h0.kept >= 4); CHECK_EQ(h1.mode, 1); CHECK_EQ(h1.on, 1);
+    // mode 2 (per sampler): the repeating sampler's twin for every texture, none for the clamping one; the comparison twin with the values
+    CHECK(vkn_tex_hack_set(2, 0.5f, 4) >= 1);
+    const VkSampler k40b = vkn_sampler_hack_by_id(40);
+    CHECK(k40b && k40b != k40); CHECK_EQ(vkn_sampler_hack_by_id(41), VK_NULL_HANDLE);
+    hk_draw(951, 952, 40, &s0, &s3); CHECK(s0 == k40b); CHECK(s3 == k40b);
+    hk_draw(950, 950, 41, &s0, &s3); CHECK(s0 == b41); CHECK(s3 == b41);
+    { const VkSamplerCreateInfo *ci = hk_sci(vkn_sampler_cmp_by_id(40)), *cj = hk_sci(vkn_sampler_cmp_by_id(41));
+      CHECK(ci && cj); if (ci && cj) { CHECK(ci->compareEnable); CHECK_F(ci->mipLodBias, 0.5); CHECK_F(ci->maxAnisotropy, 4.0); CHECK_F(cj->mipLodBias, 0.0); } }
+    // the cap alone (no twin where it changes nothing); a cap of 1 = anisotropy off
+    CHECK(vkn_tex_hack_set(1, 0.0f, 4) >= 1);
+    CHECK_EQ(vkn_sampler_hack_by_id(41), VK_NULL_HANDLE);
+    { const VkSamplerCreateInfo *ci = hk_sci(vkn_sampler_hack_by_id(40)); CHECK(ci); if (ci) { CHECK_F(ci->mipLodBias, 0.0); CHECK_F(ci->maxAnisotropy, 4.0); CHECK(ci->anisotropyEnable); } }
+    CHECK(vkn_tex_hack_set(1, 0.0f, 1) >= 1);
+    { const VkSamplerCreateInfo *ci = hk_sci(vkn_sampler_hack_by_id(40)); CHECK(ci); if (ci) { CHECK_F(ci->maxAnisotropy, 1.0); CHECK(!ci->anisotropyEnable); } }
+    // a sampler created while the values are on gets its twin at creation; destroyed, the twin goes with it
+    vkn_tex_hack_get(&h0);
+    CHECK_EQ(vkn_sampler_create(H(92, 1), 42, 5, 0, 0, 0, 16, 0), 0);
+    CHECK(vkn_sampler_hack_by_id(42) != VK_NULL_HANDLE);
+    CHECK_EQ(vkn_sampler_destroy(H(92, 1)), 1); CHECK_EQ(vkn_sampler_hack_by_id(42), VK_NULL_HANDLE);
+    vkn_tex_hack_get(&h1); CHECK_EQ(h1.made - h0.made, 1); CHECK_EQ(h1.retired - h0.retired, 1);
+    // off: no twins, the game samplers bound; every retired twin counted dead for the draw path's descriptor sets
+    CHECK_EQ(vkn_tex_hack_set(1, 0.0f, 0), 0);
+    vkn_tex_hack_get(&h1); CHECK_EQ(h1.twins, 0); CHECK_EQ(h1.on, 0); CHECK(h1.sets >= 5);
+    hk_draw(950, 950, 40, &s0, &s3); CHECK(s0 == b40); CHECK(s3 == b40);
+    vkn_tex_get_stats(&t1);
+    CHECK((t1.samplers_made - t1.samplers) - (t0.samplers_made - t0.samplers) >= h1.retired - h0.retired + 4);   // the twins' retires + sampler 42
+    CHECK_EQ(t1.samplers, t0.samplers);
+    // ---- DRS signals of mode 1: draws a frame between two asks, the newest finished frame's GPU ms (or -1 without timestamps)
+    (void)vkn_hacks_draws();
+    for (int f = 0; f < 2; f++) { fbegin(1); targets(g_a2, NULL, g_d3); vkn_draw_in in = g_in; for (int i = 0; i < 5; i++) CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); fsubmit(0); }
+    const double dr = vkn_hacks_draws(), gm = vkn_hacks_gpu_ms();
+    CHECK(dr >= 2.5 && dr <= 10.0); CHECK(gm == -1.0 || gm >= 0.0);
+    printf("  hacks: DRS signals of mode 1: %.2f draws a frame, GPU %.3f ms\n", dr, gm);
+    // ---- the lines and LIGHTFUSE's yield (forked: read once a process)
+    static const char *const e_max[][2] = {{"DM_HACK_TIER", "3"}, {"DM_HACK_SHFAR", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_LCAP", NULL},
+                                           {"DM_VK_NATIVE_SH", NULL}, {NULL, NULL}};
+    static const char *const e_max1[][2] = {{"DM_HACK_TIER", "3"}, {"DM_HACK_SHFAR", NULL}, {"DM_VK_NATIVE_SHFAR", NULL}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_LCAP", "0"},
+                                            {NULL, NULL}};
+    static const char *const e_sh0[][2] = {{"DM_HACK_TIER", NULL}, {"DM_HACK_LIGHTS", "4"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SH", "0"}, {NULL, NULL}};
+    static const char *const e_l4[][2] = {{"DM_HACK_TIER", NULL}, {"DM_HACK_LIGHTS", "4"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_LCAP", "1"}, {NULL, NULL}};
+    static const char *const e_l4d[][2] = {{"DM_HACK_TIER", NULL}, {"DM_HACK_LIGHTS", "4"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_LCAP", NULL}, {NULL, NULL}};
+    static a5_res R;
+    a5_child(e_max, hk_lines_child, &R); a5_child(e_max1, hk_lines_child, &R); a5_child(e_sh0, hk_lines_child, &R); a5_child(e_l4, hk_lines_child, &R);
+    a5_child(e_l4d, hk_lines_child, &R);
+    // ---- targets re-made at another size (forked: the cache and the store policy stay there)
+    static const char *const e_rs[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_HACK_TIER", NULL}, {"DM_HACK_SHFAR", NULL}, {NULL, NULL}};
+    a5_child(e_rs, hk_resize_child, &R);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
 }

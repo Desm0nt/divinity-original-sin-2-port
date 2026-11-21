@@ -629,7 +629,9 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     if (g.live && memcmp(rect, g.R.rect, sizeof rect)) end_range(END_NEXT);
     if (g.pend) run_pending();
     if (g.far) {   // the far cascade (nrh_far: the frame's tiles in order of their first draw, the last one of 3 / of 2 for a 2048 atlas)
-        if (nrh_far(&g.ftiles, rect, a->w) == 1) {
+        // [stage 5.4 G2] only the sun atlas, as xbg_nr_hacks.inc far_draw (square, >= 1024): the cache adopts any depth-only image >= 256
+        if (a->w != a->h || a->w < 1024) g.s.far_not_sun++;
+        else if (nrh_far(&g.ftiles, rect, a->w) == 1) {
             g.s.far_draws++;
             if (g.far == 1) { out->skip = 1; g.s.far_skipped++; return; }
         }
@@ -645,6 +647,7 @@ static uint32_t num(const char *n, uint32_t def, uint32_t lo, uint32_t hi) {
     const char *v = getenv(n); if (!v || !*v) return def;
     const long x = atol(v); return x < (long)lo ? lo : x > (long)hi ? hi : (uint32_t)x;
 }
+static int g_far_read;   // [stage 5.4 G2] vkn_shc_install read DM_VK_NATIVE_SHFAR
 void vkn_shc_install(void) {
     static int done; if (done) return; done = 1;
     const char *e = getenv("DM_VK_NATIVE_SHCACHE");
@@ -658,7 +661,7 @@ void vkn_shc_install(void) {
     int fr = f && *f ? atoi(f) : nrh_value(NRH_SHFAR, &from);
     if (f && *f) from = 'v';
     if (fr < 0 || fr > 2) fr = 0;
-    g.mode = m; g.far = fr; g.inst = m || fr;
+    g.mode = m; g.far = fr; g.inst = m || fr; g_far_read = 1;
     vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u; DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
              m == 0 ? "off" : m == 1 ? "on" : m == 2 ? "verify - decided and counted, drawn as the engine asks, would-be hits compared" : "poison - a hit keeps the cleared tile",
              g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
@@ -667,6 +670,7 @@ void vkn_shc_install(void) {
     if (vkn_fx_register("shcache", shc_fx, NULL, 100)) { vkn_logf(RED "shcache: the draw-effect chain refused the function: off"); g.inst = 0; return; }
     vkn_rec_on_close(on_close);
 }
+int vkn_shc_far(void) { return g_far_read ? g.far : -1; }
 int vkn_shc_active(void) { return g.inst; }
 void vkn_shc_stats_get(vkn_shc_stats *s) { if (s) { *s = g.s; s->img_bytes = img_bytes(); } }
 

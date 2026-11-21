@@ -8,7 +8,8 @@
 //   DM_VK_NATIVE=1          native: the backend owns what it covers (a hook may replace its function).
 // Hooks go in with dn_hook_chain (hle_dos2_native.c): a site another module of ours hooked already (DM_NR ...) is chained - this
 // file's hook runs first and reaches the function through the earlier hook. So this installer runs AFTER every other installer.
-// Safe-mode step 2 sets DM_VK_NATIVE=0 (dm/gfx/vulkan/engine/xbg_safe_mode.h).
+// Safe mode (dm/gfx/vulkan/engine/xbg_safe_mode.h): step 1 = stage-5 techniques and the recording thread off, step 2 = conservative
+// backend basics, still on the backend; step 3 sets DM_VK_NATIVE=0 (the old path).
 // Every site's jump goes to dm_vkn_stack_stub(hook), not to the hook: the hook (and the engine original it calls) runs on the
 // thread's 1 MiB host stack, never on the guest stack the game sized for the Switch (hle_dos2_vkn_stack.c: mechanism and numbers).
 #ifdef DM_GAME_DOS2
@@ -53,8 +54,8 @@ void dm_vkn_cmd_register(void) __attribute__((weak));      // hle_dos2_vkn_cmd.c
 // ---- the frame tick: once a presented frame. Census every 10 s; `own` = nobody records frames (mode 2, or mode 1 without the
 // frame part): then frames advance here (deferred destruction) and queued uploads are flushed by an own submission. ----
 static vkn_fn g_o_endframe; static uint64_t g_census_t;
-static vkn_census_fn g_census[16]; static int g_ncensus;
-void dm_vkn_census(vkn_census_fn fn) { if (g_ncensus < 16) g_census[g_ncensus++] = fn; }
+static vkn_census_fn g_census[48]; static int g_ncensus;   // (stage 5: 22+ parts register a line)
+void dm_vkn_census(vkn_census_fn fn) { if (g_ncensus < 48) g_census[g_ncensus++] = fn; }
 
 // ---- DM_VK_NATIVE_LOG=1 (read once at install): one line per presented frame for the first 120 frames, deltas of the parts'
 // counters since the previous line: draws recorded / dropped by reason (vkn_draw), UI draws / drops (vkn_ui), passes (vkn_pass),

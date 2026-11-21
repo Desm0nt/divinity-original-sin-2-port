@@ -694,12 +694,16 @@ static const struct { const char *name; char kind; } k_pre_off[] = {   // kind: 
     {"DM_NR_ONCHIP_FOG", 'T'},         // T its fog variant
     {"DM_NR_MAT_VS", 'T'},             // T NR-33B trimmed vertex outputs
     {"DM_NR_XLQ", 'T'},                // T NR-32 output trim
-    {"DM_HACK_FSR", 'T'},              // T EASU module swap of the stretch pass (stage 5.4 ports it to the backend; until then off in mode 1)
+    // [stage 5.4 G1] DM_HACK_FSR left the list: it is the player's gear value (Tl2Gear dos2Fsr / a hack tier), read by the backend
+    // (vkn_shlib_named.cpp, the PPFXAA module swap) and by hle_dos2_quality.c (DM_HACK_NOAA's FSR rule). Forcing it to "0" made the explicit
+    // 0 win over DM_HACK_TIER and dropped the gear's FSR row in mode 1. The translator's own swap (xbg_nr_sh.inc hacks) needs DM_NR_SH=1,
+    // which stays forced off above, so the DM_VK_NATIVE_SHLIB=0 fallback cannot apply it twice.
 };
 // Kept on purpose: DM_NR_MEM (RAM budget, no hook; with NR off it plans only the encoder and warm-up caches), DM_GFX_PRESENT_THREAD
 // (the presenter the frame part hands images to), DM_DOS2_* (screen shape, quality / DRS, touch UI: not NVN-stream features), the
-// translator's own DM_GFX_* policies (they act on the NVN stream only, which mode 1 leaves empty), DM_HACK_* other than FSR (read by
-// the backend's pieces through nr_hacks.h: DM_HACK_SHFAR / _SHPCF / _TIER), and every DM_VK_NATIVE_* switch.
+// translator's own DM_GFX_* policies (they act on the NVN stream only, which mode 1 leaves empty), every DM_HACK_* (read by the
+// backend's pieces through nr_hacks.h: [stage 5.4] FSR / LIGHTS / SHPCF / SHFAR / TEXBIAS / ANISO / TIER; the rest by
+// hle_dos2_quality.c), and every DM_VK_NATIVE_* switch.
 void dm_dos2_vkn_pre(void) {
     const char *e = getenv("DM_VK_NATIVE");
     if (!e || atoi(e) != VKN_NATIVE) return;

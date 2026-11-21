@@ -214,6 +214,34 @@ void vkn_tex_private_free(vkn_tex *t);
 // freed, a sampler created / replaced / destroyed, a comparison twin installed or dropped. Texel writes (uploads, updates, GPU writes)
 // and layout changes do not count: they change no answer. A plain atomic load; read it BEFORE the lookups it is to guard.
 uint32_t vkn_tex_bind_gen(void);
+// ==== [stage 5.4 G2] DM_HACK_TEXBIAS / DM_HACK_ANISO (dm/gfx/nr/nr_hacks.h; the old path: xbg_nr_hacks.inc par) ====
+// The player's values (explicit DM_HACK_<name> over DM_HACK_TIER), read once at the first sampler creation: a mip LOD bias added and an
+// anisotropy cap N (min(game's, N), 1 = off). Applied through a HACK TWIN per sampler-pool id: the game sampler's VkSamplerCreateInfo
+// with mipLodBias + bias and maxAnisotropy min(game, N), made at vkn_sampler_create (loader thread: never on the draw path), retired
+// with its game sampler. Which binding gets the twin, DM_VK_NATIVE_TEXHACK (new; no old name - the old path applied the values in the
+// translator's sampler lookup):
+//   0  off: the values are not applied (the hacks line of vkn_hacks.c prints it red);
+//   1  per texture (default; the old path's rule): vkn_sampler_by_id returns the twin when this thread's previous vkn_tex_view_by_id
+//      gave a texture the CPU uploaded and the GPU never wrote (class SAMPLED, no vkn_pass write), with >= 2 levels: the draw path asks
+//      view then sampler per texture binding (vkn_draw.c bind_textures, the effect pieces the same way); a sampler lookup without a view
+//      before it gets the game sampler. Targets, the post chain and the UI atlas keep the game's values (a sampler bias also moves
+//      explicit textureLod reads: Vulkan's lambda = lod + mipLodBias). Comparison twins (Dref: the shadow atlas, a target): unchanged.
+//   2  per sampler: every lookup of a sampler that repeats or mirrors in U or V gets the twin (materials tile; targets / post / UI
+//      clamp), whatever the texture; its comparison twin carries the values too. No per-texture decision.
+// The gear applies DM_HACK_* at the next launch (Tl2Gear.java "next launch"): nothing changes them in a running game. vkn_tex_hack_set
+// is the live path anyway (host test; a future live row): any thread; every twin (and every comparison twin of our own) is retired
+// (vkn_retire: 3 frames - a draw recorded before still has its sampler), the binding generation bumped (the draw-cost reuse rebuilds),
+// twins made again from the creation arguments; returns how many. Twins count as samplers in vkn_tex_stats (samplers, samplers_made):
+// the draw path's death check (samplers_made - samplers) sees a retired twin and forgets its descriptor sets.
+typedef struct vkn_tex_hack_stats {
+    int mode, on, aniso; float bias;              // DM_VK_NATIVE_TEXHACK, any value in effect, the cap, the bias (mip levels)
+    uint32_t twins;                               // alive
+    uint64_t made, failed, retired, picked, kept, cmp, sets;   // twins made / failed / retired; lookups that took the twin / kept the
+                                                  // game sampler (mode 1: not a material); comparison twins with the values (mode 2); live sets
+} vkn_tex_hack_stats;
+void vkn_tex_hack_get(vkn_tex_hack_stats *s);
+int vkn_tex_hack_set(int mode, float bias, int aniso);
+VkSampler vkn_sampler_hack_by_id(uint32_t sampler_id);   // the twin of an id (VK_NULL_HANDLE = none); tests and logs
 
 #ifdef __cplusplus
 }

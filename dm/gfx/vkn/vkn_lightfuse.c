@@ -677,11 +677,13 @@ static int reg_fn(void) {
     if (!g.reg) g.reg = !vkn_fx_register("lightfuse", lf_fx, NULL, 300) ? 1 : -1;
     return g.reg > 0;
 }
+int vkn_hacks_lightfuse_ok(void) __attribute__((weak));   // [stage 5.4 G1] vkn_hacks.h: DM_HACK_LIGHTS' cap module replaces the Light module
 void vkn_lf_install(void) {
     static int done; if (done) return; done = 1;
     g.retype = -1;
     const char *e = getenv("DM_VK_NATIVE_LIGHTFUSE"); int m = e && *e ? atoi(e) : 1;   // xbg_nr_lightfuse_default: 1 on every family
     if (m < 0 || m > 3) { lf_red(R_CFG, "DM_VK_NATIVE_LIGHTFUSE=%s is not 0 / 1 / 2 / 3: off", e); m = 0; }
+    if (m && vkn_hacks_lightfuse_ok && !vkn_hacks_lightfuse_ok()) m = 0;   // [stage 5.4 G1] the player's light cap wins (DM_VK_NATIVE_LCAP=1; one line there)
     const char *f = getenv("DM_VK_NATIVE_LIGHTFUSE_FOG"); int v = f && *f ? atoi(f) : 1;   // xbg_nr_lightfuse_fog_default: 1
     if (v < 0 || v > 2) { lf_red(R_CFG, "DM_VK_NATIVE_LIGHTFUSE_FOG=%s is not 0 / 1 / 2: off", f); v = 0; }
     if (v && !m && f && *f) vkn_logf("lightfuse: DM_VK_NATIVE_LIGHTFUSE_FOG=%d needs DM_VK_NATIVE_LIGHTFUSE: off", v);

@@ -13,7 +13,7 @@ NATIVE=${NATIVE:-$PORT/work/shaders-native/native.xgspack}
 NR=${NR:-$PORT/work/native-lightfuse/native-nr.xgspack}
 LIMIT=${1:-0}; shift || true
 # "+nr<q>" (q 0..3), "+nrv", "+nr3nl": the named-bundle replacement on both sides (vkn_shlib_test.cpp head comment)
-MODELS=${*:-adreno mali powervr adreno-simmali adreno-native adreno-files adreno+nr3 mali+nr3 powervr+nr3 adreno+nr1 adreno+nr2 adreno+nrv adreno+nr3nl adreno-native+nr3}
+MODELS=${*:-adreno mali powervr adreno-simmali adreno-native adreno-files adreno+nr3 mali+nr3 powervr+nr3 adreno+nr1 adreno+nr2 adreno+nrv adreno+nr3nl adreno-native+nr3 adreno+nr3-fsr1-lc4 adreno+nr2-fsr3-lc2 adreno+nr3-fsr2 mali+nr3-fsr1-lc2}
 NDK=${NDK:?set NDK to <ndk>/toolchains/llvm/prebuilt/<host>/sysroot/usr/include}
 B=${B:-$HOME/vkn-shlib-test}; mkdir -p $B/inc/android $B/obj $B/shaders $B/src/dm
 [ -d $B/inc/vulkan ] || cp -r $NDK/vulkan $NDK/vk_video $B/inc/
