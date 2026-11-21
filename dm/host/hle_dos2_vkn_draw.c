@@ -58,8 +58,10 @@
 #include "../gfx/vkn/vkn_draw.h"
 #include "../gfx/vkn/vkn_prof.h"   // [stage 5.1 G] the measurement probes (DM_VK_NATIVE_PROF "draw by part")
 #include "../gfx/vkn/vkn_query.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: every backend call of this part is a record
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define DR_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own
 
@@ -150,7 +152,7 @@ static void runlock(uint64_t w) { __atomic_sub_fetch((uint32_t *)(uintptr_t)w, 1
 static struct { uint32_t off, size; uint64_t frame; uint8_t ok; } g_lc[4][VKN_UBO_SLOTS];
 static int dedupe(int list, uint32_t slot, uint32_t size, const void *shadow, const uint8_t *cpu, uint32_t *off) {
     if (!(g_hcost & VKN_COST_UBO) || list < 0 || list > 3 || slot >= VKN_UBO_SLOTS || !size || !shadow) return 0;
-    const uint64_t f = vkn_frame();
+    const uint64_t f = vkn_rt_frame();   // [stage 5.5] (the frame of the recording at this point: = vkn_frame() without the thread)
     const int cand[2] = {list, list == 0 ? 1 : list == 1 ? 0 : -1};
     for (int c = 0; c < 2; c++) {
         if (cand[c] < 0) continue;
@@ -176,7 +178,7 @@ static int64_t upload(uint64_t b, uint64_t frame, int shader, int list) {
     if (!cpu || vkn_ring_alloc(size, &off)) { g_c.ring_fail++; DR_REDLN(1, "constant ring: no room / no ring for %u bytes (block %#llx)", size, (unsigned long long)b); return -1; }
     if (size) memcpy(cpu + off, (const void *)(uintptr_t)shadow, size);
     g_c.ring_bytes += size;
-    if (list >= 0 && list <= 3 && slot < VKN_UBO_SLOTS) { g_lc[list][slot].off = off; g_lc[list][slot].size = size; g_lc[list][slot].frame = vkn_frame(); g_lc[list][slot].ok = 1; }
+    if (list >= 0 && list <= 3 && slot < VKN_UBO_SLOTS) { g_lc[list][slot].off = off; g_lc[list][slot].size = size; g_lc[list][slot].frame = vkn_rt_frame(); g_lc[list][slot].ok = 1; }
 fields:
     wr64(b + B_VA, DR_UBO_VA | off);
     wr64(b + B_CPU, (uint64_t)(uintptr_t)(cpu + off));
@@ -200,7 +202,7 @@ static void flush_globals(uint64_t r) {
         g_c.g_up++;
         const uint32_t slot = vkn_rd8(b + B_BIND), size = vkn_rd32(b + B_SIZE);
         if (slot >= VKN_UBO_SLOTS) { g_c.gl_slot++; DR_REDLN(2, "global constant block %#llx: binding index %u >= %d", (unsigned long long)b, slot, VKN_UBO_SLOTS); continue; }
-        for (int st = 0; st < 3; st++) vkn_draw_ubo(st, slot, (uint32_t)off, size);   // NVN stages 0, 1, 5 at once (0x926f90)
+        for (int st = 0; st < 3; st++) vkn_rt_ubo(st, slot, (uint32_t)off, size);   // NVN stages 0, 1, 5 at once (0x926f90); [stage 5.5] a record
     }
     if (lock) runlock(r + R_GLOCK);
 }
@@ -224,7 +226,7 @@ static void flush_shader(uint64_t r) {
             if (vkn_rd8(b + B_BIND) < 8 && (vkn_rd8(b + B_DIRTY) || vkn_rd64(b + B_STAMP) != frame)) { uploaded = 1; if (upload(b, frame, 1, k) >= 0) g_c.s_up++; }
         }
     }
-    if ((g_hcost & VKN_COST_FLUSH) && !uploaded && g_ann.ok && g_ann.rec == rec && g_ann.gen == vkn_draw_ubo_gen() &&
+    if ((g_hcost & VKN_COST_FLUSH) && !uploaded && g_ann.ok && g_ann.rec == rec && g_ann.gen == vkn_rt_ubo_gen() &&
         !memcmp(g_ann.arr, arrs, sizeof arrs) && !memcmp(g_ann.cnt, cnts, sizeof cnts)) { g_k.ann_skip++; g_k.ann_skip_blocks += g_ann.n; return; }
     g_ann.ok = 0;
     const uint64_t bad0 = g_c.bad_ptr, ann0 = g_c.s_ann;
@@ -240,13 +242,13 @@ static void flush_shader(uint64_t r) {
                 DR_REDLN(3, "shader block %#llx (stage list %d, binding %u): CPU pointer %#llx is not in our ring %#llx (not announced)", (unsigned long long)b, k, slot, (unsigned long long)p, (unsigned long long)c);
                 continue;
             }
-            vkn_draw_ubo(k, slot, (uint32_t)(p - c), size);
+            vkn_rt_ubo(k, slot, (uint32_t)(p - c), size);   // [stage 5.5] a record
             g_c.s_ann++;
         }
     }
     if ((g_hcost & VKN_COST_FLUSH) && g_c.bad_ptr == bad0) {   // (a pass with a bad pointer is always made again: its red line / counter)
         g_ann.ok = 1; g_ann.rec = rec; memcpy(g_ann.arr, arrs, sizeof arrs); memcpy(g_ann.cnt, cnts, sizeof cnts);
-        g_ann.gen = vkn_draw_ubo_gen(); g_ann.n = (uint32_t)(g_c.s_ann - ann0);
+        g_ann.gen = vkn_rt_ubo_gen(); g_ann.n = (uint32_t)(g_c.s_ann - ann0);
     }
 }
 // 0x924730: only the resets (and a count of the binds the original would have issued: slots in the dirty ranges holding a texture).
@@ -257,6 +259,10 @@ static void flush_textures(uint64_t r) {
     // would store the values that are there
     if ((g_hcost & VKN_COST_FLUSH) && vkn_rd16(r + dirty[0]) == 0xff20 && vkn_rd16(r + dirty[1]) == 0xff20 && vkn_rd16(r + dirty[2]) == 0xff20 &&
         vkn_rd16(r + sdirty[0]) == 0xff20 && vkn_rd16(r + sdirty[1]) == 0xff20 && vkn_rd16(r + sdirty[2]) == 0xff20) { g_k.tex_clean++; return; }
+    {   // [stage 5.5] DM_VK_NATIVE_RT_SLOTS 2 / 3: a range that is not clean = the slot arrays may have changed since the last flush
+        int dirt = 0; for (int k = 0; k < 3; k++) dirt |= vkn_rd16(r + dirty[k]) != 0xff20 || vkn_rd16(r + sdirty[k]) != 0xff20;
+        if (dirt) vkn_rt_slots_touch();
+    }
     for (int k = 0; k < 3; k++) {
         const int8_t lo = (int8_t)vkn_rd8(r + dirty[k]), hi = (int8_t)vkn_rd8(r + dirty[k] + 1);
         for (int s = lo < 0 ? 0 : lo; s <= hi && s < 32; s++) g_c.tex_binds_orig += (int32_t)vkn_rd32(r + ids[k] + 4u * s) != -1;
@@ -339,7 +345,7 @@ void dm_vkn_draw_fill(vkn_draw_in *in) {
     if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // textures the engine wrote through their mapped storage since the last draw
     const uint64_t r = vkn_renderer();
     memset(in, 0, sizeof *in);
-    vkn_query_cond(r && vkn_rd8(r + R_RENDER_EN) ? vkn_rd64(r + R_RENDER_QUERY) : 0);   // [stage 4: queries] the condition of this draw
+    vkn_rt_query_cond(r && vkn_rd8(r + R_RENDER_EN) ? vkn_rd64(r + R_RENDER_QUERY) : 0);   // [stage 4: queries] the condition of this draw ([stage 5.5] carried by the draw's record)
     if (!r) return;
     in->shader = vkn_rd64(r + R_SHADER);
     // blend: 0 = what NVN still has (the last applied one); the default handle = NVN defaults = blending off
@@ -382,6 +388,10 @@ void dm_vkn_draw_fill(vkn_draw_in *in) {
 }
 
 // ---- the draws ----
+// [stage 5.5] The draws, the dispatch and the arrays draw are records (vkn_rt_*: vkn_query_dispatch is the dispatch record's; a dropped
+// encoded draw is counted by vkn_draw, not here). The hook-side probes (FLUSH / FILL) only without the recording thread: with it the
+// recording thread wraps each executed draw in its own probes (vkn_prof_h is the recording thread's).
+#define PROF (!vkn_rt_threaded())
 VKN_HOOK h_flush_globals(VKN_A) { VKN_UNUSED; flush_globals(a0); return 0; }   // 0x926f90(r)
 VKN_HOOK h_flush_shader(VKN_A) { VKN_UNUSED; flush_shader(a0); return 0; }     // 0x925740(r)
 VKN_HOOK h_flush_textures(VKN_A) { VKN_UNUSED; flush_textures(a0); return 0; } // 0x924730(r)
@@ -390,57 +400,56 @@ VKN_HOOK h_flush_textures(VKN_A) { VKN_UNUSED; flush_textures(a0); return 0; } /
 VKN_HOOK h_draw_indexed(VKN_A) {   // 0x928e80(r, w1 first, w2 count)
     VKN_UNUSED;
     const uint64_t r = a0;
-    vkn_prof_draw_begin();
+    if (PROF) vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
-    vkn_prof_mark(VKN_PROF_FLUSH);
+    if (PROF) vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    vkn_prof_mark(VKN_PROF_FILL);
-    g_c.di++; g_c.dropped += vkn_draw_indexed(&in, (uint32_t)a1, (uint32_t)a2, 1) != 0;
+    if (PROF) vkn_prof_mark(VKN_PROF_FILL);
+    g_c.di++; g_c.dropped += vkn_rt_draw_indexed(&in, (uint32_t)a1, (uint32_t)a2, 1) != 0;
     dm_vkn_draw_tail_post(r);
-    vkn_prof_draw_end();
+    if (PROF) vkn_prof_draw_end();
     return 0;
 }
 VKN_HOOK h_draw_indexed_inst(VKN_A) {   // 0x928fb0(r, -, w2 instances, -, w4 count); first index [r+0x17d0]
     VKN_UNUSED;
     const uint64_t r = a0;
-    vkn_prof_draw_begin();
+    if (PROF) vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
-    vkn_prof_mark(VKN_PROF_FLUSH);
+    if (PROF) vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    vkn_prof_mark(VKN_PROF_FILL);
-    g_c.dii++; g_c.dropped += vkn_draw_indexed(&in, (uint32_t)vkn_rd64(r + R_FIRST), (uint32_t)a4, (uint32_t)a2) != 0;
+    if (PROF) vkn_prof_mark(VKN_PROF_FILL);
+    g_c.dii++; g_c.dropped += vkn_rt_draw_indexed(&in, (uint32_t)vkn_rd64(r + R_FIRST), (uint32_t)a4, (uint32_t)a2) != 0;
     dm_vkn_draw_tail_post(r);
-    vkn_prof_draw_end();
+    if (PROF) vkn_prof_draw_end();
     return 0;
 }
 VKN_HOOK h_dispatch(VKN_A) {   // 0x9290f0(r, w1 x, w2 y, w3 z)
     VKN_UNUSED;
     const uint64_t r = a0;
-    vkn_prof_draw_begin();
+    if (PROF) vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
-    vkn_prof_mark(VKN_PROF_FLUSH);
+    if (PROF) vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    vkn_prof_mark(VKN_PROF_FILL);
-    vkn_query_dispatch();   // [stage 4: queries] a dispatch is never skipped
+    if (PROF) vkn_prof_mark(VKN_PROF_FILL);
     vkn_img_bind img[IMG_SLOTS]; uint32_t n = 0;
     for (uint32_t s = 0; s < IMG_SLOTS; s++) if (g_img[2][s]) { img[n].slot = s; img[n].tex = g_img[2][s]; n++; }
-    g_c.dc++; g_c.dropped += vkn_draw_dispatch(&in, img, n, (uint32_t)a1, (uint32_t)a2, (uint32_t)a3) != 0;
+    g_c.dc++; g_c.dropped += vkn_rt_dispatch(&in, img, n, (uint32_t)a1, (uint32_t)a2, (uint32_t)a3) != 0;
     dm_vkn_draw_tail_post(r);
-    vkn_prof_draw_end();
+    if (PROF) vkn_prof_draw_end();
     return 0;
 }
 int dm_vkn_draw_arrays(uint32_t first, uint32_t count) {
     const uint64_t r = vkn_renderer();
     if (!r) return 1;
-    vkn_prof_draw_begin();
+    if (PROF) vkn_prof_draw_begin();
     dm_vkn_draw_tail_pre(r);
-    vkn_prof_mark(VKN_PROF_FLUSH);
+    if (PROF) vkn_prof_mark(VKN_PROF_FLUSH);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    vkn_prof_mark(VKN_PROF_FILL);
-    const int rc = vkn_draw_arrays(&in, first, count);
+    if (PROF) vkn_prof_mark(VKN_PROF_FILL);
+    const int rc = vkn_rt_draw_arrays(&in, first, count);
     g_c.da++; g_c.dropped += rc != 0;
     dm_vkn_draw_tail_post(r);
-    vkn_prof_draw_end();
+    if (PROF) vkn_prof_draw_end();
     return rc;
 }
 
@@ -504,6 +513,11 @@ void dm_vkn_draw_register(void) {
     dm_vkn_site(0x928e80, k_di, "DrawIndexed", (void *)h_draw_indexed, &g_o_di, VKN_M_NATIVE);
     dm_vkn_site(0x928fb0, k_dii, "DrawIndexedInstanced", (void *)h_draw_indexed_inst, &g_o_dii, VKN_M_NATIVE);
     dm_vkn_site(0x9290f0, k_dc, "DispatchCompute", (void *)h_dispatch, &g_o_dc, VKN_M_NATIVE);
+    {   // [stage 5.5] every hook of this part encodes its backend work (or touches only the engine's records): no default sync
+        void *const enc[] = {(void *)h_flush_globals, (void *)h_flush_shader, (void *)h_flush_textures, (void *)h_bind_image, (void *)h_bind_ssbo,
+                             (void *)h_draw_indexed, (void *)h_draw_indexed_inst, (void *)h_dispatch};
+        for (size_t i = 0; i < sizeof enc / sizeof enc[0]; i++) dm_vkn_stack_flag(enc[i], DM_VKN_SF_ENC);
+    }
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2: no site of this part goes in (VKN_M_NATIVE), nothing else either
     {   // [stage 5] DM_VK_NATIVE_COST (vkn_draw.h): bit mask of the draw-cost shortcuts, default all; 0 = the stage-4 draw path exactly
         const char *e = getenv("DM_VK_NATIVE_COST");

@@ -36,6 +36,18 @@ int vkn_fx_register(const char *name, vkn_fx_fn fn, void *user, int order) {
     else vkn_logf("fx: \"%s\" registered, order %d", name ? name : "?", order);
     return rc;
 }
+int vkn_fx_drop(const char *name) {
+    int rc = 0;
+    pthread_mutex_lock(&g_mu);
+    const uint32_t n = g_nfn;
+    for (uint32_t i = 0; name && i < n; i++) if (!strcmp(g_fn[i].name, name)) {
+        for (uint32_t k = i; k + 1 < n; k++) g_fn[k] = g_fn[k + 1];
+        __atomic_store_n(&g_nfn, n - 1, __ATOMIC_RELEASE); rc = 1; break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (rc) vkn_logf("fx: \"%s\" dropped", name);
+    return rc;
+}
 static const vkn_fx_out *g_force;                 // [stage 5.1 A4] vkn_fx_force: recording thread
 void vkn_fx_force(const vkn_fx_out *o) { g_force = o; }
 int vkn_fx_active(void) {

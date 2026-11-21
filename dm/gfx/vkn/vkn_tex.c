@@ -1097,8 +1097,14 @@ void vkn_tex_update_init(void) {
     done = 1;
     vkn_rec_on_begin(rec_begin_seen);
 }
-int vkn_tex_on_rec_thread(void) {   // [stage 5 A1] vkn_tex.h
+int vkn_rt_rec_thread_is(void) __attribute__((weak));   // [stage 5.5] vkn_rt.h: with the recording thread, the owner of the recording
+static int rec_here(void) {
+    const int o = vkn_rt_rec_thread_is ? vkn_rt_rec_thread_is() : -1;
+    if (o >= 0) return o;
     return __atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && pthread_equal(pthread_self(), g_rec_thread);
+}
+int vkn_tex_on_rec_thread(void) {   // [stage 5 A1] vkn_tex.h
+    return rec_here();
 }
 void vkn_tex_update_stats_get(vkn_tex_update_stats *s) {
     if (!s) return;
@@ -1106,6 +1112,18 @@ void vkn_tex_update_stats_get(vkn_tex_update_stats *s) {
 }
 static void ust_count(uint64_t *c) { pthread_mutex_lock(&g_mu); (*c)++; pthread_mutex_unlock(&g_mu); }
 
+// [stage 5.5] the recording thread (vkn_rt.h): on the engine thread outside an owned section the update is a record - the staging is
+// made here (the rows read now), the copy is recorded where the recording is: into the open recording as before, else queued.
+int vkn_rt_tex_rec(void) __attribute__((weak));
+void vkn_rt_call(void (*fn)(void *arg), const void *arg, uint32_t bytes) __attribute__((weak));
+typedef struct { struct up_ctx *u; uint64_t bytes; } up_rec;
+static void up_rec_fn(void *p) {
+    const up_rec *r = (const up_rec *)p; up_ctx *u = r->u;
+    const int here = vkn_cb && vkn_pass_layout && vkn_cb() != VK_NULL_HANDLE;
+    if (here) { vkn_pass_layout(u->t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL); up_run(vkn_cb(), u); }
+    else { u->ns = vkn_now_ns(); vkn_upload_push(up_run, u, r->bytes); }
+    pthread_mutex_lock(&g_mu); if (here) g_ust.recorded++; else g_ust.queued++; pthread_mutex_unlock(&g_mu);
+}
 int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *rows, uint32_t pitch) {
     if (!t || !rows || t->dead || !t->image || t->samples != 1) { ust_count(&g_ust.dropped_dead); return -1; }
     if (level >= t->mips || layer >= (t->nvn_target == 2 ? mipdim(t->depth, level) : t->layers)) { ust_count(&g_ust.dropped_rect); return -1; }
@@ -1187,8 +1205,13 @@ submit:;
     if (alive) t->refs++;
     pthread_mutex_unlock(&g_mu);
     if (!alive) { if (u->have_blk) vkn_block_free(&u->blk); vkn_bcgpu_job_free(u->job); free(u); ust_count(&g_ust.dropped_dead); return -1; }
-    const int here = vkn_cb && vkn_pass_layout && __atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && pthread_equal(pthread_self(), g_rec_thread) &&
-                     vkn_cb() != VK_NULL_HANDLE;
+    if (vkn_rt_tex_rec && vkn_rt_call && vkn_rt_tex_rec()) {   // [stage 5.5] a record
+        const up_rec r = {u, bytes};
+        pthread_mutex_lock(&g_mu); g_ust.bytes += bytes; pthread_mutex_unlock(&g_mu);
+        vkn_rt_call(up_rec_fn, &r, sizeof r);
+        return 0;
+    }
+    const int here = vkn_cb && vkn_pass_layout && rec_here() && vkn_cb() != VK_NULL_HANDLE;   // [stage 5.5] (the owner of the recording)
     if (here) {
         // in order with the draws of this recording: an open pass ends, remembered clears of t run, then the copy
         vkn_pass_layout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);

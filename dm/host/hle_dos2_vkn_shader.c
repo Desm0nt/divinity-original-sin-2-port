@@ -28,7 +28,9 @@
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_shader.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 enum { CTL_COPY = 0xe48, NAME_MAX_ = 96, MAP_N = 1 << 16 };
@@ -140,7 +142,9 @@ VKN_HOOK vkn_h_destroy(VKN_A) {
     if ((rc & 1) && cookie) {
         uint64_t h = 0;
         pthread_mutex_lock(&g_map_mu); const int found = map_take(cookie, &h); pthread_mutex_unlock(&g_map_mu);
-        if (found) { vkn_shader_destroy(h); __atomic_add_fetch(&g_n_destroyed, 1, __ATOMIC_RELAXED); }
+        // [stage 5.5] the drain calls this for every pending shader, every frame: the sync only when one really goes
+        static vkn_rt_site site = VKN_RT_SITE("DestroyShaderIfOld (destroyed)");
+        if (found) { vkn_rt_own_begin(&site); vkn_shader_destroy(h); vkn_rt_own_end(); __atomic_add_fetch(&g_n_destroyed, 1, __ATOMIC_RELAXED); }
         else __atomic_add_fetch(&g_n_unmatched, 1, __ATOMIC_RELAXED);
     }
     return rc;
@@ -166,6 +170,7 @@ void dm_vkn_shader_register(void) {
     dm_vkn_site(0x92d320, k_load, "LoadShaderFile", (void *)vkn_h_load, &g_o_load, VKN_M_BOTH);
     dm_vkn_site(0x915ad0, k_create, "CreateShader", (void *)vkn_h_create, &g_o_create, VKN_M_BOTH);
     dm_vkn_site(0x91ce90, k_destroy, "DestroyShaderIfOld", (void *)vkn_h_destroy, &g_o_destroy, VKN_M_BOTH);
+    dm_vkn_stack_flag((void *)vkn_h_destroy, DM_VKN_SF_ENC);   // [stage 5.5] syncs itself, only for a destroy
     dm_vkn_census(shader_census);
 }
 #endif

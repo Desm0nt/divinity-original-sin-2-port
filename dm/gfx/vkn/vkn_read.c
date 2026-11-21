@@ -61,9 +61,15 @@ int vkn_read_supported(const vkn_tex *t, const char **why) {
     return w == NULL;
 }
 
+int vkn_rt_rec_thread_is(void) __attribute__((weak));   // [stage 5.5] vkn_rt.h: with the recording thread, the owner of the recording
+static int rec_other(void) {   // 1 = another thread records
+    const int o = vkn_rt_rec_thread_is ? vkn_rt_rec_thread_is() : -1;
+    if (o >= 0) return !o;
+    return __atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && !pthread_equal(g_rec_thread, pthread_self());
+}
 int vkn_read_now_ok(void) {
     if (vkn_cb() && vkn_rec_presented()) return 0;
-    return !__atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) || pthread_equal(g_rec_thread, pthread_self());
+    return !rec_other();
 }
 
 static int fail(uint64_t *ctr, int rc) { (*ctr)++; return rc; }
@@ -84,7 +90,7 @@ int vkn_read_texels(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32
         return fail(&g_st.e_rect, VKN_READ_E_RECT);
     }
     if (vkn_cb() && vkn_rec_presented()) return fail(&g_st.e_busy, VKN_READ_E_BUSY);
-    if (__atomic_load_n(&g_rec_known, __ATOMIC_ACQUIRE) && !pthread_equal(g_rec_thread, pthread_self())) return fail(&g_st.e_thread, VKN_READ_E_THREAD);
+    if (rec_other()) return fail(&g_st.e_thread, VKN_READ_E_THREAD);
     const uint32_t nb = vkn_read_texel_bytes(t), vb = vk_bpt(t->format);
     const uint64_t row_out = pitch ? pitch : (uint64_t)w * nb;
     if (row_out < (uint64_t)w * nb) return fail(&g_st.e_rect, VKN_READ_E_RECT);

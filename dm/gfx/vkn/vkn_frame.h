@@ -51,6 +51,15 @@ int vkn_frame_gpu_ns(uint64_t *begin_ns, uint64_t *end_ns);
 typedef struct vkn_frame_xstats { uint64_t presents, submit_fail, left_open, fence_timeouts, present_waits, present_wait_ns; } vkn_frame_xstats;
 void vkn_frame_xstats_get(vkn_frame_xstats *s);
 
+// ==== [stage 5.5] the recording thread (vkn_rt.h): "single-threaded" above means the recording's owner, which may change between the
+// engine thread and the recording thread at a sync point; these may be called from the engine thread while the other thread records ====
+// vkn_frame_gpu_ns: any thread (the pair is read as one). vkn_frame_gpu_done: the newest presented recording the GPU finished, as the
+// vkn_frame() its draws saw (*any = 0: none yet). vkn_frame_wait_frame (the owner): waits until every submitted presented recording of
+// frame <= f finished. vkn_rec_end_due (the owner): a presented submit's frame end is due (vkn_frame() + 1 at the next presented begin).
+uint64_t vkn_frame_gpu_done(int *any);
+void vkn_frame_wait_frame(uint64_t f);
+int vkn_rec_end_due(void);
+
 #ifdef __cplusplus
 }
 #endif

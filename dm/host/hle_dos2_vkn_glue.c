@@ -57,6 +57,7 @@ void dm_vkn_on_nvn_viewport_scissor(int32_t x, int32_t y, int32_t w, int32_t h) 
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_read.h"
 #include "../gfx/vkn/vkn_mirror.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: a flush with notes owns the recording (it records uploads, reads t->pass_written)
 
 #define GL_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own
 
@@ -229,12 +230,15 @@ void dm_vkn_glue_forget(uint64_t obj) {
         if (t_stor[i].obj == obj) { memmove(&t_stor[i], &t_stor[i + 1], sizeof t_stor[0] * (t_nstor - 1 - i)); t_nstor--; i--; }
 }
 void dm_vkn_glue_flush_tex(void);
+static vkn_rt_site g_site_flush = VKN_RT_SITE("storage mirror");
 void dm_vkn_glue_flush_tex(void) {
     if (!t_nstor) return;
     stor_note n[STOR_MAX];
     const uint32_t c = t_nstor;
     memcpy(n, t_stor, sizeof n[0] * c); t_nstor = 0;
+    vkn_rt_own_begin(&g_site_flush);   // [stage 5.5] in order with the draws before it (vkn_tex_update records into the open recording)
     for (uint32_t i = 0; i < c; i++) flush_one(&n[i]);
+    vkn_rt_own_end();
 }
 static uint64_t flush_on_stack(void *p) { (void)p; dm_vkn_glue_flush_tex(); return 0; }
 // Packet 0x2c / 0x2d from the buffer part's model of the executor (guest stack): the packet the next 0x2c handler copies from, and
@@ -242,7 +246,7 @@ static uint64_t flush_on_stack(void *p) { (void)p; dm_vkn_glue_flush_tex(); retu
 void dm_vkn_glue_pkt(unsigned op, uint64_t pkt);
 void dm_vkn_glue_pkt(unsigned op, uint64_t pkt) {
     if (op == 0x2c) t_pkt = pkt;
-    else if (op == 0x2d) { t_pkt = 0; if (t_nstor) dm_vkn_on_stack(flush_on_stack, NULL); }
+    else if (op == 0x2d) { t_pkt = 0; if (t_nstor) dm_vkn_on_stack_x(flush_on_stack, NULL, NULL, DM_VKN_SF_ENC); }   // ([stage 5.5] the flush syncs itself)
 }
 
 // ---- the writers' hooks (mode 1): their context for the notes, and the flush when they return (the write is finished) ----
@@ -281,6 +285,8 @@ void dm_vkn_glue_register(void) {
     dm_vkn_site(0x14284c0, k_sight, "SightMapsUpload", (void *)gl_sight, &g_o_sight, VKN_M_NATIVE);
     dm_vkn_site(0xff5500, k_ff, "TextureRowsUpload", (void *)gl_ff, &g_o_ff, VKN_M_NATIVE);
     dm_vkn_site(0xd1ada0, k_video, "MoviePlayer::Draw", (void *)gl_video, &g_o_video, VKN_M_NATIVE);
+    // [stage 5.5] engine code + the flush (which syncs only when it has notes): no default sync at the entry
+    dm_vkn_stack_flag((void *)gl_sight, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)gl_ff, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)gl_video, DM_VKN_SF_ENC);
 }
 
 void dm_vkn_glue_census(void);

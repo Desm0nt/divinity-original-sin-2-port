@@ -46,7 +46,9 @@
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_astc.h"
 #include "../gfx/vkn/vkn_bcgpu.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 static vkn_fn g_o_ct, g_o_cti, g_o_win, g_o_dt, g_o_red, g_o_cs, g_o_ds;
@@ -248,7 +250,14 @@ void dm_vkn_glue_forget(uint64_t obj) __attribute__((weak));   // hle_dos2_vkn_g
 VKN_HOOK vkn_h_dt(VKN_A) {
     const uint64_t obj = a1 ? vkn_rd64(a1) : 0;   // before: the original clears the record
     const uint64_t v = g_o_dt(VKN_F);
-    if ((v & 1) && obj) { if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj); vkn_tex_destroy_cookie(obj); }   // (audit U3: its storage note goes too)
+    if ((v & 1) && obj) {   // (audit U3: its storage note goes too)
+        // [stage 5.5] the drain 0x91ad20 calls this for every pending texture, every frame: the sync only when one really goes
+        static vkn_rt_site site = VKN_RT_SITE("DestroyTextureIfOld (destroyed)");
+        vkn_rt_own_begin(&site);
+        if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj);
+        vkn_tex_destroy_cookie(obj);
+        vkn_rt_own_end();
+    }
     return v;
 }
 
@@ -356,6 +365,7 @@ void dm_vkn_tex_register(void) {
     dm_vkn_site(0x91f2e0, k_cti, "CreateTextureFromImage", (void *)vkn_h_cti, &g_o_cti, VKN_M_BOTH);
     dm_vkn_site(0x93c3a0, k_win, "window textures", (void *)vkn_h_win, &g_o_win, VKN_M_BOTH);
     dm_vkn_site(0x91d630, k_dt, "DestroyTextureIfOld", (void *)vkn_h_dt, &g_o_dt, VKN_M_BOTH);
+    dm_vkn_stack_flag((void *)vkn_h_dt, DM_VKN_SF_ENC);   // [stage 5.5] syncs itself, only for a destroy (the original's NVN entries: the create part's, ENC)
     dm_vkn_site(0x920460, k_red, "ReduceTextureMips", (void *)vkn_h_red, &g_o_red, VKN_M_BOTH);
     dm_vkn_site(0x921e40, k_cs, "CreateSampler", (void *)vkn_h_cs, &g_o_cs, VKN_M_BOTH);
     dm_vkn_site(0x9239f0, k_ds, "DestroySampler", (void *)vkn_h_ds, &g_o_ds, VKN_M_BOTH);

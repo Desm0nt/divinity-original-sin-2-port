@@ -61,6 +61,16 @@
 // (hle_oe.c dynamic 3D scale needs >= 30 frames, hle_dos2_nr.c windows, diag.c perf file, hle_cpuprof.c rates), the translator's
 // XJ_FRAME frame number, the per-frame stats rows and long-frame log, the DM_NB / Z5 frame marks: needs an export in hle_nvn.c, called
 // here when it exists (dm_nvn_vkn_frame, weak). dm_cpu_place_self / dm_cpuprof_present are called here directly.
+//
+// [stage 5.5] DM_VK_NATIVE_RT (dm/gfx/vkn/vkn_rt.h; read here at registration, default 1; forced 0 with DM_VK_NATIVE_COND 1 / 3):
+// the backend's calls of these hooks are records of the recording thread: BeginFrame's vkn_rec_begin (vkn_rt_rec_begin binds the engine
+// thread as the encoder at the first one), BeginRender's clears and depth target (vkn_rt_pass_*), EndFrame's pass end / present / submit
+// (vkn_rt_rec_end: an off-frame end syncs, the engine expects the GPU work finished) and the frame's tail (vkn_rt_frame_tail: the
+// prof frame times and dm_vkn_tick run on the recording thread, then the backpressure). The engine-side work stays here, in the same
+// order. vkn_rec_prewait is not called (the recording thread waits for its buffer in vkn_rec_begin); the pacing sleep stays on the engine
+// thread. What the engine thread measures then: g_ft (begin / record / end) is the ENGINE thread's time (record = its encode time,
+// end = EndFrame without the backpressure wait, which the "[vkn] rt:" line reports), the GPU ms r+0x18f0 = the newest finished pair as
+// the recording thread saw it (vkn_frame_gpu_ns, read atomically). DM_VK_NATIVE_RT_SLOTS: the slot-array policy (default 1).
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include <errno.h>
@@ -73,10 +83,12 @@
 #include "../gfx/vkn/vkn_frame.h"
 #include "../gfx/vkn/vkn_pass.h"
 #include "../gfx/vkn/vkn_prof.h"   // [stage 5 A0] measurement
+#include "../gfx/vkn/vkn_rt.h"     // [stage 5.5] the recording thread
 #include "../gfx/vkn/vkn_state.h"
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/nvn/nvn_pace.h"
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define FH_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
@@ -233,7 +245,7 @@ VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
     uint64_t ctx;
     if (presented) {
         const uint32_t idx = pace_acquire();   // nvnWindowAcquireTexture: before the mutex, as the original
-        vkn_rec_prewait(1);                    // the ring buffer's fence: also outside the mutex
+        if (!vkn_rt_mode()) vkn_rec_prewait(1);   // the ring buffer's fence: also outside the mutex ([stage 5.5] the recording thread's own)
         wr32(dev + DEV_BACK, idx);
         if (mu_on()) mu_lock();
         ctx = dev + DEV_CTX0 + (uint64_t)idx * CTX_BYTES;
@@ -242,12 +254,12 @@ VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
         for (uint32_t k = 0; k < 0x1000; k++) wr64(half + 16ull * k, k & 1 ? ~0ull : 0);   // {0, -1} per query (begin, end counter value)
         wr32(dev + DEV_CNT_USED, 0);
     } else {
-        vkn_rec_prewait(0);
+        if (!vkn_rt_mode()) vkn_rec_prewait(0);
         if (mu_on()) mu_lock();
         ctx = dev + DEV_CTX_OFF;
         wr64(dev + DEV_CTX, ctx);
     }
-    (void)vkn_rec_begin(presented);   // (a failure is counted by vkn_frame; the recorders then see no command buffer)
+    vkn_rt_rec_begin(presented);   // (a failure is counted by vkn_frame; the recorders then see no command buffer) [stage 5.5] a record
     if (presented) {
         const float ms = (float)((double)(vkn_rd64(ctx + CTX_TS1) - vkn_rd64(ctx + CTX_TS0)) / 1000000.0);   // 0x92175c: from the previous use
         memcpy((void *)(uintptr_t)(r + R_GPU_MS), &ms, 4);
@@ -266,7 +278,7 @@ static void clear_color(uint64_t r, uint64_t h) {
     vkn_tex *t = vkn_tex_get(h);
     if (!t) { g_fs.clear_unknown++; if (red_ok(RL_CLEAR)) vkn_logf(FH_RED "frame: window colour clear of %#llx: texture unknown to the backend, dropped", (unsigned long long)h); return; }
     static const float zero[4] = {0, 0, 0, 0};
-    vkn_pass_clear_color(t, 0, zero, NULL);
+    vkn_rt_pass_clear_color(t, 0, zero, NULL);   // [stage 5.5] a record
 }
 static void clear_depth(uint64_t r, uint64_t h) {
     vkn_tex *t = vkn_rec(r, TEX_TAB, TEX_REC, h) ? vkn_tex_get(h) : NULL;
@@ -278,12 +290,12 @@ static void clear_depth(uint64_t r, uint64_t h) {
     }
     if (vkn_rd64(r + R_DEPTH) != h) {   // nvnCommandBufferSetRenderTargets(0, NULL, NULL, depth, NULL) + full viewport / scissor
         vkn_tex *none[VKN_PASS_COLORS] = {0}; const uint32_t zero[VKN_PASS_COLORS] = {0};
-        vkn_pass_targets(0, none, zero, zero, t);
+        vkn_rt_pass_targets(0, none, zero, zero, t);   // [stage 5.5] a record
         if (vkn_rd32(r + R_VP_W) != t->w || vkn_rd32(r + R_VP_H) != t->h || vkn_rd32(r + R_VP_X) || vkn_rd32(r + R_VP_Y)) {
             wr32(r + R_VP_W, t->w); wr32(r + R_VP_H, t->h); wr64(r + R_VP_X, 0);   // (0x928cb0: one 8-byte store of zero over +0x1724 / +0x1728)
         }
     }
-    vkn_pass_clear_depth(t, 3, 1.0f, 0);   // mode 2: depth (mask 1) and stencil (value 0, mask 0xffffffff)
+    vkn_rt_pass_clear_depth(t, 3, 1.0f, 0);   // mode 2: depth (mask 1) and stencil (value 0, mask 0xffffffff) ([stage 5.5] a record)
 }
 
 VKN_HOOK fh_render(VKN_A) {   // 0x93d9f0 Window::BeginRender(win)
@@ -360,14 +372,15 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (present) g_fs.ends_presented++; else g_fs.ends_off++;
     if (mu_on()) mu_lock();
     if (dm_vkn_glue_flush_tex) dm_vkn_glue_flush_tex();   // audit U1: a texture written through its storage after the frame's last draw
+    vkn_tex *pt = NULL;
     if (present) {
-        vkn_pass_end();
         const uint64_t h = vkn_rd64(win + WIN_BACK);
-        vkn_tex *t = vkn_tex_get(h);
-        if (t) (void)vkn_rec_present(t, g_crop_set ? g_crop : NULL, WIN_INTERVAL);
-        else { g_fs.wintex_unknown++; if (red_ok(RL_WINTEX)) vkn_logf(FH_RED "frame: present of window texture %#llx (index %u): unknown to the backend, frame not shown", (unsigned long long)h, g_pace.idx); }
+        pt = vkn_tex_get(h);
+        if (!pt) { g_fs.wintex_unknown++; if (red_ok(RL_WINTEX)) vkn_logf(FH_RED "frame: present of window texture %#llx (index %u): unknown to the backend, frame not shown", (unsigned long long)h, g_pace.idx); }
     }
-    (void)vkn_rec_submit(!present);   // EndRecording + SubmitCommands (+ for b0 0 the original's FenceSync / Flush / SyncWait)
+    // vkn_pass_end + vkn_rec_present when present, then EndRecording + SubmitCommands (+ for b0 0 the original's FenceSync / Flush /
+    // SyncWait): vkn_rec_submit(!present). [stage 5.5] one record (an off-frame end syncs after it)
+    vkn_rt_rec_end(present, pt, g_crop_set ? g_crop : NULL, WIN_INTERVAL);
     if (vkn_rd8(gaddr(G_MU_ON)) & 1) { mu_unlock(); if (mu_on()) mu_lock(); }
     if (present) { ((fn_2)eng(FN_DEFER_A))(r, 0); ((fn_2)eng(FN_DEFER_B))(r, 0); }
     if (vkn_rd8(gaddr(G_MU_ON)) & 1) { mu_unlock(); if (mu_on()) mu_lock(); }
@@ -382,7 +395,11 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (mu_on()) mu_unlock();
     const uint64_t slot10 = vkn_rd64(vkn_rd64(win) + 0x50);   // (the original tail-branches to it)
     const uint64_t rc = ((fn_2)(uintptr_t)slot10)(win, (uint64_t)present);
-    if (present) { g_ft.end = vkn_now_ns() - t0; vkn_prof_frame_cpu(g_ft.begin, g_ft.render, g_ft.end); dm_vkn_tick(); }   // [stage 5 A0] frame_cpu
+    if (present) {   // [stage 5 A0] frame_cpu; [stage 5.5] with the tick a record of the recording thread (+ the backpressure)
+        g_ft.end = vkn_now_ns() - t0;
+        const uint64_t cpu[3] = {g_ft.begin, g_ft.render, g_ft.end};
+        vkn_rt_frame_tail(cpu, dm_vkn_tick);
+    }
     return rc;
 }
 
@@ -428,6 +445,18 @@ void dm_vkn_frame_register(void) {
     dm_vkn_site(0x93ccd0, k_end, "Window::EndFrame", (void *)fh_end, &g_o_end, VKN_M_NATIVE);
     dm_vkn_site(0x93cc20, k_resize, "Window::Resize", (void *)fh_resize, &g_o_resize, VKN_M_NATIVE);
     dm_vkn_census(fh_census);
+    {   // [stage 5.5] DM_VK_NATIVE_RT / _SLOTS (vkn_rt.h): the recording thread, the slot-array policy
+        const char *e = getenv("DM_VK_NATIVE_RT"), *sl = getenv("DM_VK_NATIVE_RT_SLOTS"), *qc = getenv("DM_VK_NATIVE_COND");
+        int rt = e && *e ? atoi(e) : 1;
+        const int cond = qc && *qc ? atoi(qc) : 0;
+        if ((cond == 1 || cond == 3) && rt) { vkn_logf("rt: DM_VK_NATIVE_COND=%d: the engine reads the visibility verdicts the recording makes: DM_VK_NATIVE_RT=%d forced 0", cond, rt); rt = 0; }
+        vkn_rt_install(rt, sl && *sl ? atoi(sl) : VKN_RT_SLOTS_CMP);
+        vkn_logf("rt: DM_VK_NATIVE_RT=%d%s, DM_VK_NATIVE_RT_SLOTS=%s (the recording thread starts at the first BeginFrame)", vkn_rt_mode(), e && *e ? "" : " (default)", sl && *sl ? sl : "1 (default)");
+        if (vkn_rt_mode()) dm_vkn_census(vkn_rt_census);
+        // the frame hooks encode their backend work themselves: no default sync at their entry (their nested engine calls may sync)
+        dm_vkn_stack_flag((void *)fh_begin, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)fh_render, DM_VKN_SF_ENC);
+        dm_vkn_stack_flag((void *)fh_end, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)fh_resize, DM_VKN_SF_ENC);
+    }
     {   // [stage 5 A0] DM_VK_NATIVE_PROF (replaces the old path's DM_NR_HEAT / DM_NR_TCOUNT): 0 off, 1 (default) 10 s lines + a GPU sample every 20 s, 2 every 2 s
         const char *e = getenv("DM_VK_NATIVE_PROF");
         vkn_prof_init(e && *e ? atoi(e) : 1);

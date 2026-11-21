@@ -114,6 +114,18 @@ uint32_t vkn_buf_get_n(int kind, const uint64_t *h, uint32_t n, const vkn_block 
 // such copy lands in a buffer with a new number. Lock-free (the recording thread reads it per shadow draw): the engine does not create a
 // handle while it draws from the old one of the same index.
 uint64_t vkn_buf_version(int kind, uint64_t handle, int *none);
+// ==== [stage 5.5] the recording thread (vkn_rt.h; the head of the [stage 5.5] block in vkn_buf.c) ====
+// The encoder's marks: vkn_buf_get's "used in frame vkn_rt_frame()" for each live handle (one lock). The rename rule of vkn_buf_update
+// runs on the encoder; while a record executes (vkn_rt_decoding) the lookups above return the recording's view and mark nothing.
+void vkn_buf_mark(int kind, const uint64_t *h, uint32_t n);
+uint64_t vkn_ring_cum(void);              // ring bytes handed out so far (a wrap's skipped tail included): the guard's measure
+// The recording ring: the engine's rule over a block of its own, for copies the recording side makes itself (vkn_ui.c), so that the
+// engine ring's offsets depend only on the encoder's order and this one's only on the recording's.
+#define VKN_RING2_BYTES 0x400000u
+int vkn_ring2_alloc(uint32_t size, uint32_t *off);
+VkBuffer vkn_ring2_buffer(void);
+void *vkn_ring2_cpu(void);
+uint64_t vkn_ring2_base(void);
 
 #ifdef __cplusplus
 }

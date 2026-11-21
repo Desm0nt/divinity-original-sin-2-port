@@ -86,6 +86,7 @@
 #include "../gfx/vkn/vkn_frame.h"
 #include "../gfx/vkn/vkn_pass.h"
 #include "../gfx/vkn/vkn_tex.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the slots' backend calls are records (no default sync at the slots)
 #include "../gfx/nvn/nvn_obj.h"   // view_t: the HLE layout of NVNtextureView in guest memory (levels / layers of a view argument)
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_draw.h"
@@ -329,13 +330,13 @@ static void site_count(uint32_t off, int slot) {
 static struct { int on; uint32_t serial; int32_t rect[4]; uint8_t vp[16], sc[16]; } g_ovr_vp, g_ovr_sc;
 static void ovr_set(uint64_t r, int which, const int32_t xywh[4]) {
     __typeof__(g_ovr_vp) *o = which ? &g_ovr_sc : &g_ovr_vp;
-    o->on = 1; o->serial = vkn_cb_serial(); memcpy(o->rect, xywh, sizeof o->rect);
+    o->on = 1; o->serial = vkn_rt_cb_serial(); memcpy(o->rect, xywh, sizeof o->rect);   // ([stage 5.5] the engine thread's count of recordings)
     memcpy(o->vp, (const void *)(uintptr_t)(r + R_VP), 16); memcpy(o->sc, (const void *)(uintptr_t)(r + R_SC), 16);
 }
 static int ovr_live(uint64_t r, int which) {
     __typeof__(g_ovr_vp) *o = which ? &g_ovr_sc : &g_ovr_vp;
     if (!o->on) return 0;
-    if (o->serial != vkn_cb_serial() || memcmp(o->vp, (const void *)(uintptr_t)(r + R_VP), 16) || (which && memcmp(o->sc, (const void *)(uintptr_t)(r + R_SC), 16))) { o->on = 0; return 0; }
+    if (o->serial != vkn_rt_cb_serial() || memcmp(o->vp, (const void *)(uintptr_t)(r + R_VP), 16) || (which && memcmp(o->sc, (const void *)(uintptr_t)(r + R_SC), 16))) { o->on = 0; return 0; }
     return 1;
 }
 // The rectangles NVN would have at a draw where a direct call set them behind the engine's caches. Returns bit 0: vp = the viewport
@@ -380,7 +381,7 @@ static void act_elements(uint32_t mode, uint32_t type, int32_t count, uint64_t a
     if (addr < va || (addr - va) % isz || (addr - va) / isz + (uint64_t)count > ib.size / isz) { red(D_IB_ADDR, in.ib, addr, va); return; }
     if (basev || basei) red(D_INSTANCE_BASE, (uint64_t)(uint32_t)basev, (uint64_t)(uint32_t)basei, in.ib);
     cnt(inst > 1 || basev || basei ? A_ELEMENTS_INST : A_ELEMENTS);
-    if (vkn_draw_indexed(&in, (uint32_t)((addr - va) / isz), (uint32_t)count, (uint32_t)inst)) cnt(D_DRAW_DROP);
+    if (vkn_rt_draw_indexed(&in, (uint32_t)((addr - va) / isz), (uint32_t)count, (uint32_t)inst)) cnt(D_DRAW_DROP);
 }
 static void act_arrays(uint32_t mode, int32_t first, int32_t count) {   // nvnCommandBufferDrawArrays(cb, mode, first, count)
     const uint64_t r = vkn_renderer();
@@ -389,7 +390,7 @@ static void act_arrays(uint32_t mode, int32_t first, int32_t count) {   // nvnCo
     vkn_draw_in in; fill(r, &in);
     if (!prim_of_mode(r, mode, &in.prim)) return;
     cnt(A_ARRAYS);
-    if (vkn_draw_arrays(&in, (uint32_t)first, (uint32_t)count)) cnt(D_DRAW_DROP);
+    if (vkn_rt_draw_arrays(&in, (uint32_t)first, (uint32_t)count)) cnt(D_DRAW_DROP);
 }
 // nvnCommandBufferSetViewport(cb, x, y, w, h): the callers wrote r+0x171c {w, h, x, y} before (see the verdicts); NVN's scissor is
 // untouched by it. A rectangle that is not the cache's is an override.
@@ -438,12 +439,13 @@ static void act_clear_tex(uint64_t tex, uint64_t view, uint64_t region, uint64_t
         rect[0] = g[0]; rect[1] = g[1]; rect[2] = g[3]; rect[3] = g[4]; rp = rect;
     }
     cnt(A_CLEAR_TEX);
-    vkn_pass_clear_color(t, layer, rgba, rp);
+    vkn_rt_pass_clear_color(t, layer, rgba, rp);
 }
 // nvnCommandBufferClearDepthStencil(cb, float depth, NVNboolean depth mask, int stencil, int stencil mask): the bound depth target.
 static void act_clear_ds(float depth, uint32_t dmask, int32_t stencil, int32_t smask) {
     const int what = ((dmask & 0xff) ? 1 : 0) | (smask ? 2 : 0);
     if (!what) return;
+    if (vkn_rt_live()) { cnt(A_CLEAR_DS); vkn_rt_pass_clear_bound_depth(what, depth, (uint32_t)stencil, &g_c[D_DS_NONE]); return; }   // [stage 5.5] (no depth bound: counted there)
     vkn_tex *t = vkn_pass_depth();
     if (!t) { red(D_DS_NONE, dmask, (uint64_t)(uint32_t)smask, 0); return; }
     cnt(A_CLEAR_DS);
@@ -468,7 +470,7 @@ static void act_targets(int32_t n, uint64_t cols, uint64_t views, uint64_t depth
     vkn_tex *dt = NULL;
     if (depth && !(dt = vkn_tex_by_cookie(depth))) red(D_RT_UNKNOWN, depth, 0xd, 0);
     cnt(A_RT);
-    vkn_pass_targets((uint32_t)n, ct, L, M, dt);
+    vkn_rt_pass_targets((uint32_t)n, ct, L, M, dt);
 }
 
 // ---- the entry: every repointed slot's host function lands here ----
@@ -631,7 +633,9 @@ void dm_vkn_cmd_register(void) {
     for (size_t i = 0; i < sizeof k_slots / sizeof k_slots[0]; i++) {
         g_sname[k_slots[i].idx] = k_slots[i].name; g_skind[k_slots[i].idx] = k_slots[i].kind;
         // The slot functions run Vulkan (draws, clears, targets) for a guest caller: entered on the host stack like every site.
-        if (!(g_stub[k_slots[i].idx] = dm_vkn_stack_stub(k_slots[i].fn))) nostub++;
+        // [stage 5.5] DM_VKN_SF_ENC: every action encodes its backend call (vkn_rt_*), the rest is counters / host state / forwards that
+        // touch no recording state (the frame composite 0xb0aab0 calls these every frame: no sync there)
+        if (!(g_stub[k_slots[i].idx] = dm_vkn_stack_stub_ex(k_slots[i].fn, k_slots[i].name, DM_VKN_SF_ENC))) nostub++;
     }
     if (nostub) vkn_logf(CMD_RED "cmd: %d slot functions without a host-stack stub: those slots stay HLE NVN", nostub);
     // First 4 instructions of 0x938330 (python <scratchpad>/vk/re/pro.py; none PC-relative, checked with capstone).

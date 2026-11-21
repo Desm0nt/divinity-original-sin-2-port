@@ -130,6 +130,7 @@
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_query.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_exec.h"
 #include "hle_dos2_vkn_stack.h"
@@ -370,7 +371,10 @@ static uint64_t ex_clear_on_stack(void *p) { const ex_clear_job *j = p; dm_vkn_p
 typedef struct { uint64_t r; uint32_t first, count; } ex_arrays_job;
 static uint64_t ex_arrays_on_stack(void *p) { const ex_arrays_job *j = p; return (uint64_t)(uint32_t)dm_vkn_exec_draw_arrays(j->r, j->first, j->count); }
 typedef struct { uint64_t q; int begin; } ex_query_job;
-static uint64_t ex_query_on_stack(void *p) { const ex_query_job *j = p; if (j->begin) vkn_query_begin(j->q); else vkn_query_end(j->q); return 0; }
+static uint64_t ex_query_on_stack(void *p) { const ex_query_job *j = p; if (j->begin) vkn_rt_query_begin(j->q); else vkn_rt_query_end(j->q); return 0; }   // [stage 5.5] records
+// [stage 5.5] the recording thread (vkn_rt.h): the three packet handlers that reach the backend encode their calls (a region clear, the
+// arrays draw, a query bracket): no default sync on their host-stack call.
+static vkn_rt_site g_site_clear = VKN_RT_SITE("packet 0x04"), g_site_arrays = VKN_RT_SITE("packet 0x23"), g_site_query = VKN_RT_SITE("packet 0x3d / 0x3e");
 static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
     *len = ex_len(op);
     __atomic_add_fetch(&g_op[op & 63], 1, __ATOMIC_RELAXED);
@@ -387,7 +391,7 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         if (!dm_vkn_pass_clear_rect) { red(D_CLEAR_NOPASS, tex, 0, 0); return 1; }
         st(S_CLEAR);
         ex_clear_job j = {tex, (uint32_t)layer, {rgba[0], rgba[1], rgba[2], rgba[3]}, x, y, w, h};
-        dm_vkn_on_stack(ex_clear_on_stack, &j);
+        dm_vkn_on_stack_x(ex_clear_on_stack, &j, &g_site_clear, DM_VKN_SF_ENC);
         return 1;
     }
     case 0x07: dm_vkn_exec_raster(r, vkn_rd64(pkt + 8)); return 1;
@@ -425,7 +429,7 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         }
         return 1;
     }
-    case 0x23: { ex_arrays_job j = {r, vkn_rd32(pkt + 4), vkn_rd32(pkt + 8)}; dm_vkn_on_stack(ex_arrays_on_stack, &j); return 1; }
+    case 0x23: { ex_arrays_job j = {r, vkn_rd32(pkt + 4), vkn_rd32(pkt + 8)}; dm_vkn_on_stack_x(ex_arrays_on_stack, &j, &g_site_arrays, DM_VKN_SF_ENC); return 1; }
     case 0x37: {   // resource state u8 +1: 0 / 1 -> nvnCommandBufferBarrier(cb, 2); 2..12 -> nothing; else the engine aborts (0x80f560)
         const uint8_t s = vkn_rd8(pkt + 1);
         if (s <= 12) { __atomic_add_fetch(&g_bar[s], 1, __ATOMIC_RELAXED); st(s <= 1 ? S_BARRIER_NVN : S_BARRIER_NOP); }
@@ -437,7 +441,7 @@ static int ex_take(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
         if (!q) { red(D_QUERY_NULL, op, pkt, 0); return 1; }
         st(op == 0x3d ? S_QUERY_BEGIN : S_QUERY_END);
         ex_query_job j = {q, op == 0x3d};
-        if (vkn_query_mode()) dm_vkn_on_stack(ex_query_on_stack, &j);   // (may end a Vulkan query)
+        if (vkn_query_mode()) dm_vkn_on_stack_x(ex_query_on_stack, &j, &g_site_query, DM_VKN_SF_ENC);   // (may end a Vulkan query)
         else ex_query_on_stack(&j);                                     // (mode 0: counted only, no Vulkan)
         return 1;
     }
@@ -586,6 +590,10 @@ void dm_vkn_exec_register(void) {
     dm_vkn_site(0x92c130, k_fmtvb, "ApplyFormatVB0", (void *)ex_h_fmtvb, &g_o_fmtvb, VKN_M_NATIVE);
     dm_vkn_site(0x93ffc0, k_raster, "SetRasterState", (void *)ex_h_raster, &g_o_raster, VKN_M_NATIVE);
     dm_vkn_site(0x940f90, k_arrays, "ListDrawArrays", (void *)ex_h_arrays, &g_o_arrays, VKN_M_NATIVE);
+    {   // [stage 5.5] the state functions write only the renderer's cache; the arrays draw is a record: no default sync
+        void *const enc[] = {(void *)ex_h_shader, (void *)ex_h_blend, (void *)ex_h_state, (void *)ex_h_fmtvb, (void *)ex_h_raster, (void *)ex_h_arrays};
+        for (size_t i = 0; i < sizeof enc / sizeof enc[0]; i++) dm_vkn_stack_flag(enc[i], DM_VKN_SF_ENC);
+    }
     // The executor's hook: dn_install_rc_take installs the ExecuteRenderCommand jump itself when no old layer did (with DM_VK_NATIVE=1
     // dm_dos2_vkn_pre turned every one of them off, so this is the only native opcode handler).
     if (dn_install_rc_take(k_ex_ops, ex_take))

@@ -645,7 +645,9 @@ void dm_vkn_create_register(void) {
         g_grp_of[k_slots[i].idx] = (uint8_t)(k_slots[i].grp + 1);
         // NVN functions take no stack arguments, so the stub (made for the VKN_A signature) hands every register to the function's
         // own prototype unchanged; the function runs on the thread's host stack like an HLE NVN entry did.
-        if (!(g_stub[k_slots[i].idx] = dm_vkn_stack_stub(k_slots[i].fn))) nostub++;
+        // [stage 5.5] DM_VKN_SF_ENC: these answer NVN object set-up / getters from the engine's own objects and touch nothing of the
+        // recording (no vkn_* call in this file): no default sync (the run-time getters - TextureGetWidth / Format / Stride - are hot)
+        if (!(g_stub[k_slots[i].idx] = dm_vkn_stack_stub_ex(k_slots[i].fn, k_slots[i].name, DM_VKN_SF_ENC))) nostub++;
     }
     if (nostub) vkn_logf(CR_RED "create: %d stub functions without a host-stack stub: those slots stay HLE NVN", nostub);
     g_on = 1;

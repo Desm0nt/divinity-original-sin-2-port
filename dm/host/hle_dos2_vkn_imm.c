@@ -54,7 +54,9 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_buf.h"
 #include "../gfx/vkn/vkn_draw.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the draws are records
 #include "hle_dos2_vkn.h"
+#include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_draw.h"
 #include "hle_dos2_vkn_exec.h"
 
@@ -140,7 +142,11 @@ static int vb_ring_check(uint64_t r, int fn, uint64_t bytes, uint8_t **dst) {
 static uint32_t vb_ring_put(uint64_t r, int fn, uint8_t *dst, const void *src, uint32_t n, uint32_t stride) {
     const uint32_t bytes = n * stride;
     uint32_t head = vkn_rd32(r + R_DYN_VB_HEAD);
-    if (head + bytes > RING) { head = 0; w32(r + R_DYN_VB_HEAD, 0); g_c.vb_wraps++; }
+    const uint32_t head0 = head; int wrap = 0;
+    if (head + bytes > RING) { head = 0; w32(r + R_DYN_VB_HEAD, 0); g_c.vb_wraps++; wrap = 1; }
+    // [stage 5.2 audit] with the recording thread the GPU (and the recording thread's cover proof / LIGHTFUSE) read these bytes later than
+    // without it: never overwrite what a frame still in flight reads (vkn_rt.h vkn_rt_cpu_ring: a sync + GPU wait, counted)
+    vkn_rt_cpu_ring(0, (wrap && head0 < RING ? (uint64_t)RING - head0 : 0) + bytes, RING);
     if (bytes && src) memcpy(dst + head, src, bytes);
     w32(r + R_DYN_VB_HEAD, vkn_rd32(r + R_DYN_VB_HEAD) + bytes);
     g_c.calls[fn]++; g_c.verts[fn] += n; g_c.bytes += bytes;
@@ -176,7 +182,7 @@ static void states(uint64_t r, uint64_t raster, uint64_t blend, uint64_t ds, uin
 static void draw_arrays(uint64_t r, uint32_t n) {
     dm_vkn_draw_tail_pre(r);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    if (vkn_draw_arrays(&in, 0, n)) red(D_DRAW, -1, in.shader, in.prim, n);
+    if (vkn_rt_draw_arrays(&in, 0, n)) red(D_DRAW, -1, in.shader, in.prim, n);   // ([stage 5.5] an encoded draw's drop: vkn_draw counts it)
     dm_vkn_draw_tail_post(r);
 }
 
@@ -240,7 +246,9 @@ VKN_HOOK h_idx(VKN_A) {
     const uint32_t head = vb_ring_put(r, FN_IDX, dst, (const void *)(uintptr_t)vkn_rd64(p + 0x48), n, 12);
     // 0x928dd0(r, indices, bytes): the index ring
     uint32_t ioff = vkn_rd32(r + R_DYN_IB_HEAD);
-    if (ioff + ibytes > RING) { ioff = 0; w32(r + R_DYN_IB_HEAD, 0); g_c.ib_wraps++; }
+    const uint32_t ioff0 = ioff; int iwrap = 0;
+    if (ioff + ibytes > RING) { ioff = 0; w32(r + R_DYN_IB_HEAD, 0); g_c.ib_wraps++; iwrap = 1; }
+    vkn_rt_cpu_ring(1, (iwrap && ioff0 < RING ? (uint64_t)RING - ioff0 : 0) + ibytes, RING);   // [stage 5.2 audit] (as the vertex ring's)
     if (ibytes && vkn_rd64(p + 0x58)) memcpy((void *)(uintptr_t)(icpu + ioff), (const void *)(uintptr_t)vkn_rd64(p + 0x58), ibytes);
     w32(r + R_DYN_IB_HEAD, vkn_rd32(r + R_DYN_IB_HEAD) + ibytes);
     g_c.indices += icount; g_c.ib_bytes += ibytes;
@@ -269,7 +277,7 @@ VKN_HOOK h_idx(VKN_A) {
     // DrawElements(r+0x1718, record +0x24, count, record +8): the base address = first index 0 (see the head comment)
     dm_vkn_draw_tail_pre(r);
     vkn_draw_in in; dm_vkn_draw_fill(&in);
-    if (vkn_draw_indexed(&in, 0, icount, 1)) red(D_DRAW, FN_IDX, in.shader, in.prim, icount);
+    if (vkn_rt_draw_indexed(&in, 0, icount, 1)) red(D_DRAW, FN_IDX, in.shader, in.prim, icount);
     dm_vkn_draw_tail_post(r);
     return 0;
 }
@@ -361,6 +369,10 @@ void dm_vkn_imm_register(void) {
     dm_vkn_site(0x930210, k_idx, "ImmDrawIndexed", (void *)h_idx, &g_o_idx, VKN_M_NATIVE);
     dm_vkn_site(0x930910, k_2dt, "ImmDraw2DTextured", (void *)h_2dt, &g_o_2dt, VKN_M_NATIVE);
     dm_vkn_site(0x930e90, k_3dt, "ImmDraw3DTextured", (void *)h_3dt, &g_o_3dt, VKN_M_NATIVE);
+    {   // [stage 5.5] engine-side work + draw records: no default sync
+        void *const enc[] = {(void *)h_2d, (void *)h_3d, (void *)h_idx, (void *)h_2dt, (void *)h_3dt};
+        for (size_t i = 0; i < sizeof enc / sizeof enc[0]; i++) dm_vkn_stack_flag(enc[i], DM_VKN_SF_ENC);
+    }
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2: no site of this part goes in (VKN_M_NATIVE), no census either
     dm_vkn_census(im_census);
 }

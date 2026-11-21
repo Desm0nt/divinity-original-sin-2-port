@@ -23,6 +23,11 @@
 //     pipeline layout match, dynamic offset count and range, bound vertex / index buffers, viewport / scissor inside the render area;
 //   - [stage 5.1 A5] mk_depth_on: a depth CONTENT model of D16 images executed by that replay (clears, load ops, clear rectangles,
 //     copies, image -> buffer copies, draws with a content-derived z and rectangle: see "the depth content model" below).
+//   - [stage 5.5] mk_jr_on: a canonical journal of every submission (the recording thread's test, vkn_stage3_test.c test_rt): one hash
+//     per submitted command buffer over its commands in order, with the vertex / index buffer binds replaced by the BYTES each draw
+//     reads (hashed when the draw is recorded: where an arena block lies and how the draw-cost folds split offsets between bind and draw
+//     may differ between the modes, what the GPU reads may not); timestamps left out; the log restarts after a submission when nothing
+//     records (long runs).
 #ifndef VKN_MOCK_VK_H
 #define VKN_MOCK_VK_H
 #include <pthread.h>
@@ -150,7 +155,11 @@ typedef struct mk_ev {
     uint32_t dyn[16];              // bind-sets dynamic offsets
     VkDeviceSize off[4];           // bind-vb offsets, bind-ib offset
     VkImageCopy ic[4]; VkImageBlit ib[4]; VkFilter filter;
+    uint64_t jh;                   // [stage 5.5] draws with mk_jr_on: the hash of the bytes the draw reads (indices, vertex streams)
 } mk_ev;
+static int mk_jr_on;   // [stage 5.5]
+static int mk_jr_recording(void);
+static uint64_t mk_jr_draw(VkCommandBuffer cb, const mk_ev *e, int indexed);
 enum { MK_EVS = 1 << 14 };
 static mk_ev *mk_evs; static uint64_t mk_seq, mk_ev_base;   // entries [mk_ev_base, mk_seq) are in mk_evs[seq - mk_ev_base]
 static int mk_validate_on, mk_val_errors, mk_fence_hold, mk_fence_stuck;
@@ -549,6 +558,7 @@ void vkDestroyFence(VkDevice d, VkFence f, const VkAllocationCallbacks *a) {
     mk_del((uint64_t)(uintptr_t)f, MK_FENCE);
 }
 static void mk_replay(mk_obj *cbo, VkCommandBuffer cb);
+static void mk_jr_submit(mk_obj *cbo, VkCommandBuffer cb, const mk_ev *sub);   // [stage 5.5]
 static VkCommandBuffer mk_last_submitted;
 VkResult vkQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence fence) {
     pthread_mutex_lock(&mk_mu);
@@ -561,7 +571,9 @@ VkResult vkQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence fe
         mk_obj *o = mk_cb(cb, "vkQueueSubmit", 2); mk_last_submitted = cb;
         mk_ev *e = mk_log(cb, MK_E_SUBMIT); e->a[0] = (uint64_t)(uintptr_t)fence; e->qlock = mk_qlock_depth; e->u[0] = (uint32_t)s;
         if (o) { mk_replay(o, cb); if (mk_fence_hold) o->pend_seq = s; }
+        if (o && mk_jr_on) mk_jr_submit(o, cb, e);   // [stage 5.5]
     }
+    if (mk_jr_on && !mk_jr_recording()) mk_ev_base = mk_seq;   // [stage 5.5] nothing records: the log starts again
     if (fence) {
         mk_obj *o = mk_find((uint64_t)(uintptr_t)fence, MK_FENCE);
         if (!o || o->signaled || o->pend_seq) mk_err("submit with a dead, signalled or pending fence");
@@ -754,11 +766,15 @@ PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice d, const char *name) {
 }
 // [/stage 4: queries]
 void vkCmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
-    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDraw", MK_E_DRAW); e->u[0] = vc; e->u[1] = ic; e->u[2] = fv; e->u[3] = fi; mk_q_draw(e); pthread_mutex_unlock(&mk_mu);
+    pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDraw", MK_E_DRAW); e->u[0] = vc; e->u[1] = ic; e->u[2] = fv; e->u[3] = fi; mk_q_draw(e);
+    if (mk_jr_on) e->jh = mk_jr_draw(cb, e, 0);   // [stage 5.5]
+    pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t ic, uint32_t inst, uint32_t fi, int32_t vo, uint32_t finst) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDrawIndexed", MK_E_DRAW_IDX);
-    e->u[0] = ic; e->u[1] = inst; e->u[2] = fi; e->u[3] = (uint32_t)vo; e->u[4] = finst; mk_q_draw(e); pthread_mutex_unlock(&mk_mu);
+    e->u[0] = ic; e->u[1] = inst; e->u[2] = fi; e->u[3] = (uint32_t)vo; e->u[4] = finst; mk_q_draw(e);
+    if (mk_jr_on) e->jh = mk_jr_draw(cb, e, 1);   // [stage 5.5]
+    pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdDispatch", MK_E_DISPATCH); e->u[0] = x; e->u[1] = y; e->u[2] = z; pthread_mutex_unlock(&mk_mu);
@@ -1349,7 +1365,7 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
 
 // ---------------------------------------------------------------- the shader loader of mode 1 (vkn_shlib.h; it took over the translator's doors)
 typedef struct mk_bundle { char key[17]; xbg_vkn_stage st; } mk_bundle;
-static mk_bundle mk_bundles[32]; static int mk_nbundles;
+static mk_bundle mk_bundles[64]; static int mk_nbundles;   // (the whole stage-3 suite with test_rt's extensions adds more than 32)
 static int mk_xbg_down;                         // vkn_shlib_shader returns -1 (the library not initialised)
 static pthread_t mk_main_thread;
 static int mk_xbg_calls, mk_xbg_off_main, mk_key_calls, mk_alpha_calls, mk_retype_calls, mk_variant_off_main;
@@ -1359,6 +1375,7 @@ static pthread_mutex_t mk_gate_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_co
 static int mk_gate_on, mk_gate_inside; static char mk_gate_key[17];
 
 static MK_U xbg_vkn_stage *mk_bundle_add(const char *key, uint32_t stage) {
+    if (mk_nbundles >= (int)(sizeof mk_bundles / sizeof mk_bundles[0])) { fprintf(stderr, "mk_bundle_add: the bundle table is full\n"); abort(); }
     mk_bundle *b = &mk_bundles[mk_nbundles++]; memset(b, 0, sizeof *b);
     memcpy(b->key, key, 16); b->key[16] = 0;
     b->st.stage = stage; b->st.shader = (void *)(uintptr_t)(0x5a000 + 0x100 * mk_nbundles);
@@ -1402,5 +1419,93 @@ void xbg_support_defaults(void *bytes1392, float width, float height) {   // the
     float *f = (float *)bytes1392; memset(bytes1392, 0, 1392);
     f[144 / 4] = 1.0f / width; f[148 / 4] = 1.0f / height; f[160 / 4] = width; f[164 / 4] = height;
     for (int i = 0; i < 73; i++) f[192 / 4 + i] = 1.0f;
+}
+// ---------------------------------------------------------------- [stage 5.5] the canonical journal (mk_jr_on; test_rt)
+typedef struct mk_jr_rec { uint64_t h; uint32_t nev, ndraw; } mk_jr_rec;
+static mk_jr_rec *mk_jr; static uint32_t mk_jr_n, mk_jr_cap;
+static uint64_t mk_jr_mix(uint64_t h, uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); return h * 0xff51afd7ed558ccdull; }
+static uint64_t mk_jr_bytes(uint64_t h, const void *p, uint64_t n) { const uint8_t *b = (const uint8_t *)p; for (uint64_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull; return h; }
+// The last event of op in cb's recording before `to` (BIND_VB: the one that set `binding`); NULL = none.
+static const mk_ev *mk_jr_last(VkCommandBuffer cb, uint64_t from, uint64_t to, int op, int binding, int bp) {
+    for (uint64_t s = to; s-- > from && s >= mk_ev_base;) {
+        const mk_ev *e = mk_ev_at(s);
+        if (!e || e->cb != cb || e->op != op) continue;
+        if (op == MK_E_BIND_VB && !((uint32_t)binding >= e->u[0] && (uint32_t)binding < e->u[0] + e->u[1])) continue;
+        if (op == MK_E_BIND_PIPE && (int)e->u[0] != bp) continue;
+        return e;
+    }
+    return NULL;
+}
+static uint64_t mk_jr_buf(uint64_t h, uint64_t buf, uint64_t off, uint64_t len) {   // the bytes of a buffer range (clamped), under mk_mu
+    mk_obj *o = mk_any(buf);
+    if (!o || o->kind != MK_BUFFER || !o->cpu) return mk_jr_mix(h, 0xdead);
+    if (off > o->size) return mk_jr_mix(h, 0xbeef);
+    if (len > o->size - off) len = o->size - off;
+    return mk_jr_bytes(mk_jr_mix(h, len), (const uint8_t *)o->cpu + off, len);
+}
+static uint64_t mk_jr_draw(VkCommandBuffer cb, const mk_ev *e, int indexed) {
+    mk_obj *co = mk_any(MK_H(cb));
+    if (!co) return 0;
+    const uint64_t from = co->ev_first, to = e->seq;
+    const mk_ev *bp = mk_jr_last(cb, from, to, MK_E_BIND_PIPE, 0, (int)VK_PIPELINE_BIND_POINT_GRAPHICS);
+    mk_obj *po = bp ? mk_any(bp->a[0]) : NULL;
+    uint64_t h = 0x5a5a;
+    int64_t vmin = 0, vmax = -1;
+    const uint32_t inst = e->u[1], finst = indexed ? e->u[4] : e->u[3];
+    if (indexed) {
+        const mk_ev *ib = mk_jr_last(cb, from, to, MK_E_BIND_IB, 0, 0);
+        if (!ib) return 0xbad1;
+        const uint32_t isz = ib->u[0] == (uint32_t)VK_INDEX_TYPE_UINT32 ? 4 : 2;
+        mk_obj *bo = mk_any(ib->a[0]);
+        const uint64_t at = ib->off[0] + (uint64_t)e->u[2] * isz, n = (uint64_t)e->u[0] * isz;
+        if (!bo || !bo->cpu || at + n > bo->size) return 0xbad2;
+        const uint8_t *ix = (const uint8_t *)bo->cpu + at;
+        h = mk_jr_bytes(h, ix, n);
+        int64_t mn = INT64_MAX, mx = -1;
+        for (uint32_t i = 0; i < e->u[0]; i++) { uint32_t v = 0; memcpy(&v, ix + (uint64_t)i * isz, isz); if ((int64_t)v < mn) mn = v; if ((int64_t)v > mx) mx = v; }
+        if (mx >= 0) { vmin = (int32_t)e->u[3] + mn; vmax = (int32_t)e->u[3] + mx; }
+    } else if (e->u[0]) { vmin = e->u[2]; vmax = (int64_t)e->u[2] + e->u[0] - 1; }
+    if (po && po->kind == MK_PIPE && !po->compute)
+        for (uint32_t i = 0; i < po->gp.nbind; i++) {
+            const VkVertexInputBindingDescription *b = &po->gp.bind[i];
+            const mk_ev *vb = mk_jr_last(cb, from, to, MK_E_BIND_VB, (int)b->binding, 0);
+            h = mk_jr_mix(h, b->binding);
+            if (!vb) { h = mk_jr_mix(h, 0xbad3); continue; }
+            const uint32_t k = b->binding - vb->u[0];
+            const uint64_t buf = vb->a[k], off = vb->off[k];
+            if (!b->stride) { h = mk_jr_buf(h, buf, off, 16); continue; }
+            if (b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) { h = mk_jr_buf(h, buf, off + (uint64_t)finst * b->stride, (uint64_t)inst * b->stride); continue; }
+            if (vmax < vmin || vmin < 0) { h = mk_jr_mix(h, 0x7e57); continue; }
+            h = mk_jr_buf(h, buf, off + (uint64_t)vmin * b->stride, (uint64_t)(vmax - vmin + 1) * b->stride);
+        }
+    return h;
+}
+static int mk_jr_recording(void) {   // under mk_mu: a command buffer that began since the log's start is still recording
+    for (uint32_t i = 0; i < mk_nobj; i++) { const mk_obj *o = mk_obj_tab[i]; if (o->kind == MK_CB && o->live && o->cb_state == 1 && o->ev_first >= mk_ev_base) return 1; }
+    return 0;
+}
+static void mk_jr_submit(mk_obj *cbo, VkCommandBuffer cb, const mk_ev *sub) {   // under mk_mu
+    uint64_t h = 0x6a09e667f3bcc908ull; uint32_t nev = 0, nd = 0;
+    for (uint64_t s = cbo->ev_first; s <= sub->seq; s++) {
+        const mk_ev *e = mk_ev_at(s);
+        if (!e || e->cb != cb) continue;
+        const int op = e->op;
+        if (op == MK_E_TIMESTAMP || op == MK_E_RESET_QP || op == MK_E_BIND_VB || op == MK_E_BIND_IB) continue;
+        nev++; h = mk_jr_mix(h, (uint64_t)op);
+        if (op == MK_E_DRAW || op == MK_E_DRAW_IDX) {   // counts, first instance, the predicate's verdict, the bytes read
+            nd++; h = mk_jr_mix(h, e->u[0]); h = mk_jr_mix(h, e->u[1]); h = mk_jr_mix(h, op == MK_E_DRAW_IDX ? e->u[4] : e->u[3]); h = mk_jr_mix(h, e->u[7]); h = mk_jr_mix(h, e->jh);
+            continue;
+        }
+        if (op == MK_E_SUBMIT) { h = mk_jr_mix(h, e->a[0]); continue; }
+        for (int i = 0; i < 4; i++) h = mk_jr_mix(h, e->a[i]);
+        for (int i = 0; i < 8; i++) h = mk_jr_mix(h, e->u[i]);
+        h = mk_jr_mix(h, (uint64_t)e->l0 << 32 | (uint32_t)e->l1);
+        h = mk_jr_bytes(h, &e->r, sizeof e->r); h = mk_jr_bytes(h, &e->rect, sizeof e->rect); h = mk_jr_bytes(h, &e->vp, sizeof e->vp);
+        h = mk_jr_mix(h, e->n); h = mk_jr_bytes(h, e->cv, sizeof e->cv); h = mk_jr_bytes(h, e->ca, sizeof e->ca); h = mk_jr_bytes(h, e->cr, sizeof e->cr);
+        h = mk_jr_bytes(h, e->dyn, sizeof e->dyn); h = mk_jr_bytes(h, e->off, sizeof e->off); h = mk_jr_bytes(h, e->ic, sizeof e->ic);
+        h = mk_jr_bytes(h, e->ib, sizeof e->ib); h = mk_jr_mix(h, (uint64_t)e->filter);
+    }
+    if (mk_jr_n == mk_jr_cap) { mk_jr_cap = mk_jr_cap ? 2 * mk_jr_cap : 1024; mk_jr = (mk_jr_rec *)realloc(mk_jr, mk_jr_cap * sizeof *mk_jr); }
+    if (mk_jr) { mk_jr[mk_jr_n].h = h; mk_jr[mk_jr_n].nev = nev; mk_jr[mk_jr_n].ndraw = nd; mk_jr_n++; }
 }
 #endif

@@ -94,6 +94,10 @@ static uint64_t g_fx_drop;   // draws dropped for an fx binding without a source
 // open bracket, begin that bracket's query in the piece's pass, and reset the outer draw's condition / predicate / count entry) - it
 // is not an engine draw, the Switch's bracket never held it.
 static int g_fx_nest;
+// [stage 5.5] the recording thread (vkn_rt.c): the engine's indices of the indexed draw being executed from a record, copied when the
+// engine's draw was encoded (the rewrite below reads them; the buffer's bytes may be newer by now). Only for that very draw (`in`), never
+// for a piece's nested draw or a later replay of a copy.
+const void *vkn_draw_rt_snap; const vkn_draw_in *vkn_draw_rt_in;
 
 // ---- what this recording has bound (forgotten at every recording begin and by vkn_draw_raw_begin) ----
 static struct {
@@ -1051,7 +1055,8 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
             DRAW_RED(R_RW, "index buffer %#llx has no CPU pointer: no rewrite of engine primitive %u (draw dropped)", (unsigned long long)in->ib, in->prim);
             return 1;
         }
-        return draw_rewritten(in, (const uint8_t *)ib.blk.cpu + (uint64_t)first_index * isz, isz, 0, count, instances);
+        const void *src = !g_fx_nest && vkn_draw_rt_snap && vkn_draw_rt_in == in ? vkn_draw_rt_snap : (const uint8_t *)ib.blk.cpu + (uint64_t)first_index * isz;   // [stage 5.5]
+        return draw_rewritten(in, src, isz, 0, count, instances);
     }
     VkCommandBuffer cb; vkn_pass_info pi; const vkn_vfmt *vf;
     g_call.indexed = 1; g_call.first = first_index; g_call.count = count; g_call.instances = instances ? instances : 1;

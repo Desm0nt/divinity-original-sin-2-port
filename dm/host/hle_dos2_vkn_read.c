@@ -216,7 +216,7 @@ void dm_vkn_read_register(void) {
     dm_vkn_site(0x929880, k_rb_raw, "ReadTextureTexels", (void *)rh_raw, &g_o_raw, VKN_M_NATIVE);
     if (g_read_on) {
         vkn_read_init();
-        if (!(g_slot_stub = dm_vkn_stack_stub((void *)rd_slot))) vkn_logf(RB_RED "read: no host-stack stub for the ReadTexels slot: read-back returns no data");
+        if (!(g_slot_stub = dm_vkn_stack_stub_ex((void *)rd_slot, "nvnTextureReadTexels", 0))) vkn_logf(RB_RED "read: no host-stack stub for the ReadTexels slot: read-back returns no data");
     }
     vkn_logf("read: DM_VK_NATIVE_READ=%d (texture read-back through the ReadTexels slot; movie planes: the storage mirror)", g_read_on);
     dm_vkn_census(rd_census);

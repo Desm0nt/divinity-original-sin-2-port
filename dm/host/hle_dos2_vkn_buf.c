@@ -282,7 +282,7 @@ static int pk_update(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
     }
     pk_job j; memset(&j, 0, sizeof j);
     j.kind = ib ? VKN_BUF_IB : VKN_BUF_VB; j.h = h; j.dst = dst; j.src = (const void *)(uintptr_t)((pkt + 0x2f) & ~15ull); j.size = size;
-    const int rc = (int)(int64_t)dm_vkn_on_stack(pk_on_stack, &j);
+    const int rc = (int)(int64_t)dm_vkn_on_stack_x(pk_on_stack, &j, NULL, DM_VKN_SF_ENC);   // [stage 5.5] vkn_buf_update runs on the encoder
     if (rc == -1) { g_pk.engine[PE_NOTOURS]++; g_pk.engine_bytes += size; return 0; }   // (a record we did not create: the old path)
     wr64(rec + (ib ? IB_LASTUSE : VB_LASTUSE), frame);
     *len = (uint64_t)size + 0x2f;
@@ -368,6 +368,10 @@ void dm_vkn_buf_register(void) {
     dm_vkn_site(0x91db40, k_dvb, "DestroyVertexBuffer", (void *)vb_h_dvb, &g_o_dvb, VKN_M_BOTH);
     dm_vkn_site(0x91d890, k_dib, "DestroyIndexBuffer", (void *)vb_h_dib, &g_o_dib, VKN_M_BOTH);
     dm_vkn_site(0x9218c0, k_copy, "CopyStagedBufferData", (void *)vb_h_copy, &g_o_copy, VKN_M_BOTH);
+    // [stage 5.5] the recording thread (dm/gfx/vkn/vkn_rt.h): creates make new handles (nothing recorded can name them) and the staged
+    // copy is the encoder's (vkn_buf.c keeps the recording's view of a renamed buffer until the rename's commit record): no default
+    // sync. The destroys sync (the block's retirement at the recording's point).
+    dm_vkn_stack_flag((void *)vb_h_cvb, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)vb_h_cib, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)vb_h_copy, DM_VKN_SF_ENC);
     dm_vkn_census(vb_census);
     if (vkn_mode() == VKN_NATIVE) {
         // Stage 4 (copies): the storage mirror's writer hooks, and the executor's second model slot (packets 0x2c / 0x2d for the

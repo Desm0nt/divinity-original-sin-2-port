@@ -148,7 +148,7 @@ void dm_dos2_vkn_install(void) {
         vkn_site *s = &g_site[i];
         if (!(s->modes & (mode == VKN_NATIVE ? VKN_M_NATIVE : VKN_M_ALONGSIDE))) continue;
         want++;
-        void *o = NULL, *entry = dm_vkn_stack_stub(s->hook);   // NULL (no page): the hook itself, on the guest stack (red line there)
+        void *o = NULL, *entry = dm_vkn_stack_stub_ex(s->hook, s->name, 0);   // NULL (no page): the hook itself, on the guest stack (red line there); [stage 5.5] named: its sync site
         if (dn_hook_chain(m, s->off, s->pro, entry ? entry : s->hook, &o)) { vkn_logf("\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91main+%#x (%s): not the words of DOS2 update v786432 main (build 4979b200) nor a hook of ours: this hook stays off", s->off, s->name); continue; }
         *s->orig = (vkn_fn)o; in++;
     }

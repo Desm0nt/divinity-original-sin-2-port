@@ -33,6 +33,7 @@ typedef struct fr_slot {
     VkCommandBuffer cb; VkFence fence;
     uint8_t pending;    // submitted, fence not yet seen signalled
     uint8_t ts;         // the timestamp pair of this buffer was written by its last recording
+    uint64_t frame;     // [stage 5.5] vkn_frame() of its last presented recording (vkn_frame_gpu_done)
 } fr_slot;
 
 static struct {
@@ -49,7 +50,9 @@ static struct {
     void (*on_begin[VKN_FR_LISTEN])(void); int nbegin;
     void (*on_close[VKN_FR_LISTEN])(void); int nclose;
     vkn_frame_stats st; vkn_frame_xstats xs;
-    uint64_t gpu_b, gpu_e; int gpu_ok;                       // newest finished presented timestamp pair (ns)
+    uint64_t gpu_b, gpu_e; int gpu_ok;                       // newest finished presented timestamp pair (ns); [stage 5.5] seqlock gpu_seq
+    uint32_t gpu_seq;
+    uint64_t done_frame; int done_any;                       // [stage 5.5] newest presented recording seen finished (atomics)
     int last_err;                                           // last dm_present_last_error value seen
     uint32_t red[RL_N];
 } g = {.cur = -1};
@@ -105,8 +108,15 @@ static void slot_done(int k) {
     if (s->ts && g.qp && k < VKN_FR_RING) {
         uint64_t v[2] = {0, 0};
         if (vkGetQueryPoolResults(g.dev, g.qp, 2u * (uint32_t)k, 2, sizeof v, v, sizeof v[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && v[1] >= v[0]) {
-            g.gpu_b = (uint64_t)((double)v[0] * g.ts_period); g.gpu_e = (uint64_t)((double)v[1] * g.ts_period); g.gpu_ok = 1;
+            // [stage 5.5] a seqlock: the engine thread reads the pair (vkn_frame_gpu_ns) while the recording thread writes it
+            __atomic_add_fetch(&g.gpu_seq, 1, __ATOMIC_ACQ_REL);
+            __atomic_store_n(&g.gpu_b, (uint64_t)((double)v[0] * g.ts_period), __ATOMIC_RELAXED); __atomic_store_n(&g.gpu_e, (uint64_t)((double)v[1] * g.ts_period), __ATOMIC_RELAXED);
+            __atomic_store_n(&g.gpu_ok, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g.gpu_seq, 1, __ATOMIC_ACQ_REL);
         }
+    }
+    if (k < VKN_FR_RING && (!__atomic_load_n(&g.done_any, __ATOMIC_RELAXED) || s->frame > __atomic_load_n(&g.done_frame, __ATOMIC_RELAXED))) {   // [stage 5.5]
+        __atomic_store_n(&g.done_frame, s->frame, __ATOMIC_RELEASE); __atomic_store_n(&g.done_any, 1, __ATOMIC_RELEASE);
     }
     s->ts = 0;
     vkn_prof_slot_done(k);   // [stage 5 A0] a sampled recording of this buffer: its timestamps are final now
@@ -167,7 +177,7 @@ int vkn_rec_begin(int presented) {
         if (red_ok(RL_BEGIN)) vkn_logf(FR_RED "frame: command buffer %d could not begin (VkResult %d): the %s recording is dropped", k, (int)r, presented ? "presented" : "off-frame");
         return -1;
     }
-    if (presented) g.next++;
+    if (presented) { g.next++; s->frame = vkn_frame(); }   // [stage 5.5] (after the due frame end: the frame its draws see)
     g.cur = k; g.cur_presented = presented;
     if (g.qp) {
         vkCmdResetQueryPool(s->cb, g.qp, 2u * (uint32_t)k, 2);
@@ -290,8 +300,29 @@ int vkn_rec_submit(int wait) {
 void vkn_frame_stats_get(vkn_frame_stats *s) { *s = g.st; }
 void vkn_frame_xstats_get(vkn_frame_xstats *s) { *s = g.xs; }
 int vkn_frame_gpu_ns(uint64_t *begin_ns, uint64_t *end_ns) {
-    if (!g.gpu_ok) return 0;
-    *begin_ns = g.gpu_b; *end_ns = g.gpu_e;
-    return 1;
+    // [stage 5.5] any thread: the pair as one (seqlock against slot_done on the recording thread)
+    for (int i = 0; i < 64; i++) {
+        const uint32_t s0 = __atomic_load_n(&g.gpu_seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1) continue;
+        const int ok = __atomic_load_n(&g.gpu_ok, __ATOMIC_RELAXED);
+        const uint64_t b = __atomic_load_n(&g.gpu_b, __ATOMIC_RELAXED), e = __atomic_load_n(&g.gpu_e, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g.gpu_seq, __ATOMIC_RELAXED) != s0) continue;
+        if (!ok) return 0;
+        *begin_ns = b; *end_ns = e;
+        return 1;
+    }
+    return 0;
+}
+// ---- [stage 5.5] the recording thread (vkn_rt.c) ----
+int vkn_rec_end_due(void) { return g.end_due; }   // the recording's owner
+uint64_t vkn_frame_gpu_done(int *any) {           // any thread
+    const int a = __atomic_load_n(&g.done_any, __ATOMIC_ACQUIRE);
+    if (any) *any = a;
+    return a ? __atomic_load_n(&g.done_frame, __ATOMIC_ACQUIRE) : 0;
+}
+void vkn_frame_wait_frame(uint64_t f) {           // the recording's owner: every submitted presented buffer of frame <= f finished
+    if (!g.init) return;
+    for (int k = 0; k < VKN_FR_RING; k++) if (g.s[k].pending && g.s[k].frame <= f) (void)slot_wait(k);
 }
 #endif

@@ -40,14 +40,16 @@
 extern "C" {
 #endif
 
-enum { VKN_FX_TEX = 16, VKN_FX_UBO = 8, VKN_FX_CHAIN = 12 };
+enum { VKN_FX_TEX = 16, VKN_FX_UBO = 8, VKN_FX_CHAIN = 24 };
+// (VKN_FX_CHAIN: the game registers 11 functions - ui-pass-fence, occ-oracle, shcache, mat, prepass, gbuf-le, lightfuse, post,
+// pass-cover, gbuf-le-pre, prepass-late; 12 left the host test's process full, which refused prepass-late and shcache.)
 // Binding kinds of a swapped shader's table whose source is vkn_fx_out (slot = index into out->tex / out->ubo). Outside the engine
 // kinds of vkn_shader.h (VKN_BK_OTHER is the last of those).
 enum { VKN_BK_FX_TEX = 16, VKN_BK_FX_UBO = 17 };
 // vkn_bind.flags bit: this texture binding is read with a depth comparison (sampler2DShadow): bind the slot sampler's twin.
 #define VKN_BF_CMP (1u << 30)
 // Shader ids of vkn_fx_shader_create start here (pipeline keys hold 24 bits; engine shader ids are dense from 1).
-enum { VKN_FX_SHADER_ID0 = 0xf00000, VKN_FX_SHADERS = 256 };
+enum { VKN_FX_SHADER_ID0 = 0xf00000, VKN_FX_SHADERS = 1024 };
 
 // What the chain is told about the draw besides vkn_draw_in.
 typedef struct vkn_fx_ctx {
@@ -80,6 +82,8 @@ typedef void (*vkn_fx_fn)(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_o
 // Adds a function to the chain (install time or later; any thread). order: low runs first (suggested: 100 shadow cache,
 // 200 material / pre-pass variants, 300 fused lighting, 400 post). 0 = ok, -1 = chain full / duplicate name.
 int vkn_fx_register(const char *name, vkn_fx_fn fn, void *user, int order);
+// Removes a function by name (1 = removed). Only while no draw runs (host tests: a test's own function out of the process's chain).
+int vkn_fx_drop(const char *name);
 // The draw path's side. vkn_fx_active: any function registered and no bypass. vkn_fx_run: *out zeroed here, then the chain.
 int vkn_fx_active(void);
 void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out);
