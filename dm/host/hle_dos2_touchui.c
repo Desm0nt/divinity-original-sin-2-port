@@ -795,6 +795,11 @@ int dm_dos2_touchui_on(void);
 int dm_dos2_touchui_on(void) { return g_on; }
 int dm_dos2_touchui_pak_has(const char *gui_path);   // hle_dos2_touchui_hud.c: is "GUI/x.swf" in the package
 int dm_dos2_touchui_pak_has(const char *gui_path) { return g_nocheck || (g_nfiles && tu_pak_has(gui_path)); }
+int dm_dos2_touchui_pak_file(const char *name);   // hle_dos2_touch_base.c: is this full package path in the package (no DM_DOS2_TOUCHUI_NOCHECK shortcut: a missing bindings file = no bindings)
+int dm_dos2_touchui_pak_file(const char *name) {
+    for (int i = 0; i < g_nfiles; i++) if (!strcasecmp(g_files[i].name, name)) return 1;
+    return 0;
+}
 void dm_dos2_touchui_install(void);   // main.c host_preload, BEFORE dm_dos2_touch_install (it turns DM_DOS2_TOUCH / _KBM on for it)
 void dm_dos2_touchui_install(void) {
     const char *e = getenv("DM_DOS2_TOUCHUI"), *lg = getenv("DM_DOS2_TOUCHUI_LOG"), *v;

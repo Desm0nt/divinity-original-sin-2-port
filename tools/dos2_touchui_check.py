@@ -11,14 +11,14 @@ from pathlib import Path
 import capstone
 
 root = Path(__file__).resolve().parent.parent
-src = ''.join((root / 'dm/host' / f).read_text(encoding='utf-8') for f in ('hle_dos2_touchui.c', 'hle_dos2_touchui_ei.c', 'hle_dos2_touchui_hud.c', 'hle_dos2_touchui_ie.c', 'hle_dos2_touchui_route.c', 'hle_dos2_touch_world.c', 'hle_dos2_touchui_vis.c', 'hle_dos2_touch_gaps.h', 'hle_dos2_touch_gaps.c', 'hle_dos2_touch_tips.h', 'hle_dos2_touch_tips.c', 'hle_dos2_touch_kit.c'))   # TU-06 / TU-07 sites too; the dmTouch kit's (DK_)
+src = ''.join((root / 'dm/host' / f).read_text(encoding='utf-8') for f in ('hle_dos2_touchui.c', 'hle_dos2_touchui_ei.c', 'hle_dos2_touchui_hud.c', 'hle_dos2_touchui_ie.c', 'hle_dos2_touchui_route.c', 'hle_dos2_touch_world.c', 'hle_dos2_touchui_vis.c', 'hle_dos2_touch_gaps.h', 'hle_dos2_touch_gaps.c', 'hle_dos2_touch_tips.h', 'hle_dos2_touch_tips.c', 'hle_dos2_touch_kit.c', 'hle_dos2_touch_base.c'))   # TU-06 / TU-07 sites too; the dmTouch kit's (DK_)
 main = open(sys.argv[1], 'rb').read()
-enum = {k: int(v, 16) for k, v in re.findall(r'\b((?:T[UGWT]|EI|HU|IE|RT|VS|DK)_[A-Z0-9_]+) = (0x[0-9a-f]+)', src)}
+enum = {k: int(v, 16) for k, v in re.findall(r'\b((?:T[UGWTB]|EI|HU|IE|RT|VS|DK)_[A-Z0-9_]+) = (0x[0-9a-f]+)', src)}
 arr = {}
 for name, n, body in re.findall(r'static const uint32_t (k_\w+)\[(\d+)\] = \{(.*?)\};', src, re.S):
     words = [int(w, 16) for w in re.findall(r'0x[0-9a-f]{8}', re.sub(r'/\*.*?\*/', '', body, flags=re.S))]
     assert len(words) == int(n), (name, len(words), n); arr[name] = words
-sites = re.findall(r'\{((?:T[UGWT]|EI|HU|IE|RT|VS|DK)_[A-Z0-9_]+), (\d+), (k_\w+)\}', src) + [('TU_IGGY_NOMETHOD', '7', 'k_iggy_nomethod')]
+sites = re.findall(r'\{((?:T[UGWTB]|EI|HU|IE|RT|VS|DK)_[A-Z0-9_]+), (\d+), (k_\w+)\}', src) + [('TU_IGGY_NOMETHOD', '7', 'k_iggy_nomethod')]
 md = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM); bad = 0
 for off, n, k in sites:
     o = enum[off]; want = arr[k]; got = list(struct.unpack_from('<%dI' % int(n), main, o))

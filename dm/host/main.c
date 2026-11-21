@@ -194,7 +194,9 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_touch_kit_install(void); dm_dos2_touch_kit_install(); }   // [DOS2] DM_DOS2_TOUCH_KIT / _M0 (default 0): the dmTouch kit's host side and the M0 experiment, after the EI / IE / route hooks (hle_dos2_touch_kit.c)
     { void dm_dos2_touch_world_install(void); dm_dos2_touch_world_install(); }   // [DOS2] DM_DOS2_TOUCH_WORLD=3: PC world clicks by touch in controller mode: picking from the cursor, Action1 (hle_dos2_touch_world.c)
     { void dm_dos2_touch_guard_install(void); dm_dos2_touch_guard_install(); }   // [DOS2] with DM_DOS2_TOUCH: NULL check the game lacks in its pending-tooltip path (hle_dos2_touchui.c, run tu03 crash)
+    { void dm_dos2_touch_base_install(void); dm_dos2_touch_base_install(); }   // [DOS2] DM_DOS2_TOUCH_BASE=console (default off): UI mode TOUCH on the console input mode, step 1: site checks, read by the touch hook below (hle_dos2_touch_base.c)
     { void dm_dos2_touch_install(void); dm_dos2_touch_install(); }   // [DOS2] DM_DOS2_TOUCH: touches as mouse records through the engine's InjectInput (hle_dos2_touch.c)
+    { void dm_dos2_touch_base_hook(void); dm_dos2_touch_base_hook(); }   // [DOS2] DM_DOS2_TOUCH_BASE=console, step 2: the listener filter's two mode reads pinned AFTER hle_dos2_touch.c compared those words (DM_DOS2_TOUCH_KBM)
     { void dm_dos2_touchui_hud_hook(void); dm_dos2_touchui_hud_hook(); }   // [DOS2] touch HUD, step 2: its create-all / destroy-all jumps go in AFTER hle_dos2_touch.c compared those prologues (the TU-07 install-order bug)
     { void dm_dos2_vkn_install(void); dm_dos2_vkn_install(); }   // [DOS2] DM_VK_NATIVE: the native Vulkan backend behind the engine's renderer (hle_dos2_vkn.c); LAST: its hooks chain over the others'
 #endif

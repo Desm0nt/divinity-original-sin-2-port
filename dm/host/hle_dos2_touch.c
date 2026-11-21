@@ -205,6 +205,9 @@
 //   left click, double tap = a PC double click, short long press = hover, long press = right click, pans = keys w / a / s / d, rotation = keys
 //   delete / end, pinch = wheel, 2f / 3f taps = held lalt / lshift, 3f swipe = key o); no pad path. Section "UI mode TOUCH" below dt_radial_up;
 //   rules in hle_dos2_touch_gesture.h, host test dm/host/tests/dos2_touch_t_gesture_test.c. DM_DOS2_TOUCH_T=0: TOUCH keeps the hybrid gestures.
+// Base A (21.11, DM_DOS2_TOUCH_BASE=console, default off; hle_dos2_touch_base.c / .h): TOUCH keeps the mode byte 0, the listener filter alone
+//   answers "controller mode" - here: the bindings path may name the merged file Eoc/dmtouch_1.json, a pad pulse in TOUCH is a real npad
+//   pulse again, [mgr+0x170] is held at 1 while the TOUCH PC UI is up, no live pad switch. Off = every line below as before.
 #ifdef DM_GAME_DOS2
 #include "hle.h"
 #include "dm_input.h"   // DM_BTN_* (also included further down; pack 3y uses DM_BTN_X before that)
@@ -217,6 +220,8 @@
 #include <time.h>
 #include "hle_dos2_touch_gesture.h"
 #include "hle_dos2_uimode.h"
+#include "hle_dos2_touch_base.h"   // DM_DOS2_TOUCH_BASE=console: TOUCH on the console input mode (hle_dos2_touch_base.c)
+int dm_dos2_touch_base_want(void); int dm_dos2_touch_base_on(void); int dm_dos2_touch_base_merged(void);
 
 enum { DT_POLL = 0x8a7530, DT_INJECT = 0x847690, DT_CALL = 0x8a8478, DT_MGR_LD = 0x8a77dc, DT_MGR = 0x2bb8960, DT_CURSOR = 0x2bb88e8,
        DT_CUR_INIT = 0x8a8e94, DT_CUR_READ = 0xd2392c, DT_SETDEV = 0x12a04a0 };
@@ -235,7 +240,7 @@ static const uint32_t k_win_rd[5] = {0x9000fd95 /* adrp x21,main+0x2bbb000 */, 0
 static const uint32_t k_win_set = 0x29030801;     // 0x93d21c stp w1,w2,[x0,#0x18]: Window::SetSize
 static const uint32_t k_uiset[2] = {0x39646118 /* ldrb w24,[x8,#0x918] */, 0xf9406ec8};   // 0x10c07ac: the per-player UI set reads the mode byte
 static const uint32_t k_bind_ref[2] = {0xd00095c1 /* adrp x1,main+0x1ebf000 */, 0x9130d421 /* add x1,x1,#0xc35 */};
-static const char k_bind_pad[] = "PlayerProfiles/Eoc/controller_1.json", k_bind_keys[] = "PlayerProfiles/Eoc/keyboard_1.json";
+static const char k_bind_pad[] = TB_BIND_PAD_PATH, k_bind_keys[] = TB_BIND_KEYS_PATH, k_bind_merged[] = TB_BIND_MERGED_PATH;   // hle_dos2_touch_base.h (the old two strings + the merged file of base A)
 static int g_dbg, g_kbm, g_pcui, g_mode_ok, g_win_ok, g_win_fixed;
 // live switch (pass 4): the player UI manager's create all / destroy all and the places that prove the global and the hash layout
 enum { DT_UI_THIS = 0x3298140, DT_UI_CREATE = 0x10c4580, DT_UI_DESTROY = 0x10c4730, DT_UI_CREATE_CALL = 0x104da98, DT_UI_DESTROY_CALL = 0xd40064,
@@ -252,7 +257,7 @@ static int g_live, g_live_ms = 1000, g_in_poll, g_pad_act, g_live_wait;
 // UI mode switch (hle_dos2_uimode.c): g_live_ok = the live switch's sites matched and the InjectInput hook is in (also without DM_DOS2_TOUCH_LIVE,
 // so a change to TOUCH in game can still bring the controller UI back on a pad press); g_live_ui = UI mode TOUCH runs that switch now (the =1
 // variant); g_bind_ok / g_bind_keys / g_keys_pref = the bindings path string checked / now keyboard_1.json / wanted in TOUCH (DM_DOS2_TOUCH_PCUI_KEYS)
-static int g_live_ok, g_live_ui, g_bind_ok, g_bind_keys, g_keys_pref = 1;
+static int g_live_ok, g_live_ui, g_bind_ok, g_bind_keys, g_keys_pref = 1;   // g_bind_keys: TB_BIND_* the path string names now (0 pad, 1 keys, 2 merged = base A)
 static int dt_live(void) { return g_live ? g_live : g_live_ui; }   // the live switch's variant now: DM_DOS2_TOUCH_LIVE for the run, else the UI mode's
 static unsigned g_live_n;
 static uint64_t g_live_t;
@@ -780,7 +785,7 @@ static _Atomic uint32_t g_kp_id;          // a key asked (raw id + 1), 0 = none;
 static _Atomic uint64_t g_kp_at;          // dt_ms() when it goes down
 static uint32_t g_kp_held; static uint64_t g_kp_t; static int g_kp_polls;   // game thread: the key down now (id + 1)
 static unsigned g_n_kp;
-static int dt_t_padswitch(void) { const char *ps = getenv("DM_DOS2_TOUCH_T_PADSWITCH"); return ps && atoi(ps) > 0; }   // owner 20.11: no live pad switch in TOUCH unless =1
+static int dt_t_padswitch(void) { const char *ps = getenv("DM_DOS2_TOUCH_T_PADSWITCH"); return tb_padswitch(dm_dos2_touch_base_want(), ps && atoi(ps) > 0); }   // owner 20.11: no live pad switch in TOUCH unless =1
 int dm_dos2_touch_key_pulse(uint32_t id, int delay_ms, const char *why);
 int dm_dos2_touch_key_pulse(uint32_t id, int delay_ms, const char *why) {
     if (!dm_dos2_touch_on() || id > 0xff) return 0;
@@ -1252,12 +1257,13 @@ static void dt_live_switch(int pc, const char *why) {
 static int dt_pc(void) { return dt_live() ? !*(volatile uint8_t *)(g_main->base + DT_MODE) : g_pcui; }   // the PC UI is up now
 // ---- the UI mode switch's HUD part (hle_dos2_uimode.c, game thread) ----
 static int dt_poke_ro(module_t *m, uint32_t off, const void *src, size_t n);
-static int dt_bind(int keys) {   // the bindings path main+0x1ebfc35: Eoc/keyboard_1.json (1) or Eoc/controller_1.json (0); read by main+0xc05ab0 when it loads them
+static int dt_bind(int keys) {   // the bindings path main+0x1ebfc35: TB_BIND_PAD Eoc/controller_1.json, _KEYS Eoc/keyboard_1.json, _MERGED Eoc/dmtouch_1.json (base A); read by main+0xc05ab0 when it loads them
     if (!g_bind_ok) return 0;
     if (keys == g_bind_keys) return 1;
-    if (dt_poke_ro(g_main, DT_BIND_STR, keys ? k_bind_keys : k_bind_pad, keys ? sizeof k_bind_keys : sizeof k_bind_pad)) { LOG("【红】[touch] mprotect RW failed: the bindings path is left alone"); return 0; }
+    const char *const str = keys == TB_BIND_MERGED ? k_bind_merged : keys ? k_bind_keys : k_bind_pad;
+    if (dt_poke_ro(g_main, DT_BIND_STR, str, strlen(str) + 1)) { LOG("【红】[touch] mprotect RW failed: the bindings path is left alone"); return 0; }
     g_bind_keys = keys;
-    LOG("[touch] bindings path main+%#x -> %s (loaded by main+0xc05ab0; when the game loads them again was not traced: maybe only at the start)", DT_BIND_STR, keys ? k_bind_keys : k_bind_pad);
+    LOG("[touch] bindings path main+%#x -> %s (loaded by main+0xc05ab0; when the game loads them again was not traced: maybe only at the start)", DT_BIND_STR, str);
     return 1;
 }
 int dm_dos2_touch_ui_records(void);   // player UI sets now (0 = not in game: main menu / loading), -1 = cannot tell (the hash sites differ)
@@ -1281,7 +1287,7 @@ int dm_dos2_touch_ui_hud(int mode, int rebuild, uint64_t *us) {
     }
     if (pc && !g_mode_ok) { LOG("【红】[touch] UI mode touch: main+%#x / +%#x differ: the mode byte is not set (the controller UI stays)", DT_MODE_INIT, DT_UISET); return 0; }
     if (g_mode_ok) *(volatile uint8_t *)(g_main->base + DT_MODE) = (uint8_t)ui_mode_byte(mode);
-    dt_bind(pc && g_keys_pref);
+    dt_bind(tb_bindings(dm_dos2_touch_base_want(), pc, g_keys_pref, dm_dos2_touch_base_merged()));   // without DM_DOS2_TOUCH_BASE=console: pc && g_keys_pref, as before
     // run 20.11 review: the same rule as at the start (owner 20.11, c5957b6): no live pad switch in TOUCH unless DM_DOS2_TOUCH_T_PADSWITCH=1 - a
     // mode change that lands here (DM_DOS2_UI_LIVE, an old Java's nativeDos2UiMode) must not bring the rebuilds back
     g_live_ui = pc && g_live_ok && dt_t_padswitch(); g_pcui = pc; g_live_wait = 0; g_live_t = dt_ms();   // the pad's live switch waits its hysteresis from here
@@ -1470,7 +1476,10 @@ int dm_dos2_touch_pad_pulse(uint64_t mask, const char *why, int delay_ms);
 int dm_dos2_touch_pad_pulse(uint64_t mask, const char *why, int delay_ms) {
     if (!g_pp_on || !mask) return 0;
     const uint64_t now = dt_ms();
-    if (dt_t_mode()) {   // UI mode TOUCH: the pad's records are filtered and unbound there - the keyboard twin (dt_pad_key, the key tap section)
+    // UI mode TOUCH: the pad's records are filtered and unbound there - the keyboard twin (dt_pad_key, the key tap section). Base A
+    // (DM_DOS2_TOUCH_BASE=console, hle_dos2_touch_base.c): the filter lets the pad through and the merged bindings bind it - a real pulse
+    // again, as in the hybrid (the npad path below)
+    if (dt_t_mode() && !tb_pulse_real(dm_dos2_touch_base_on(), 1, g_bind_keys)) {
         if (now - g_pp_asked < 250) return 0;
         const uint32_t key = dt_pad_key(mask);
         if (key == DT_PADKEY_NONE) { static unsigned n; if (n++ < 20) LOG("[touch] pad button %#llx (%s): UI mode TOUCH has no keyboard twin for it: nothing sent", (unsigned long long)mask, why ? why : ""); return 0; }
@@ -1538,7 +1547,7 @@ static int dt_ei_padbtn(void *ctx, void *player, void *ui, const char *name, uns
     {   // DM_DOS2_TOUCH_KIT_M0 bit 4 (hle_dos2_touch_kit.c, log only): the input events this pulse makes and who takes them
         void dm_dos2_kit_m0_pulse(int code, uint64_t mask, int delay_ms, int key);
         const int dl = n >= 2 && a[1].type == 4 && a[1].d >= 0 && a[1].d <= 2000 ? (int)a[1].d : btn == DM_BTN_A ? 750 : 0;
-        const uint32_t tw = dt_t_mode() ? dt_pad_key(btn) : DT_PADKEY_NONE;
+        const uint32_t tw = dt_t_mode() && !tb_pulse_real(dm_dos2_touch_base_on(), 1, g_bind_keys) ? dt_pad_key(btn) : DT_PADKEY_NONE;
         dm_dos2_kit_m0_pulse(code, btn, dl, tw == DT_PADKEY_NONE ? -1 : (int)tw);
     }
     // optional 2nd argument = the delay in ms the movie asks for (the title splash: 60 ms, its close is no guarded accept; pack 3f)
@@ -1839,7 +1848,10 @@ static void dt_drain(void) {
     dm_dos2_kit_poll();   // DM_DOS2_TOUCH_KIT / _M0 (hle_dos2_touch_kit.c): timed verbs, the addressed "IE dm*" deliveries, M0; nothing when both are 0
     { void dm_dos2_uimode_poll(void); dm_dos2_uimode_poll(); }   // the UI mode switch: a request from the gear, the HUD part at the next load (hle_dos2_uimode.c)
     dt_kp_poll(mgr);   // UI mode TOUCH: a key tap of the host (the Back's escape, a pad pulse's keyboard twin)
-    if (g_kbm) {   // controller mode: let keyboard / mouse records through the listener filter (main+0x84407c)
+    // base A (DM_DOS2_TOUCH_BASE=console): while the TOUCH PC UI is up the filter answers "controller mode", so keyboard / mouse records pass
+    // only through this byte - held at 1 whatever DM_DOS2_TOUCH_KBM says (today they pass as "class 0 == mode byte 0": the same listeners)
+    const int base_open = tb_kbm_hold(dm_dos2_touch_base_on(), dt_pc());
+    if (g_kbm || base_open) {   // controller mode: let keyboard / mouse records through the listener filter (main+0x84407c)
         volatile uint8_t *k = (volatile uint8_t *)mgr + DT_MGR_KBM;
         uint8_t want = 1;
         int why = 0;   // console touch (owner 15.11): hle_dos2_touchui.c dm_dos2_touchui_gate decides; -1 = busy, keep the last state
@@ -1851,12 +1863,14 @@ static void dt_drain(void) {
             want = open < 0 ? *k : (uint8_t)(open > 0);
             if (dm_dos2_route_on() && (!in_game || dm_dos2_route_game())) { want = 1; why = 5; }   // pass 7: the per-object hook decides who gets the mouse
         }
+        if (base_open) { want = 1; why = 6; }
         if (*k != want && (want || g_kbm == 2)) { static unsigned n; *k = want;
-            static const char *const k_why[6] = {"menus (no window watch)", "OPEN: a touch window is on screen, mouse records reach every listener",
+            static const char *const k_why[7] = {"menus (no window watch)", "OPEN: a touch window is on screen, mouse records reach every listener",
                 "OPEN: no console menu on screen (splash / loading / press A: a tap is accept)", "CLOSED: a console menu without touch code is on screen (pad, Back = B)",
                 "CLOSED: in game, no touch menu on screen: mouse records only to the listeners that ask for them",
-                "OPEN: per-movie routing (hle_dos2_touchui_route.c) decides which UI object gets the mouse"};
-            if (n++ < 400) LOG("[touch] DM_DOS2_TOUCH_KBM=%d: [mgr+%#x] -> %u (%s)", g_kbm, DT_MGR_KBM, want, g_kbm == 2 ? k_why[why < 0 || why > 5 ? 0 : why] : "mouse records reach every listener in controller mode"); }
+                "OPEN: per-movie routing (hle_dos2_touchui_route.c) decides which UI object gets the mouse",
+                "OPEN: UI mode TOUCH on the console input base (DM_DOS2_TOUCH_BASE=console): keyboard / mouse records pass the pinned filter through this byte"};
+            if (n++ < 400) LOG("[touch] DM_DOS2_TOUCH_KBM=%d: [mgr+%#x] -> %u (%s)", g_kbm, DT_MGR_KBM, want, g_kbm == 2 || why == 6 ? k_why[why < 0 || why > 6 ? 0 : why] : "mouse records reach every listener in controller mode"); }
     }
     g_motion_in_drain = 0;
     if (g_ui_ok) { uint8_t *ui = *(uint8_t *volatile *)(g_main->base + DT_UI_THIS); g_in_game = ui && dt_ui_records(ui); }
@@ -2193,6 +2207,8 @@ void dm_dos2_touch_install(void) {
     }
     if (((v = getenv("DM_DOS2_TOUCH_PCUI")) && atoi(v) > 0) || ui_start == UI_TOUCH) {   // UI mode TOUCH at start = this PC start (hle_dos2_uimode.c)
         static const uint32_t strb_wzr = 0x3900c11f;   // strb wzr,[x8,#0x30]
+        // the PC start's bindings file: TB_BIND_KEYS (keyboard_1.json), as before, unless DM_DOS2_TOUCH_BASE=console has its merged file in the package
+        const int bind_start = tb_bindings(dm_dos2_touch_base_want(), 1, 1, dm_dos2_touch_base_merged());
         if (ui_start == UI_TOUCH) {
             // owner 20.11: no live rebuilds in TOUCH (they broke the UI on the phone; the mode changes with a restart): a pad press does not
             // switch to the controller UI; DM_DOS2_TOUCH_T_PADSWITCH=1 = the pad's way back as before
@@ -2210,10 +2226,10 @@ void dm_dos2_touch_install(void) {
             if (g_live) LOG("[touch] DM_DOS2_TOUCH_LIVE: bindings stay Eoc/controller_1.json (the pad needs them after a switch); DM_DOS2_TOUCH_PCUI is only the start mode");
             else if (!g_keys_pref) LOG("[touch] DM_DOS2_TOUCH_PCUI_KEYS=0: bindings stay Eoc/controller_1.json (no wheel zoom, no escape)");
             else if (!g_bind_ok) LOG("【红】[touch] main+%#x / +%#x differ: the bindings path is left alone (no keyboard_1.json)", DT_BIND_STR, DT_BIND_REF);
-            else if (dt_poke_ro(m, DT_BIND_STR, k_bind_keys, sizeof k_bind_keys)) LOG("【红】[touch] mprotect RW failed: the bindings path is left alone");
+            else if (dt_poke_ro(m, DT_BIND_STR, tb_bind_path(bind_start), strlen(tb_bind_path(bind_start)) + 1)) LOG("【红】[touch] mprotect RW failed: the bindings path is left alone");
             else {
-                g_bind_keys = 1;
-                LOG("[touch] bindings path main+%#x: %s -> %s (loaded by main+0xc05ab0 for the four players)", DT_BIND_STR, k_bind_pad, k_bind_keys);
+                g_bind_keys = bind_start;
+                LOG("[touch] bindings path main+%#x: %s -> %s (loaded by main+0xc05ab0 for the four players)", DT_BIND_STR, k_bind_pad, tb_bind_path(g_bind_keys));
                 if (g_live_ui) LOG("[touch] UI mode touch: after a pad press the controller UI runs with the keyboard_1.json bindings (controller_1.json is not loaded): "
                                    "DM_DOS2_TOUCH_PCUI_KEYS=0 keeps controller_1.json (no wheel zoom / escape then)");
             }

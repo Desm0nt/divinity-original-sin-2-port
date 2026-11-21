@@ -28,7 +28,9 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
                stage bounds for the floating sticks; --no-hudrect = without), and overhead_d = overhead.swf + that pass (the "(X) Actions..." hint
                over the selected target as rect "hint3": a world tap there = X; --no-ohint = without);
         touch (hints + the HUD of UI mode TOUCH made from the player's PC movies: hotBar_p minimap_p statusConsole_p playerInfo_p combatLog_p dmSide_p,
-               tools/dos2_pchud_touch.py, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"; every `hints` movie is byte for byte the same),
+               tools/dos2_pchud_touch.py, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"; every `hints` movie is byte for byte the same;
+               + PlayerProfiles/Eoc/dmtouch_1.json = keyboard_1.json + controller_1.json of --engine <Engine.pak> (default: next to --sw) for
+               DM_DOS2_TOUCH_BASE=console, tools/dos2_touch_bind.py; --no-bind = without),
         --kit-m0 / --kit (hints / touch sets; docs/dos2/TOUCH_UNIFIED.md M0 / M2): the type 0x8d movies (dmColumn_d, dmSide_p) get the M0 probe
                (tools/dos2_touchkit.py m0_patch: the kit's input event names + a trace) or the whole dmTouch kit with their maps; without them
                every movie is what it was,
@@ -105,7 +107,7 @@ def write_pak(path, files, store=False, priority=0):
 def main():
     a = sys.argv[1:]
     if not a or a[0] in ('-h', '--help'): sys.exit(__doc__)
-    opt = {'--src': None, '--out': None, '--name': 'TouchUI.pak', '--sw': None}; store = '--store' in a
+    opt = {'--src': None, '--out': None, '--name': 'TouchUI.pak', '--sw': None, '--engine': None}; store = '--store' in a
     for k in opt:
         if k in a: opt[k] = a[a.index(k) + 1]
     which = a[0]
@@ -226,6 +228,13 @@ def main():
     files = [(GUI + n, made[n] if n in made else have[n]()) for n in sorted(list(names) + list(made), key=str.lower)]   # Larian's lists are sorted by name, case ignored (Game.pak, Engine.pak)
     for n, d in files:
         if d[:3] not in (b'CWS', b'FWS', b'ZWS'): sys.exit('%s is not a SWF (%r)' % (n, d[:3]))
+    if which == 'touch' and '--no-bind' not in a:   # base A (DM_DOS2_TOUCH_BASE=console): keyboard_1.json + controller_1.json of the player's Engine.pak as one bindings file (tools/dos2_touch_bind.py)
+        import dos2_touch_bind
+        eng = opt['--engine'] or str(Path(opt['--sw'] or root / 'romfs' / 'Data' / 'Game.pak').parent / 'Engine.pak')
+        if not os.path.exists(eng): print('NOTE: no %s (give --engine <Engine.pak>): the package gets no %s; DM_DOS2_TOUCH_BASE=console then keeps keyboard_1.json and keyboard twins' % (eng, dos2_touch_bind.OUT))
+        else:
+            if dos2_touch_bind.check(eng): sys.exit('%s: static checks failed, package not written' % dos2_touch_bind.OUT)
+            files = sorted(files + [(dos2_touch_bind.OUT, dos2_touch_bind.build(eng))], key=lambda f: f[0].lower())
     if which in ('hints', 'touch') and not [o for o in a if o.startswith('--no-')]:   # self-check: every movie the host maps a UI type to is in the package
         miss = host_missing({n for n, _ in files})
         if miss is None: print('self-check skipped: dm/host/hle_dos2_touchui.c not found next to tools/')
