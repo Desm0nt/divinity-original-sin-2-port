@@ -1083,7 +1083,8 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             src.vs = vin ? vin->vs : fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);   // [stage 5.3 V1] vin
             src.fs = !has_fs ? VK_NULL_HANDLE : fxs ? s->module[VKN_SRC_FS] : vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0);
             src.layout = s->layout; src.pass = pi->pass; src.vs_inputs = vs_inputs;
-            src.shader = fxs || fxbits || vin ? NULL : s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable (an effect's variant is not listed)
+            src.shader = s; src.retype = code; src.alpha_func = fsv ? 5u : 0u; src.alpha_ref = fsv ? in->alpha_ref : 0.0f;   // [DOS2] VK-NATIVE stage 4 warm-up (vkn_warm.c): what makes this build replayable
+            src.vs_id = vin ? vin->vs_id : 0;   // [stage 5 rest] effect variants too: fx bits, a piece's shader / vertex module by its recipe (vkn_warm.h)
             if (src.vs && (src.fs || !has_fs)) p = vkn_pipe_get(&key, &src);
         }
         if (!p) {

@@ -307,6 +307,10 @@ int vkn_mat_warm_module(const void *eng, const void *arg, uint32_t n, VkShaderMo
     uint64_t a[3]; memcpy(a, arg, sizeof a);
     return vin_module(s, a[0], a[1], a[2], 1, m, vs_id) ? -1 : 0;
 }
+static int mat_make(const struct vkn_shader *eng, const void *arg, uint32_t n, const struct vkn_shader **fx, VkShaderModule *vs, uint16_t *vs_id) {
+    (void)fx; return vkn_mat_warm_module(eng, arg, n, vs, vs_id);
+}
+extern int vkn_warm_maker(const char *piece, int (*fn)(const struct vkn_shader *, const void *, uint32_t, const struct vkn_shader **, VkShaderModule *, uint16_t *)) __attribute__((weak));
 // variant B: the cut-down vertex module of c for retype code `code` (made once; a failure is kept and counted at every draw)
 static const vs_var *cut_vs(mcls *c, uint64_t code) {
     for (uint32_t i = 0; i < c->nvs; i++) if (c->vs[i].code == code) return &c->vs[i];
@@ -453,6 +457,7 @@ void vkn_mat_install(uint32_t vendor, const char *device_name) {
     if (!g.mode && !g.xlq) return;
     if (!reg_fn()) { mred(R_CFG, "the draw-effect chain refused the function: off"); g.mode = g.xlq = 0; return; }
     g.inst = 1;
+    if (vkn_warm_maker && (g.mode == 2 || g.xlq == 1 || g.xlq == 3)) vkn_warm_maker("mat", mat_make);   // [stage 5 rest] the vin modules' recipe
 }
 void vkn_b5_install(uint32_t vendor, const char *device_name);   // vkn_shlib.cpp's one call (end of vkn_shlib_init: mode 1 with the library on)
 void vkn_b5_install(uint32_t vendor, const char *device_name) { vkn_mat_install(vendor, device_name); if (vkn_prepass_install) vkn_prepass_install(vendor, device_name); }

@@ -17,6 +17,23 @@
 // DM_GFX_PIPE_CACHE_LOAD=0 (the translator's PowerVR switch) skips loading the cache file here too (it is still saved).
 // No game addresses. Thread safety: one mutex for the worker's table, its note queue and its counters; the render thread's hit path
 // of vkn_pipe_get never touches it.
+//
+// [stage 5 rest] TECHNIQUE PIPELINES (list version 2; a version-1 file is read and rewritten). Stage 5's draw effects (vkn_fx.h) built
+// their pipelines unlisted (the draw path passed no shader): the first sight of a scene built them in the frame. Now listed:
+//   * fx bits (no fragment stage: MAT variant A, the shadow cache's depth-only draws; rasterizer discard): the record's `fx`, replayed
+//     on the engine shader with the same bits;
+//   * a named fragment stage drawn outside its verified pass (DM_VK_NATIVE_SH, the Dref / PCF bundles): `fsalt`, replayed with the
+//     translated module (vkn_shader_named_alt) - off the recording thread vkn_shader_module gives the named one;
+//   * a piece's vertex module (vkn_fx_out.vin: MAT variant B and XLQ) and a piece's shader object (vkn_fx_shader_create: LIGHTFUSE's
+//     fused 'f' / 'g' shaders and its Fog-window readers) by RECIPE: the piece tells this file, when it makes the module / object, a
+//     name and up to VKN_WARM_ARG bytes that make it again from the engine shader (vkn_warm_recipe_vs / _fx), and registers a maker
+//     (vkn_warm_maker) that returns the SAME module + vin id / object for them on any thread (the piece's own table, under its lock).
+//     The record keeps the engine shader's keys (the replay waits for that shader), the piece name and the bytes.
+//   Not listed (counted as "not listable", by reason): a build of a piece without a recipe (PRESKIN's modules, post's fused shaders).
+//   Exactness: a listed build is taken only by a draw asking for the same key (effect ids included) and the same modules - a recipe
+//   that made something else is an unused build, never another picture.
+// [stage 5 rest] PORTABLE SEED (vkn_seed.c, DM_VK_NATIVE_SEED): the records of the APK's dos2-pipe-seed.bin (the old path's NR-31 seed:
+//   a phone's list as Vulkan create-info content) translated to this backend's records when their shader exists (vkn_seed.h).
 #ifndef DM_VKN_WARM_H
 #define DM_VKN_WARM_H
 #include "vkn.h"
@@ -42,8 +59,51 @@ void vkn_warm_forget(uint32_t shader);
 // 1 = the worker creates the VkPipelineCache (from its file), vkn_state must not create an empty one.
 int vkn_warm_owns_cache(void);
 
+// ---- [stage 5 rest] technique pipelines: recipes and makers (any thread) ----
+enum { VKN_WARM_ARG = 48, VKN_WARM_PIECE = 10 };
+struct vkn_shader;
+// The module / object of piece `piece` for engine shader `eng` and the recipe bytes: fx (shader object) or vs + vs_id (vertex module).
+// 0 = made / found (the same one a draw gets).
+typedef int (*vkn_warm_make_fn)(const struct vkn_shader *eng, const void *arg, uint32_t n, const struct vkn_shader **fx, VkShaderModule *vs, uint16_t *vs_id);
+int vkn_warm_maker(const char *piece, vkn_warm_make_fn fn);   // 0 ok (install time)
+// The piece made fx object `fx_shader` / vertex module id `vs_id` for engine shader `eng_shader` from these bytes (n <= VKN_WARM_ARG).
+void vkn_warm_recipe_fx(const void *fx_shader, const char *piece, const void *eng_shader, const void *arg, uint32_t n);
+void vkn_warm_recipe_vs(uint16_t vs_id, const char *piece, const void *eng_shader, const void *arg, uint32_t n);
+
+// ---- the list record (version 2; vkn_seed.c makes them too) ----
+enum { VKN_WREC_VEL = 16 };
+enum { VKN_WREC_F_BLEND = 1, VKN_WREC_F_DS = 2, VKN_WREC_F_RASTER = 4, VKN_WREC_F_VFMT = 8, VKN_WREC_F_FS = 16 };
+enum { VKN_WREC_R_NONE = 0, VKN_WREC_R_FX = 1, VKN_WREC_R_VS = 2 };   // rkind: a piece's shader object / vertex module by recipe
+typedef struct vkn_warm_rec {
+    char key[2][16];            // vertex / fragment program keys (xbg_shader_program_key, 16 hex chars, no NUL; fragment zero = no stage)
+    uint64_t retype;            // vertex variant: the retype code ("#vi"), 0 = base module
+    float alpha_ref;            // fragment variant: alpha test reference ("#at")
+    uint32_t alpha_func;        // NVN compare func of the alpha test, 0 = base module
+    uint32_t color[8], depth;   // render pass compatibility: VkFormat per colour slot (0 = not bound), depth VkFormat
+    uint8_t prim, stencil_ref, flags, nvel;   // engine primitive (after the rewrite), stencil reference, VKN_WREC_F_*, vertex elements
+    uint8_t blend[6], ds[8], raster[5];        // engine argument tuples (vkn_blend_args / vkn_ds_args / vkn_raster_args)
+    uint8_t ncolor, samples, pad0;
+    uint8_t write_mask[8];      // VkColorComponentFlags per colour slot
+    uint16_t vs_inputs, pad1;   // locations the vertex module reads (checked against the shader at the replay)
+    uint8_t vel[6 * VKN_WREC_VEL];   // vertex format elements (6 bytes each, the engine's)
+    uint8_t pad2[6];
+    // version 2
+    uint8_t fx, rkind, fsalt, pad3;   // VKN_PIPE_FX_* bits; VKN_WREC_R_*; 1 = the named fragment stage's translated module
+    uint16_t rlen; char piece[VKN_WARM_PIECE];
+    uint8_t rarg[VKN_WARM_ARG];
+    uint64_t sum;               // fnv of everything above (a torn or foreign record is dropped)
+} vkn_warm_rec;
+uint64_t vkn_warm_rec_sum(const vkn_warm_rec *r);
+// vkn_seed.c (worker thread): a record made from the seed; it enters the list as pending (built when its shader exists), not the file.
+// 1 = new, 0 = known already (the device's own list has it, or full).
+int vkn_warm_seed_add(const vkn_warm_rec *r);
+// The draw path's vertex retype code for shader s and vertex format content id vfmt (vkn_draw.c retype_code), any thread.
+uint64_t vkn_warm_retype_code(const struct vkn_shader *s, uint16_t vfmt);
+
 typedef struct vkn_warm_stats {
     uint32_t listed, loaded, appended, dropped_full, dropped_bad, not_listable, queue_lost;   // the list
+    uint32_t nl_noshader, nl_fx, nl_vin, nl_content, upgraded;                             // [stage 5 rest] not listable by reason; v1 records read
+    uint32_t tech_listed, tech_replayed, seed_added, seed_replayed;                         // technique records in the list / built; seed records
     uint32_t pending, replayed, built, failed, skipped, stale, mismatched;                    // the replay
     uint64_t taken, waits, wait_ns, build_ns;                                                 // the render thread's misses served
     uint64_t cache_loaded, cache_saved, saves, save_fail;                                     // the driver cache file (bytes)

@@ -5,7 +5,9 @@
 #ifdef DM_GAME_DOS2
 #include "vkn_warm.h"
 #include "vkn_shader.h"
+#include "vkn_fx.h"   // [stage 5 rest] VKN_FX_SHADER_ID0 / VKN_FX_SHADERS (the pieces' shader ids)
 #include <pthread.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,30 +20,26 @@ extern int xbg_vkn_cache_dir(char *out, size_t bytes) __attribute__((weak));
 extern int vkn_shlib_on(void) __attribute__((weak));
 extern int vkn_shlib_cache_dir(char *out, size_t bytes) __attribute__((weak));
 
+// [stage 5 rest] the portable seed (vkn_seed.c; weak: host tests without it)
+extern void vkn_seed_tick(const char *dir) __attribute__((weak));
+extern void vkn_seed_note(const vkn_warm_rec *r) __attribute__((weak));
+extern void vkn_seed_census(void) __attribute__((weak));
+
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 enum { VEL_MAX = 16, NOTE_Q = 256, WBUCKETS = 1024, DEDUP = 8192, DIR_BYTES = 512, DIR_WAIT_MS = 60000, TICK_MS = 100, REDS = 16 };
 
-// ---- the list record: everything a pipeline is made of, as content that is stable across runs (fixed 232 bytes) ----
-enum { F_BLEND = 1, F_DS = 2, F_RASTER = 4, F_VFMT = 8, F_FS = 16 };
-typedef struct wrec {
-    char key[2][16];            // vertex / fragment program keys (xbg_shader_program_key, 16 hex chars, no NUL; fragment zero = no stage)
-    uint64_t retype;            // vertex variant: the retype code ("#vi"), 0 = base module
-    float alpha_ref;            // fragment variant: alpha test reference ("#at")
-    uint32_t alpha_func;        // NVN compare func of the alpha test, 0 = base module
-    uint32_t color[8], depth;   // render pass compatibility: VkFormat per colour slot (0 = not bound), depth VkFormat
-    uint8_t prim, stencil_ref, flags, nvel;   // engine primitive (after the rewrite), stencil reference, F_*, vertex elements
-    uint8_t blend[6], ds[8], raster[5];        // engine argument tuples (vkn_blend_args / vkn_ds_args / vkn_raster_args)
-    uint8_t ncolor, samples, pad0;
-    uint8_t write_mask[8];      // VkColorComponentFlags per colour slot
-    uint16_t vs_inputs, pad1;   // locations the vertex module reads (checked against the shader at the replay)
-    uint8_t vel[6 * VEL_MAX];   // vertex format elements (6 bytes each, the engine's)
-    uint8_t pad2[6];
-    uint64_t sum;               // fnv of everything above (a torn or foreign record is dropped)
-} wrec;
-_Static_assert(sizeof(wrec) == 232, "wrec layout");
+// ---- the list record (vkn_warm.h vkn_warm_rec): everything a pipeline is made of, as content that is stable across runs ----
+// Version 1 (stage 4, 232 bytes) = the fields up to pad2; version 2 ([stage 5 rest], 296 bytes) adds the effect bits, the named
+// module choice and a piece's recipe. A version-1 file is read (records widened, their sums made again) and rewritten as version 2.
+enum { F_BLEND = VKN_WREC_F_BLEND, F_DS = VKN_WREC_F_DS, F_RASTER = VKN_WREC_F_RASTER, F_VFMT = VKN_WREC_F_VFMT, F_FS = VKN_WREC_F_FS };
+enum { VEL_MAX_ = VKN_WREC_VEL };
+typedef vkn_warm_rec wrec;
+_Static_assert(sizeof(wrec) == 296, "wrec layout");
+_Static_assert(offsetof(wrec, fx) == 224, "wrec version-1 prefix");
+enum { REC1_SIZE = 232 };   // version 1: the first 224 bytes + its sum
 typedef struct whdr { char magic[8]; uint32_t version, rec_size, vendor, device, driver, pad; uint8_t uuid[16]; } whdr;
 static const char k_magic[8] = {'V', 'K', 'N', 'P', 'L', 'S', 'T', 0};
-enum { LIST_VERSION = 1 };
+enum { LIST_VERSION = 2 };
 
 // ---- the worker's pipeline table: content key + modules -> pipeline ----
 // k[0..2] = vkn_pipe_key with the variant bytes cleared (the draw path numbers its variants itself), k[3] / k[4] = the vertex /
@@ -58,6 +56,7 @@ static went *g_w[WBUCKETS];
 static wrec *g_list; static uint32_t g_nlist;
 static uint32_t *g_list_shader;    // shader id the entry is built (or held by the render thread) for; 0 = pending
 static uint8_t *g_list_state;      // 0 pending, 1 done for g_list_shader, 2 not buildable here (unusable stage / bad content)
+static uint8_t *g_list_seed;       // [stage 5 rest] 1 = the entry came from the seed (vkn_seed.c; never appended to the file)
 static uint64_t g_dedup[DEDUP]; static uint32_t g_ndedup;
 // render thread -> worker
 static wrec g_q[NOTE_Q]; static uint32_t g_q_shader[NOTE_Q]; static uint32_t g_nq;
@@ -65,6 +64,66 @@ static vkn_warm_stats g_st;
 static int g_reds;
 
 static uint64_t rec_sum(const wrec *r) { return vkn_fnv(r, offsetof(wrec, sum)); }
+uint64_t vkn_warm_rec_sum(const vkn_warm_rec *r) { return rec_sum(r); }
+
+// ---- [stage 5 rest] recipes and makers ----
+typedef struct recipe { char piece[VKN_WARM_PIECE]; uint8_t n, has_fs; uint8_t arg[VKN_WARM_ARG]; char key[2][16]; } recipe;
+enum { MAKERS = 8 };
+static pthread_mutex_t g_rc_mu = PTHREAD_MUTEX_INITIALIZER;
+static recipe *g_rc_fx[VKN_FX_SHADERS];   // by piece shader id - VKN_FX_SHADER_ID0
+static recipe **g_rc_vs;                  // by vin id (65536 slots, made at the first recipe)
+static struct { char piece[VKN_WARM_PIECE]; vkn_warm_make_fn fn; } g_mk[MAKERS]; static uint32_t g_nmk;
+int vkn_warm_maker(const char *piece, vkn_warm_make_fn fn) {
+    if (!piece || !fn) return -1;
+    pthread_mutex_lock(&g_rc_mu);
+    int rc = -1;
+    for (uint32_t i = 0; i < g_nmk; i++) if (!strncmp(g_mk[i].piece, piece, VKN_WARM_PIECE)) { g_mk[i].fn = fn; rc = 0; }
+    if (rc && g_nmk < MAKERS) { snprintf(g_mk[g_nmk].piece, VKN_WARM_PIECE, "%s", piece); g_mk[g_nmk].fn = fn; g_nmk++; rc = 0; }
+    pthread_mutex_unlock(&g_rc_mu);
+    return rc;
+}
+static vkn_warm_make_fn maker_of(const char *piece) {
+    vkn_warm_make_fn f = NULL;
+    pthread_mutex_lock(&g_rc_mu);
+    for (uint32_t i = 0; i < g_nmk && !f; i++) if (!strncmp(g_mk[i].piece, piece, VKN_WARM_PIECE)) f = g_mk[i].fn;
+    pthread_mutex_unlock(&g_rc_mu);
+    return f;
+}
+static recipe *recipe_new(const char *piece, const void *eng, const void *arg, uint32_t n) {
+    const vkn_shader *e = (const vkn_shader *)eng;
+    if (!piece || !e || n > VKN_WARM_ARG || (n && !arg) || strlen(e->key[VKN_SRC_VS]) != 16) return NULL;
+    recipe *r = (recipe *)calloc(1, sizeof *r); if (!r) return NULL;
+    snprintf(r->piece, sizeof r->piece, "%s", piece); r->n = (uint8_t)n; if (n) memcpy(r->arg, arg, n);
+    memcpy(r->key[0], e->key[VKN_SRC_VS], 16);
+    if (strlen(e->key[VKN_SRC_FS]) == 16) { memcpy(r->key[1], e->key[VKN_SRC_FS], 16); r->has_fs = 1; }
+    return r;
+}
+void vkn_warm_recipe_fx(const void *fx_shader, const char *piece, const void *eng_shader, const void *arg, uint32_t n) {
+    const vkn_shader *f = (const vkn_shader *)fx_shader;
+    if (!f || f->id < (uint32_t)VKN_FX_SHADER_ID0 || f->id - (uint32_t)VKN_FX_SHADER_ID0 >= (uint32_t)VKN_FX_SHADERS) return;
+    recipe *r = recipe_new(piece, eng_shader, arg, n); if (!r) return;
+    pthread_mutex_lock(&g_rc_mu);
+    recipe **slot = &g_rc_fx[f->id - (uint32_t)VKN_FX_SHADER_ID0];
+    free(*slot); *slot = r;
+    pthread_mutex_unlock(&g_rc_mu);
+}
+void vkn_warm_recipe_vs(uint16_t vs_id, const char *piece, const void *eng_shader, const void *arg, uint32_t n) {
+    if (!vs_id) return;
+    recipe *r = recipe_new(piece, eng_shader, arg, n); if (!r) return;
+    pthread_mutex_lock(&g_rc_mu);
+    if (!g_rc_vs) g_rc_vs = (recipe **)calloc(65536, sizeof *g_rc_vs);
+    if (g_rc_vs) { free(g_rc_vs[vs_id]); g_rc_vs[vs_id] = r; } else free(r);
+    pthread_mutex_unlock(&g_rc_mu);
+}
+static int recipe_get(int fx, uint32_t id, recipe *out) {   // 0 = found (copied)
+    int rc = -1;
+    pthread_mutex_lock(&g_rc_mu);
+    const recipe *r = fx ? (id >= (uint32_t)VKN_FX_SHADER_ID0 && id - (uint32_t)VKN_FX_SHADER_ID0 < (uint32_t)VKN_FX_SHADERS ? g_rc_fx[id - (uint32_t)VKN_FX_SHADER_ID0] : NULL)
+                         : (g_rc_vs && id && id < 65536 ? g_rc_vs[id] : NULL);
+    if (r) { *out = *r; rc = 0; }
+    pthread_mutex_unlock(&g_rc_mu);
+    return rc;
+}
 static void wkey(const vkn_pipe_key *k, VkShaderModule vs, VkShaderModule fs, uint64_t out[5]) {
     out[0] = k->w[0] & ~(0xffffull << 24); out[1] = k->w[1]; out[2] = k->w[2];
     out[3] = (uint64_t)(uintptr_t)vs; out[4] = (uint64_t)(uintptr_t)fs;
@@ -114,35 +173,59 @@ int vkn_warm_take(const vkn_pipe_key *k, const vkn_pipe_src *src, VkPipeline *ou
     pthread_mutex_unlock(&g_mu);
     return rc;
 }
-// Fills a record from a build. 0 = listable.
+// Fills a record from a build. 0 = listable; else the not-listable reason: 1 no shader object, 2 a piece's shader without a recipe,
+// 3 a piece's vertex module without a recipe, 4 content (a state / pass not readable back).
+enum { NL_SHADER = 1, NL_FX, NL_VIN, NL_CONTENT };
 static int rec_make(const vkn_pipe_desc *d, const vkn_pipe_src *src, wrec *r) {
     const vkn_shader *s = (const vkn_shader *)src->shader;
-    if (!s || !s->key[VKN_SRC_VS][0]) return -1;
+    if (!s || !s->key[VKN_SRC_VS][0]) return NL_SHADER;
     memset(r, 0, sizeof *r);
-    memcpy(r->key[0], s->key[VKN_SRC_VS], 16);
-    if (src->fs && s->key[VKN_SRC_FS][0]) { memcpy(r->key[1], s->key[VKN_SRC_FS], 16); r->flags |= F_FS; }
-    r->retype = src->retype; r->alpha_func = src->alpha_func; r->alpha_ref = src->alpha_func ? src->alpha_ref : 0.0f;
-    if (d->blend) { if (vkn_blend_args(d->blend, r->blend)) return -1; r->flags |= F_BLEND; }
-    if (d->ds) { if (vkn_ds_args(d->ds, r->ds)) return -1; r->flags |= F_DS; }
-    if (d->raster) { if (vkn_raster_args(d->raster, r->raster)) return -1; r->flags |= F_RASTER; }
+    const int fxs = s->id >= (uint32_t)VKN_FX_SHADER_ID0;
+    recipe rc;
+    if (fxs) {   // [stage 5 rest] a piece's shader object: the engine shader's keys + the piece's recipe
+        if (src->vs_id || recipe_get(1, s->id, &rc)) return src->vs_id ? NL_VIN : NL_FX;
+        r->rkind = VKN_WREC_R_FX;
+    } else if (src->vs_id) {   // [stage 5 rest] a piece's vertex module on the engine shader
+        if (recipe_get(0, src->vs_id, &rc)) return NL_VIN;
+        if (strncmp(rc.key[0], s->key[VKN_SRC_VS], 16)) return NL_VIN;
+        r->rkind = VKN_WREC_R_VS;
+    }
+    if (r->rkind) {
+        memcpy(r->key[0], rc.key[0], 16);
+        if (rc.has_fs) { memcpy(r->key[1], rc.key[1], 16); r->flags |= F_FS; }
+        memcpy(r->piece, rc.piece, sizeof r->piece); r->rlen = rc.n; memcpy(r->rarg, rc.arg, rc.n);
+    } else {
+        memcpy(r->key[0], s->key[VKN_SRC_VS], 16);
+        if (s->key[VKN_SRC_FS][0]) { memcpy(r->key[1], s->key[VKN_SRC_FS], 16); r->flags |= F_FS; }   // (no_fs builds keep the key: the fx bit says)
+        // [stage 5 rest] a named fragment stage outside its verified pass got its translated module (vkn_shader.c named_fs)
+        if (src->fs && !src->alpha_func && src->fs != s->module[VKN_SRC_FS]) r->fsalt = 1;
+    }
+    if (!fxs) { r->retype = src->retype; r->alpha_func = src->alpha_func; r->alpha_ref = src->alpha_func ? src->alpha_ref : 0.0f; }
+    r->fx = d->fx;
+    if (d->blend) { if (vkn_blend_args(d->blend, r->blend)) return NL_CONTENT; r->flags |= F_BLEND; }
+    if (d->ds) { if (vkn_ds_args(d->ds, r->ds)) return NL_CONTENT; r->flags |= F_DS; }
+    if (d->raster) { if (vkn_raster_args(d->raster, r->raster)) return NL_CONTENT; r->flags |= F_RASTER; }
     if (d->vfmt) {
         uint32_t n = 0; const uint8_t *el = vkn_vfmt_elems(d->vfmt, &n);
-        if (!el || n > VEL_MAX) return -1;
+        if (!el || n > VEL_MAX_) return NL_CONTENT;
         memcpy(r->vel, el, 6u * n); r->nvel = (uint8_t)n; r->flags |= F_VFMT;
     }
-    if (vkn_rp_compat_info(d->pass, r->color, &r->ncolor, &r->depth, &r->samples)) return -1;
+    if (vkn_rp_compat_info(d->pass, r->color, &r->ncolor, &r->depth, &r->samples)) return NL_CONTENT;
     r->prim = d->prim; r->stencil_ref = d->stencil_ref; memcpy(r->write_mask, d->write_mask, 8); r->vs_inputs = src->vs_inputs;
     r->sum = rec_sum(r);
     return 0;
 }
 void vkn_warm_note(const vkn_pipe_desc *d, const vkn_pipe_src *src) {
     if (!vkn_warm_on() || !d || !src) return;
-    wrec r; const int ok = !rec_make(d, src, &r);
-    uint64_t wk[5]; const vkn_pipe_key k = vkn_pipe_key_pack(d); wkey(&k, src->vs, src->fs, wk);
+    wrec r; const int why = rec_make(d, src, &r), ok = !why;
+    uint64_t wk[5]; vkn_pipe_key k = vkn_pipe_key_pack(d); k.w[2] |= (uint64_t)src->vs_id << 48; wkey(&k, src->vs, src->fs, wk);
     pthread_mutex_lock(&g_mu);
     // The cache table owns this content now: the worker must not build it again in this run.
     if (!wfind(wk)) wadd(wk, d->shader, W_TAKEN);
-    if (!ok) g_st.not_listable++;
+    if (!ok) {
+        g_st.not_listable++;
+        if (why == NL_SHADER) g_st.nl_noshader++; else if (why == NL_FX) g_st.nl_fx++; else if (why == NL_VIN) g_st.nl_vin++; else g_st.nl_content++;
+    }
     else if (g_nq < NOTE_Q) { g_q[g_nq] = r; g_q_shader[g_nq] = d->shader; g_nq++; pthread_cond_signal(&g_go); }
     else g_st.queue_lost++;
     pthread_mutex_unlock(&g_mu);
@@ -225,28 +308,47 @@ static void hdr_fill(whdr *h) {
 static int list_add(const wrec *r, uint32_t shader, uint8_t state) {   // under g_mu; 1 = new entry
     if (!dedup_add(rec_sum(r))) return 0;
     if (g_nlist >= VKN_WARM_MAX) { g_st.dropped_full++; return 0; }
-    g_list[g_nlist] = *r; g_list_shader[g_nlist] = shader; g_list_state[g_nlist] = state; g_nlist++;
+    g_list[g_nlist] = *r; g_list_shader[g_nlist] = shader; g_list_state[g_nlist] = state; g_list_seed[g_nlist] = 0; g_nlist++;
+    if (r->rkind || r->fx || r->fsalt) g_st.tech_listed++;
     return 1;
+}
+int vkn_warm_seed_add(const vkn_warm_rec *r) {   // [stage 5 rest] worker thread (vkn_seed.c)
+    if (!r || !g_list || r->sum != rec_sum(r)) return 0;
+    pthread_mutex_lock(&g_mu);
+    const int n = list_add(r, 0, 0);
+    if (n) { g_list_seed[g_nlist - 1] = 1; g_st.seed_added++; }
+    pthread_mutex_unlock(&g_mu);
+    return n;
 }
 static void list_load(void) {
     g_list = (wrec *)calloc(VKN_WARM_MAX, sizeof *g_list); g_list_shader = (uint32_t *)calloc(VKN_WARM_MAX, 4); g_list_state = (uint8_t *)calloc(VKN_WARM_MAX, 1);
-    if (!g_list || !g_list_shader || !g_list_state) { vkn_logf(RED "warm: no memory for the list: replay off"); g_files = 0; return; }
+    g_list_seed = (uint8_t *)calloc(VKN_WARM_MAX, 1);
+    if (!g_list || !g_list_shader || !g_list_state || !g_list_seed) { vkn_logf(RED "warm: no memory for the list: replay off"); g_list = NULL; g_files = 0; return; }
     if (!g_files) return;
     char p[DIR_BYTES + 64]; path_of(p, sizeof p, "vkn-pipeline-list.bin");
     size_t n = 0; uint8_t *data = read_all(p, &n, sizeof(whdr) + (size_t)VKN_WARM_MAX * sizeof(wrec) * 2);
     whdr want; hdr_fill(&want);
+    whdr v1 = want; v1.version = 1; v1.rec_size = REC1_SIZE;   // [stage 5 rest] a stage-4 list: read, widened, rewritten
     int rewrite = 1; uint32_t bad = 0;
-    if (data && n >= sizeof(whdr) && !memcmp(data, &want, sizeof want)) {
-        const size_t nrec = (n - sizeof(whdr)) / sizeof(wrec);
+    const int is2 = data && n >= sizeof(whdr) && !memcmp(data, &want, sizeof want), is1 = !is2 && data && n >= sizeof(whdr) && !memcmp(data, &v1, sizeof v1);
+    if (is2 || is1) {
+        const size_t rs = is2 ? sizeof(wrec) : REC1_SIZE, nrec = (n - sizeof(whdr)) / rs;
         pthread_mutex_lock(&g_mu);
         for (size_t i = 0; i < nrec; i++) {
-            wrec r; memcpy(&r, data + sizeof(whdr) + i * sizeof(wrec), sizeof r);
-            if (r.sum != rec_sum(&r) || r.nvel > VEL_MAX || r.ncolor > 8) { bad++; continue; }
+            wrec r; memset(&r, 0, sizeof r);
+            const uint8_t *src = data + sizeof(whdr) + i * rs;
+            if (is2) memcpy(&r, src, sizeof r);
+            else {
+                uint64_t s1; memcpy(&r, src, offsetof(wrec, fx)); memcpy(&s1, src + offsetof(wrec, fx), 8);
+                if (s1 != vkn_fnv(&r, offsetof(wrec, fx))) { bad++; continue; }
+                r.sum = rec_sum(&r); g_st.upgraded++;
+            }
+            if (r.sum != rec_sum(&r) || r.nvel > VEL_MAX_ || r.ncolor > 8 || r.rlen > VKN_WARM_ARG) { bad++; continue; }
             if (list_add(&r, 0, 0)) g_st.loaded++;
         }
         g_st.dropped_bad += bad;
         pthread_mutex_unlock(&g_mu);
-        rewrite = bad || (n - sizeof(whdr)) % sizeof(wrec);   // a torn tail would misalign every later append
+        rewrite = is1 || bad || (n - sizeof(whdr)) % rs;   // a torn tail would misalign every later append
     } else if (data && n) vkn_logf("warm: %s is of another device / driver / version: started anew", p);
     free(data);
     if (rewrite) {   // header + the good records, atomically
@@ -257,7 +359,7 @@ static void list_load(void) {
         if (write_atomic(p, &want, sizeof want, copy, copy ? cnt * sizeof(wrec) : 0)) { vkn_logf(RED "warm: cannot write %s: the list is not kept", p); g_files = 0; }
         free(copy);
     }
-    vkn_logf("warm: pipeline list %s: %u entries loaded (%u bad)", p, g_st.loaded, bad);
+    vkn_logf("warm: pipeline list %s: %u entries loaded (%u bad%s)", p, g_st.loaded, bad, is1 ? ", a version-1 list: rewritten as version 2" : "");
 }
 // The render thread's notes: deduplicated, appended to the file, entered as "done" for their shader (the cache table has them).
 static void notes_drain(void) {
@@ -266,7 +368,9 @@ static void notes_drain(void) {
     n = g_nq;
     for (uint32_t i = 0; i < n; i++) if (list_add(&g_q[i], g_q_shader[i], 1)) q[add++] = g_q[i];
     g_nq = 0; g_st.appended += add;
+    static wrec all[NOTE_Q]; const uint32_t nall = n; if (vkn_seed_note) memcpy(all, g_q, n * sizeof(wrec));
     pthread_mutex_unlock(&g_mu);
+    if (vkn_seed_note) for (uint32_t i = 0; i < nall; i++) vkn_seed_note(&all[i]);   // [stage 5 rest] DM_VK_NATIVE_SEED=2: did the seed have it?
     if (!add || !g_files) return;
     char p[DIR_BYTES + 64]; path_of(p, sizeof p, "vkn-pipeline-list.bin");
     FILE *f = fopen(p, "ab");
@@ -309,6 +413,22 @@ static int keys_eq(const vkn_shader *s, const wrec *r) {
     if (r->flags & F_FS) return strlen(s->key[VKN_SRC_FS]) == 16 && !memcmp(s->key[VKN_SRC_FS], r->key[1], 16);
     return !s->key[VKN_SRC_FS][0];   // a vertex-only entry matches only a shader without a fragment stage (the draw's modules differ otherwise)
 }
+// The draw path's vertex retype code (vkn_draw.c retype_code / retype_on, DM_GFX_VTX_RETYPE: default on everywhere but Adreno) for a
+// shader and a vertex format: the seed's records get it on this device (vkn_seed.c asks here).
+uint64_t vkn_warm_retype_code(const vkn_shader *s, uint16_t vfmt);
+uint64_t vkn_warm_retype_code(const vkn_shader *s, uint16_t vfmt) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_GFX_VTX_RETYPE"); const vkn_dev *d = vkn_device(); on = e && *e ? atoi(e) != 0 : d ? d->props.vendorID != 0x5143 : 0; }
+    const vkn_vfmt *vf = vfmt ? vkn_vfmt_info(vfmt) : NULL;
+    if (!vf || !on || !s) return 0;
+    uint64_t code = 0;
+    for (uint32_t i = 0; i < s->ninputs && i < 16; i++) {
+        const uint32_t l = s->inputs[i]; if (l >= VKN_VFMT_LOCS) continue;
+        const uint32_t c = vf->loc_class[l];
+        if (c && c - 1 != s->input_classes[i]) code |= (uint64_t)c << (2 * l);
+    }
+    return code;
+}
 // Builds entry i for shader s (worker). 1 = built (or known), 0 = not now, -1 = never for this record.
 static int replay_one(uint32_t i, const vkn_shader *s, uint32_t gen) {
     const wrec r = g_list[i];
@@ -321,29 +441,47 @@ static int replay_one(uint32_t i, const vkn_shader *s, uint32_t gen) {
     if (r.flags & F_VFMT) d.vfmt = vkn_vfmt_put(0, r.vel, r.nvel);
     if (((r.flags & F_BLEND) && !d.blend) || ((r.flags & F_DS) && !d.ds) || ((r.flags & F_RASTER) && !d.raster) || ((r.flags & F_VFMT) && !d.vfmt)) return -1;
     d.prim = r.prim; d.stencil_ref = r.stencil_ref; memcpy(d.write_mask, r.write_mask, 8);
+    d.fx = (uint8_t)(r.fx & VKN_PIPE_FX_MASK);
     d.pass = vkn_rp_compat_make(r.color, r.ncolor, r.depth, r.samples);
     if (!d.pass) return -1;
     vkn_pipe_src src; memset(&src, 0, sizeof src);
-    // The same module calls as the draw path's miss (vkn_draw.c prepare): base / "#vi" vertex, base / "#at" fragment.
-    src.vs = vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, r.retype);
-    src.fs = (r.flags & F_FS) ? vkn_shader_module(s, VKN_STAGE_FS, r.alpha_func, r.alpha_ref, 0) : VK_NULL_HANDLE;
-    if (!src.vs || ((r.flags & F_FS) && !src.fs) || !s->layout) return -1;   // a missing / unusable stage: the draw is dropped anyway
-    src.layout = s->layout;
-    for (uint32_t k = 0; k < s->ninputs && k < 16; k++) if (s->inputs[k] < VKN_VFMT_LOCS) src.vs_inputs |= (uint16_t)(1u << s->inputs[k]);
-    const vkn_pipe_key key = vkn_pipe_key_pack(&d);
+    const vkn_shader *o = s;   // the object the pipeline belongs to (a piece's shader for a recipe of kind FX)
+    uint16_t vs_id = 0; VkShaderModule pvs = VK_NULL_HANDLE;
+    if (r.rkind) {   // [stage 5 rest] a piece's object / vertex module made again by the piece itself (the same one its draws get)
+        char nm[VKN_WARM_PIECE + 1]; memcpy(nm, r.piece, VKN_WARM_PIECE); nm[VKN_WARM_PIECE] = 0;
+        const vkn_warm_make_fn mk = maker_of(nm);
+        const vkn_shader *fx = NULL;
+        if (!mk) return 0;   // the piece is not installed (yet): another round
+        if (mk(s, r.rarg, r.rlen, &fx, &pvs, &vs_id)) return -1;
+        if (r.rkind == VKN_WREC_R_FX) { if (!fx || !vkn_fx_shader_is(fx)) return -1; o = fx; d.shader = fx->id; }
+        else if (!pvs || !vs_id) return -1;
+    }
+    const int fs_on = (r.flags & F_FS) && !(d.fx & VKN_PIPE_FX_NO_FS) && (o->stages & (1u << VKN_SRC_FS));
+    if (o != s) {   // a piece's object: its own modules, no variants (vkn_draw.c fxs)
+        src.vs = o->module[VKN_SRC_VS]; src.fs = fs_on ? o->module[VKN_SRC_FS] : VK_NULL_HANDLE;
+    } else {
+        // The same module calls as the draw path's miss (vkn_draw.c prepare): base / "#vi" vertex, base / "#at" fragment.
+        src.vs = pvs ? pvs : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, r.retype);
+        src.fs = !fs_on ? VK_NULL_HANDLE : r.fsalt ? vkn_shader_named_alt(s) : vkn_shader_module(s, VKN_STAGE_FS, r.alpha_func, r.alpha_ref, 0);
+    }
+    if (!src.vs || (fs_on && !src.fs) || !o->layout) return -1;   // a missing / unusable stage: the draw is dropped anyway
+    src.layout = o->layout;
+    for (uint32_t k = 0; k < o->ninputs && k < 16; k++) if (o->inputs[k] < VKN_VFMT_LOCS) src.vs_inputs |= (uint16_t)(1u << o->inputs[k]);
+    vkn_pipe_key key = vkn_pipe_key_pack(&d);
+    key.w[2] |= (uint64_t)vs_id << 48;   // (vkn_draw.c: the per-draw vertex module's id)
     uint64_t wk[5]; wkey(&key, src.vs, src.fs, wk);
     pthread_mutex_lock(&g_mu);
-    if (src.vs_inputs != r.vs_inputs) g_st.mismatched++;   // the record's shader read other inputs: built with the current ones
+    if (src.vs_inputs != r.vs_inputs && !g_list_seed[i]) g_st.mismatched++;   // the record's shader read other inputs: built with the current ones
     went *e = wfind(wk);
     if (e) { pthread_mutex_unlock(&g_mu); return 1; }      // the render thread has it, or an equal entry was built
-    e = wadd(wk, s->id, W_BUILDING);
+    e = wadd(wk, d.shader, W_BUILDING);
     pthread_mutex_unlock(&g_mu);
     if (!e) return 0;
     uint64_t ns = 0;
     VkPipeline p = vkn_pipe_build(&d, &src, &ns);
     // A shader died while this ran: if it was this record (its id may be reused), the pipeline must not be offered.
     int stale = 0;
-    if (vkn_pipe_forget_gen() != gen) { const vkn_shader *now = vkn_shader_find_keys(s->key[VKN_SRC_VS], s->key[VKN_SRC_FS]); stale = now != s || now->id != d.shader; }
+    if (vkn_pipe_forget_gen() != gen) { const vkn_shader *now = vkn_shader_find_keys(s->key[VKN_SRC_VS], s->key[VKN_SRC_FS]); stale = now != s || now->id != s->id; }
     pthread_mutex_lock(&g_mu);
     g_st.build_ns += ns;
     if (e->dead || stale) {
@@ -353,7 +491,7 @@ static int replay_one(uint32_t i, const vkn_shader *s, uint32_t gen) {
         return 0;
     }
     e->p = p; e->state = p ? W_READY : W_FAILED;
-    if (p) g_st.built++; else g_st.failed++;
+    if (p) { g_st.built++; if (r.rkind || r.fx || r.fsalt) g_st.tech_replayed++; if (g_list_seed[i]) g_st.seed_replayed++; } else g_st.failed++;
     pthread_cond_broadcast(&g_built);
     pthread_mutex_unlock(&g_mu);
     return 1;
@@ -408,6 +546,7 @@ static void *worker_main(void *unused) {
             cache_load(); list_load(); ready = 1;
         }
         notes_drain();
+        if (vkn_seed_tick && g_list) vkn_seed_tick(g_files ? g_dir : NULL);   // [stage 5 rest] the portable seed (its own pace)
         replay();
         cache_save(0);
     }
@@ -444,6 +583,10 @@ void vkn_warm_census(void) {
              w.skipped, w.stale, w.mismatched, (unsigned long long)ws.warm_hits, (unsigned long long)w.waits, w.wait_ns / 1e6, (unsigned long long)st.misses, st.build_ns / 1e6,
              (unsigned long long)ws.stale_builds, w.cache_state == 1 ? "from file" : w.cache_state == 2 ? "new" : w.cache_state == 0 ? "not yet" : "off",
              (unsigned long long)w.cache_loaded, (unsigned long long)w.cache_saved, (unsigned long long)w.saves, (unsigned long long)w.save_fail, (unsigned long long)ws.compiles);
+    vkn_logf("warm: technique pipelines (stage 5 rest): %u in the list, %u built by the worker; not listable %u = no shader object %u, a piece's shader without "
+             "a recipe %u (post), a piece's vertex module without a recipe %u (PRESKIN), content %u; version-1 records read %u; seed records %u in the list, %u built",
+             w.tech_listed, w.tech_replayed, w.not_listable, w.nl_noshader, w.nl_fx, w.nl_vin, w.nl_content, w.upgraded, w.seed_added, w.seed_replayed);
+    if (vkn_seed_census) vkn_seed_census();
     if ((w.dropped_full || w.queue_lost || w.save_fail) && g_reds++ < REDS)
         vkn_logf(RED "warm: list full %u, notes lost %u, cache saves failed %llu", w.dropped_full, w.queue_lost, (unsigned long long)w.save_fail);
 }

@@ -128,6 +128,7 @@ VkShaderModule vkn_shlib_alpha_module(void *shader, uint32_t func, float ref);
 VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code);
 // The directory of the backend's cache files (the parent of the shader directory, as xbg_vkn_cache_dir). 0 = written.
 int vkn_shlib_cache_dir(char *out, size_t bytes);
+int vkn_shlib_shader_dir(char *out, size_t bytes);   // [stage 5 rest] the shader directory itself (vkn_seed.c). 0 = written.
 // The module lock (taken only while DM_GFX_PIPE_SERIAL is on): vkCreateShaderModule here, and for any backend pipeline build that wants
 // PowerVR's rule. Recursive-safe for one level is NOT given: do not nest.
 void vkn_shlib_create_lock(void);

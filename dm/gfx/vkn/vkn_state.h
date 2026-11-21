@@ -160,6 +160,9 @@ typedef struct vkn_pipe_src {
     uint64_t retype;
     uint32_t alpha_func;
     float alpha_ref;
+    // [DOS2] VK-NATIVE stage 5 rest (vkn_warm.h "technique pipelines"): the per-draw vertex module's id (vkn_fx_out.vin.vs_id, key w[2]
+    // bits 48..63; 0 = none). With `shader` set for an effect's build too, the warm-up lists it by the piece's recipe.
+    uint16_t vs_id;
 } vkn_pipe_src;
 // VK_NULL_HANDLE: the primitive needs a rewrite (counted), or the build failed (counted, cached), or no device. src may be NULL on
 // a lookup that must not build (returns VK_NULL_HANDLE on a miss).

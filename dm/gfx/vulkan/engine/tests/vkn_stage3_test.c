@@ -2413,7 +2413,7 @@ int vkn_shlib_named_alt(const char *fs_key, xbg_vkn_stage *out) {
 static int g_wn_calls, g_wn_fx_listable; static uint8_t g_wn_last_fx; static const void *g_wn_last_shader;
 void vkn_warm_note(const vkn_pipe_desc *d, const vkn_pipe_src *src) {
     g_wn_calls++; g_wn_last_fx = d->fx; g_wn_last_shader = src->shader;
-    if (d->fx && src->shader) g_wn_fx_listable++;   // rec_make lists every build with a shader object: an effect variant must not have one
+    if (d->fx && src->shader) g_wn_fx_listable++;   // [stage 5 rest] effect variants are listed too: the build names its shader object
 }
 int vkn_warm_take(const vkn_pipe_key *k, const vkn_pipe_src *src, VkPipeline *out) { (void)k; (void)src; (void)out; return 0; }
 static void *a5_off_thread(void *arg) { const vkn_shader *s = (const vkn_shader *)arg; return (void *)vkn_shader_module(s, VKN_STAGE_FS, 0, 0.0f, 0); }
@@ -2565,15 +2565,15 @@ static void test_a5_fx(void) {
             pthread_t th; void *mod = NULL; g_nm_pass_last_n = 0;
             CHECK_EQ(pthread_create(&th, NULL, a5_off_thread, (void *)ns), 0); pthread_join(th, &mod);
             CHECK(mod == (void *)nf->module); CHECK_EQ(g_nm_pass_last_n, -1);
-            // ---- effect variants are never listed for the warm-up: the draw path builds them without a shader object
+            // ---- [stage 5 rest] effect variants are listed for the warm-up: the build names the engine shader, the fx bits say the variant
             targets(g_a2, NULL, g_d3);
             g_wn_calls = 0; g_wn_fx_listable = 0;
             g_fxm = 2; m = mark(); CHECK_EQ(vkn_draw_indexed(&ni, 0, 3, 1), 0);    // discard (a new pipeline for this shader)
-            CHECK(g_wn_calls >= 1); CHECK_EQ(g_wn_last_fx, VKN_PIPE_FX_DISCARD); CHECK(g_wn_last_shader == NULL);
+            CHECK(g_wn_calls >= 1); CHECK_EQ(g_wn_last_fx, VKN_PIPE_FX_DISCARD); CHECK(g_wn_last_shader == (const void *)ns);
             g_fxm = 4; CHECK_EQ(vkn_draw_indexed(&ni, 0, 3, 1), 0);               // no fragment stage
-            CHECK_EQ(g_wn_last_fx, VKN_PIPE_FX_NO_FS); CHECK(g_wn_last_shader == NULL);
+            CHECK_EQ(g_wn_last_fx, VKN_PIPE_FX_NO_FS); CHECK(g_wn_last_shader == (const void *)ns);
             g_fxm = 0; vkn_draw_in n3 = ni; n3.blend = H(41, 1); CHECK_EQ(vkn_draw_indexed(&n3, 0, 3, 1), 0);   // the engine's own build: listed
-            CHECK_EQ(g_wn_last_fx, 0); CHECK(g_wn_last_shader != NULL); CHECK_EQ(g_wn_fx_listable, 0);
+            CHECK_EQ(g_wn_last_fx, 0); CHECK(g_wn_last_shader == (const void *)ns); CHECK_EQ(g_wn_fx_listable, 2);
             fsubmit(0);
         }
         g_nm_key = g_nm_key2 = NULL;

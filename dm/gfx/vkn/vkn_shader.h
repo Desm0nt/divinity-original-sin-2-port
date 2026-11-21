@@ -90,6 +90,10 @@ const vkn_shader *vkn_shader_peek(uint64_t handle);
 // 2 bits per input location, 0 keep / 1 float / 2 sint / 3 uint; high 32 bits 1 = SSCALED fed as SINT, 2 = USCALED fed as UINT; 0 = none).
 // Variants are built once by the loader and cached there. VK_NULL_HANDLE = no such stage / unusable / missing.
 VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype);
+// [stage 5 rest] A named fragment stage (DM_VK_NATIVE_SH): the translated module drawn in passes outside the verified one (what
+// vkn_shader_module gives the recording thread there), made once; VK_NULL_HANDLE = not a named shader. The warm-up replays a listed
+// build that used it with it (off the recording thread vkn_shader_module cannot know the pass and gives the named module). Any thread.
+VkShaderModule vkn_shader_named_alt(const vkn_shader *s);
 // The engine destroyed the shader (DestroyShaderIfOld returned true): the record leaves the table, its objects go through vkn_retire.
 void vkn_shader_destroy(uint64_t handle);
 // Called (any thread, outside every lock of this module) for each destroyed or replaced record, before it is retired: the pipeline cache

@@ -518,6 +518,7 @@ static void alt_run(void *arg) {
 // that pipeline's pass (vkn_draw.c builds after vkn_pass_ready; the pipeline key holds the pass's compatibility class, so this runs once
 // per shader and pass); off it (the warm-up worker) the pass is not known: the named module, counted. Outside the verified pass the
 // translated module (vkn_shlib_named_pass decides; a Dref module stays).
+static VkShaderModule named_alt(sh_rec *r);
 static VkShaderModule named_fs(sh_rec *r) {
     const vkn_shader *s = &r->pub;
     if (!vkn_shlib_named_pass) return s->module[VKN_SRC_FS];
@@ -533,6 +534,11 @@ static VkShaderModule named_fs(sh_rec *r) {
         if (dt) { depth = dt->nvn_fmt; if (!n) { samples = dt->samples ? dt->samples : 1; w = dt->w; h = dt->h; } }
     }
     if (!vkn_shlib_named_pass(r->nr_entry - 1, n, fmt, depth, samples, w, h)) return s->module[VKN_SRC_FS];
+    return named_alt(r);
+}
+// The translated module of a named shader (a pass outside the verified one): made once; the named module when there is none.
+static VkShaderModule named_alt(sh_rec *r) {
+    const vkn_shader *s = &r->pub;
     pthread_mutex_lock(&g_mu); int state = r->nr_alt_state; pthread_mutex_unlock(&g_mu);
     if (!state) {
         alt_job a = {s, VK_NULL_HANDLE, NULL};
@@ -547,6 +553,11 @@ static VkShaderModule named_fs(sh_rec *r) {
                                       (unsigned long long)s->handle, s->key[VKN_SRC_FS], a.why ? a.why : "?");
     }
     return state > 0 ? r->nr_alt : s->module[VKN_SRC_FS];
+}
+// [stage 5 rest] the warm-up's door (vkn_shader.h): the module named_fs gives outside the verified pass, for a listed build that had it.
+VkShaderModule vkn_shader_named_alt(const vkn_shader *s) {
+    if (!s || s->id >= (uint32_t)VKN_FX_SHADER_ID0 || !((const sh_rec *)s)->nr_entry || !s->module[VKN_SRC_FS]) return VK_NULL_HANDLE;
+    return named_alt((sh_rec *)s);
 }
 VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_func, float alpha_ref, uint64_t retype) {
     if (!s) return VK_NULL_HANDLE;

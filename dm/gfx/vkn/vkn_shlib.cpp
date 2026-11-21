@@ -662,8 +662,8 @@ Sh *load(const std::string &key, const void *control, const void *code) {
         if (g.noout) p->fs_noout = int8_t(!rf.outputs && !rf.sample_mask ? 1 : 0);
     }
     if (g.psk_on && h.stage == 0) p->psk = int8_t(sl_preskin(words));   // [stage 5.3 V1] PRESKIN (vkn_preskin.h): no other shader is looked at at a draw
-    {   // [stage 5 technique A] the read masks (only when technique A is asked for: DM_VK_NATIVE_COND 5 / 6)
-        static const bool occ_on = [] { const char *e = getenv("DM_VK_NATIVE_COND"); return e && (atoi(e) == 5 || atoi(e) == 6); }();
+    {   // [stage 5 technique A] the read masks (only when technique A or Z is asked for: DM_VK_NATIVE_COND 5 / 6 / 10..13)
+        static const bool occ_on = [] { const char *e = getenv("DM_VK_NATIVE_COND"); const int c = e ? atoi(e) : 0; return c == 5 || c == 6 || (c >= 10 && c <= 13); }();   // [stage 5 technique Z] 10..13 too
         if (occ_on && (h.stage == 0 || h.stage == 4))
             for (auto &b : p->bindings) if (b.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b.source == XBG_SOURCE_UNIFORM) {
                 Sh::Rm m; m.binding = b.binding; m.bits.assign(((b.bytes ? b.bytes : 65536u) / 16u + 63u) / 64u, 0);
@@ -911,6 +911,13 @@ extern "C" int vkn_shlib_cache_dir(char *out, size_t bytes) {
     std::lock_guard<std::mutex> lock(g_mu); if (!g.ready) return -1;
     if (g.base.size() + 1 > bytes) return -1;
     memcpy(out, g.base.c_str(), g.base.size() + 1); return 0;
+}
+extern "C" int vkn_shlib_shader_dir(char *out, size_t bytes) {   // [stage 5 rest] (vkn_seed.c: a pushed seed wins over the APK's)
+    if (!out || !bytes) return -1;
+    out[0] = 0;
+    std::lock_guard<std::mutex> lock(g_mu); if (!g.ready) return -1;
+    if (g.dir.size() + 1 > bytes) return -1;
+    memcpy(out, g.dir.c_str(), g.dir.size() + 1); return 0;
 }
 extern "C" void vkn_shlib_create_lock(void) { if (g.serial) g_create_mu.lock(); }
 extern "C" void vkn_shlib_create_unlock(void) { if (g.serial) g_create_mu.unlock(); }

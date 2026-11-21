@@ -31,7 +31,8 @@
 // (vkn_frame_gpu_ns; the same per-frame pair the old path's NVN timestamps gave) - DRS, DM_DOS2_DRS_SPIKE (a cave on that read) work as
 // they are. What did not: the translator's xbg_recent_gpu_ms / xbg_recent_draws stay -1 in mode 1, so DM_DOS2_DRS_SETTLE saw "a load
 // screen" forever (a held target) and the 10 s line printed "backend measured -1.00". hle_dos2_quality.c asks the functions below in
-// mode 1 instead. No game addresses.
+// mode 1 instead. [stage 5 rest] xbg_recent_gpu_ms itself answers from here in mode 1 too (vkn_hacks_recent_gpu_ms): the ADPF GPU
+// time, DM_PACE_ADAPT and DM_3D_SCALE read it. No game addresses.
 #ifndef DM_VKN_HACKS_H
 #define DM_VKN_HACKS_H
 #include <stdint.h>

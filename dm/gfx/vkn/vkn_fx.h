@@ -175,8 +175,9 @@ void vkn_fx_force(const vkn_fx_out *o);
 // shader id + vs_id name the module. Optionally the VERTEX INPUT too: vin.vfmt is a vertex-format content id (vkn_vfmt_put(0, elems, n):
 // content only, no engine handle) used for the pipeline (key field vfmt) and the stream binds, and vin.stream (0..2, a stream that format
 // reads) is bound at (vin.buf, vin.off) instead of in->vb[stream]. The retype code (vkn_draw.c retype_code) stays the one of the
-// engine's format: the module given must already be made for it (vkn_shlib_b5_words with that code). The warm-up does not list such
-// pipelines. MAT (vkn_mat.c) can adopt it for its cut-down vertex shaders (vs + vs_id, vfmt 0) instead of an effect-shader object each.
+// engine's format: the module given must already be made for it (vkn_shlib_b5_words with that code). [stage 5 rest] The warm-up lists
+// such pipelines when the piece gave the module's recipe (vkn_warm.h vkn_warm_recipe_vs + a maker): MAT's cut-down / XLQ modules ride
+// here now (vs + vs_id, vfmt 0), no effect-shader object each; PRESKIN's modules have no recipe yet (not listed).
 uint16_t vkn_fx_vs_id(void);                       // 1..65535 (thread safe); 0 = exhausted (65535 modules)
 
 #ifdef __cplusplus

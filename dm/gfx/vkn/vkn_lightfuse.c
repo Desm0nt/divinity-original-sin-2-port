@@ -75,8 +75,8 @@ static const vkn_shader *g_role_s[ROLE_IDS]; static uint64_t g_role_h[ROLE_IDS];
 
 static void lf_red(int kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void lf_red(int kind, const char *fmt, ...) {
-    g.s.reds++;
-    if (kind < 0 || kind >= R_N || g.reds[kind]++ >= 16) return;
+    __atomic_add_fetch(&g.s.reds, 1, __ATOMIC_RELAXED);   // ([stage 5 rest] the warm-up worker makes this piece's objects too)
+    if (kind < 0 || kind >= R_N || __atomic_fetch_add(&g.reds[kind], 1, __ATOMIC_RELAXED) >= 16) return;
     char b[640]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
     vkn_logf(RED "lightfuse: %s", b);
 }
@@ -263,7 +263,16 @@ static const vkn_shader *make_fx(const char *name, VkShaderModule vs, VkShaderMo
     return o;
 }
 // The fused shader for engine Light shader `l` and variant v ('f' Sky, 'g' Sky + Fog): made once (a failure is kept too).
+// [stage 5 rest] Both the recording thread and the warm-up worker (lf_make, the recipe "lightfuse" of vkn_warm.h) make this piece's objects:
+// fused_for / twin_for run under g_mk_mu, so a pipeline the worker built for an object is the one the draw finds.
+static pthread_mutex_t g_mk_mu = PTHREAD_MUTEX_INITIALIZER;
+extern void vkn_warm_recipe_fx(const void *fx_shader, const char *piece, const void *eng_shader, const void *arg, uint32_t n) __attribute__((weak));
+static const fused *fused_for_locked(const vkn_shader *l, char v);
 static const fused *fused_for(const vkn_shader *l, char v) {
+    pthread_mutex_lock(&g_mk_mu); const fused *f = fused_for_locked(l, v); pthread_mutex_unlock(&g_mk_mu);
+    return f;
+}
+static const fused *fused_for_locked(const vkn_shader *l, char v) {
     for (uint32_t i = 0; i < g.nfu && i < FUSED; i++) if (g.fu[i].light == l && g.fu[i].handle == l->handle && g.fu[i].v == v) return g.fu[i].fx ? &g.fu[i] : NULL;
     fused *f = g.nfu < FUSED ? &g.fu[g.nfu++] : &g.fu[(g.nfu++) % FUSED];   // (a full cache forgets the oldest: rebuilt if it comes back)
     memset(f, 0, sizeof *f); f->light = l; f->handle = l->handle; f->v = v;
@@ -313,7 +322,8 @@ static const fused *fused_for(const vkn_shader *l, char v) {
         else if (!(f->fx = make_fx(v == 'g' ? "lightfuse-g" : "lightfuse-f", vsm, st->module, l, tab, n))) why = "vkn_fx_shader_create refused the table";
     }
     if (why) lf_red(R_TWIN, "%c.ClusteredLightingWithSSAO for Light shader %#llx (%s): %s - no fusion with this variant", v, (unsigned long long)l->handle, l->key[VKN_SRC_FS], why);
-    else vkn_logf("lightfuse: Light shader %#llx (%s) -> %s: %u bindings (the Light table, %u fragment bindings the fused module declares, + Sky's 8 textures on 200..242 and c8 / c6 on 248 / 254)",
+    else if (vkn_warm_recipe_fx) vkn_warm_recipe_fx(f->fx, "lightfuse", l, &v, 1);   // [stage 5 rest] listed by recipe ('f' / 'g')
+    if (!why) vkn_logf("lightfuse: Light shader %#llx (%s) -> %s: %u bindings (the Light table, %u fragment bindings the fused module declares, + Sky's 8 textures on 200..242 and c8 / c6 on 248 / 254)",
                   (unsigned long long)l->handle, l->key[VKN_SRC_FS], v == 'g' ? "lightfuse-g (+ DeferredFog on output 1)" : "lightfuse-f", n, st ? st->binding_count : 0u);
     free(st); free(tab);
     return f->fx ? f : NULL;
@@ -597,7 +607,12 @@ static void fog_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     out->skip = 1; g.s.fog_skipped++;
 }
 // A reader of C inside the window: a shader object of its own whose texture bindings of C read Sp (made once per reader and pass).
+static const twin *twin_for_locked(const vkn_shader *s, uint64_t cmask);
 static const twin *twin_for(const vkn_shader *s, uint64_t cmask) {
+    pthread_mutex_lock(&g_mk_mu); const twin *t = twin_for_locked(s, cmask); pthread_mutex_unlock(&g_mk_mu);
+    return t;
+}
+static const twin *twin_for_locked(const vkn_shader *s, uint64_t cmask) {
     const VkShaderModule vs = vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, 0), fs = vkn_shader_module(s, VKN_STAGE_FS, 0, 0.0f, 0);
     if (!vs || !fs) return NULL;
     for (uint32_t i = 0; i < g.ntw; i++) {
@@ -623,6 +638,7 @@ static const twin *twin_for(const vkn_shader *s, uint64_t cmask) {
     free(tab);
     if (why) { lf_red(R_TWIN, "reader shader %#llx (%s) of the skipped Fog's target: %s - Sp is copied instead", (unsigned long long)s->handle, s->key[VKN_SRC_FS], why); return NULL; }
     g.s.twins++;
+    if (vkn_warm_recipe_fx) { uint8_t a[9]; a[0] = 'r'; memcpy(a + 1, &cmask, 8); vkn_warm_recipe_fx(x->fx, "lightfuse", s, a, sizeof a); }   // [stage 5 rest]
     vkn_logf("lightfuse fog: reader shader %#llx (%s): %u texture binding(s) of C read Sp (shader object of its own)", (unsigned long long)s->handle, s->key[VKN_SRC_FS], x->nt);
     return x;
 }
@@ -690,6 +706,18 @@ static int reg_fn(void) {
     if (!g.reg) g.reg = !vkn_fx_register("lightfuse", lf_fx, NULL, 300) ? 1 : -1;
     return g.reg > 0;
 }
+// [stage 5 rest] the warm-up worker's maker (vkn_warm.h recipe "lightfuse"): 'f' / 'g' the fused shader of Light shader eng, 'r' + the
+// 8-byte mask the Fog-window reader twin of eng. The object the draws get (made once, under g_mk_mu).
+static int lf_make(const struct vkn_shader *eng, const void *arg, uint32_t n, const struct vkn_shader **fx, VkShaderModule *vs, uint16_t *vs_id) {
+    (void)vs; (void)vs_id;
+    const uint8_t *a = (const uint8_t *)arg;
+    if (!g.inst || !eng || !a || !n || !fx) return -1;
+    if ((a[0] == 'f' || a[0] == 'g') && n == 1) { if (a[0] == 'g' && !g.fog) return -1; const fused *f = fused_for(eng, (char)a[0]); *fx = f ? f->fx : NULL; }
+    else if (a[0] == 'r' && n == 9 && g.fog) { uint64_t m; memcpy(&m, a + 1, 8); const twin *t = twin_for(eng, m); *fx = t ? t->fx : NULL; }
+    else return -1;
+    return *fx ? 0 : -1;
+}
+extern int vkn_warm_maker(const char *piece, int (*fn)(const struct vkn_shader *, const void *, uint32_t, const struct vkn_shader **, VkShaderModule *, uint16_t *)) __attribute__((weak));
 int vkn_hacks_lightfuse_ok(void) __attribute__((weak));   // [stage 5.4 G1] vkn_hacks.h: DM_HACK_LIGHTS' cap module replaces the Light module
 void vkn_lf_install(void) {
     static int done; if (done) return; done = 1;
@@ -710,6 +738,7 @@ void vkn_lf_install(void) {
     if (!m) return;
     if (!reg_fn()) { lf_red(R_CFG, "the draw-effect chain refused the function: off"); g.mode = g.fog = 0; return; }
     g.inst = 1;
+    if (vkn_warm_maker && g.mode != 2) vkn_warm_maker("lightfuse", lf_make);   // [stage 5 rest] (verify mode draws as recorded: nothing to warm)
 }
 int vkn_lf_active(void) { return g.inst; }
 void vkn_lf_stats_get(vkn_lf_stats *s) { if (s) *s = g.s; }
