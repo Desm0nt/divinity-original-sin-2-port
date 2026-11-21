@@ -128,7 +128,24 @@ typedef struct vkn_ui_pass_stats {
     // [mgpu P2] DM_VK_NATIVE_UIFC (vkn_ui.c "filter cache")
     int fc_mode;
     uint64_t fc_epochs, fc_hits, fc_misses, fc_stored, fc_refused[8], fc_draws_saved, fc_px_copied, fc_verify, fc_differ, fc_poison, fc_evicted, fc_flush[6];
+    // [mgpu P7] DM_VK_NATIVE_UILAYER / DM_VK_NATIVE_UICACHE (vkn_ui.c "mgpu P7"): runs held, calls / draws held, flushes by reason (VKN_UILF_*),
+    // runs executed hoisted / in their order, why not hoisted (VKN_UILU_*: first reason of a run), pushed targets poisoned; the cache:
+    // candidate runs, refusals (VKN_UICR_*), would-hits, hits (skipped runs), draws / calls not executed, compares, differences, poisoned hits;
+    // the CPU time of the UI's entry points and flushes on the recording thread (ns) and the calls
+    int layer_mode, cache_mode;
+    uint64_t lh_runs, lh_calls, lh_draws, lh_flush[8], lh_hoisted, lh_ordered, lh_unsafe[8], lh_poison;
+    uint64_t uc_cand, uc_refused[12], uc_would, uc_hits, uc_draws_saved, uc_calls_saved, uc_verify, uc_differ, uc_poison;
+    uint64_t ui_ns, ui_calls;
 } vkn_ui_pass_stats;
+// [mgpu P7] flush reasons: an engine draw / depth read on GDraw's binding (a custom draw), a conflicting engine use, the layer used by the
+// engine (Combine), a pass end (a piece, the recording's close), the size limit, other
+enum { VKN_UILF_BOUND, VKN_UILF_CONFLICT, VKN_UILF_LAYER, VKN_UILF_END, VKN_UILF_SIZE, VKN_UILF_OTHER, VKN_UILF_N };
+// [mgpu P7] not hoisted: no layer named, a pushed target's depth-stencil use, a pushed draw reads the layer / depth, a pushed target written
+// after the layer read it, too many textures read
+enum { VKN_UILU_NOLAYER, VKN_UILU_DS, VKN_UILU_READL, VKN_UILU_REUSE, VKN_UILU_MANY, VKN_UILU_N };
+// [mgpu P7] cache refusals: no layer, a texture without a version, a vertex range, too many targets, a target drawn before the run cleared
+// it, no layer content, no remembered clear of the layer, the first candidate, written since, another key
+enum { VKN_UICR_NOLAYER, VKN_UICR_TEX, VKN_UICR_VB, VKN_UICR_MANY, VKN_UICR_INIT, VKN_UICR_NOL, VKN_UICR_NOCLEAR, VKN_UICR_FIRST, VKN_UICR_DIRTY, VKN_UICR_KEY, VKN_UICR_N };
 void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
 // What the pass module must provide for level 2 (declared weak in vkn_ui.c; absent = level 2 acts as level 1, refusal "api"):
 //   int vkn_pass_area_hint(const VkRect2D *area)  the passes vkn_pass opens for the CURRENT target set begin with renderArea = *area
@@ -139,6 +156,14 @@ void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
 //       vkn_pass_clear_color must use offset + extent; vkn_pass_targets() of any caller ends a narrowed pass even for the same set.
 //       0 = stored.
 //   int vkn_pass_area_get(VkRect2D *out)  1 + the render area of the pass open in vkn_cb() for the current set; 0 = none open.
+
+// ==== [mgpu P7] the UI layer in one pass and the whole-UI cache (vkn_ui.c block "mgpu P7" has the rule) ====
+// DM_VK_NATIVE_UILAYER: 0 off / 1 filter blocks executed before the layer (one layer pass) / 2 verify / 3 poison; DM_VK_NATIVE_UICACHE:
+// 0 off / 1 an unchanged UI run is not executed again / 2 verify / 3 poison; -1 = family default (render-pass tilers 1, else 0). Any GPU.
+// Install time. Every vkn_ui_* call above is held while either is on (and executed at the run's flush).
+void vkn_ui_layer_config(int layer, int cache);
+void vkn_ui_layer(vkn_tex *L);   // the host (RenderingBegin, a record): GDraw's base colour target (the layer)
+void vkn_ui_layer_flush(void);   // a held run executed now (tests)
 
 // ==== [rt P6] DM_VK_NATIVE_UISET (vkn_ui.c "[rt P6]"): 0 a fresh set per UI draw (as before), 1 sets of the recording by content (the
 // copies' offsets as dynamic offsets), 2 = 1 without the reuse (fresh sets, lookups counted). Install time. Totals of hits / misses / would-hit (mode 2).

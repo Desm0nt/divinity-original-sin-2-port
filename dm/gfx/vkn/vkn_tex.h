@@ -95,6 +95,7 @@ typedef struct vkn_tex {
     VkImageUsageFlags usage; VkImageCreateFlags cflags; VkComponentMapping swz;
     char sname[32];                            // the engine's target name (logs)
     uint64_t shc_up;                           // [stage 5 A3] upload number (end of this header)
+    uint8_t ui_tgt;                            // [mgpu P7] a target of the UI (vkn_ui.c: GDraw's set, the filter cache atlas): the journal's UI share
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index

@@ -173,11 +173,13 @@ static vkn_tex *g_color, *g_depth;
 static int fc_holding(void); static void fc_put_vs(uint8_t kind, int32_t x, int32_t y, int32_t w, int32_t h); static void fc_begin(vkn_tex *t, const int32_t rect[4]);
 static void fc_put_draw(const vkn_ui_draw_in *in); static void fc_flush(int why); static void fc_end(void); static int fc_hold_clear(vkn_tex *t, const int32_t rect[4]);
 static int fc_same_set(const vkn_tex *c, const vkn_tex *d);
-void vkn_ui_viewport(int32_t x, int32_t y, int32_t w, int32_t h) {
+static int ui_draw_x(const vkn_ui_draw_in *in); static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]);
+static int g_up_noarea;   // [mgpu P7] the hold's hoisted layer replay: the layer's epoch takes no render-area decision (one pass)
+static void ui_viewport_x(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (fc_holding()) { fc_put_vs(1, x, y, w, h); return; }   // [mgpu P2]
     g_vp = (VkViewport){(float)x, (float)y, (float)w, (float)h, 0.0f, 1.0f}; g_vp_set = 1;
 }
-void vkn_ui_scissor(int32_t x, int32_t y, int32_t w, int32_t h) {
+static void ui_scissor_x(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (fc_holding()) { fc_put_vs(2, x, y, w, h); return; }   // [mgpu P2]
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -331,7 +333,7 @@ static void up_decide(nb_ua_rect r, uint64_t what, int full_clear) {
         }
         return;
     }
-    if (g_up.mode >= 2) {   // render area
+    if (g_up.mode >= 2 && !g_up_noarea) {   // render area ([mgpu P7] not for the hoisted layer: its pass is one)
         int why = -1; nb_ua_rect s = nb_ua_none();
         const nb_ua_hent *h = !stress && e && !nb_ua_empty(e->uni) ? e : NULL;
         if (!g_up.verify && !g_ups.api) why = VKN_UIP_AR_API;
@@ -404,7 +406,7 @@ static void up_begin(vkn_tex *c, vkn_tex *d, int shared) {
     g_ep.w = d && d->w < c->w ? d->w : c->w; g_ep.h = d && d->h < c->h ? d->h : c->h;
     g_ep.uni = nb_ua_none(); g_ep.area = nb_ua_none();
 }
-void vkn_ui_pass_fence(void) {
+static void ui_fence_x(void) {
     if (fc_holding()) fc_flush(1);   // [mgpu P2] (FCF_FENCE)
     if (!g_ep.on) return;
     if (!up_mine()) { up_lost(); return; }
@@ -421,12 +423,12 @@ void vkn_ui_pass_fence(void) {
 // vkn_fx chain, every engine draw: the engine draws with what NVN has bound - GDraw's whole set, full area (a custom draw inside the UI)
 static void up_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
     (void)in; (void)ctx; (void)out; (void)user;
-    if (g_ep.on && (g_ep.detached || g_ep.hint)) { vkn_ui_pass_fence(); g_ups.fence_draw++; }
+    if (g_ep.on && (g_ep.detached || g_ep.hint)) { ui_fence_x(); g_ups.fence_draw++; }
 }
 void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s) { if (s) { *s = g_ups; if (!g_up.resolved) s->mode = -1; } }
 // [mgpu P1] the host: the epoch of t beginning now is a pushed Iggy target whose meaningful texels are rect (x, y, w, h: its cleared
 // region; Iggy draws and reads nothing else of it until TextureDrawBufferEnd)
-void vkn_ui_region(vkn_tex *t, const int32_t rect[4]) {
+static void ui_region_x(vkn_tex *t, const int32_t rect[4]) {
     if (!rect || rect[2] <= 0 || rect[3] <= 0) return;
     if (g_up.region && g_ep.on && g_ep.c == t && !g_ep.decided) { g_ep.rq = 1; memcpy(g_ep.rrect, rect, sizeof g_ep.rrect); }
     fc_begin(t, rect);   // [mgpu P2]
@@ -449,7 +451,7 @@ void vkn_ui_region(vkn_tex *t, const int32_t rect[4]) {
 // texels outside the region are never read (the region contract, vkn_ui_region). Modes: 0 off; 1 on, every 128th hit drawn and compared
 // with its slot (a difference: red line, the cache off for the session); 2 verify: every hit drawn as a miss and compared (differ must
 // stay 0); 3 poison: 1 + one frame in 64 a hit clears the region magenta instead (the cached path is visible). Default (-1): 1.
-enum { FC_N = 128, FC_AW = 2048, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 1024, FC_CT = 256, FC_CMP = 4 };
+enum { FC_N = 128, FC_AW = 2560, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 1024, FC_CT = 256, FC_CMP = 4 };
 enum { FCR_NOREG, FCR_DRAW, FCR_TEX, FCR_MANY, FCR_DS, FCR_FULL, FCR_OTHER };
 enum { FCF_TARGETS, FCF_FENCE, FCF_ENGINE, FCF_CLOSE, FCF_OTHER };
 enum { FCE_VP = 1, FCE_SC, FCE_CLR, FCE_DRAW };
@@ -477,10 +479,13 @@ static uint64_t fc_bytes(uint64_t h, const void *p, uint32_t n) {
     return h;
 }
 void vkn_ui_fc_config(int mode) { g_fc.req = mode < -1 || mode > 3 ? 0 : mode; g_fc.init = 0; }
+static void lh_written(vkn_tex *t);   // [mgpu P7]
 static void fc_written(vkn_tex *t) {   // vkn_pass_on_write: a GPU write drops the content key of t
+    if (!g_fc.mode) return;
     const uint32_t h = (uint32_t)(((uintptr_t)t >> 4) * 0x9E3779B1u) & (FC_CT - 1);
     for (uint32_t i = 0; i < 8; i++) { fc_ct *c = &g_fc.ct[(h + i) & (FC_CT - 1)]; if (c->t == t) { c->valid = 0; return; } }
 }
+static void ui_on_write(vkn_tex *t) { fc_written(t); lh_written(t); }   // [mgpu P7] vkn_pass_on_write
 static fc_ct *fc_ct_get(const vkn_tex *t, int create) {
     const uint32_t h = (uint32_t)(((uintptr_t)t >> 4) * 0x9E3779B1u) & (FC_CT - 1);
     fc_ct *fr = NULL;
@@ -494,7 +499,7 @@ static int fc_on(void) {
     if (!g_fc.init) {
         const vkn_dev *d = vkn_device(); if (!d) return 0;
         g_fc.init = 1; g_fc.mode = g_fc.req < 0 ? 1 : g_fc.req; g_ups.fc_mode = g_fc.mode;
-        if (g_fc.mode) vkn_pass_on_write(fc_written);
+        vkn_pass_on_write(ui_on_write);   // [mgpu P7] (one listener for both pieces)
         vkn_logf("ui filter cache (mgpu P2): DM_VK_NATIVE_UIFC=%d (%s; %s); atlas %ux%u, %u entries, at most %u draws an epoch", g_fc.mode, g_fc.req < 0 ? "default" : "env",
                  g_fc.mode == 0 ? "off" : g_fc.mode == 1 ? "on, every 128th hit drawn and compared" : g_fc.mode == 2 ? "verify: every hit drawn and compared" : "poison: 1 + a hit magenta one frame in 64",
                  FC_AW, FC_AH, FC_N, FC_MAXD);
@@ -536,7 +541,8 @@ static void fc_begin(vkn_tex *t, const int32_t rect[4]) {
     if (g_fc.hold) fc_flush(FCF_OTHER);
     if (!fc_on() || !t || t != g_color || t->dead || t->samples > 1 || rect[2] <= 0 || rect[3] <= 0) return;
     g_ups.fc_epochs++;
-    if (rect[2] > FC_AW / 2 || rect[3] > FC_AH / 2) { g_ups.fc_refused[FCR_OTHER]++; return; }
+    // [mgpu P7] wide strips too (W07: 1343x55 and 2400x157 regions were "other", 5 a frame): up to the atlas width when at most a quarter high
+    if (!((rect[2] <= FC_AW / 2 && rect[3] <= FC_AH / 2) || (rect[2] <= FC_AW && rect[3] <= FC_AH / 4))) { g_ups.fc_refused[FCR_OTHER]++; return; }
     g_fc.hold = 1; g_fc.bad = 0; g_fc.t = t; g_fc.d = g_depth; memcpy(g_fc.rect, rect, sizeof g_fc.rect);
     g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.first = 1;
     g_fc.key = fc_mix(fc_mix(fc_mix(0xf11ce, (uint64_t)t->format), (uint64_t)(uint32_t)rect[0] << 32 | (uint32_t)rect[1]), (uint64_t)(uint32_t)rect[2] << 32 | (uint32_t)rect[3]);
@@ -561,9 +567,9 @@ static uint32_t fc_copy(fc_draw **dp, const void *src, uint32_t n) {   // bytes 
     return off;
 }
 static void fc_put_draw(const vkn_ui_draw_in *in) {
-    if (g_fc.ndraws >= FC_MAXD || g_fc.n > FC_MAXB) { g_ups.fc_refused[FCR_MANY]++; fc_flush(FCF_OTHER); vkn_ui_draw(in); return; }
+    if (g_fc.ndraws >= FC_MAXD || g_fc.n > FC_MAXB) { g_ups.fc_refused[FCR_MANY]++; fc_flush(FCF_OTHER); ui_draw_x(in); return; }
     fc_draw *d = (fc_draw *)fc_put(FCE_DRAW, sizeof *d);
-    if (!d) { fc_flush(FCF_OTHER); vkn_ui_draw(in); return; }
+    if (!d) { fc_flush(FCF_OTHER); ui_draw_x(in); return; }
     d->in = *in;
     const uint32_t stride = in->vfmt == VKN_UI_VF_V2 ? 8u : 16u;
     if (in->vb) { d->vb = *in->vb; d->has_vb = 1; }
@@ -598,7 +604,7 @@ static void fc_put_draw(const vkn_ui_draw_in *in) {
     return;
 oom:
     g_fc.n = (uint32_t)((uint8_t *)d - g_fc.buf); g_fc.nents--;
-    fc_flush(FCF_OTHER); vkn_ui_draw(in);
+    fc_flush(FCF_OTHER); ui_draw_x(in);
 }
 static void fc_replay(void) {
     g_fc.replay = 1;
@@ -606,14 +612,14 @@ static void fc_replay(void) {
         fc_hdr *h = (fc_hdr *)(void *)(g_fc.buf + at);
         const int32_t *p = (const int32_t *)(const void *)(h + 1);
         switch (h->kind) {
-        case FCE_VP: vkn_ui_viewport(p[0], p[1], p[2], p[3]); break;
-        case FCE_SC: vkn_ui_scissor(p[0], p[1], p[2], p[3]); break;
-        case FCE_CLR: vkn_ui_clear_color(g_fc.t, p); break;
+        case FCE_VP: ui_viewport_x(p[0], p[1], p[2], p[3]); break;
+        case FCE_SC: ui_scissor_x(p[0], p[1], p[2], p[3]); break;
+        case FCE_CLR: ui_clear_color_x(g_fc.t, p); break;
         case FCE_DRAW: {
             fc_draw *d = (fc_draw *)(void *)h; vkn_ui_draw_in in = d->in; uint8_t *b = (uint8_t *)d;
             in.vsc = d->o_vsc ? b + d->o_vsc : NULL; in.fsc = d->o_fsc ? b + d->o_fsc : NULL; in.fsc1 = d->o_fsc1 ? b + d->o_fsc1 : NULL;
             if (d->has_vb) in.vb = &d->vb; else { in.verts = d->o_verts ? b + d->o_verts : NULL; in.idx = d->o_idx ? (const uint16_t *)(const void *)(b + d->o_idx) : NULL; }
-            vkn_ui_draw(&in);
+            ui_draw_x(&in);
             break; }
         default: break;
         }
@@ -626,7 +632,7 @@ static void fc_state_only(void) {
     g_fc.replay = 1;
     for (uint32_t at = 0; at < g_fc.n;) {
         fc_hdr *h = (fc_hdr *)(void *)(g_fc.buf + at); const int32_t *p = (const int32_t *)(const void *)(h + 1);
-        if (h->kind == FCE_VP) vkn_ui_viewport(p[0], p[1], p[2], p[3]); else if (h->kind == FCE_SC) vkn_ui_scissor(p[0], p[1], p[2], p[3]);
+        if (h->kind == FCE_VP) ui_viewport_x(p[0], p[1], p[2], p[3]); else if (h->kind == FCE_SC) ui_scissor_x(p[0], p[1], p[2], p[3]);
         at += h->size;
     }
     g_fc.replay = 0;
@@ -639,8 +645,8 @@ static int fc_atlas(const vkn_tex *t) {   // the atlas in t's format (one format
     const vkn_tex_src src = {.kind = VKN_SRC_NONE};
     const char *why = NULL;
     g_fc.atlas = vkn_tex_create(1ull << 32 | 0xffffffffull, &d, &src, &why);
-    if (!g_fc.atlas || g_fc.atlas->format != t->format) { UI_RED(RR_STATIC, "filter cache: no atlas (%s): off", why ? why : "format"); g_fc.mode = 0; g_ups.fc_mode = 0; vkn_pass_on_write(NULL); return -1; }
-    snprintf(g_fc.atlas->sname, sizeof g_fc.atlas->sname, "ui-filter-cache");
+    if (!g_fc.atlas || g_fc.atlas->format != t->format) { UI_RED(RR_STATIC, "filter cache: no atlas (%s): off", why ? why : "format"); g_fc.mode = 0; g_ups.fc_mode = 0; return -1; }
+    snprintf(g_fc.atlas->sname, sizeof g_fc.atlas->sname, "ui-filter-cache"); g_fc.atlas->ui_tgt = 1;   // [mgpu P7]
     g_fc.afmt = t->nvn_fmt;
     return 0;
 }
@@ -743,7 +749,7 @@ static int fc_hold_clear(vkn_tex *t, const int32_t rect[4]) {   // the region cl
     return 1;
 }
 
-void vkn_ui_targets(vkn_tex *color, vkn_tex *depth) {
+static void ui_targets_x(vkn_tex *color, vkn_tex *depth) {
     if (fc_holding()) { if (fc_same_set(color, depth)) { g_st.targets++; return; } fc_end(); }   // [mgpu P2] the clean end of a held epoch
     int shared = 0;
     if (up_on() && up_targets(color, depth, &shared)) { g_st.targets++; return; }   // [stage 5.2 B2]
@@ -751,6 +757,8 @@ void vkn_ui_targets(vkn_tex *color, vkn_tex *depth) {
     const uint32_t zero[VKN_PASS_COLORS] = {0};
     vkn_pass_targets(1, c, zero, zero, depth);
     g_color = color; g_depth = depth;
+    if (color) color->ui_tgt = 1;
+    if (depth) depth->ui_tgt = 1;   // [mgpu P7] (the journal's UI share)
     g_st.targets++;
     if (g_up.mode) up_begin(color, depth, shared);   // [stage 5.2 B2]
 }
@@ -914,7 +922,7 @@ static int ring_put(const void *src, uint32_t n, uint32_t pad, VkBuffer *buf, ui
 
 static int unit_of_slot(uint32_t slot) { return slot <= 2 ? (int)slot : slot == 7 ? 3 : -1; }
 
-int vkn_ui_draw(const vkn_ui_draw_in *in) {
+static int ui_draw_x(const vkn_ui_draw_in *in) {
     if (fc_holding()) { fc_put_draw(in); return 0; }   // [mgpu P2] held (drawn at the epoch's end, or replaced by the cached region)
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st.drop_cb++; UI_RED(RR_CB, "a draw outside any recording: dropped"); return 1; }
@@ -1079,7 +1087,7 @@ int vkn_ui_draw(const vkn_ui_draw_in *in) {
     return 0;
 }
 
-void vkn_ui_clear_ds(int depth, uint8_t mask) {
+static void ui_clear_ds_x(int depth, uint8_t mask) {
     if (fc_holding()) { g_ups.fc_refused[4]++; fc_flush(4); }   // [mgpu P2] a depth-stencil use: drawn as recorded (FCR_DS, FCF_OTHER)
     vkn_tex *t = vkn_pass_depth();   // NVN clears the bound depth target: the one of the current set (GDraw's or the engine's)
     if (g_ep.on && g_ep.detached && !t && up_mine()) t = g_ep.d;   // [stage 5.2 B2] detached: NVN still has GDraw's depth bound
@@ -1117,7 +1125,7 @@ void vkn_ui_clear_ds(int depth, uint8_t mask) {
     g_st.clears_masked++;
 }
 
-void vkn_ui_clear_color(vkn_tex *t, const int32_t rect[4]) {
+static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]) {
     if (fc_holding()) { if (fc_hold_clear(t, rect)) return; fc_flush(4); }   // [mgpu P2]
     if (!t || t->dead) return;
     static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1135,4 +1143,514 @@ void vkn_ui_clear_color(vkn_tex *t, const int32_t rect[4]) {
 }
 
 void vkn_ui_stats_get(vkn_ui_stats *s) { if (s) *s = g_st; }
+// ==== [mgpu P7] the UI layer hold: the layer in one pass, the whole-UI cache (DM_VK_NATIVE_UILAYER / DM_VK_NATIVE_UICACHE; vkn_ui.h) ====
+// Every GDraw call of the backend (the vkn_ui_* entry points below) is HELD - copied into a buffer in order, not executed - from the
+// first one of a run until something outside the UI needs what it would have drawn (vkn_pass_before_ev: an engine use that conflicts,
+// below). Then the run is FLUSHED: executed through the stage-3 / P1 / P2 code as it was (the *_x functions), or skipped (the cache).
+//   groups   an entry belongs to group 0 when the colour target current in the run is the layer L (the base of GDraw's stack, named by
+//            the host at RenderingBegin: vkn_ui_layer), else to group 1 (a pushed target: Iggy's filter targets);
+//   hoisted  (UILAYER 1) group 1 is executed first, then group 0: every filter block before the layer, so the layer is ONE pass
+//            instead of one per filter (W07: 15 layer passes of 10-40 MB on the tile model). Exact when (checked while holding, else the
+//            run is executed in its own order, counted by reason): no group-1 depth-stencil use (the DS is shared), no group-1 draw samples
+//            the layer or the depth target, no pushed target is written after a group-0 draw sampled it (a reuse). A pushed target is
+//            read only by the layer's later draws (its composite) and by later group-1 steps (blur ping-pong): both keep their order.
+//            State calls (targets / viewport / scissor) are applied lazily per group: each executed entry sees the state it saw in the
+//            run. Fences (RenderingEnd, custom-draw begin) only order engine work after them, which comes after the flush: dropped,
+//            one at the end of the run when it had any. The layer's epoch takes no render-area decision (g_up_noarea: one pass).
+//   conflict while holding (the engine's event is executed now, BEFORE the held run): the engine's own TARGETS never conflicts (it
+//            marks that the bound set is the engine's again); READY / DEPTH (an engine draw / a bound-depth clear) conflict when the
+//            set bound is GDraw's (the run's last binding) or the current set holds a texture the run writes or reads; SAMPLE of a
+//            texture the run writes; CLEAR / STORAGE / LAYOUT of one it writes or reads; COPY into one it writes or reads, or out of
+//            one it writes; END (a piece's pass end, the recording's close) always. A flush puts back the engine's set when the engine
+//            had bound one after the run's last binding (the UI's set stays current otherwise, as NVN has it).
+//   cache    (UICACHE 1) a key over the first run of a recording that has content: per entry its kind and values, per draw programs,
+//            states, constant / vertex / index bytes, per texture unit the content version (a target of the run: the running hash of
+//            what the run wrote into it; else vkn_tex.shc_up / the P2 key; a GPU-written texture outside the run has none: no key),
+//            the targets by their order of appearance, and the value of the layer's remembered whole clear (the engine's frame clear,
+//            vkn_pass_clear_take). The run is SKIPPED when the last recording's first run had the same key and value and no texture it
+//            wrote (layer, depth, filter targets) was written since its flush (vkn_pass_on_write, our own later runs included): their
+//            content is then exactly what this run would draw. Skip = the layer's remembered clear leaves the record, the run's final
+//            state calls are applied, nothing else. Exact by construction; a missing key field is what the self-check catches.
+// Switches: UILAYER 0 off (the hold only for the cache: runs in order) / 1 hoisted / 2 verify (hoisted and in order on alternate
+// recordings; a recording whose run key equals the last one compares a band of the layer before (= the last recording's result) and
+// after: "differ" must stay 0) / 3 poison (1 + every pushed target of a hoisted run magenta afterwards: a read out of order shows).
+// UICACHE 0 off / 1 on (+ every 256th hit drawn and compared) / 2 verify (every would-hit drawn and compared) / 3 poison (1 + one hit in
+// 64 clears the layer magenta instead). -1 = family default (render-pass tilers 1, else 0). Install time (vkn_ui_layer_config).
+enum { LH_TGT = 1, LH_VP, LH_SC, LH_CDS, LH_CLR, LH_DRAW, LH_REG, LH_FENCE };
+enum { LH_SET = 48, LH_TH = 64, LH_MAXB = 8u << 20, LH_MAXE = 16384, LH_CMP = 4, LH_BAND = 64 };
+typedef struct lh_hdr { uint32_t size; uint8_t kind, grp, pad[10]; } lh_hdr;   // 16 bytes
+typedef struct lh_ptr { lh_hdr h; vkn_tex *a, *b; int32_t v[4]; int32_t has, pad; } lh_ptr;   // TGT (a, b) / VP / SC (v) / CDS (v0, v1) / CLR (a, has, v) / REG (a, v)
+typedef struct lh_draw_e { lh_hdr h; vkn_ui_draw_in in; vkn_block vb; uint32_t o_vsc, o_fsc, o_fsc1, o_verts, o_idx; uint8_t has_vb, pad[3]; } lh_draw_e;
+typedef struct lh_cmp { int live; uint64_t frame, key; vkn_block b; uint32_t bytes; } lh_cmp;
+static struct {
+    int lreq, creq, init, lmode, cmode, tile;
+    vkn_tex *L;                                       // the layer
+    uint8_t hold, replay, owns, unsafe, content, fence, has_l, has_f, keyok, keywhy, seen_tgt, seen_vp, seen_sc, pre_done, pre_c0;
+    uint32_t serial, runs;                            // the recording of the current runs; runs with content in it
+    vkn_tex *c0, *d0, *cc, *cd;                       // live UI targets at the run's begin; the run's current (held) targets
+    int32_t vp0[4], sc0[4]; uint8_t vp0_set, sc0_set; // live viewport / scissor at the run's begin
+    uint8_t *buf; uint32_t n, cap, nents, ndraws;
+    vkn_tex *w[LH_SET], *r[LH_SET], *r0[LH_SET]; uint32_t nw, nr, nr0; uint8_t wfull, rfull;   // written / read by the run; read by group 0
+    struct { vkn_tex *t; uint64_t h; uint8_t wr, init; } th[LH_TH]; uint32_t nth;   // the run's targets by order of appearance, running content hashes
+    uint64_t key;
+    // the cache: the last candidate (the first run of the last recording with content), the textures it wrote, written since?
+    struct { uint64_t key; float v[4]; uint8_t ok; } pv;
+    vkn_tex *tw[LH_SET]; uint32_t ntw; uint8_t track, tdirty;
+    uint64_t hits_all, alt; uint32_t band;
+    lh_cmp cmp[LH_CMP];
+    uint32_t tdepth; uint64_t t0;                     // CPU time of the entry points (nesting)
+} g_lh;
+void vkn_ui_layer_config(int layer, int cache) { g_lh.lreq = layer < -1 || layer > 3 ? 0 : layer; g_lh.creq = cache < -1 || cache > 3 ? 0 : cache; g_lh.init = 0; }
+static void lh_ev(int ev, vkn_tex *a, vkn_tex *b);
+static void lh_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
+static int lh_on(void) {
+    if (g_lh.init) return g_lh.lmode || g_lh.cmode;
+    const vkn_dev *d = vkn_device(); if (!d) return 0;
+    g_lh.init = 1;
+    const int f = vkn_policy_family_from(d->props.vendorID, d->props.deviceName, getenv("DM_GFX_SIM_GPU"));
+    g_lh.tile = vkn_policy_tile_pass(f, vkn_drv()->driver_id) || g_up.sim_tiler;
+    g_lh.lmode = g_lh.lreq < 0 ? (g_lh.tile ? 1 : 0) : g_lh.lreq;
+    g_lh.cmode = g_lh.creq < 0 ? (g_lh.tile ? 1 : 0) : g_lh.creq;
+    g_ups.layer_mode = g_lh.lmode; g_ups.cache_mode = g_lh.cmode;
+    vkn_logf("ui layer (mgpu P7): DM_VK_NATIVE_UILAYER=%d (%s; %s), DM_VK_NATIVE_UICACHE=%d (%s; %s); tile pass family %d",
+             g_lh.lmode, g_lh.lreq < 0 ? "family default" : "env", g_lh.lmode == 0 ? "off" : g_lh.lmode == 1 ? "filter blocks before the layer: one layer pass" :
+             g_lh.lmode == 2 ? "verify: hoisted / in order on alternate recordings, equal runs compared" : "poison: 1 + pushed targets magenta after a hoisted run",
+             g_lh.cmode, g_lh.creq < 0 ? "family default" : "env", g_lh.cmode == 0 ? "off" : g_lh.cmode == 1 ? "an unchanged UI is not drawn again (every 256th hit drawn and compared)" :
+             g_lh.cmode == 2 ? "verify: every would-hit drawn and compared" : "poison: 1 + a hit in 64 clears the layer magenta", g_lh.tile);
+    if (g_lh.lmode || g_lh.cmode) {
+        vkn_pass_before_ev(lh_ev); vkn_pass_on_write(ui_on_write);
+        static int fx; if (!fx) fx = !vkn_fx_register("ui-layer", lh_fx, NULL, 0);   // (before "ui-pass-fence" at 1)
+    }
+    return g_lh.lmode || g_lh.cmode;
+}
+static int lh_in(vkn_tex *const *set, uint32_t n, const vkn_tex *t) { for (uint32_t i = 0; i < n; i++) if (set[i] == t) return 1; return 0; }
+static void lh_add_set(vkn_tex **set, uint32_t *n, uint8_t *full, vkn_tex *t) {
+    if (!t || lh_in(set, *n, t)) return;
+    if (*n < LH_SET) set[(*n)++] = t; else *full = 1;
+}
+static int lh_w(const vkn_tex *t) { return t && (g_lh.wfull || lh_in(g_lh.w, g_lh.nw, t)); }
+static int lh_wr(const vkn_tex *t) { return t && (lh_w(t) || g_lh.rfull || lh_in(g_lh.r, g_lh.nr, t)); }
+static void lh_written(vkn_tex *t) { if (g_lh.track && !g_lh.tdirty && lh_in(g_lh.tw, g_lh.ntw, t)) g_lh.tdirty = 1; }
+// the run's target t: its order of appearance (the key names targets so) and its running content hash
+static int lh_th(vkn_tex *t) {
+    if (!t) return -1;
+    for (uint32_t i = 0; i < g_lh.nth; i++) if (g_lh.th[i].t == t) return (int)i;
+    if (g_lh.nth >= LH_TH) { if (g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_MANY; } return -1; }
+    g_lh.th[g_lh.nth].t = t; g_lh.th[g_lh.nth].h = fc_mix(0x7a6, g_lh.nth); g_lh.th[g_lh.nth].wr = g_lh.th[g_lh.nth].init = 0;
+    return (int)g_lh.nth++;
+}
+static uint64_t lh_tag(vkn_tex *t) { if (!t) return 0x404; if (t == g_lh.L) return 0x1a4e; const int i = lh_th(t); return 0x7700u + (uint64_t)(uint32_t)i; }
+static void lh_content(vkn_tex *t, uint64_t v) { const int i = lh_th(t); if (i >= 0) { g_lh.th[i].h = fc_mix(g_lh.th[i].h, v); g_lh.th[i].wr = 1; } }
+// the key holds only what the run itself puts into a target: a pushed target / the depth must be cleared by the run before a draw lands
+// in it (the layer begins with the engine's remembered clear, checked at the flush)
+static void lh_init(vkn_tex *t) { const int i = lh_th(t); if (i >= 0) g_lh.th[i].init = 1; }
+static void lh_need_init(vkn_tex *t) { if (!t || t == g_lh.L) return; const int i = lh_th(t); if (i >= 0 && !g_lh.th[i].init && g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_INIT; } }
+static void *lh_put(uint8_t kind, uint32_t bytes) {
+    bytes = (bytes + 15u) & ~15u;
+    if (g_lh.n + bytes > g_lh.cap) {
+        uint32_t c = g_lh.cap ? g_lh.cap : 65536; while (c < g_lh.n + bytes) c *= 2;
+        uint8_t *nb = (uint8_t *)realloc(g_lh.buf, c); if (!nb) return NULL;
+        g_lh.buf = nb; g_lh.cap = c;
+    }
+    lh_hdr *h = (lh_hdr *)(void *)(g_lh.buf + g_lh.n); memset(h, 0, bytes); h->size = bytes; h->kind = kind;
+    h->grp = (uint8_t)(g_lh.cc && g_lh.cc != g_lh.L ? 1 : 0);
+    g_lh.n += bytes; g_lh.nents++; g_ups.lh_calls++;
+    return h;
+}
+static uint32_t lh_copy(lh_draw_e **dp, const void *src, uint32_t n) {   // bytes appended to the current entry: offset from it (0 = none, ~0 = no memory)
+    if (!src || !n) return 0;
+    const uint32_t at = (uint32_t)((uint8_t *)*dp - g_lh.buf), off = g_lh.n - at, pad = (n + 15u) & ~15u;
+    if (g_lh.n + pad > g_lh.cap) {
+        uint32_t c = g_lh.cap; while (c < g_lh.n + pad) c *= 2;
+        uint8_t *nb = (uint8_t *)realloc(g_lh.buf, c); if (!nb) return ~0u;
+        g_lh.buf = nb; g_lh.cap = c; *dp = (lh_draw_e *)(void *)(g_lh.buf + at);
+    }
+    memcpy(g_lh.buf + g_lh.n, src, n); g_lh.n += pad; (*dp)->h.size += pad;
+    return off;
+}
+static void lh_flush(int why);
+static void lh_unsafe(int why) { if (!g_lh.unsafe) { g_lh.unsafe = 1; g_ups.lh_unsafe[why]++; } }
+// the content version of a texture unit for the key (0 = ok)
+static int lh_tex_ver(vkn_tex *t, uint64_t *v) {
+    if (!t || t->dead || !t->view) { *v = 0x51ace; return 0; }   // (the placeholder at draw time)
+    for (uint32_t i = 0; i < g_lh.nth; i++) if (g_lh.th[i].t == t && g_lh.th[i].wr) { *v = fc_mix(0xd1a, g_lh.th[i].h); return 0; }
+    if (t == g_lh.L) return -1;   // (the layer read before the run wrote it: not this run's content)
+    return fc_tex_ver(t, v);
+}
+// a run begins (the first held call): the live UI state is the run's starting state
+static void lh_begin(void) {
+    const uint32_t ser = vkn_cb_serial();
+    if (ser != g_lh.serial) { g_lh.serial = ser; g_lh.runs = 0; }
+    g_lh.hold = 1; g_lh.owns = 0; g_lh.unsafe = 0; g_lh.content = 0; g_lh.fence = 0; g_lh.has_l = 0; g_lh.has_f = 0; g_lh.keyok = 1; g_lh.keywhy = 0;
+    g_lh.c0 = g_color; g_lh.d0 = g_depth; g_lh.cc = g_color; g_lh.cd = g_depth;
+    g_lh.vp0_set = (uint8_t)g_vp_set; g_lh.vp0[0] = (int32_t)g_vp.x; g_lh.vp0[1] = (int32_t)g_vp.y; g_lh.vp0[2] = (int32_t)g_vp.width; g_lh.vp0[3] = (int32_t)g_vp.height;
+    g_lh.sc0_set = (uint8_t)g_sc_set; g_lh.sc0[0] = g_sc.offset.x; g_lh.sc0[1] = g_sc.offset.y; g_lh.sc0[2] = (int32_t)g_sc.extent.width; g_lh.sc0[3] = (int32_t)g_sc.extent.height;
+    g_lh.n = 0; g_lh.nents = 0; g_lh.ndraws = 0; g_lh.nw = g_lh.nr = g_lh.nr0 = 0; g_lh.wfull = g_lh.rfull = 0; g_lh.nth = 0;
+    if (!g_lh.L) lh_unsafe(VKN_UILU_NOLAYER);
+    g_lh.seen_tgt = g_lh.seen_vp = g_lh.seen_sc = g_lh.pre_done = g_lh.pre_c0 = 0;
+    g_lh.key = 0x9a7e;
+    g_ups.lh_runs++;
+}
+// the first content entry of the run: the starting state it sees (what no entry of the run set before it) goes into the key
+// (clears and regions read the targets; draws also the viewport and the scissor)
+static void lh_pre(int draw) {
+    uint64_t k = g_lh.key;
+    if (!(g_lh.pre_done & 1)) {
+        g_lh.pre_done |= 1;
+        if (!g_lh.seen_tgt) { k = fc_mix(fc_mix(fc_mix(k, 0x7e0), lh_tag(g_lh.c0)), lh_tag(g_lh.d0)); g_lh.pre_c0 = 1; }
+    }
+    if (draw && !(g_lh.pre_done & 2)) {
+        g_lh.pre_done |= 2;
+        if (!g_lh.seen_vp) k = fc_mix(fc_mix(k, (uint64_t)g_lh.vp0_set << 63 ^ (uint64_t)(uint32_t)g_lh.vp0[0] << 32 ^ (uint32_t)g_lh.vp0[1]), (uint64_t)(uint32_t)g_lh.vp0[2] << 32 | (uint32_t)g_lh.vp0[3]);
+        if (!g_lh.seen_sc) k = fc_mix(fc_mix(k, (uint64_t)g_lh.sc0_set << 63 ^ (uint64_t)(uint32_t)g_lh.sc0[0] << 32 ^ (uint32_t)g_lh.sc0[1]), (uint64_t)(uint32_t)g_lh.sc0[2] << 32 | (uint32_t)g_lh.sc0[3]);
+    }
+    g_lh.key = k;
+}
+static int lh_want(void) {
+    if (g_lh.replay || !lh_on()) return 0;
+    if (g_lh.hold) {
+        if (vkn_cb_serial() == g_lh.serial) return 1;
+        lh_flush(VKN_UILF_OTHER);   // (a run left open across recordings: not expected - executed where we are now)
+    }
+    if (!vkn_cb()) return 0;
+    lh_begin();
+    return 1;
+}
+static void lh_check_size(void) { if (g_lh.n > LH_MAXB || g_lh.nents > LH_MAXE) lh_flush(VKN_UILF_SIZE); }
+// ---- holding: one function per entry point ----
+static void lh_targets(vkn_tex *c, vkn_tex *d) {
+    lh_ptr *e = (lh_ptr *)lh_put(LH_TGT, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_targets_x(c, d); return; }
+    g_lh.cc = c; g_lh.cd = d; e->h.grp = (uint8_t)(c && c != g_lh.L ? 1 : 0); e->a = c; e->b = d; g_lh.owns = 0; g_lh.seen_tgt = 1;
+    if (e->h.grp && lh_in(g_lh.r0, g_lh.nr0, c)) lh_unsafe(VKN_UILU_REUSE);   // a pushed target the layer read before: written again now
+    g_lh.key = fc_mix(fc_mix(fc_mix(g_lh.key, LH_TGT), lh_tag(c)), lh_tag(d));
+}
+static void lh_vs(uint8_t kind, int32_t x, int32_t y, int32_t w, int32_t h) {
+    lh_ptr *e = (lh_ptr *)lh_put(kind, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); if (kind == LH_VP) ui_viewport_x(x, y, w, h); else ui_scissor_x(x, y, w, h); return; }
+    e->v[0] = x; e->v[1] = y; e->v[2] = w; e->v[3] = h;
+    if (kind == LH_VP) g_lh.seen_vp = 1; else g_lh.seen_sc = 1;
+    g_lh.key = fc_bytes(fc_mix(g_lh.key, kind), e->v, 16);
+}
+static void lh_note_w(vkn_tex *t) {   // content for t: written by the run
+    lh_pre(0);
+    if (!t) return;
+    lh_add_set(g_lh.w, &g_lh.nw, &g_lh.wfull, t);
+    if (t == g_lh.L) g_lh.has_l = 1; else if (!(t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) g_lh.has_f = 1;
+    g_lh.content = 1;
+}
+static void lh_clear_ds(int depth, uint8_t mask) {
+    lh_ptr *e = (lh_ptr *)lh_put(LH_CDS, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_clear_ds_x(depth, mask); return; }
+    e->v[0] = depth; e->v[1] = mask;
+    if (e->h.grp) lh_unsafe(VKN_UILU_DS);
+    lh_note_w(g_lh.cd); g_lh.content = 1;
+    g_lh.key = fc_mix(fc_mix(g_lh.key, LH_CDS), (uint64_t)(uint32_t)depth << 8 | mask);
+    if (depth && mask == 0xff) lh_init(g_lh.cd); else lh_need_init(g_lh.cd);
+    lh_content(g_lh.cd, (uint64_t)(uint32_t)depth << 8 | mask);
+}
+static void lh_clear_color(vkn_tex *t, const int32_t rect[4]) {
+    lh_ptr *e = (lh_ptr *)lh_put(LH_CLR, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_clear_color_x(t, rect); return; }
+    e->a = t; e->has = rect != NULL; if (rect) memcpy(e->v, rect, 16);
+    e->h.grp = (uint8_t)(t && t != g_lh.L ? 1 : 0);
+    if (e->h.grp && lh_in(g_lh.r0, g_lh.nr0, t)) lh_unsafe(VKN_UILU_REUSE);
+    lh_note_w(t);
+    g_lh.key = fc_bytes(fc_mix(fc_mix(g_lh.key, LH_CLR), lh_tag(t) | (uint64_t)e->has << 32), e->v, 16);
+    lh_init(t);   // (a pushed target is read only inside its cleared region; the layer's whole clears are the engine's)
+    lh_content(t, fc_bytes(0xc1, e->v, 16));
+}
+static void lh_region(vkn_tex *t, const int32_t rect[4]) {
+    lh_ptr *e = (lh_ptr *)lh_put(LH_REG, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_region_x(t, rect); return; }
+    e->a = t; memcpy(e->v, rect, 16); e->h.grp = (uint8_t)(t && t != g_lh.L ? 1 : 0);
+    lh_pre(0);
+    g_lh.key = fc_bytes(fc_mix(fc_mix(g_lh.key, LH_REG), lh_tag(t)), e->v, 16);
+}
+static void lh_fence(void) {
+    lh_ptr *e = (lh_ptr *)lh_put(LH_FENCE, sizeof *e);
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_fence_x(); return; }
+    e->h.grp = 0; g_lh.fence = 1;
+    g_lh.key = fc_mix(g_lh.key, LH_FENCE);
+}
+static void lh_draw(const vkn_ui_draw_in *in) {
+    lh_draw_e *d = (lh_draw_e *)lh_put(LH_DRAW, sizeof *d);
+    if (!d) { lh_flush(VKN_UILF_OTHER); ui_draw_x(in); return; }
+    d->in = *in;
+    const uint32_t stride = in->vfmt == VKN_UI_VF_V2 ? 8u : 16u;
+    if (in->vb) { d->vb = *in->vb; d->has_vb = 1; }
+    uint32_t o;
+    if ((o = lh_copy(&d, in->vsc, in->vsc_bytes)) == ~0u) goto oom; d->o_vsc = o;
+    if ((o = lh_copy(&d, in->fsc, in->fsc_bytes)) == ~0u) goto oom; d->o_fsc = o;
+    if ((o = lh_copy(&d, in->fsc1, in->fsc1 ? in->fsc1_bytes : 0)) == ~0u) goto oom; d->o_fsc1 = o;
+    if (!in->vb) {
+        if ((o = lh_copy(&d, in->verts, in->nverts * stride)) == ~0u) goto oom; d->o_verts = o;
+        if ((o = lh_copy(&d, in->idx, in->quads ? 0 : in->nidx * 2u)) == ~0u) goto oom; d->o_idx = o;
+    }
+    g_lh.ndraws++; g_ups.lh_draws++;
+    lh_pre(1);
+    {
+        const int grp = d->h.grp;
+        lh_note_w(g_lh.cc);
+        if (in->ds) { lh_note_w(g_lh.cd); if (grp) lh_unsafe(VKN_UILU_DS); }
+        for (int u = 0; u < VKN_UI_UNITS; u++) {
+            vkn_tex *t = in->tex[u]; if (!t) continue;
+            lh_add_set(g_lh.r, &g_lh.nr, &g_lh.rfull, t);
+            if (grp && (t == g_lh.L || t == g_lh.cd)) lh_unsafe(VKN_UILU_READL);
+            if (!grp) { uint8_t f = 0; lh_add_set(g_lh.r0, &g_lh.nr0, &f, t); if (f) lh_unsafe(VKN_UILU_MANY); }
+        }
+    }
+    {   // the key (fc_put_draw's fields; textures by the run's versions)
+        uint64_t k = fc_mix(fc_mix(fc_mix(0xd7a, in->vs), in->fs), (uint64_t)in->vfmt | (uint64_t)in->quads << 8 | (uint64_t)in->blend << 16 | (uint64_t)in->ds << 24 |
+                                                                  (uint64_t)in->color_off << 32 | (uint64_t)in->stencil_cmp << 40 | (uint64_t)in->stencil_write << 48);
+        for (int u = 0; u < VKN_UI_UNITS; u++) { uint64_t v; if (lh_tex_ver(in->tex[u], &v)) { if (g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_TEX; } v = 0; } k = fc_mix(k, v); }
+        k = fc_bytes(k, in->vsc, in->vsc_bytes); k = fc_bytes(k, in->fsc, in->fsc_bytes); k = fc_bytes(k, in->fsc1, in->fsc1 ? in->fsc1_bytes : 0);
+        if (in->vb) {
+            if (!in->vb->cpu || in->vb_off + (uint64_t)in->nverts * stride > in->vb->size || (!in->quads && in->ib_off + 2ull * in->nidx > in->vb->size)) { if (g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_VB; } }
+            else { k = fc_bytes(k, (const uint8_t *)in->vb->cpu + in->vb_off, in->nverts * stride); if (!in->quads) k = fc_bytes(k, (const uint8_t *)in->vb->cpu + in->ib_off, in->nidx * 2u); }
+        } else { k = fc_bytes(k, in->verts, in->nverts * stride); if (!in->quads) k = fc_bytes(k, in->idx, in->nidx * 2u); }
+        k = fc_mix(k, (uint64_t)in->nverts << 32 | in->nidx);
+        g_lh.key = fc_mix(fc_mix(g_lh.key, LH_DRAW), k);
+        lh_need_init(g_lh.cc); if (in->ds) lh_need_init(g_lh.cd);
+        lh_content(g_lh.cc, k); if (in->ds) lh_content(g_lh.cd, k);
+    }
+    lh_check_size();
+    return;
+oom:
+    g_lh.n = (uint32_t)((uint8_t *)d - g_lh.buf); g_lh.nents--;
+    lh_flush(VKN_UILF_OTHER); ui_draw_x(in);
+}
+// ---- executing a held run ----
+static void lh_exec(const lh_hdr *h) {
+    const lh_ptr *p = (const lh_ptr *)(const void *)h;
+    switch (h->kind) {
+    case LH_TGT: ui_targets_x(p->a, p->b); break;
+    case LH_VP: ui_viewport_x(p->v[0], p->v[1], p->v[2], p->v[3]); break;
+    case LH_SC: ui_scissor_x(p->v[0], p->v[1], p->v[2], p->v[3]); break;
+    case LH_CDS: ui_clear_ds_x(p->v[0], (uint8_t)p->v[1]); break;
+    case LH_CLR: ui_clear_color_x(p->a, p->has ? p->v : NULL); break;
+    case LH_REG: ui_region_x(p->a, p->v); break;
+    case LH_FENCE: ui_fence_x(); break;
+    case LH_DRAW: {
+        const lh_draw_e *d = (const lh_draw_e *)(const void *)h; vkn_ui_draw_in in = d->in; const uint8_t *b = (const uint8_t *)d;
+        in.vsc = d->o_vsc ? b + d->o_vsc : NULL; in.fsc = d->o_fsc ? b + d->o_fsc : NULL; in.fsc1 = d->o_fsc1 ? b + d->o_fsc1 : NULL;
+        if (d->has_vb) in.vb = &d->vb; else { in.verts = d->o_verts ? b + d->o_verts : NULL; in.idx = d->o_idx ? (const uint16_t *)(const void *)(b + d->o_idx) : NULL; }
+        (void)ui_draw_x(&in);
+        break; }
+    default: break;
+    }
+}
+// group g of the run, state applied lazily (each executed entry sees the targets / viewport / scissor it saw in the run)
+typedef struct lh_st { vkn_tex *c, *d; int32_t vp[4], sc[4]; uint8_t vp_set, sc_set, tgt_set; } lh_st;
+static void lh_state_apply(const lh_st *sv, lh_st *ap) {
+    if ((sv->c || sv->d) && (!ap->tgt_set || sv->c != ap->c || sv->d != ap->d)) { ui_targets_x(sv->c, sv->d); ap->c = sv->c; ap->d = sv->d; ap->tgt_set = 1; }
+    if (sv->vp_set && (!ap->vp_set || memcmp(sv->vp, ap->vp, 16))) { ui_viewport_x(sv->vp[0], sv->vp[1], sv->vp[2], sv->vp[3]); memcpy(ap->vp, sv->vp, 16); ap->vp_set = 1; }
+    if (sv->sc_set && (!ap->sc_set || memcmp(sv->sc, ap->sc, 16))) { ui_scissor_x(sv->sc[0], sv->sc[1], sv->sc[2], sv->sc[3]); memcpy(ap->sc, sv->sc, 16); ap->sc_set = 1; }
+}
+static void lh_scan_state(const lh_hdr *h, lh_st *sv) {
+    const lh_ptr *p = (const lh_ptr *)(const void *)h;
+    if (h->kind == LH_TGT) { sv->c = p->a; sv->d = p->b; }
+    else if (h->kind == LH_VP) { memcpy(sv->vp, p->v, 16); sv->vp_set = 1; }
+    else if (h->kind == LH_SC) { memcpy(sv->sc, p->v, 16); sv->sc_set = 1; }
+}
+static void lh_group(int g, const lh_st *s0, lh_st *ap) {
+    lh_st sv = *s0;
+    for (uint32_t at = 0; at < g_lh.n;) {
+        const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at);
+        at += h->size;
+        if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
+        if (h->grp != g || h->kind == LH_FENCE) continue;
+        lh_state_apply(&sv, ap);
+        lh_exec(h);
+    }
+}
+// the run's final state (a hit, the end of a hoisted run): targets, viewport, scissor as the run left them
+static void lh_final_state(const lh_st *s0, lh_st *ap) {
+    lh_st sv = *s0;
+    for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; lh_scan_state(h, &sv); }
+    if (sv.c) lh_state_apply(&sv, ap);
+}
+// a band of the layer into a staging block (the compare of verify / self-check); a remembered clear of the layer stays remembered
+static int lh_band(lh_cmp *c, uint32_t y0, uint32_t bh, int second) {
+    vkn_tex *L = g_lh.L; VkCommandBuffer cb = vkn_cb();
+    if (!L || L->dead || !cb) return -1;
+    float v[4]; const int had = vkn_pass_clear_take(L, v, 1);   // (not run by the layout change: the band is what the layer HOLDS)
+    vkn_pass_layout(L, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    const VkBufferImageCopy r = {.bufferOffset = c->b.off + (second ? c->bytes : 0), .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {0, (int32_t)y0, 0},
+                                 .imageExtent = {L->w, bh, 1}};
+    vkCmdCopyImageToBuffer(cb, L->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
+    if (had) vkn_pass_clear_color(L, 0, v, NULL);   // (remembered again: no pass of the layer is open after the layout change)
+    return 0;
+}
+static lh_cmp *lh_cmp_new(void) {
+    vkn_tex *L = g_lh.L;
+    if (!L || L->dead || L->samples > 1 || (L->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) return NULL;
+    lh_cmp *c = NULL; for (int i = 0; i < LH_CMP && !c; i++) if (!g_lh.cmp[i].live) c = &g_lh.cmp[i];
+    if (!c) return NULL;
+    const uint32_t bh = L->h < LH_BAND ? L->h : LH_BAND;
+    c->bytes = L->w * bh * 4u;   // (Iggy's layer: RGBA8)
+    if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * c->bytes, 16, &c->b)) return NULL;
+    if (c->b.cpu) memset(c->b.cpu, 0, 2ull * c->bytes);   // (both halves are written by the copies; a copy that did not run compares equal zeros)
+    return c;
+}
+static void lh_cmp_check(int all) {
+    for (int i = 0; i < LH_CMP; i++) {
+        lh_cmp *c = &g_lh.cmp[i];
+        if (!c->live || (!all && vkn_frame() < c->frame + 4)) continue;
+        const int differ = memcmp(c->b.cpu, (const uint8_t *)c->b.cpu + c->bytes, c->bytes) != 0;
+        if (differ) {
+            g_ups.uc_differ++;
+            UI_RED(RR_STATIC, "ui layer / cache: a band of the layer (key %016llx, %u bytes) differs between two recordings of the same UI run%s", (unsigned long long)c->key, c->bytes,
+                   g_lh.cmode == 1 || g_lh.cmode == 3 ? ": the UI cache is off for this session" : "");
+            if (g_lh.cmode == 1 || g_lh.cmode == 3) { g_lh.cmode = 0; g_ups.cache_mode = 0; }
+        }
+        vkn_block_free(&c->b); c->live = 0;
+    }
+}
+static void lh_flush(int why) {
+    if (!g_lh.hold) return;
+    g_lh.hold = 0;
+    const uint64_t t0 = vkn_now_ns();
+    if (why >= 0 && why < VKN_UILF_N) g_ups.lh_flush[why]++;
+    lh_cmp_check(0);
+    if (!g_lh.nents) return;
+    // the engine's bound set now (put back after the run when the engine bound it after the run's last binding)
+    uint32_t en = 0; vkn_tex *ec[VKN_PASS_COLORS], *ed = NULL; uint32_t el[VKN_PASS_COLORS], em[VKN_PASS_COLORS];
+    vkn_pass_cur_get(&en, ec, el, em, &ed);
+    const int restore = g_lh.owns;
+    // the cache: the first run with content of this recording
+    int skip = 0, check = 0, cand = 0, poison = 0; float v[4] = {0, 0, 0, 0}; uint64_t key = 0;
+    const int first = g_lh.content && g_lh.runs == 0;
+    if (g_lh.content) g_lh.runs++;
+    if (first && (g_lh.cmode || g_lh.lmode == 2)) {
+        int r = -1;
+        if (!g_lh.L) r = VKN_UICR_NOLAYER;
+        else if (!g_lh.keyok) r = g_lh.keywhy;
+        else if (!g_lh.has_l) r = VKN_UICR_NOL;
+        else if (g_lh.pre_c0 && g_lh.c0 && g_lh.c0 != g_lh.L) r = VKN_UICR_INIT;   // (drawn into a pushed target the run did not bind: its earlier content is not the run's)
+        else if (!vkn_pass_clear_take(g_lh.L, v, 0)) r = VKN_UICR_NOCLEAR;
+        if (r < 0) {
+            cand = 1; key = g_lh.key; for (int i = 0; i < 4; i++) { uint32_t b; memcpy(&b, &v[i], 4); key = fc_mix(key, b); }
+            g_ups.uc_cand++;
+            if (!g_lh.pv.ok) r = VKN_UICR_FIRST;
+            else if (g_lh.tdirty) r = VKN_UICR_DIRTY;
+            else if (g_lh.pv.key != key) r = VKN_UICR_KEY;
+        }
+        if (r >= 0) g_ups.uc_refused[r]++;
+        if (r < 0) {   // the same run as the last recording's, nothing it wrote touched since
+            g_ups.uc_would++;
+            check = g_lh.cmode == 2 || g_lh.lmode == 2 || (g_lh.cmode != 0 && (++g_lh.hits_all & 255) == 0);
+            skip = g_lh.cmode && !check;
+            poison = skip && g_lh.cmode == 3 && (vkn_frame() & 63) == 0;
+        }
+    }
+    g_lh.replay = 1;
+    lh_st s0; memset(&s0, 0, sizeof s0); s0.c = g_lh.c0; s0.d = g_lh.d0;
+    s0.vp_set = g_lh.vp0_set; memcpy(s0.vp, g_lh.vp0, 16); s0.sc_set = g_lh.sc0_set; memcpy(s0.sc, g_lh.sc0, 16);
+    lh_st ap = s0; ap.tgt_set = 0;   // (applied: the live state, except the set vkn_pass holds now)
+    if (skip) {
+        vkn_pass_clear_take(g_lh.L, NULL, 1);   // the layer keeps the last recording's UI, which is this run's
+        if (poison) { static const float mg[4] = {1, 0, 1, 1}; vkn_pass_clear_color(g_lh.L, 0, mg, NULL); g_ups.uc_poison++; }
+        lh_final_state(&s0, &ap);
+        g_ups.uc_hits++; g_ups.uc_draws_saved += g_lh.ndraws; g_ups.uc_calls_saved += g_lh.nents;
+    } else {
+        lh_cmp *c = check ? lh_cmp_new() : NULL;
+        const uint32_t bh = g_lh.L && g_lh.L->h < LH_BAND ? g_lh.L->h : LH_BAND;
+        const uint32_t y0 = c && g_lh.L->h > bh ? (g_lh.band++ * bh) % (g_lh.L->h - bh + 1) : 0;
+        if (c && lh_band(c, y0, bh, 0)) { vkn_block_free(&c->b); c = NULL; }
+        int hoist = g_lh.lmode && !g_lh.unsafe && g_lh.has_f && g_lh.has_l;
+        if (g_lh.lmode == 2 && hoist) hoist = (int)(g_lh.alt++ & 1);
+        if (hoist) {
+            lh_group(1, &s0, &ap);
+            {   // the layer's first set (the clean end of a P2 epoch), then every texture the layer reads made sampleable: a layout change inside
+                // the layer's pass would end it (the composites read the pushed targets just drawn)
+                lh_st sv = s0;
+                for (uint32_t at = 0; at < g_lh.n;) {
+                    const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+                    if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
+                    if (h->grp == 0 && h->kind != LH_FENCE) break;
+                }
+                lh_state_apply(&sv, &ap);
+                for (uint32_t i = 0; i < g_lh.nr0; i++) if (g_lh.r0[i] != sv.c && g_lh.r0[i] != sv.d && !g_lh.r0[i]->dead) (void)vkn_pass_sample(g_lh.r0[i]);
+            }
+            g_up_noarea = 1; lh_group(0, &s0, &ap); g_up_noarea = 0;
+            lh_final_state(&s0, &ap);
+            if (g_lh.fence) ui_fence_x();
+            g_ups.lh_hoisted++;
+            if (g_lh.lmode == 3) {   // poison: the pushed targets the run wrote, magenta now (their content is spent)
+                static const float mg[4] = {1, 0, 1, 1};
+                for (uint32_t i = 0; i < g_lh.nw; i++) if (g_lh.w[i] != g_lh.L && !(g_lh.w[i]->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) { vkn_pass_clear_color(g_lh.w[i], 0, mg, NULL); g_ups.lh_poison++; }
+            }
+        } else {
+            if (g_lh.c0) ui_targets_x(g_lh.c0, g_lh.d0);   // (the run's starting set: vkn_pass may hold the engine's now)
+            for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; lh_exec(h); }
+            g_ups.lh_ordered++;
+        }
+        if (c && !lh_band(c, y0, bh, 1)) { c->live = 1; c->frame = vkn_frame(); c->key = key; g_ups.uc_verify++; } else if (c) vkn_block_free(&c->b);
+    }
+    if (restore) vkn_pass_targets(en, ec, el, em, ed);
+    g_lh.replay = 0;
+    // the candidate for the next recording: this run, the textures it wrote, tracked from now on
+    if (first) {
+        g_lh.pv.ok = (uint8_t)(cand && !poison); g_lh.pv.key = key; memcpy(g_lh.pv.v, v, sizeof v);
+        g_lh.ntw = 0; for (uint32_t i = 0; i < g_lh.nw; i++) g_lh.tw[g_lh.ntw++] = g_lh.w[i];
+        g_lh.track = (uint8_t)(cand && !g_lh.wfull); g_lh.tdirty = (uint8_t)(poison || g_lh.wfull);
+    }
+    g_lh.n = 0; g_lh.nents = 0; g_lh.ndraws = 0;
+    g_ups.ui_ns += vkn_now_ns() - t0;
+}
+// vkn_pass_before_ev: an engine use while a run is held (the rule at the top)
+static void lh_ev(int ev, vkn_tex *a, vkn_tex *b) {
+    if (g_lh.replay || !g_lh.hold) return;
+    int why = -1;
+    switch (ev) {
+    case VKN_PBE_TARGETS: g_lh.owns = 1; return;
+    case VKN_PBE_READY: case VKN_PBE_DEPTH:
+        if (!g_lh.owns) why = VKN_UILF_BOUND;
+        else {
+            uint32_t n = 0; vkn_tex *c[VKN_PASS_COLORS], *d = NULL; vkn_pass_cur_get(&n, c, NULL, NULL, &d);
+            for (uint32_t i = 0; i < n && why < 0; i++) if (lh_wr(c[i])) why = VKN_UILF_CONFLICT;
+            if (why < 0 && lh_wr(d)) why = VKN_UILF_CONFLICT;
+        }
+        break;
+    case VKN_PBE_SAMPLE: if (lh_w(a)) why = a == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
+    case VKN_PBE_STORAGE: case VKN_PBE_LAYOUT: case VKN_PBE_CLEAR: if (lh_wr(a)) why = a == g_lh.L && ev == VKN_PBE_LAYOUT ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
+    case VKN_PBE_COPY: if (lh_wr(a) || lh_w(b)) why = b == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
+    case VKN_PBE_END: why = VKN_UILF_END; break;
+    default: why = VKN_UILF_OTHER; break;
+    }
+    if (why >= 0) lh_flush(why);
+}
+// the effect chain, first: an engine draw while the run's binding is GDraw's (a custom draw) - before any piece looks at the set
+static void lh_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
+    (void)in; (void)ctx; (void)out; (void)user;
+    if (g_lh.hold && !g_lh.replay && !g_lh.owns) lh_flush(VKN_UILF_BOUND);
+}
+void vkn_ui_layer(vkn_tex *L) {   // the host (RenderingBegin): GDraw's base colour target
+    if (L == g_lh.L) return;
+    if (g_lh.hold) lh_flush(VKN_UILF_OTHER);
+    g_lh.L = L; g_lh.pv.ok = 0; g_lh.track = 0;
+}
+// ---- the entry points (vkn_ui.h; the recording thread) ----
+#define LH_T0() do { if (!g_lh.tdepth++) g_lh.t0 = vkn_now_ns(); } while (0)
+#define LH_T1() do { if (!--g_lh.tdepth) { g_ups.ui_ns += vkn_now_ns() - g_lh.t0; g_ups.ui_calls++; } } while (0)
+void vkn_ui_targets(vkn_tex *color, vkn_tex *depth) { LH_T0(); if (lh_want()) lh_targets(color, depth); else ui_targets_x(color, depth); LH_T1(); }
+void vkn_ui_viewport(int32_t x, int32_t y, int32_t w, int32_t h) { LH_T0(); if (lh_want()) lh_vs(LH_VP, x, y, w, h); else ui_viewport_x(x, y, w, h); LH_T1(); }
+void vkn_ui_scissor(int32_t x, int32_t y, int32_t w, int32_t h) { LH_T0(); if (lh_want()) lh_vs(LH_SC, x, y, w, h); else ui_scissor_x(x, y, w, h); LH_T1(); }
+void vkn_ui_clear_ds(int depth, uint8_t mask) { LH_T0(); if (lh_want()) lh_clear_ds(depth, mask); else ui_clear_ds_x(depth, mask); LH_T1(); }
+void vkn_ui_clear_color(vkn_tex *t, const int32_t rect[4]) { LH_T0(); if (lh_want()) lh_clear_color(t, rect); else ui_clear_color_x(t, rect); LH_T1(); }
+void vkn_ui_region(vkn_tex *t, const int32_t rect[4]) {
+    if (!rect || rect[2] <= 0 || rect[3] <= 0) return;
+    LH_T0(); if (lh_want()) lh_region(t, rect); else ui_region_x(t, rect); LH_T1();
+}
+void vkn_ui_pass_fence(void) { LH_T0(); if (g_lh.hold && !g_lh.replay) lh_fence(); else ui_fence_x(); LH_T1(); }
+int vkn_ui_draw(const vkn_ui_draw_in *in) {
+    int r = 0;
+    LH_T0();
+    if (in && lh_want()) lh_draw(in); else r = ui_draw_x(in);
+    LH_T1();
+    return r;
+}
+void vkn_ui_layer_flush(void) { if (g_lh.hold && !g_lh.replay) lh_flush(VKN_UILF_OTHER); }
+// ==== [/mgpu P7]
 #endif

@@ -89,7 +89,7 @@ struct vkn_ui_stats;
 extern void vkn_ui_stats_get(struct vkn_ui_stats *s) __attribute__((weak));
 typedef struct pj_att { char name[24]; uint32_t fmt; uint8_t load, store, depth; } pj_att;
 typedef struct pj_ent { pj_att a[VKN_PASS_COLORS + 1]; uint8_t na, why, joined; uint32_t w, h; VkRect2D area; uint64_t lb, sb; uint32_t draws; } pj_ent;
-static struct { int init, target, armed; uint32_t heavy, n, cap, passes; pj_ent *e; uint64_t d0, u0, lb, sb; int open; } g_pj;
+static struct { int init, target, armed; uint32_t heavy, n, cap, passes; pj_ent *e; uint64_t d0, u0, lb, sb; int open, ui; } g_pj;   // ui: [mgpu P7] a UI target is attached
 static int pj_cfg(void) {
     if (!g_pj.init) { g_pj.init = 1; const char *e = getenv("DM_VK_NATIVE_PASSLOG"); g_pj.target = e && *e && atoi(e) > 0 ? atoi(e) : 0; }
     return g_pj.target;
@@ -104,6 +104,7 @@ static void pj_name(char *o, const vkn_tex *t) { if (t->sname[0]) snprintf(o, 24
 static void pj_begin(const tset *s, const vkn_rp_key *k, uint32_t W, uint32_t H, VkRect2D area, uint64_t lb, uint64_t sb, int joined) {
     draw_counts(&g_pj.d0, &g_pj.u0); g_pj.lb = lb; g_pj.sb = sb; g_pj.open = 1;
     g_s4.passes++; g_pj.passes++;
+    g_pj.ui = 0; for (uint32_t i = 0; i < s->n; i++) if (s->c[i] && s->c[i]->ui_tgt) g_pj.ui = 1;   // [mgpu P7] (a UI colour target: the UI's pass)
     if (!g_pj.armed) return;
     if (g_pj.n >= g_pj.cap) {
         const uint32_t nc = g_pj.cap ? g_pj.cap * 2 : 256;
@@ -127,6 +128,7 @@ static void pj_end(int why) {
     g_s4.draws += d - g_pj.d0; g_s4.ui_draws += u - g_pj.u0;
     if (why < 0 || why >= VKN_PE_N) why = VKN_PE_OTHER;
     g_s4.ended[why]++; g_s4.ended_bytes[why] += g_pj.lb + g_pj.sb;
+    if (g_pj.ui) { g_s4.ui_passes++; g_s4.ui_load += g_pj.lb; g_s4.ui_store += g_pj.sb; g_s4.ui_pass_draws += (d - g_pj.d0) + (u - g_pj.u0); }   // [mgpu P7]
     if (g_pj.armed && g_pj.n) { pj_ent *e = &g_pj.e[g_pj.n - 1]; e->why = (uint8_t)why; e->draws = (uint32_t)((d - g_pj.d0) + (u - g_pj.u0)); }
 }
 static const char *pj_op(uint8_t load, uint8_t store) {   // L load / C clear / - dont care, then S store / - dont care
@@ -165,6 +167,10 @@ void vkn_pass_stats4_get(vkn_pass_stats4 *s) { if (s) *s = g_s4; }
 static void (*g_before)(void);
 #define BEFORE() do { if (g_before) { void (*f_)(void) = g_before; g_before = NULL; f_(); } } while (0)
 void vkn_pass_before(void (*fn)(void)) { g_before = fn; }
+// [mgpu P7] the event hook (vkn_pass.h vkn_pass_before_ev): first, then the P2 hook; never re-entered (its own calls run plain)
+static vkn_pass_ev_fn g_bev; static int g_bev_busy;
+void vkn_pass_before_ev(vkn_pass_ev_fn fn) { g_bev = fn; }
+#define BEFORE_EV(ev, a, b) do { if (g_bev && !g_bev_busy) { g_bev_busy = 1; g_bev((ev), (a), (b)); g_bev_busy = 0; } BEFORE(); } while (0)
 // ==== [/mgpu P0 journal]
 
 // Integer formats take an integer clear value (the engine's floats converted).
@@ -328,7 +334,7 @@ void vkn_pass_init(void) {
     vkn_rec_on_begin(on_begin);
     vkn_rec_on_begin(dump_begin);
 }
-void vkn_pass_end(void) { BEFORE(); disarm(); END_W(VKN_PE_END); }
+void vkn_pass_end(void) { BEFORE_EV(VKN_PBE_END, NULL, NULL); disarm(); END_W(VKN_PE_END); }
 
 // A render target that was never written and never cleared is about to be read (sampled, or loaded by a pass that blends into it).
 // On the Switch its memory is fresh pool memory: zeros. A new VkImage holds garbage, and garbage in a history target (adapted
@@ -1203,7 +1209,7 @@ static int begin_set(const tset *s) {
 
 void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const uint32_t layer[VKN_PASS_COLORS], const uint32_t mip[VKN_PASS_COLORS], vkn_tex *depth) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_TARGETS, NULL, NULL);   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     tset s; memset(&s, 0, sizeof s);
     s.n = n > VKN_PASS_COLORS ? VKN_PASS_COLORS : n;
@@ -1247,7 +1253,9 @@ void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const u
     g_cur = s;
 }
 
-vkn_tex *vkn_pass_depth(void) { return g_cur.d; }
+vkn_tex *vkn_pass_depth(void) { BEFORE_EV(VKN_PBE_DEPTH, NULL, NULL); return g_cur.d; }   // [mgpu P7] (the bound set is about to be read)
+// [mgpu P7] a remembered whole clear of level 0 layer 0 of t leaves the record (vkn_pass.h vkn_pass_clear_take)
+int vkn_pass_clear_take(vkn_tex *t, float rgba[4], int take) { return t && !is_depth(t) ? clr_find(t, 0, rgba, take) : 0; }
 // ==== [stage 5.2 B1 + B2] the render-area hint of the UI piece (vkn_pass.h; the combination rule is in begin_set) ====
 int vkn_pass_area_hint(const VkRect2D *area) {
     vkn_pass_init();
@@ -1264,7 +1272,7 @@ int vkn_pass_area_get(VkRect2D *out) {
 
 int vkn_pass_ready(vkn_pass_info *info) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_READY, NULL, NULL);   // [mgpu P2]
     if (!vkn_cb()) { g_st2.no_cb++; disarm(); return -1; }
     if (g_join && open_here()) { disarm(); if (info) *info = g_info_join; return 0; }   // [mgpu P6.1] the joined pass serves the depth-only draws
     if (open_here() && same_set(&g_open_set, &g_cur)) {
@@ -1298,7 +1306,7 @@ int vkn_pass_ready(vkn_pass_info *info) {
 
 int vkn_pass_sample(vkn_tex *t) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_SAMPLE, t, NULL);   // [mgpu P2]
     if (!t) return 0;
     WATCH(t, VKN_PASS_EV_SAMPLE, 0.0f);   // [stage 5 A3]
     if (in_set(&g_cur, t)) { g_st.feedback++; return 1; }
@@ -1323,7 +1331,7 @@ int vkn_pass_sample(vkn_tex *t) {
 
 void vkn_pass_storage(vkn_tex *t) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_STORAGE, t, NULL);   // [mgpu P2]
     if (!t) return;
     WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     disarm();   // [stage 5.2 B1]
@@ -1338,7 +1346,7 @@ void vkn_pass_storage(vkn_tex *t) {
 
 void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_LAYOUT, t, NULL);   // [mgpu P2]
     if (!t) return;
     WATCH(t, VKN_PASS_EV_USE, 0.0f);   // [stage 5 A3]
     disarm();   // [stage 5.2 B1]
@@ -1356,7 +1364,7 @@ void vkn_pass_layout(vkn_tex *t, VkImageLayout to) {
 // ---- clears ----
 void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const int32_t rect[4]) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_CLEAR, t, NULL);   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (g_dump.active && t && t->format == VK_FORMAT_R8G8B8A8_UNORM && t->w >= 1000) vkn_logf("trace: clear colour of %llx layer %u rect %d %d %d %d (%g %g %g %g), pass open %d", (unsigned long long)(t->handle & 0xffff), layer, rect ? rect[0] : 0, rect ? rect[1] : 0, rect ? rect[2] : -1, rect ? rect[3] : -1, rgba ? rgba[0] : 0, rgba ? rgba[1] : 0, rgba ? rgba[2] : 0, rgba ? rgba[3] : 0, open_here());
     if (!t || !rgba || is_depth(t) || layer >= t->layers) {
@@ -1404,7 +1412,7 @@ void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const
 
 void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_CLEAR, t, NULL);   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (!t || !is_depth(t)) {
         g_st2.clear_bad++;
@@ -1442,7 +1450,7 @@ static int blit_ok(VkFormat f) {
 }
 void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     vkn_pass_init();
-    BEFORE();   // [mgpu P2]
+    BEFORE_EV(VKN_PBE_COPY, dst, src);   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (g_dump.active && dst && src) { dump_note(src); dump_note(dst); }
     if (g_dump.active && dst && src) vkn_logf("trace: copy %llx (%ux%u) -> %llx (%ux%u)", (unsigned long long)(src->handle & 0xffff), src->w, src->h, (unsigned long long)(dst->handle & 0xffff), dst->w, dst->h);
@@ -1511,7 +1519,7 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
 // ==== [mgpu P2] a region copy (vkn_pass.h vkn_pass_copy_rect) ====
 int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32_t sx, int32_t sy, uint32_t w, uint32_t h) {
     vkn_pass_init();
-    BEFORE();
+    BEFORE_EV(VKN_PBE_COPY, dst, src);
     disarm();
     if (!dst || !src || dst == src || dst->dead || src->dead || dst->format != src->format || dst->samples != src->samples || is_depth(dst) || is_depth(src)) return -1;
     if (dx < 0 || dy < 0 || sx < 0 || sy < 0 || !w || !h || (uint64_t)dx + w > dst->w || (uint64_t)dy + h > dst->h || (uint64_t)sx + w > src->w || (uint64_t)sy + h > src->h) return -1;
@@ -1530,6 +1538,7 @@ int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32
     vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
     written(dst);
     g_st.copies++;
+    if (dst->ui_tgt || src->ui_tgt) { g_s4.ui_copies++; g_s4.ui_copy += 2ull * att_bytes(src, w, h); }   // [mgpu P7] (read + write)
     return 0;
 }
 

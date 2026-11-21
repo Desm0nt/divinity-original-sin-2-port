@@ -61,6 +61,7 @@
 #include "../gfx/vkn/vkn_buf.h"
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_ui.h"
+#include "../gfx/vkn/vkn_pass.h"   // [mgpu P7] the journal's UI share (vkn_pass_stats4)
 #include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the GDraw calls of the backend are records (vkn_rt_ui_*)
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
@@ -355,6 +356,7 @@ static void ui_rendering_end(void) {
     vkn_rt_ui_pass_fence();   // [stage 5.2 B2] the engine may draw / clear with GDraw's targets bound after this: the NVN set, full area ([stage 5.5] a record)
     g_n_re++;
 }
+static void ui_layer_fn(void *a) { vkn_ui_layer(*(vkn_tex *const *)a); }   // [mgpu P7] (a record)
 // 0x1becd80 RenderingBegin(ctx): caches +0x80..+0x87 = -1, +0x90..+0xaf = 0, the reset (with them on), the targets, viewport + scissor,
 // projection.
 VKN_HOOK h_rb(VKN_A) {
@@ -364,6 +366,7 @@ VKN_HOOK h_rb(VKN_A) {
     if (g_re_stub && vkn_rd64(slot) == (uint64_t)(uintptr_t)(dm_vkn_base() + 0x1bf4200)) { wr64(slot, (uint64_t)(uintptr_t)g_re_stub); g_n_table++; }
     wr64(ctx + 0x80, ~0ull); wr64(ctx + 0xa0, 0); wr64(ctx + 0xa8, 0); wr64(ctx + 0x90, 0); wr64(ctx + 0x98, 0);
     state_reset(ctx);
+    { vkn_tex *L = tex_of(vkn_rd64(ctx + 0xb0)); vkn_rt_call(ui_layer_fn, &L, sizeof L); }   // [mgpu P7] GDraw's base colour target = the layer
     targets_apply(ctx);
     vs_apply(ctx);
     proj(ctx);
@@ -799,7 +802,7 @@ static int model_2c(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
 static vkn_ui_pass_stats g_ups0; static uint64_t g_ups_frame0;
 static void ui_pass_census(void) {
     vkn_ui_pass_stats a; vkn_ui_pass_stats_get(&a);
-    if (a.mode <= 0 && !a.fc_mode) return;   // (off, or no device yet; [mgpu P2] the filter cache runs without the UI pass)
+    if (a.mode <= 0 && !a.fc_mode && !a.layer_mode && !a.cache_mode && !a.ui_calls) return;   // (off, or no device yet; [mgpu P2] the filter cache runs without the UI pass)
     const vkn_ui_pass_stats *p = &g_ups0; const uint64_t fr = vkn_frame();
     const double f = fr > g_ups_frame0 ? (double)(fr - g_ups_frame0) : 1.0, mb = 1048576.0;
 #define D(x) ((double)(a.x - p->x) / f)
@@ -824,6 +827,26 @@ static void ui_pass_census(void) {
              a.fc_mode, D(fc_epochs), D(fc_hits), D(fc_misses), D(fc_stored), D(fc_draws_saved), D(fc_px_copied) / 1e6, D(fc_evicted), D(fc_refused[0]), D(fc_refused[1]), D(fc_refused[2]),
              D(fc_refused[3]), D(fc_refused[4]), D(fc_refused[5]), D(fc_refused[6]), D(fc_verify), (unsigned long long)a.fc_differ, D(fc_poison),
              D(fc_flush[0]), D(fc_flush[1]), D(fc_flush[2]), D(fc_flush[3]), D(fc_flush[4]));
+    {   // [mgpu P7] the UI's traffic (the pass journal's UI share), CPU and the layer hold / cache: one line to compare before / after
+        vkn_pass_stats4 q; vkn_pass_stats4_get(&q);
+        static vkn_pass_stats4 q0;
+        const double qf = q.frames > q0.frames ? (double)(q.frames - q0.frames) : 1.0;
+#define Q(x) ((double)(q.x - q0.x) / qf)
+        vkn_logf("ui traffic (mgpu P7): a presented frame: UI passes %.2f (draws %.1f), model %.1f MB load + %.1f MB store, copies %.2f (%.1f MB); "
+                 "UI CPU on the recording thread %.3f ms (%.0f calls) | DM_VK_NATIVE_UILAYER=%d: runs %.2f, calls held %.1f (draws %.1f), executed hoisted %.2f / in order %.2f, "
+                 "not hoisted: no layer %.2f, pushed DS %.2f, pushed read of the layer %.2f, target reuse %.2f, many reads %.2f; poisoned %.2f; flushed by: an engine draw on GDraw's binding %.2f, "
+                 "a conflict %.2f, the layer used %.2f, a pass end %.2f, size %.2f, other %.2f | DM_VK_NATIVE_UICACHE=%d: candidates %.2f, would hit %.2f, hits %.2f (draws not executed %.1f, calls %.1f); "
+                 "refused: no layer %.2f, a texture without a version %.2f, vertex range %.2f, many targets %.2f, drawn before cleared %.2f, no layer content %.2f, no layer clear %.2f, "
+                 "first %.2f, written since %.2f, another key %.2f; verify compares %.3f, differ %llu (total); poison %.3f",
+                 Q(ui_passes), Q(ui_pass_draws), Q(ui_load) / mb, Q(ui_store) / mb, Q(ui_copies), Q(ui_copy) / mb, D(ui_ns) / 1e6, D(ui_calls),
+                 a.layer_mode, D(lh_runs), D(lh_calls), D(lh_draws), D(lh_hoisted), D(lh_ordered), D(lh_unsafe[VKN_UILU_NOLAYER]), D(lh_unsafe[VKN_UILU_DS]), D(lh_unsafe[VKN_UILU_READL]),
+                 D(lh_unsafe[VKN_UILU_REUSE]), D(lh_unsafe[VKN_UILU_MANY]), D(lh_poison), D(lh_flush[VKN_UILF_BOUND]), D(lh_flush[VKN_UILF_CONFLICT]), D(lh_flush[VKN_UILF_LAYER]),
+                 D(lh_flush[VKN_UILF_END]), D(lh_flush[VKN_UILF_SIZE]), D(lh_flush[VKN_UILF_OTHER]), a.cache_mode, D(uc_cand), D(uc_would), D(uc_hits), D(uc_draws_saved), D(uc_calls_saved),
+                 D(uc_refused[VKN_UICR_NOLAYER]), D(uc_refused[VKN_UICR_TEX]), D(uc_refused[VKN_UICR_VB]), D(uc_refused[VKN_UICR_MANY]), D(uc_refused[VKN_UICR_INIT]), D(uc_refused[VKN_UICR_NOL]),
+                 D(uc_refused[VKN_UICR_NOCLEAR]), D(uc_refused[VKN_UICR_FIRST]), D(uc_refused[VKN_UICR_DIRTY]), D(uc_refused[VKN_UICR_KEY]), D(uc_verify), (unsigned long long)a.uc_differ, D(uc_poison));
+#undef Q
+        q0 = q;
+    }
 #undef D
     g_ups0 = a; g_ups_frame0 = fr;
 }
@@ -885,6 +908,8 @@ void dm_vkn_ui_register(void) {
         }
         { const char *rg = getenv("DM_VK_NATIVE_UIREGION"); vkn_ui_region_config(rg && *rg ? atoi(rg) : -1); }   // [mgpu P1] (-1 = render-pass tilers 1, else 0)
         { const char *fc = getenv("DM_VK_NATIVE_UIFC"); vkn_ui_fc_config(fc && *fc ? atoi(fc) : -1); }          // [mgpu P2]
+        { const char *l = getenv("DM_VK_NATIVE_UILAYER"), *c = getenv("DM_VK_NATIVE_UICACHE");                  // [mgpu P7] (-1 = render-pass tilers 1, else 0)
+          vkn_ui_layer_config(l && *l ? atoi(l) : -1, c && *c ? atoi(c) : -1); }
         vkn_ui_pass_config(e && *e ? atoi(e) : -1, v && *v ? atoi(v) : 0, r && *r ? atoi(r) : 0, sim_tiler);
     }
     {   // [rt P6] DM_VK_NATIVE_UISET (vkn_ui.h): 0 a fresh set per UI draw, 1 (default) sets of the recording by content, 2 = 1 without reuse (counted)

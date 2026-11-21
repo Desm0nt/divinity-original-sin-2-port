@@ -168,6 +168,9 @@ typedef struct vkn_pass_stats4 {
     uint64_t ended[VKN_PE_N], ended_bytes[VKN_PE_N];
     uint64_t join_tried, joined, join_hit, join_miss, join_early, join_would, join_refused[6];   // [mgpu P6.1] (vkn_pass.c "pass join")
     uint64_t ord_full;                                                                        // [mgpu P4] ordinal table full (chain key used)
+    // [mgpu P7] the UI's share: passes with a UI colour target (vkn_tex.ui_tgt: GDraw's targets and the filter cache atlas), their model
+    // bytes (load / store over the render area) and draws; region copies from / into a UI texture (read + write bytes)
+    uint64_t ui_passes, ui_load, ui_store, ui_pass_draws, ui_copies, ui_copy;
 } vkn_pass_stats4;
 void vkn_pass_stats4_get(vkn_pass_stats4 *s);
 // ==== [mgpu P2] a region copy between two colour textures of one format (the UI filter cache, vkn_ui.c): layouts by this module ====
@@ -178,6 +181,17 @@ int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32
 void vkn_pass_before(void (*fn)(void));
 // [mgpu P2] fn(t) after every GPU write this module records into t (attachment of a pass that begins, clear, copy destination, storage).
 void vkn_pass_on_write(void (*fn)(vkn_tex *t));
+// ==== [mgpu P7] the UI layer hold (vkn_ui.c "mgpu P7") ====
+// fn(ev, a, b) at the entry of every vkn_pass_* call below, BEFORE the P2 hook and before the call reads or changes anything: TARGETS
+// (the set about to change), READY (a pass for the current set), SAMPLE / STORAGE / LAYOUT / CLEAR (texture a: colour or depth clear),
+// COPY (a = destination, b = source; copy and copy_rect), END (vkn_pass_end: a piece, the recording's close), DEPTH (vkn_pass_depth:
+// the bound depth target is about to be read). fn may call this module (its own calls do not reach fn again). NULL = none.
+enum { VKN_PBE_TARGETS = 1, VKN_PBE_READY, VKN_PBE_SAMPLE, VKN_PBE_STORAGE, VKN_PBE_LAYOUT, VKN_PBE_CLEAR, VKN_PBE_COPY, VKN_PBE_END, VKN_PBE_DEPTH };
+typedef void (*vkn_pass_ev_fn)(int ev, vkn_tex *a, vkn_tex *b);
+void vkn_pass_before_ev(vkn_pass_ev_fn fn);
+// A remembered whole clear of colour texture t (level 0, layer 0; vkn_pass_clear_color without a rect while no pass of t was open):
+// 1 + its value (take = 1: it leaves the record - the texture keeps what it holds), 0 = none.
+int vkn_pass_clear_take(vkn_tex *t, float rgba[4], int take);
 
 #ifdef __cplusplus
 }
