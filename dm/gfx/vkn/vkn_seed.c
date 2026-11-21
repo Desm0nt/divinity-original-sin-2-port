@@ -6,7 +6,9 @@
 #include "vkn.h"
 #include "vkn_shader.h"
 #include "vkn_state.h"
+#include "vkn_tex.h"    // [VK-SEED] vkn_tex_rt_format
 #include "../nr/nr_seed.h"
+#include <stddef.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,12 +42,18 @@ static struct {
     uint64_t *keys; uint32_t nkeys, ckeys; // fnv of the key pairs of the translated records
     uint8_t *img; size_t nimg;        // host test image
     int told_differ;
+    // [VK-SEED] the new path's seed (vkn_seed.h): its records (portable form), their states, the lookup tables
+    vkn_warm_rec *v; uint8_t *vst; uint32_t nv;
+    uint64_t *vid; uint32_t vidcap;   // identities (+ the D32 form of an EITHER record): open addressing, 0 = empty
+    uint64_t *vkp; uint32_t vkpcap;   // fnv of the key pairs (the "same shaders" answer)
+    uint32_t *vhead, *vnext; uint32_t vhcap;   // key pair -> records (chains; UINT32_MAX = end)
 } g = {.mode = -1};
 
 const char *vkn_seed_reason_name(int r) {
     static const char *const n[VKN_SEED_R_N] = {"not a seed record", "not pack keys", "a fused post stage (the backend's own)", "a vertex conversion variant (#vi..c)",
         "a create-info shape the old path never wrote", "a pass format this device cannot render to", "a topology the engine does not draw", "not one vertex + at most one fragment stage",
-        "no blend state of this run matches", "no depth-stencil state of this run matches", "no raster state of this run matches", "no vertex format of this run matches"};
+        "no blend state of this run matches", "no depth-stencil state of this run matches", "no raster state of this run matches", "no vertex format of this run matches",
+        "a torn / foreign record (checksum, shape)", "the vertex format table is full"};
     return r >= 0 && r < VKN_SEED_R_N ? n[r] : "?";
 }
 static void refuse(srec *r, int why) { if (r) r->state = 2; if (why >= 0 && why < VKN_SEED_R_N) g.s.refused[why]++; }
@@ -108,33 +116,45 @@ static int decode(const nsd_rec *x, nsd_pipe *p, srec *o) {   // -1 = ok, else a
     }
     return -1;
 }
+// The seed file `name` from the shader directory (a test push) or files/ (the APK's copy). NULL = none.
+static uint8_t *read_seed_file(const char *name, size_t *n, char *path, size_t pn) {
+    char sd[512]; const char *cand[2] = {NULL, NULL}; char p0[600], p1[600]; uint8_t *data = NULL;
+    *n = 0;
+    if (vkn_shlib_shader_dir && !vkn_shlib_shader_dir(sd, sizeof sd) && sd[0]) { snprintf(p0, sizeof p0, "%s/%s", sd, name); cand[0] = p0; }
+    const char *fd = getenv("DM_MARKER_DIR");
+    if (fd && *fd) { snprintf(p1, sizeof p1, "%s/%s", fd, name); cand[1] = p1; }
+    for (int i = 0; i < 2 && !data; i++) {
+        if (!cand[i]) continue;
+        FILE *f = fopen(cand[i], "rb"); if (!f) continue;
+        if (!fseek(f, 0, SEEK_END)) {
+            const long sz = ftell(f);
+            if (sz > 32 && sz < (64l << 20) && !fseek(f, 0, SEEK_SET) && (data = (uint8_t *)malloc((size_t)sz))) {
+                if (fread(data, 1, (size_t)sz, f) == (size_t)sz) { *n = (size_t)sz; snprintf(path, pn, "%s", cand[i]); }
+                else { free(data); data = NULL; }
+            }
+        }
+        fclose(f);
+    }
+    return data;
+}
+static int load2(const uint8_t *data, size_t n, const char *path);
 static void load(const char *dir) {
     uint8_t *data = NULL; size_t n = 0; char path[640] = "";
-    if (g.img) { data = g.img; n = g.nimg; snprintf(path, sizeof path, "(test image)"); }
-    else {
-        char sd[512]; const char *cand[2] = {NULL, NULL}; char p0[600], p1[600];
-        if (vkn_shlib_shader_dir && !vkn_shlib_shader_dir(sd, sizeof sd) && sd[0]) { snprintf(p0, sizeof p0, "%s/dos2-pipe-seed.bin", sd); cand[0] = p0; }
-        const char *fd = getenv("DM_MARKER_DIR");
-        if (fd && *fd) { snprintf(p1, sizeof p1, "%s/dos2-pipe-seed.bin", fd); cand[1] = p1; }
-        (void)dir;
-        for (int i = 0; i < 2 && !data; i++) {
-            if (!cand[i]) continue;
-            FILE *f = fopen(cand[i], "rb"); if (!f) continue;
-            if (!fseek(f, 0, SEEK_END)) {
-                const long sz = ftell(f);
-                if (sz > 32 && sz < (64l << 20) && !fseek(f, 0, SEEK_SET) && (data = (uint8_t *)malloc((size_t)sz))) {
-                    if (fread(data, 1, (size_t)sz, f) == (size_t)sz) { n = (size_t)sz; snprintf(path, sizeof path, "%s", cand[i]); }
-                    else { free(data); data = NULL; }
-                }
-            }
-            fclose(f);
-        }
-    }
+    (void)dir;
     g.loaded = 1;
-    if (!data) { g.s.file = 0; vkn_logf("seed: DM_VK_NATIVE_SEED=%d: no dos2-pipe-seed.bin (shader directory, files/): nothing to do", g.mode); return; }
+    if (g.img) { data = g.img; n = g.nimg; snprintf(path, sizeof path, "(test image)"); }
+    else if ((data = read_seed_file(VKN_SEED2_FILE, &n, path, sizeof path))) {   // [VK-SEED] the new path's seed first
+        const int ok = load2(data, n, path); free(data); data = NULL;
+        if (ok) return;
+        data = read_seed_file("dos2-pipe-seed.bin", &n, path, sizeof path);
+    } else data = read_seed_file("dos2-pipe-seed.bin", &n, path, sizeof path);
+    if (data && n >= 8 && !memcmp(data, "VKNSEED", 8)) {   // (a test image of the new seed)
+        load2(data, n, path); if (data != g.img) free(data); return;
+    }
+    if (!data) { g.s.file = 0; vkn_logf("seed: DM_VK_NATIVE_SEED=%d: no " VKN_SEED2_FILE " / dos2-pipe-seed.bin (shader directory, files/): nothing to do", g.mode); return; }
     nsd_seed_hdr h;
     if (nsd_seed_open(data, n, &h)) { g.s.file = -1; vkn_logf(VKN_RED_MARK "seed: %s is not a version-%u seed or is damaged: ignored", path, NSD_SEED_VERSION); if (data != g.img) free(data); return; }
-    g.s.file = 1; g.s.id = h.id;
+    g.s.file = 1; g.s.id = h.id; g.s.kind = 1;
     g.r = (srec *)calloc(h.nrec ? h.nrec : 1, sizeof *g.r);
     nsd_pipe *p = (nsd_pipe *)malloc(sizeof *p); nsd_rec *x = (nsd_rec *)malloc(sizeof *x);
     size_t off = h.body; int rc = 0;
@@ -331,6 +351,150 @@ static void pass(void) {
     free(v.s);
 }
 
+// ---------------------------------------------------------------- [VK-SEED] the new path's seed (vkn_seed.h)
+// vkn_warm_rec offsets the tool writes by number (tools/dos2_vkn_seed.py O_*): a layout change must change the tool too
+_Static_assert(sizeof(vkn_warm_rec) == 296 && offsetof(vkn_warm_rec, retype) == 32 && offsetof(vkn_warm_rec, depth) == 80 && offsetof(vkn_warm_rec, nvel) == 87 &&
+               offsetof(vkn_warm_rec, vel) == 122 && offsetof(vkn_warm_rec, pad3) == 227 && offsetof(vkn_warm_rec, piece) == 230 && offsetof(vkn_warm_rec, rarg) == 240 &&
+               offsetof(vkn_warm_rec, sum) == 288, "vkn_warm_rec layout = tools/dos2_vkn_seed.py");
+static uint64_t hs_key(uint64_t h) { return h ? h : 1; }
+static void hs_put(uint64_t *t, uint32_t cap, uint64_t h) {   // cap: a power of two, never full (sized at load)
+    h = hs_key(h);
+    for (uint32_t i = (uint32_t)h & (cap - 1);; i = (i + 1) & (cap - 1)) { if (t[i] == h) return; if (!t[i]) { t[i] = h; return; } }
+}
+static int hs_has(const uint64_t *t, uint32_t cap, uint64_t h) {
+    if (!t) return 0;
+    h = hs_key(h);
+    for (uint32_t i = (uint32_t)h & (cap - 1), k = 0; k < cap; i = (i + 1) & (cap - 1), k++) { if (t[i] == h) return 1; if (!t[i]) return 0; }
+    return 0;
+}
+static uint32_t pow2_at_least(uint32_t n) { uint32_t c = 16; while (c < n) c <<= 1; return c; }
+static int is_mat_recipe(const vkn_warm_rec *r) { return r->rkind == VKN_WREC_R_VS && r->rlen == 24 && !strncmp(r->piece, "mat", VKN_WARM_PIECE); }
+static uint32_t d32_of(uint32_t f) { return f == VK_FORMAT_X8_D24_UNORM_PACK32 ? VK_FORMAT_D32_SFLOAT : f == VK_FORMAT_D24_UNORM_S8_UINT ? VK_FORMAT_D32_SFLOAT_S8_UINT : 0; }
+static uint32_t d24_of(uint32_t f) { return f == VK_FORMAT_D32_SFLOAT ? VK_FORMAT_X8_D24_UNORM_PACK32 : f == VK_FORMAT_D32_SFLOAT_S8_UINT ? VK_FORMAT_D24_UNORM_S8_UINT : 0; }
+// The portable identity (the tool's ident(canon(r))): retype and a "mat" recipe's code word cleared, the seed flags cleared.
+static uint64_t ident_of(const vkn_warm_rec *r, uint32_t depth) {
+    vkn_warm_rec x = *r;
+    x.retype = 0; x.pad3 = 0; x.depth = depth;
+    if (is_mat_recipe(&x)) memset(x.rarg, 0, 8);
+    return vkn_fnv(&x, offsetof(vkn_warm_rec, sum));
+}
+// The key pair of a record / of an engine shader (vkn_warm.c keys_eq: a record without a fragment stage = a shader without one).
+static uint64_t kp_rec(const vkn_warm_rec *r) { char b[32]; memset(b, 0, sizeof b); memcpy(b, r->key[0], 16); if (r->flags & VKN_WREC_F_FS) memcpy(b + 16, r->key[1], 16); return vkn_fnv(b, 32); }
+static int kp_shader(const vkn_shader *s, uint64_t *h) {
+    char b[32]; memset(b, 0, sizeof b);
+    if (strlen(s->key[VKN_SRC_VS]) != 16) return -1;
+    memcpy(b, s->key[VKN_SRC_VS], 16);
+    if (s->key[VKN_SRC_FS][0]) { if (strlen(s->key[VKN_SRC_FS]) != 16) return -1; memcpy(b + 16, s->key[VKN_SRC_FS], 16); }
+    *h = vkn_fnv(b, 32); return 0;
+}
+static int keys_match(const vkn_shader *s, const vkn_warm_rec *r) {
+    if (memcmp(s->key[VKN_SRC_VS], r->key[0], 16)) return 0;
+    if (r->flags & VKN_WREC_F_FS) return strlen(s->key[VKN_SRC_FS]) == 16 && !memcmp(s->key[VKN_SRC_FS], r->key[1], 16);
+    return !s->key[VKN_SRC_FS][0];
+}
+static int shape_ok(const vkn_warm_rec *r) {
+    if (r->nvel > VKN_WREC_VEL || r->ncolor > 8 || r->rlen > VKN_WARM_ARG || r->rkind > VKN_WREC_R_VS || (r->pad3 & ~VKN_SEED2_EITHER)) return 0;
+    if ((r->pad3 & VKN_SEED2_EITHER) && !d32_of(r->depth)) return 0;
+    return 1;
+}
+// 1 = read (g.s.kind 2), 0 = not a usable new seed (the caller falls back to the old file).
+static int load2(const uint8_t *data, size_t n, const char *path) {
+    uint32_t ver = 0, rs = 0, nrec = 0, nsrc = 0; uint64_t id = 0;
+    if (n >= VKN_SEED2_HDR) { memcpy(&ver, data + 8, 4); memcpy(&rs, data + 12, 4); memcpy(&nrec, data + 16, 4); memcpy(&nsrc, data + 20, 4); memcpy(&id, data + 24, 8); }
+    if (n < VKN_SEED2_HDR || memcmp(data, "VKNSEED", 8) || ver != VKN_SEED2_VERSION || rs != sizeof(vkn_warm_rec) || nrec > (1u << 20) ||
+        n != VKN_SEED2_HDR + (size_t)nrec * rs || vkn_fnv(data + VKN_SEED2_HDR, n - VKN_SEED2_HDR) != id) {
+        g.s.file = -1;
+        vkn_logf(VKN_RED_MARK "seed: %s is not a version-%u " VKN_SEED2_FILE " or is damaged: ignored (the old seed is read if there is one)", path, VKN_SEED2_VERSION);
+        return 0;
+    }
+    g.v = (vkn_warm_rec *)calloc(nrec ? nrec : 1, sizeof *g.v); g.vst = (uint8_t *)calloc(nrec ? nrec : 1, 1);
+    g.vidcap = pow2_at_least(nrec * 4 + 16); g.vkpcap = pow2_at_least(nrec * 2 + 16); g.vhcap = g.vkpcap;
+    g.vid = (uint64_t *)calloc(g.vidcap, 8); g.vkp = (uint64_t *)calloc(g.vkpcap, 8);
+    g.vhead = (uint32_t *)malloc(g.vhcap * 4u); g.vnext = (uint32_t *)malloc((nrec ? nrec : 1) * 4u);
+    if (!g.v || !g.vst || !g.vid || !g.vkp || !g.vhead || !g.vnext) { g.s.file = -1; g.nv = 0; vkn_logf(VKN_RED_MARK "seed: no memory for %u records: off", nrec); return 1; }
+    memset(g.vhead, 0xff, g.vhcap * 4u);
+    g.s.file = 1; g.s.kind = 2; g.s.id = id;
+    for (uint32_t i = 0; i < nrec; i++) {
+        vkn_warm_rec r; memcpy(&r, data + VKN_SEED2_HDR + (size_t)i * rs, sizeof r);
+        if (r.sum != vkn_warm_rec_sum(&r) || !shape_ok(&r)) { g.s.refused[VKN_SEED_R_SUM]++; continue; }
+        const uint32_t k = g.nv++;
+        g.v[k] = r;
+        hs_put(g.vid, g.vidcap, ident_of(&r, r.depth));
+        if (r.pad3 & VKN_SEED2_EITHER) { hs_put(g.vid, g.vidcap, ident_of(&r, d32_of(r.depth))); g.s.either++; }
+        const uint64_t kp = kp_rec(&r);
+        hs_put(g.vkp, g.vkpcap, kp);
+        const uint32_t b = (uint32_t)kp & (g.vhcap - 1); g.vnext[k] = g.vhead[b]; g.vhead[b] = k;
+    }
+    g.s.records = g.nv;
+    char src[96] = ""; int k = 0;
+    for (uint32_t i = 0; i < nsrc && i < 3 && k < (int)sizeof src - 24; i++) { uint32_t ven, dev; memcpy(&ven, data + 40 + 8 * i, 4); memcpy(&dev, data + 44 + 8 * i, 4); k += snprintf(src + k, sizeof src - (size_t)k, "%s%#x/%#x", i ? ", " : "", ven, dev); }
+    vkn_logf("seed: DM_VK_NATIVE_SEED=%d (VK-SEED: %s): %s, the new path's seed %016llx, %u records (%u EITHER, %u refused while reading) from %u list(s) (%s); "
+             "each gets this device's formats / retype code when its shader exists", g.mode, g.mode == 1 ? "translated + built by the warm-up worker" : "verify - translated and counted, nothing built",
+             path, (unsigned long long)id, g.nv, g.s.either, g.s.refused[VKN_SEED_R_SUM], nsrc, src[0] ? src : "-");
+    return 1;
+}
+// Record i for shader s on this device: 1 translated (list records made), -1 refused.
+static int translate2(uint32_t i, const vkn_shader *s) {
+    vkn_warm_rec w = g.v[i];
+    const int either = (w.pad3 & VKN_SEED2_EITHER) != 0;
+    w.pad3 = 0;
+    if ((w.flags & VKN_WREC_F_FS) && !(s->stages & (1u << VKN_SRC_FS))) { refuse(NULL, VKN_SEED_R_STAGES); return -1; }
+    for (int k = 0; k < 8; k++) if (w.color[k] && !(w.color[k] = vkn_tex_rt_format(w.color[k], 0))) { refuse(NULL, VKN_SEED_R_FORMAT); return -1; }
+    uint32_t dv[2] = {0, 0}; int nd = 1;
+    if (w.depth) {
+        if (!(dv[0] = vkn_tex_rt_format(w.depth, 1))) { refuse(NULL, VKN_SEED_R_FORMAT); return -1; }
+        if (either) { const uint32_t d1 = vkn_tex_rt_format(d32_of(w.depth), 1); if (d1 && d1 != dv[0]) dv[nd++] = d1; }
+    }
+    if (w.rkind != VKN_WREC_R_FX) {   // this device's retype code for the shader + vertex format (the draw path's rule); a piece object has none
+        uint16_t vf = 0;
+        if (w.flags & VKN_WREC_F_VFMT) { vf = vkn_vfmt_put(0, w.vel, w.nvel); if (!vf) { refuse(NULL, VKN_SEED_R_VTAB); return -1; } }
+        w.retype = vkn_warm_retype_code(s, vf);
+        if (is_mat_recipe(&w)) memcpy(w.rarg, &w.retype, 8);
+    } else w.retype = 0;
+    for (int k = 0; k < nd; k++) {
+        w.depth = dv[k];
+        w.sum = vkn_warm_rec_sum(&w);
+        g.s.records_made++;
+        set_add(&g.had, &g.nhad, &g.chad, w.sum);
+        if (g.mode == 1) { if (vkn_warm_seed_add(&w)) g.s.added++; else g.s.known++; }
+    }
+    g.s.translated++;
+    return 1;
+}
+static void pass2(void) {
+    const uint64_t ep = vkn_shader_epoch();
+    if (ep == g.epoch) return;   // no new shader
+    g.epoch = ep;
+    shv v = {NULL, 0, 0};
+    vkn_shader_each(shv_add, &v);
+    for (uint32_t j = 0; j < v.n; j++) {
+        const vkn_shader *s = v.s[j]; uint64_t kp;
+        if (!s->id || kp_shader(s, &kp)) continue;
+        for (uint32_t i = g.vhead[(uint32_t)kp & (g.vhcap - 1)]; i != UINT32_MAX; i = g.vnext[i]) {
+            if (g.vst[i] || kp_rec(&g.v[i]) != kp || !keys_match(s, &g.v[i])) continue;
+            g.vst[i] = translate2(i, s) > 0 ? 1 : 2;
+        }
+    }
+    uint32_t w = 0; for (uint32_t i = 0; i < g.nv; i++) w += !g.vst[i];
+    g.s.waiting = w;
+    free(v.s);
+}
+// Mode 1 / 2: an in-frame build of this device against the seed (portable identity; this device's D24 stand-ins also as the D24 form).
+static void note2(const vkn_warm_rec *r) {
+    const int tech = r->rkind || r->fx || r->fsalt;
+    g.s.notes++; if (tech) g.s.tech_notes++;
+    int hit = hs_has(g.vid, g.vidcap, ident_of(r, r->depth));
+    if (!hit) { const uint32_t d24 = d24_of(r->depth); if (d24 && vkn_tex_rt_format(d24, 1) == r->depth) hit = hs_has(g.vid, g.vidcap, ident_of(r, d24)); }
+    if (hit) { g.s.had++; if (tech) g.s.tech_had++; return; }
+    if (hs_has(g.vkp, g.vkpcap, kp_rec(r))) {
+        g.s.differ++;
+        if (g.told_differ++ < 4)
+            vkn_logf("seed: an in-frame build (%.16s / %.16s, prim %u, %u colours, depth %u, blend %u ds %u raster %u vertex elements %u, fx %u, piece %.10s) has a seed record of the same shaders with another content",
+                     r->key[0], (r->flags & VKN_WREC_F_FS) ? r->key[1] : "-", r->prim, r->ncolor, r->depth, (r->flags & VKN_WREC_F_BLEND) != 0, (r->flags & VKN_WREC_F_DS) != 0,
+                     (r->flags & VKN_WREC_F_RASTER) != 0, r->nvel, r->fx, r->rkind ? r->piece : "-");
+    } else g.s.unknown++;
+}
+
 // ---------------------------------------------------------------- the worker's calls
 static int mode_get(void) {
     if (g.mode < 0) {
@@ -345,14 +509,16 @@ void vkn_seed_tick(const char *dir) {
     pthread_mutex_lock(&g_mu);
     if (mode_get() && (g.loaded || dir || g.img)) {
         if (!g.loaded) load(dir);
-        if (g.n) pass();
+        if (g.s.kind == 2) { if (g.nv) pass2(); }   // [VK-SEED]
+        else if (g.n) pass();
     }
     pthread_mutex_unlock(&g_mu);
 }
 void vkn_seed_note(const vkn_warm_rec *r) {
     if (!r) return;
     pthread_mutex_lock(&g_mu);
-    if (g.mode > 0 && g.s.file == 1) {
+    if (g.mode > 0 && g.s.file == 1 && g.s.kind == 2) note2(r);   // [VK-SEED]
+    else if (g.mode > 0 && g.s.file == 1) {
         g.s.notes++;
         char vs[17], fs[17]; memcpy(vs, r->key[0], 16); vs[16] = 0; memcpy(fs, r->key[1], 16); fs[16] = 0;
         if (r->rkind || r->fx || r->fsalt) { pthread_mutex_unlock(&g_mu); return; }   // (a technique pipeline: the old path had none of them)
@@ -372,6 +538,15 @@ void vkn_seed_census(void) {
     if (s.mode <= 0 || s.file != 1) return;
     char by[640]; int k = 0; by[0] = 0;
     for (int i = 0; i < VKN_SEED_R_N && k < (int)sizeof by - 96; i++) if (s.refused[i]) k += snprintf(by + k, sizeof by - (size_t)k, "%s%s %u", k ? ", " : "", vkn_seed_reason_name(i), s.refused[i]);
+    if (s.kind == 2) {   // [VK-SEED] (two lines: the 1 024-byte log line)
+        vkn_logf("seed: DM_VK_NATIVE_SEED=%d, new-path seed %016llx: %u records: translated %u (list records %u: new %u, the device's list had %u), waiting for their shader %u, "
+                 "refused: %s", s.mode, (unsigned long long)s.id, s.records, s.translated, s.records_made, s.added, s.known, s.waiting, k ? by : "none");
+        vkn_logf("seed: in-frame builds since start %llu (technique %llu): the seed had %llu (technique %llu)%s, a seed record of the same shaders differs %llu, "
+                 "shaders the seed has no record of %llu; coverage %.1f %%", (unsigned long long)s.notes, (unsigned long long)s.tech_notes, (unsigned long long)s.had,
+                 (unsigned long long)s.tech_had, s.mode == 1 ? " - built by the render thread anyway: the worker was late" : "", (unsigned long long)s.differ,
+                 (unsigned long long)s.unknown, s.notes ? 100.0 * (double)s.had / (double)s.notes : 0.0);
+        return;
+    }
     vkn_logf("seed: DM_VK_NATIVE_SEED=%d, seed %016llx: %u records: translated %u (list records %u: new %u, the device's list had %u; combinations cut at %d: %u), "
              "waiting for their shader / states %u, refused: %s; in-frame builds since start %llu: the seed had %llu, a seed record of the same shaders differs %llu, "
              "shaders the seed has no record of %llu", s.mode, (unsigned long long)s.id, s.records, s.translated, s.records_made, s.added, s.known, VKN_SEED_COMBOS,
@@ -380,6 +555,7 @@ void vkn_seed_census(void) {
 void vkn_seed_test_setup(int mode, const uint8_t *seed, size_t bytes) {
     pthread_mutex_lock(&g_mu);
     free(g.r); free(g.had); free(g.keys); free(g.img);
+    free(g.v); free(g.vst); free(g.vid); free(g.vkp); free(g.vhead); free(g.vnext);
     memset(&g, 0, sizeof g);
     g.mode = mode; g.s.mode = mode; g.s.file = -2;
     if (seed && bytes && (g.img = (uint8_t *)malloc(bytes))) { memcpy(g.img, seed, bytes); g.nimg = bytes; }

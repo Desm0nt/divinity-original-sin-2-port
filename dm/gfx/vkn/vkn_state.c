@@ -681,7 +681,9 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
             static int told; if (!__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: depth bias of D24 stand-in passes x%g (DM_VK_NATIVE_D24_BIAS)", (double)m);
         }
     }
-    static int sim_nofill = -1; if (sim_nofill < 0) sim_nofill = vkn_policy_sim_nofillmode(getenv("DM_GFX_SIM_GPU"));   // [VK-DRV] the Mali / PowerVR model
+    // [VK-DRV] the Mali / PowerVR model ([VK-SEED] read atomically: the warm-up's helper threads build pipelines concurrently)
+    static int sim_nofill_ = -1; int sim_nofill = __atomic_load_n(&sim_nofill_, __ATOMIC_RELAXED);
+    if (sim_nofill < 0) { sim_nofill = vkn_policy_sim_nofillmode(getenv("DM_GFX_SIM_GPU")); __atomic_store_n(&sim_nofill_, sim_nofill, __ATOMIC_RELAXED); }
     if (rs.polygonMode != VK_POLYGON_MODE_FILL && (!dv->feat.fillModeNonSolid || sim_nofill)) {
         static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
         rs.polygonMode = VK_POLYGON_MODE_FILL;

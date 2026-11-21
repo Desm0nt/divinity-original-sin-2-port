@@ -27,6 +27,20 @@
 // looked up: "the seed had it" (the same record, byte for byte) / "a seed record for the same shaders differs" / "shaders the seed has no
 // record of" - on a phone with the warm-up list moved away this is the proof that the translation hits. The census line "[vkn] seed:".
 // No game addresses.
+//
+// [VK-SEED] THE NEW PATH'S SEED (docs/dos2/nr/VK-SEED.md): the old seed above holds the OLD path's pipelines (T12 on the Mi 14: of 249
+// in-frame builds it had 11). dos2-vkn-seed.bin (tools/dos2_vkn_seed.py build: one or more phones' vkn-pipeline-list.bin merged; APK
+// asset -> files/, DmActivity.dos2Seeds; the shader directory wins) holds the backend's OWN list records made device-independent: the
+// header binds no device, the vertex retype code (and a "mat" recipe's code word) is 0, a depth format of a source without D24 is the
+// D24 one with the flag EITHER (pad3 bit 0); everything else is what any device records for that draw (program keys, engine argument
+// tuples, vertex elements, pass VkFormats, technique bits and recipes). It is read FIRST; the old file only when it is absent.
+// A record waits for an engine shader with its keys (as a list entry does), then gets this device's form: colour / depth formats by the
+// texture path's attachment rule (vkn_tex_rt_format: D24 stand-ins; EITHER = both D24's and D32's form), the retype code by the draw
+// path's rule for this shader + vertex format (vkn_warm_retype_code; also into a "mat" recipe), the checksum again - and enters the
+// list as a pending entry (mode 1) like a translated old record. Exactness as above: a draw takes it only for its own key and modules.
+// Mode 2 with this seed: an in-frame build is looked up by its portable identity (retype / recipe code cleared; on a device with D24
+// stand-ins also as the D24 form), so the count does not depend on when the worker got to the record. Mode 1: those counts are the
+// builds the worker did not have ready in time ("the seed had it" = late, not missing).
 #ifndef DM_VKN_SEED_H
 #define DM_VKN_SEED_H
 #include "vkn_warm.h"
@@ -37,15 +51,21 @@ extern "C" {
 enum { VKN_SEED_COMBOS = 4 };
 // Refusal reasons of a seed record (vkn_seed_reason_name).
 enum { VKN_SEED_R_PARSE, VKN_SEED_R_KEYS, VKN_SEED_R_FUSED, VKN_SEED_R_CONV, VKN_SEED_R_SHAPE, VKN_SEED_R_FORMAT, VKN_SEED_R_PRIM, VKN_SEED_R_STAGES,
-       VKN_SEED_R_BLEND, VKN_SEED_R_DS, VKN_SEED_R_RASTER, VKN_SEED_R_VFMT, VKN_SEED_R_N };
+       VKN_SEED_R_BLEND, VKN_SEED_R_DS, VKN_SEED_R_RASTER, VKN_SEED_R_VFMT, VKN_SEED_R_SUM, VKN_SEED_R_VTAB, VKN_SEED_R_N };
+// [VK-SEED] the new path's seed file (tools/dos2_vkn_seed.py): header 64 bytes, then nrec vkn_warm_rec records
+#define VKN_SEED2_FILE "dos2-vkn-seed.bin"
+enum { VKN_SEED2_VERSION = 1, VKN_SEED2_HDR = 64, VKN_SEED2_EITHER = 1 };
 const char *vkn_seed_reason_name(int r);
 
 typedef struct vkn_seed_stats {
     int mode, file;                      // in effect; file: 1 read, 0 none found, -1 damaged / other version, -2 not looked for yet
+    int kind;                            // [VK-SEED] the file read: 2 the new path's dos2-vkn-seed.bin, 1 the old path's dos2-pipe-seed.bin, 0 none
     uint64_t id; uint32_t records;       // the seed's id and record count
     uint32_t waiting, translated, records_made, added, known, combos_cut;   // records waiting for their shader / states; translated; list records made, new, known
     uint32_t refused[VKN_SEED_R_N];
     uint64_t notes, had, differ, unknown;   // render-thread builds seen: the seed had it / same shaders, other content / no seed record of its shaders
+    uint64_t tech_notes, tech_had;          // [VK-SEED] of them technique pipelines (fx bits, named stage, piece recipe; the new seed only)
+    uint32_t either;                        // [VK-SEED] EITHER records (two depth forms on a device with D24)
 } vkn_seed_stats;
 void vkn_seed_stats_get(vkn_seed_stats *s);
 // The warm-up worker (vkn_warm.c; weak there): dir = the cache directory (the shader directory's parent) or NULL while unknown.

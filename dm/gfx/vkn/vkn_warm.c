@@ -6,6 +6,7 @@
 #include "vkn_warm.h"
 #include "vkn_shader.h"
 #include "vkn_fx.h"   // [stage 5 rest] VKN_FX_SHADER_ID0 / VKN_FX_SHADERS (the pieces' shader ids)
+#include "vkn_draw.h" // [VK-SEED] vkn_draw_stats (the load phase: draws a frame)
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@ extern int vkn_shlib_cache_dir(char *out, size_t bytes) __attribute__((weak));
 extern void vkn_seed_tick(const char *dir) __attribute__((weak));
 extern void vkn_seed_note(const vkn_warm_rec *r) __attribute__((weak));
 extern void vkn_seed_census(void) __attribute__((weak));
+// [VK-SEED] the draw path's counters (weak: host tests without vkn_draw.c)
+extern void vkn_draw_stats_get(vkn_draw_stats *s) __attribute__((weak));
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 enum { VEL_MAX = 16, NOTE_Q = 256, WBUCKETS = 1024, DEDUP = 8192, DIR_BYTES = 512, DIR_WAIT_MS = 60000, TICK_MS = 100, REDS = 16 };
@@ -497,32 +500,148 @@ static int replay_one(uint32_t i, const vkn_shader *s, uint32_t gen) {
     return 1;
 }
 static uint64_t g_epoch_seen = ~0ull; static uint32_t g_gen_seen = ~0u, g_nlist_seen;
+// ---- [VK-SEED] the warm-up at load: while the game loads (fewer than LOAD_DRAWS draws a frame, or no frame for a window - the level
+// load's shader creation, the menus) the worker runs at normal priority and DM_VK_NATIVE_WARM_JOBS helper threads build the pending
+// entries with it, so the seed's / the list's pipelines of the shaders the load creates are ready before the first frame of the level
+// draws them. Outside a load: the worker alone at nice 10, as before. DM_VK_NATIVE_WARM_LOAD: 0 off, 1 at load (default), 2 always.
+enum { LOAD_DRAWS = 64, LOAD_WINDOW_MS = 250, JOBS_MAX = 7 };
+typedef struct { uint32_t i; const vkn_shader *s; } wjob;
+static pthread_mutex_t g_jmu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_jgo = PTHREAD_COND_INITIALIZER, g_jdone = PTHREAD_COND_INITIALIZER;
+// the batch: under g_jmu (next: atomic); a helper joins only an open batch, the worker closes it after the last joined helper is done
+static struct { const wjob *j; uint32_t n, gen; uint64_t batch; int active, helpers, open; uint32_t next; } g_jb;
+static int g_retry;   // a job asked for another round (atomic)
+static int g_load_mode = -1, g_jobs = -1, g_boost;   // worker only (g_boost also read by the census, relaxed)
+static void job_done(uint32_t i, const vkn_shader *s, int rc) {
+    pthread_mutex_lock(&g_mu);
+    if (rc > 0 && g_list_state[i] == 0) { g_list_state[i] = 1; g_list_shader[i] = s->id; g_st.replayed++; }
+    else if (rc < 0) { g_list_state[i] = 2; g_st.skipped++; }
+    pthread_mutex_unlock(&g_mu);
+    if (rc == 0) __atomic_store_n(&g_retry, 1, __ATOMIC_RELAXED);   // retry in the next round
+}
+static void jobs_take(const wjob *j, uint32_t n, uint32_t gen, uint32_t *next, int main_thread) {
+    for (;;) {
+        const uint32_t k = __atomic_fetch_add(next, 1, __ATOMIC_RELAXED);
+        if (k >= n) return;
+        const int rc = replay_one(j[k].i, j[k].s, gen);
+        if (!main_thread) { pthread_mutex_lock(&g_mu); g_st.load_helper_builds += rc > 0; pthread_mutex_unlock(&g_mu); }
+        job_done(j[k].i, j[k].s, rc);
+        if (main_thread) { pthread_mutex_lock(&g_mu); const uint32_t nq = g_nq; pthread_mutex_unlock(&g_mu); if (nq) notes_drain(); }
+    }
+}
+static void *helper_main(void *unused) {
+    (void)unused;
+    setpriority(PRIO_PROCESS, 0, 0);   // (this thread: a helper exists only for the loads)
+    uint64_t seen = 0;
+    pthread_mutex_lock(&g_jmu);
+    for (;;) {
+        while (g_jb.batch == seen) pthread_cond_wait(&g_jgo, &g_jmu);
+        seen = g_jb.batch;
+        if (!g_jb.open) continue;   // (woke after the worker closed it)
+        const wjob *j = g_jb.j; const uint32_t n = g_jb.n, gen = g_jb.gen;
+        g_jb.active++;
+        pthread_mutex_unlock(&g_jmu);
+        jobs_take(j, n, gen, &g_jb.next, 0);
+        pthread_mutex_lock(&g_jmu);
+        if (!--g_jb.active) pthread_cond_broadcast(&g_jdone);
+    }
+    return NULL;
+}
+static void jobs_run(const wjob *j, uint32_t n, uint32_t gen) {   // worker: the helpers + itself; returns when every job is done
+    pthread_mutex_lock(&g_jmu);
+    while (g_jb.helpers < g_jobs) {   // made at the first load that has work
+        pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8u << 20); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        const int rc = pthread_create(&t, &a, helper_main, NULL); pthread_attr_destroy(&a);
+        if (rc) { g_jobs = g_jb.helpers; vkn_logf(RED "warm: helper thread %d not created: %d helpers", g_jb.helpers + 1, g_jb.helpers); break; }
+        g_jb.helpers++;
+    }
+    g_jb.j = j; g_jb.n = n; g_jb.gen = gen; __atomic_store_n(&g_jb.next, 0, __ATOMIC_RELAXED); g_jb.batch++; g_jb.active++; g_jb.open = 1;
+    pthread_cond_broadcast(&g_jgo);
+    pthread_mutex_unlock(&g_jmu);
+    jobs_take(j, n, gen, &g_jb.next, 1);
+    pthread_mutex_lock(&g_jmu);
+    if (!--g_jb.active) pthread_cond_broadcast(&g_jdone);
+    while (g_jb.active) pthread_cond_wait(&g_jdone, &g_jmu);
+    g_jb.open = 0; g_jb.j = NULL;
+    pthread_mutex_unlock(&g_jmu);
+}
+// 1 = the game is loading now (a window of LOAD_WINDOW_MS: no frame, or fewer than LOAD_DRAWS draws a frame); worker only.
+static int load_now(void) {
+    static uint64_t t0, f0, d0; static int state = 1;
+    const uint64_t t = vkn_now_ns();
+    if (t0 && t - t0 < (uint64_t)LOAD_WINDOW_MS * 1000000ull) return state;
+    const uint64_t f = vkn_frame(); uint64_t d = 0;
+    if (vkn_draw_stats_get) { vkn_draw_stats ds; memset(&ds, 0, sizeof ds); vkn_draw_stats_get(&ds); d = ds.draws; }
+    if (t0) state = f == f0 ? 1 : vkn_draw_stats_get ? (double)(d - d0) / (double)(f - f0) < (double)LOAD_DRAWS : 0;
+    t0 = t; f0 = f; d0 = d;
+    return state;
+}
+static void boost_set(int on) {   // worker only
+    if (on == g_boost) return;
+    g_boost = on;
+    if (setpriority(PRIO_PROCESS, 0, on ? 0 : 10) && on) { static int told; if (!told++) vkn_logf("warm: the worker's priority could not be raised for a load (nice 10 kept)"); }
+    pthread_mutex_lock(&g_mu); g_st.loads += on; pthread_mutex_unlock(&g_mu);
+}
+// The key pair of a shader / a list record as one hash (keys_eq's rule), for the round's index.
+static uint64_t kp_of_shader(const vkn_shader *s) {
+    char b[32]; memset(b, 0, sizeof b);
+    if (strlen(s->key[VKN_SRC_VS]) != 16) return 0;
+    memcpy(b, s->key[VKN_SRC_VS], 16);
+    if (s->key[VKN_SRC_FS][0]) { if (strlen(s->key[VKN_SRC_FS]) != 16) return 0; memcpy(b + 16, s->key[VKN_SRC_FS], 16); }
+    const uint64_t h = vkn_fnv(b, 32); return h ? h : 1;
+}
+static uint64_t kp_of_rec(const wrec *r) { char b[32]; memset(b, 0, sizeof b); memcpy(b, r->key[0], 16); if (r->flags & F_FS) memcpy(b + 16, r->key[1], 16); const uint64_t h = vkn_fnv(b, 32); return h ? h : 1; }
 static void replay(void) {
     const uint64_t ep = vkn_shader_epoch(); const uint32_t gen = vkn_pipe_forget_gen();
+    if (g_load_mode < 0) {
+        const char *e = getenv("DM_VK_NATIVE_WARM_LOAD"); g_load_mode = e && *e ? atoi(e) : 1; if (g_load_mode < 0 || g_load_mode > 2) g_load_mode = 1;
+        e = getenv("DM_VK_NATIVE_WARM_JOBS"); g_jobs = e && *e ? atoi(e) : 3; if (g_jobs < 0) g_jobs = 0; if (g_jobs > JOBS_MAX) g_jobs = JOBS_MAX;
+        if (!g_load_mode) g_jobs = 0;
+        vkn_logf("warm: DM_VK_NATIVE_WARM_LOAD=%d (%s), DM_VK_NATIVE_WARM_JOBS=%d helper threads at a load", g_load_mode,
+                 g_load_mode == 2 ? "always the load mode" : g_load_mode ? "a load: the worker at normal priority + helpers" : "off: the worker alone at nice 10", g_jobs);
+    }
+    const int load = g_load_mode == 2 || (g_load_mode == 1 && load_now());
     pthread_mutex_lock(&g_mu);
     uint32_t pending = 0;
     for (uint32_t i = 0; i < g_nlist; i++) pending += g_list_state[i] == 0;
     g_st.pending = pending; const uint32_t nl = g_nlist;
     pthread_mutex_unlock(&g_mu);
-    if (!pending || (ep == g_epoch_seen && gen == g_gen_seen && nl == g_nlist_seen)) return;   // nothing new to match
+    if (!pending) { boost_set(0); return; }
+    if (ep == g_epoch_seen && gen == g_gen_seen && nl == g_nlist_seen) { if (!load) boost_set(0); return; }   // nothing new to match
     g_epoch_seen = ep; g_gen_seen = gen; g_nlist_seen = nl;
     shv v = {NULL, 0, 0};
     vkn_shader_each(shv_add, &v);
-    for (uint32_t i = 0; i < nl; i++) {
+    // [VK-SEED] the round's index: key pair -> the first live shader of the table order (keys_eq + id, as the scan before it)
+    uint32_t cap = 16; while (cap < v.n * 2 + 16) cap <<= 1;
+    uint64_t *hk = (uint64_t *)calloc(cap, 8); const vkn_shader **hv = (const vkn_shader **)calloc(cap, sizeof *hv);
+    if (hk && hv) for (uint32_t j = 0; j < v.n; j++) {
+        const uint64_t h = v.s[j]->id ? kp_of_shader(v.s[j]) : 0; if (!h) continue;
+        uint32_t b = (uint32_t)h & (cap - 1); while (hk[b] && hk[b] != h) b = (b + 1) & (cap - 1);
+        if (!hk[b]) { hk[b] = h; hv[b] = v.s[j]; }
+    }
+    wjob *jobs = (wjob *)malloc((nl ? nl : 1) * sizeof *jobs); uint32_t nj = 0;
+    for (uint32_t i = 0; i < nl && jobs; i++) {
         pthread_mutex_lock(&g_mu); const int pend = g_list_state[i] == 0; pthread_mutex_unlock(&g_mu);
         if (!pend) continue;
         const vkn_shader *s = NULL;
-        for (uint32_t j = 0; j < v.n && !s; j++) if (keys_eq(v.s[j], &g_list[i]) && v.s[j]->id) s = v.s[j];
+        if (hk && hv) {
+            const uint64_t h = kp_of_rec(&g_list[i]); uint32_t b = (uint32_t)h & (cap - 1);
+            while (hk[b] && hk[b] != h) b = (b + 1) & (cap - 1);
+            if (hk[b] && keys_eq(hv[b], &g_list[i])) s = hv[b];
+        } else for (uint32_t j = 0; j < v.n && !s; j++) if (keys_eq(v.s[j], &g_list[i]) && v.s[j]->id) s = v.s[j];
         if (!s) continue;   // the engine has not created this shader (yet): another round
-        const int rc = replay_one(i, s, gen);
-        pthread_mutex_lock(&g_mu);
-        if (rc > 0 && g_list_state[i] == 0) { g_list_state[i] = 1; g_list_shader[i] = s->id; g_st.replayed++; }
-        else if (rc < 0) { g_list_state[i] = 2; g_st.skipped++; }
-        pthread_mutex_unlock(&g_mu);
-        if (rc == 0) g_gen_seen = ~0u;   // retry in the next round
-        pthread_mutex_lock(&g_mu); const uint32_t nq = g_nq; pthread_mutex_unlock(&g_mu);
-        if (nq) notes_drain();   // the render thread's notes first: they mark contents it already has
+        jobs[nj].i = i; jobs[nj].s = s; nj++;
     }
+    free(hk); free(hv);
+    boost_set(load && nj > 0);
+    __atomic_store_n(&g_retry, 0, __ATOMIC_RELAXED);
+    if (g_boost && g_jobs > 0 && nj > 1) {
+        const uint64_t t0 = vkn_now_ns();
+        jobs_run(jobs, nj, gen);
+        pthread_mutex_lock(&g_mu); g_st.load_jobs += nj; g_st.load_ns += vkn_now_ns() - t0; pthread_mutex_unlock(&g_mu);
+    } else { uint32_t next = 0; jobs_take(jobs, nj, gen, &next, 1); }
+    if (__atomic_load_n(&g_retry, __ATOMIC_RELAXED)) g_gen_seen = ~0u;
+    free(jobs);
     free(v.s);
 }
 
@@ -586,6 +705,9 @@ void vkn_warm_census(void) {
     vkn_logf("warm: technique pipelines (stage 5 rest): %u in the list, %u built by the worker; not listable %u = no shader object %u, a piece's shader without "
              "a recipe %u (post), a piece's vertex module without a recipe %u (PRESKIN), content %u; version-1 records read %u; seed records %u in the list, %u built",
              w.tech_listed, w.tech_replayed, w.not_listable, w.nl_noshader, w.nl_fx, w.nl_vin, w.nl_content, w.upgraded, w.seed_added, w.seed_replayed);
+    if (w.loads || w.load_jobs)
+        vkn_logf("warm: loads (VK-SEED, DM_VK_NATIVE_WARM_LOAD=%d, %d helpers): %u load phases with work, %u entries built in them (%u by the helpers) in %.1f ms; now %s",
+                 g_load_mode, g_jobs, w.loads, w.load_jobs, w.load_helper_builds, w.load_ns / 1e6, __atomic_load_n(&g_boost, __ATOMIC_RELAXED) ? "loading" : "not loading");
     if (vkn_seed_census) vkn_seed_census();
     if ((w.dropped_full || w.queue_lost || w.save_fail) && g_reds++ < REDS)
         vkn_logf(RED "warm: list full %u, notes lost %u, cache saves failed %llu", w.dropped_full, w.queue_lost, (unsigned long long)w.save_fail);

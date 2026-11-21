@@ -164,6 +164,10 @@ void vkn_tex_depth_stats(uint64_t *standins, uint64_t *converted, int *on);
 // layout of the Vulkan image's depth aspect: D16 2 bytes, D24 4 bytes depth in bits 0..23, D32F 4 bytes float; d24f = 1: an NVN D24
 // format into a D32F stand-in (depth / 16777215). Returns the destination bytes per texel, 0 = not a depth format with a depth plane.
 uint32_t vkn_tex_depth_plane(uint32_t nvn, int d24f, const uint8_t *src, uint64_t n, uint8_t *dst);
+// [VK-SEED] the VkFormat this device makes a render target of recorded VkFormat f as (depth = 1: a depth / stencil attachment, else a
+// colour one): the D24 stand-in rule of the texture path above (DM_VK_NATIVE_D24, DM_GFX_SIM_GPU=xclipse / nod24), 0 = this device
+// cannot render to it. Any thread (format properties of the device; vkn_seed.c translates the portable seed's passes with it).
+uint32_t vkn_tex_rt_format(uint32_t f, int depth);
 
 
 // ==== added by the UI piece (stage 3, vkn_tex.c): texture updates after creation, view swizzles ====

@@ -14,6 +14,19 @@
 //          a record of a shader the run never makes waits; a fused post stage is refused;
 //   run 5  DM_VK_NATIVE_SEED=1, same device and seed: the record enters the list (not the file) and the worker builds it; the draw's
 //          take gets it.
+//   [VK-SEED] THE NEW PATH'S SEED (dos2-vkn-seed.bin, tools/dos2_vkn_seed.py; round trip device list -> seed -> another device):
+//   run 7  the source device (D24, vertex retype ON with a uint input on an unorm attribute: a non-zero retype code) builds a plain
+//          pipeline, its no-fragment-stage variant and one with a "mat" vertex module (recipe code word = the retype code): its list;
+//          the parent runs the tool on that list (WSL python3; skipped without it);
+//   run 8  DM_VK_NATIVE_SEED=2 on DM_GFX_SIM_GPU=xclipse (no D24: D32S8 stand-ins; no 3-component vertex formats) with the retype OFF:
+//          the 3 records are translated (D32S8, retype 0, the mat recipe's code 0), and the render thread's builds of the same three
+//          draws in this device's form are "the seed had it" (2 of them technique pipelines); another raster state = "same shaders";
+//   run 9  DM_VK_NATIVE_SEED=1, same device, DM_VK_NATIVE_WARM_LOAD=2 (the warm-up at load, 3 helpers): the worker + helpers build the
+//          3 seed entries (the mat maker asked with code 0), every draw's take gets its pipeline, the device's list file stays empty;
+//   run 7b / 11  the source is the xclipse model (D32S8 stand-ins; tool option ":nod24"): EITHER records; on a D24 device each is
+//          made in both forms, and a D24S8 draw and a genuine D32S8 draw both find their record;
+//   run 10 the APK's new seed (dm/android/dos2/dos2-vkn-seed.bin, from the Mi 14's list): every record read, none refused.
+//   Run 2 also checks the load phase: frames do not advance here = a load: its 4 entries are built as one batch with the helpers.
 // Build + run (WSL gcc, <vk> as in vkn_stage2_test.c):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_warm_test
 //       dm/gfx/vulkan/engine/tests/vkn_warm_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
@@ -38,6 +51,7 @@
 #include "../../../vkn/vkn_warm.h"
 #include "../../../vkn/vkn_seed.h"
 #include "../../../vkn/vkn_fx.h"
+#include "../../../vkn/vkn_tex.h"
 #include "../../../nr/nr_seed.h"
 
 static int g_checks, g_fails;
@@ -55,8 +69,16 @@ static vkn_shader g_fx;                // a piece's shader object (fake: id in t
 static const VkShaderModule M_VIN = (VkShaderModule)(uintptr_t)0x7c00010ull, M_FXV = (VkShaderModule)(uintptr_t)0x7c00020ull, M_FXF = (VkShaderModule)(uintptr_t)0x7c00030ull;
 static uint16_t g_blend, g_blend2, g_ds, g_raster, g_raster2, g_vfmt;
 static int g_maker_calls;
+static int g_uint_in;                  // [VK-SEED] the vertex input at location 4 is uint (with an unorm attribute: a retype code where retype is on)
+static int g_mat_calls; static uint64_t g_mat_code = ~0ull;
+static const VkShaderModule M_MAT = (VkShaderModule)(uintptr_t)0x7c00040ull;
+static int tst_mat(const struct vkn_shader *eng, const void *arg, uint32_t n, const struct vkn_shader **fx, VkShaderModule *vs, uint16_t *vs_id) {
+    (void)fx; __atomic_fetch_add(&g_mat_calls, 1, __ATOMIC_RELAXED);
+    if (eng != S || n != 24) return -1;
+    memcpy(&g_mat_code, arg, 8); *vs = M_MAT; *vs_id = 79; return 0;
+}
 static int tst_make(const struct vkn_shader *eng, const void *arg, uint32_t n, const struct vkn_shader **fx, VkShaderModule *vs, uint16_t *vs_id) {
-    g_maker_calls++;
+    __atomic_fetch_add(&g_maker_calls, 1, __ATOMIC_RELAXED);   // (the warm-up's helpers call makers concurrently)
     if (eng != S || n != 2) return -1;
     const uint8_t *a = (const uint8_t *)arg;
     if (a[0] == 'v' && a[1] == 1) { *vs = M_VIN; *vs_id = 77; return 0; }
@@ -69,6 +91,7 @@ static void fixture(void) {
     xbg_vkn_stage *vs = mk_bundle_add("a000000000000001", 0);
     mk_bind(vs, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, XBG_SOURCE_UNIFORM, 1, 64);
     vs->input_count = 2; vs->inputs[0] = 0; vs->inputs[1] = 4;   // position, the RGB8 colour (usage 2 -> location 4)
+    if (g_uint_in) vs->input_classes[1] = 2;   // [VK-SEED] read as uint
     xbg_vkn_stage *fs = mk_bundle_add("b000000000000001", 4);
     mk_bind(fs, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, XBG_SOURCE_TEXTURE, 0, 0);
     vkn_stage_src src[VKN_SRCS]; memset(src, 0, sizeof src);
@@ -88,6 +111,7 @@ static void fixture(void) {
     g_fx.module[VKN_SRC_VS] = M_FXV; g_fx.module[VKN_SRC_FS] = M_FXF; snprintf(g_fx.key[0], 17, "test-fx"); snprintf(g_fx.key[1], 17, "test-fx");
     g_fx.ninputs = S->ninputs; memcpy(g_fx.inputs, S->inputs, sizeof g_fx.inputs);
     CHECK_EQ(vkn_warm_maker("tst", tst_make), 0);
+    CHECK_EQ(vkn_warm_maker("mat", tst_mat), 0);
 }
 static vkn_pipe_desc desc(uint32_t depth_fmt, uint16_t raster) {
     vkn_pipe_desc d; memset(&d, 0, sizeof d);
@@ -146,6 +170,7 @@ static void run2(void) {
     wait_for(c_built4, 3000);
     vkn_warm_stats w; vkn_warm_stats_get(&w);
     CHECK_EQ(w.loaded, 4); CHECK_EQ(w.built, 4); CHECK_EQ(w.tech_replayed, 3); CHECK_EQ(g_maker_calls, 2);
+    CHECK_EQ(w.load_jobs, 4); CHECK(w.loads >= 1);   // [VK-SEED] no frames here = a load: one batch with the helpers
     for (int k = 0; k < 4; k++) { vkn_pipe_key key; vkn_pipe_src src; build_case(k, &key, &src); VkPipeline p = VK_NULL_HANDLE; CHECK_EQ(vkn_warm_take(&key, &src, &p), 1); CHECK(p != VK_NULL_HANDLE); }
     // the no-fragment variant was built without a fragment stage, the vin one with the piece's module
     { vkn_pipe_key key; vkn_pipe_src src; build_case(1, &key, &src); src.fs = VK_NULL_HANDLE; VkPipeline p; CHECK_EQ(vkn_warm_take(&key, &src, &p), 0); }   // (taken already)
@@ -278,6 +303,125 @@ static void run6(void) {   // the APK's real seed (dm/android/dos2/dos2-pipe-see
     CHECK_EQ(s.refused[VKN_SEED_R_FUSED], 2); CHECK_EQ(s.refused[VKN_SEED_R_CONV], 0); CHECK_EQ(s.refused[VKN_SEED_R_BLEND], 0);
     printf("run 6: the real seed: %u records, refused fused %u, waiting for their shaders (none made here) %u\n", s.records, s.refused[VKN_SEED_R_FUSED], s.waiting);
 }
+
+// ---- [VK-SEED] the new path's seed: device list -> tools/dos2_vkn_seed.py -> another device ----
+static uint8_t *g_seed2; static size_t g_nseed2;
+static uint64_t g_src_code;   // the source device's retype code of the fixture draw
+// the three draws of the round trip in the form of the device this process models: 0 plain, 1 no fragment stage, 2 the mat module
+static void build2(int k, uint32_t depth, uint16_t raster, uint64_t code, vkn_pipe_key *key, vkn_pipe_src *src) {
+    vkn_pipe_desc d = desc(depth, raster);
+    if (k == 1) d.fx = VKN_PIPE_FX_NO_FS;
+    *src = src_of(&d);
+    src->retype = code; src->vs = vkn_shader_module(S, VKN_STAGE_VS, 0, 0.0f, code);
+    if (k == 2) { src->vs = M_MAT; src->vs_id = 79; }
+    *key = vkn_pipe_key_pack(&d);
+    key->w[2] |= (uint64_t)src->vs_id << 48;
+}
+static int c_noted3(void) { vkn_warm_stats w; vkn_warm_stats_get(&w); return w.appended >= 3; }
+static int g_src_nod24;   // run 7 as a source without D24 (the xclipse model: its passes have D32S8 stand-ins)
+static void run7(void) {   // the source device
+    setenv("DM_GFX_VTX_RETYPE", "1", 1); g_uint_in = 1;
+    if (g_src_nod24) setenv("DM_GFX_SIM_GPU", "xclipse", 1);
+    fixture();
+    g_src_code = vkn_warm_retype_code(S, g_vfmt);
+    CHECK(g_src_code != 0);
+    const uint64_t a[3] = {g_src_code, 5, 6};
+    vkn_warm_recipe_vs(79, "mat", S, a, sizeof a);
+    start("0");
+    const uint32_t depth = g_src_nod24 ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D24_UNORM_S8_UINT;
+    for (int k = 0; k < 3; k++) { vkn_pipe_key key; vkn_pipe_src src; build2(k, depth, g_raster, g_src_code, &key, &src); CHECK(vkn_pipe_get(&key, &src) != VK_NULL_HANDLE); }
+    wait_for(c_noted3, 3000);
+    usleep(300000);
+    vkn_warm_stats w; vkn_warm_stats_get(&w); CHECK_EQ(w.appended, 3); CHECK_EQ(w.not_listable, 0);
+    CHECK_EQ(file_size("vkn-pipeline-list.bin"), 48 + 3 * sizeof(vkn_warm_rec));
+    // the list holds the source's retype code (the tool clears it)
+    char p[256]; snprintf(p, sizeof p, "%s/vkn-pipeline-list.bin", g_dir); FILE *f = fopen(p, "rb"); vkn_warm_rec r; memset(&r, 0, sizeof r);
+    if (f) { fseek(f, 48, SEEK_SET); CHECK_EQ(fread(&r, 1, sizeof r, f), sizeof r); fclose(f); }
+    CHECK_EQ(r.retype, g_src_code);
+}
+static int tool_seed(const char *opt) {   // the parent: the tool turns run 7's list into a seed (0 = made); opt: the list's ":nod24" / ""
+    char c[900];
+    snprintf(c, sizeof c, "python3 tools/dos2_vkn_seed.py build --list %s/vkn-pipeline-list.bin%s --out %s.vseed > %s.tool.txt 2>&1", g_dir, opt, g_dir, g_dir);
+    if (system(c)) { printf("[VK-SEED] the tool did not run (python3?): runs 8-9 skipped\n"); snprintf(c, sizeof c, "cat %s.tool.txt", g_dir); if (system(c)) {} return -1; }
+    char path[256]; snprintf(path, sizeof path, "%s.vseed", g_dir);
+    FILE *f = fopen(path, "rb"); CHECK(f != NULL); if (!f) return -1;
+    fseek(f, 0, SEEK_END); g_nseed2 = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
+    g_seed2 = (uint8_t *)malloc(g_nseed2); CHECK_EQ(fread(g_seed2, 1, g_nseed2, f), g_nseed2); fclose(f); remove(path);
+    CHECK_EQ(g_nseed2, VKN_SEED2_HDR + 3 * sizeof(vkn_warm_rec));
+    snprintf(path, sizeof path, "%s.tool.txt", g_dir); remove(path);
+    return 0;
+}
+static int c_translated3(void) { vkn_seed_stats s; vkn_seed_stats_get(&s); return s.translated >= 3; }
+static void dest_device(void) { setenv("DM_GFX_SIM_GPU", "xclipse", 1); setenv("DM_GFX_VTX_RETYPE", "0", 1); g_uint_in = 1; }
+static void run8(void) {   // verify on the other device model
+    dest_device();
+    fixture();
+    CHECK_EQ(vkn_warm_retype_code(S, g_vfmt), 0);
+    CHECK_EQ(vkn_tex_rt_format(VK_FORMAT_D24_UNORM_S8_UINT, 1), VK_FORMAT_D32_SFLOAT_S8_UINT);   // the xclipse model: D24 stands in as D32S8
+    CHECK_EQ(vkn_tex_rt_format(VK_FORMAT_R8G8B8A8_UNORM, 0), VK_FORMAT_R8G8B8A8_UNORM);
+    const uint64_t a[3] = {0, 5, 6};
+    vkn_warm_recipe_vs(79, "mat", S, a, sizeof a);
+    vkn_seed_test_setup(2, g_seed2, g_nseed2);
+    start("2");
+    wait_for(c_translated3, 3000);
+    vkn_seed_stats s; vkn_seed_stats_get(&s);
+    CHECK_EQ(s.file, 1); CHECK_EQ(s.kind, 2); CHECK_EQ(s.records, 3); CHECK_EQ(s.translated, 3); CHECK_EQ(s.records_made, 3); CHECK_EQ(s.added, 0); CHECK_EQ(s.waiting, 0);
+    for (int i = 0; i < VKN_SEED_R_N; i++) CHECK_EQ(s.refused[i], 0);
+    for (int k = 0; k < 3; k++) { vkn_pipe_key key; vkn_pipe_src src; build2(k, VK_FORMAT_D32_SFLOAT_S8_UINT, g_raster, 0, &key, &src); CHECK(vkn_pipe_get(&key, &src) != VK_NULL_HANDLE); }
+    { vkn_pipe_key key; vkn_pipe_src src; build2(0, VK_FORMAT_D32_SFLOAT_S8_UINT, g_raster2, 0, &key, &src); CHECK(vkn_pipe_get(&key, &src) != VK_NULL_HANDLE); }
+    usleep(400000);
+    vkn_seed_stats_get(&s);
+    CHECK_EQ(s.notes, 4); CHECK_EQ(s.had, 3); CHECK_EQ(s.tech_notes, 2); CHECK_EQ(s.tech_had, 2); CHECK_EQ(s.differ, 1); CHECK_EQ(s.unknown, 0);
+    vkn_warm_stats w; vkn_warm_stats_get(&w); CHECK_EQ(w.seed_added, 0);
+    vkn_warm_census();
+}
+static int c_seed_built3(void) { vkn_warm_stats w; vkn_warm_stats_get(&w); return w.seed_replayed >= 3; }
+static void run9(void) {   // pre-build at a load on the other device model
+    dest_device();
+    setenv("DM_VK_NATIVE_WARM_LOAD", "2", 1); setenv("DM_VK_NATIVE_WARM_JOBS", "3", 1);
+    fixture();
+    vkn_seed_test_setup(1, g_seed2, g_nseed2);
+    start("1");
+    wait_for(c_seed_built3, 3000);
+    vkn_warm_stats w; vkn_warm_stats_get(&w);
+    CHECK_EQ(w.seed_added, 3); CHECK_EQ(w.seed_replayed, 3); CHECK_EQ(w.failed, 0); CHECK_EQ(w.load_jobs, 3); CHECK(w.loads >= 1);
+    CHECK_EQ(g_mat_calls, 1); CHECK_EQ(g_mat_code, 0);   // the recipe's code word is this device's (retype off)
+    for (int k = 0; k < 3; k++) { vkn_pipe_key key; vkn_pipe_src src; build2(k, VK_FORMAT_D32_SFLOAT_S8_UINT, g_raster, 0, &key, &src); VkPipeline p = VK_NULL_HANDLE; CHECK_EQ(vkn_warm_take(&key, &src, &p), 1); CHECK(p != VK_NULL_HANDLE); }
+    usleep(300000);
+    CHECK_EQ(file_size("vkn-pipeline-list.bin"), 48);   // seed records never enter the device's own list file
+    vkn_warm_census();
+}
+static void run11(void) {   // EITHER: a seed from a source without D24, read on a device with D24 (verify)
+    setenv("DM_GFX_VTX_RETYPE", "0", 1); g_uint_in = 1;
+    fixture();
+    const uint64_t a[3] = {0, 5, 6};
+    vkn_warm_recipe_vs(79, "mat", S, a, sizeof a);
+    vkn_seed_test_setup(2, g_seed2, g_nseed2);
+    start("2");
+    wait_for(c_translated3, 3000);
+    vkn_seed_stats s; vkn_seed_stats_get(&s);
+    CHECK_EQ(s.kind, 2); CHECK_EQ(s.records, 3); CHECK_EQ(s.either, 3); CHECK_EQ(s.translated, 3); CHECK_EQ(s.records_made, 6);   // D24S8 and D32S8 each
+    // the draws as this device makes them: the engine's D24S8 (the source drew it as its stand-in) and a genuine D32S8 one
+    { vkn_pipe_key key; vkn_pipe_src src; build2(0, VK_FORMAT_D24_UNORM_S8_UINT, g_raster, 0, &key, &src); CHECK(vkn_pipe_get(&key, &src) != VK_NULL_HANDLE); }
+    { vkn_pipe_key key; vkn_pipe_src src; build2(2, VK_FORMAT_D32_SFLOAT_S8_UINT, g_raster, 0, &key, &src); CHECK(vkn_pipe_get(&key, &src) != VK_NULL_HANDLE); }
+    usleep(400000);
+    vkn_seed_stats_get(&s);
+    CHECK_EQ(s.notes, 2); CHECK_EQ(s.had, 2); CHECK_EQ(s.differ, 0);
+}
+static void run10(void) {   // the APK's new seed
+    FILE *f = fopen("dm/android/dos2/" VKN_SEED2_FILE, "rb");
+    if (!f) { printf("run 10: no dm/android/dos2/" VKN_SEED2_FILE " (run from the repository root): skipped\n"); return; }
+    fseek(f, 0, SEEK_END); const size_t n = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = (uint8_t *)malloc(n); CHECK_EQ(fread(b, 1, n, f), n); fclose(f);
+    fixture();
+    vkn_seed_test_setup(2, b, n); free(b);
+    start("2");
+    wait_for(c_loaded, 3000);
+    vkn_seed_stats s; vkn_seed_stats_get(&s);
+    CHECK_EQ(s.file, 1); CHECK_EQ(s.kind, 2); CHECK_EQ(s.records, (n - VKN_SEED2_HDR) / sizeof(vkn_warm_rec));
+    for (int i = 0; i < VKN_SEED_R_N; i++) CHECK_EQ(s.refused[i], 0);
+    printf("run 10: the APK's new seed: %u records (%u EITHER), none refused\n", s.records, s.either);
+}
 static int fork_run(void (*fn)(void), const char *name) {
     fflush(stdout);
     const pid_t pid = fork();
@@ -302,6 +446,20 @@ int main(void) {
     bad += fork_run(run5, "run 5 (seed pre-build)");
     clean_dir();
     bad += fork_run(run6, "run 6 (the APK's seed)");
+    clean_dir();
+    bad += fork_run(run7, "run 7 (new seed: the source device's list)");
+    if (!tool_seed("")) {
+        clean_dir();
+        bad += fork_run(run8, "run 8 (new seed verify, xclipse model)");
+        clean_dir();
+        bad += fork_run(run9, "run 9 (new seed pre-build at a load, xclipse model)");
+    }
+    clean_dir();
+    g_src_nod24 = 1; free(g_seed2); g_seed2 = NULL;
+    bad += fork_run(run7, "run 7b (new seed: a source without D24, xclipse model)");
+    if (!tool_seed(":nod24")) { clean_dir(); bad += fork_run(run11, "run 11 (EITHER records on a D24 device)"); }
+    clean_dir();
+    bad += fork_run(run10, "run 10 (the APK's new seed)");
     char c[400]; snprintf(c, sizeof c, "rm -rf %s", g_dir); if (system(c)) {}
     bad += g_fails;
     if (bad) { printf("vkn_warm_test: FAILED (%d)\n", bad); return 1; }

@@ -34,6 +34,10 @@
 //   that made something else is an unused build, never another picture.
 // [stage 5 rest] PORTABLE SEED (vkn_seed.c, DM_VK_NATIVE_SEED): the records of the APK's dos2-pipe-seed.bin (the old path's NR-31 seed:
 //   a phone's list as Vulkan create-info content) translated to this backend's records when their shader exists (vkn_seed.h).
+// [VK-SEED] the new path's seed dos2-vkn-seed.bin (this list's records made device-independent, tools/dos2_vkn_seed.py) is read first;
+//   THE WARM-UP AT LOAD: while the game loads (draws a frame < 64 or no frame in a 250 ms window) the worker runs at normal priority
+//   with DM_VK_NATIVE_WARM_JOBS (default 3, max 7) helper threads on the pending entries; DM_VK_NATIVE_WARM_LOAD 0 off / 1 (default) /
+//   2 always. Census line "warm: loads".
 #ifndef DM_VKN_WARM_H
 #define DM_VKN_WARM_H
 #include "vkn.h"
@@ -105,6 +109,7 @@ typedef struct vkn_warm_stats {
     uint32_t nl_noshader, nl_fx, nl_vin, nl_content, upgraded;                             // [stage 5 rest] not listable by reason; v1 records read
     uint32_t tech_listed, tech_replayed, seed_added, seed_replayed;                         // technique records in the list / built; seed records
     uint32_t pending, replayed, built, failed, skipped, stale, mismatched;                    // the replay
+    uint32_t loads, load_jobs, load_helper_builds; uint64_t load_ns;                          // [VK-SEED] the warm-up at load (vkn_warm.c)
     uint64_t taken, waits, wait_ns, build_ns;                                                 // the render thread's misses served
     uint64_t cache_loaded, cache_saved, saves, save_fail;                                     // the driver cache file (bytes)
     int cache_state;                                                                          // 0 waiting for the directory, 1 loaded, 2 empty, -1 off

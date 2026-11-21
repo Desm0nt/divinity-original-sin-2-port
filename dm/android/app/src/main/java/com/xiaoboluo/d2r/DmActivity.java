@@ -754,7 +754,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
                 if (am != null) { am.getMemoryInfo(mi); nativeMemInfo(mi.totalMem, mi.threshold); }
             } catch (UnsatisfiedLinkError | RuntimeException e) { /* an older library / no service: MemTotal */ }
         }
-        if (DOS2) dos2PipeSeed();   // [DOS2] NR-31: the APK's portable pipeline warm-up seed into files/ before the engine starts
+        if (DOS2) { dos2PipeSeed("dos2-pipe-seed.bin"); dos2PipeSeed("dos2-vkn-seed.bin"); }   // [DOS2] NR-31 / VK-SEED: the APK's portable pipeline warm-up seeds into files/ before the engine starts
         int result = nativeStart(getFilesDir().getAbsolutePath(), ext.getAbsolutePath(), src, Locale.getDefault().toLanguageTag());
         if (DOOM) { nativeLogReady = true; flushCrumbs(); crumb("nativeStart " + result); }
         if (D3) padSurfaceEnv();   // [DOS2] dm/env is read by nativeStart, so its pad switches apply from here
@@ -1002,18 +1002,20 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // [DOS2] NR-31 DM_NR_SEED (docs/dos2/nr/NR-31.md): the APK asset dos2-pipe-seed.bin (shader keys + fixed-function state of the pipelines
     // one phone built; tools/dos2_pipe_seed.py) goes to files/dos2-pipe-seed.bin, where the engine re-targets it to this GPU (xbg_nr_seed.inc).
     // Copied when missing or of another length / header (the header carries the seed id); an APK without the asset removes an old copy.
-    private void dos2PipeSeed() {
-        File out = new File(getFilesDir(), "dos2-pipe-seed.bin");
+    // [DOS2] VK-SEED (docs/dos2/nr/VK-SEED.md): the same for dos2-vkn-seed.bin, the native backend's seed (tools/dos2_vkn_seed.py; its
+    // header's first 32 bytes carry the seed id too); vkn_seed.c reads it first and the old one only without it.
+    private void dos2PipeSeed(String name) {
+        File out = new File(getFilesDir(), name);
         byte[] head = new byte[32];
-        try (java.io.InputStream in = getAssets().open("dos2-pipe-seed.bin")) {
+        try (java.io.InputStream in = getAssets().open(name)) {
             int n = 0, r; while (n < head.length && (r = in.read(head, n, head.length - n)) > 0) n += r;
             if (out.isFile()) {
                 byte[] have = new byte[32];
                 try (java.io.FileInputStream f = new java.io.FileInputStream(out)) { int k = 0, q; while (k < have.length && (q = f.read(have, k, have.length - k)) > 0) k += q; }
                 if (java.util.Arrays.equals(head, have)) return;
             }
-            File tmp = new File(getFilesDir(), "dos2-pipe-seed.bin.tmp");
-            try (java.io.InputStream in2 = getAssets().open("dos2-pipe-seed.bin"); java.io.FileOutputStream os = new java.io.FileOutputStream(tmp)) {
+            File tmp = new File(getFilesDir(), name + ".tmp");
+            try (java.io.InputStream in2 = getAssets().open(name); java.io.FileOutputStream os = new java.io.FileOutputStream(tmp)) {
                 byte[] b = new byte[65536]; int k; while ((k = in2.read(b)) > 0) os.write(b, 0, k);
             }
             if (!tmp.renameTo(out)) tmp.delete();

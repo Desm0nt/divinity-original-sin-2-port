@@ -88,6 +88,8 @@ Copy-Item drivers/sources.json "$fa/driver-sources.json"
 Copy-Item -Recurse dm/android/front-assets/* $fa
 # [DOS2] NR-31: the portable pipeline warm-up seed (tools/dos2_pipe_seed.py build; shader keys + fixed-function state only), when there is one
 if (Test-Path dm/android/dos2/dos2-pipe-seed.bin) { Copy-Item dm/android/dos2/dos2-pipe-seed.bin "$fa/dos2-pipe-seed.bin" }
+# [DOS2] VK-SEED: the native backend's portable seed (tools/dos2_vkn_seed.py build; its own list records made device-independent), when there is one
+if (Test-Path dm/android/dos2/dos2-vkn-seed.bin) { Copy-Item dm/android/dos2/dos2-vkn-seed.bin "$fa/dos2-vkn-seed.bin" }
 $drv = '-PdmDriverAssets=' + ((Resolve-Path $fa).Path -replace '\\', '/')
 if (-not (Get-Command $gradle -ErrorAction SilentlyContinue)) { throw "Gradle not found: '$gradle' (put gradle on PATH or set GRADLE to gradle.bat)" }
 $built = Join-Path $PWD 'dm/android/app/build/outputs/apk/debug/app-debug.apk'; if (Test-Path $built) { Remove-Item $built }   # never re-sign a stale APK

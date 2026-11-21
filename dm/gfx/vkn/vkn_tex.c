@@ -183,6 +183,15 @@ static void d24_note(VkFormat was, VkFormat to, VkFormatFeatureFlags ff, int mod
                  (unsigned long long)n, (int)was, (int)to, (unsigned)ff, mode == 2 ? "forced" : "the device has no X8_D24 / D24S8 for this use", mode,
                  getenv("DM_GFX_SIM_GPU") ? getenv("DM_GFX_SIM_GPU") : "-", depth_up_on() ? "" : " - NO: DM_VK_NATIVE_DEPTH_UP=0, raw bytes");
 }
+uint32_t vkn_tex_rt_format(uint32_t f, int depth) {   // [VK-SEED] (vkn_tex.h): the creation's rule below for an attachment
+    VkFormat fmt = (VkFormat)f; VkFormatFeatureFlags ff = fmt_feat(fmt);
+    const VkFormatFeatureFlags need = depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if (fmt_is_d24(fmt)) {
+        const int mode = d24_mode();
+        if (mode == 2 || (mode == 1 && (ff & need) != need)) { fmt = fmt == VK_FORMAT_X8_D24_UNORM_PACK32 ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D32_SFLOAT_S8_UINT; ff = fmt_feat(fmt); }
+    }
+    return f && (ff & need) == need ? (uint32_t)fmt : 0;
+}
 void vkn_tex_depth_stats(uint64_t *standins, uint64_t *converted, int *on) {
     if (standins) *standins = __atomic_load_n(&g_d24_made, __ATOMIC_RELAXED);
     if (converted) *converted = __atomic_load_n(&g_d24_conv, __ATOMIC_RELAXED);
