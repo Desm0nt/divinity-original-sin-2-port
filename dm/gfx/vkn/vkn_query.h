@@ -118,6 +118,56 @@ typedef struct vkn_query_occ_stats {
 } vkn_query_occ_stats;
 void vkn_query_occ_stats_get(vkn_query_occ_stats *s);
 
+// ==== [DOS2] VK-NATIVE stage 5 technique A (docs/dos2/nr/VK-OCCLUSION-ALT.md section 4; model and premises: vkn_occ.h) ====
+//   5 A        carried verdicts: a draw of a pair whose object's last verdict is "0 samples" is not recorded while vkn_occ.c proves nothing
+//              it depends on changed (its pre-pass draws, then its conditional draws when all of them were proven); empty pairs skip
+//              their conditional draws exactly (as 1); queries only to learn (0..DM_VK_NATIVE_COND_B a frame, vkn_occ.c chooses), read
+//              when the slot retired; no GPU predicates (no extension needed). Never the default (Adreno: 0).
+//   6 verify   a query on every pair every frame, everything drawn (as 2); A's decisions made all the same and checked against the
+//              query of the same frame when its slot retires: violations counted / printed red (vkn_occ_census).
+// DM_VK_NATIVE_COND_B (read in vkn_query_init): the learning budget, default 64 on Adreno, 16 on tile GPUs (vendor / DM_GFX_SIM_GPU).
+enum { VKN_COND_A = 5, VKN_COND_A_VERIFY = 6, VKN_COND_MODES_ALL = 7 };
+// For vkn_occ.c (recording thread): the open pair (-1 none), the draw's condition (-1 unconditional, -2 names no pair, else the pair),
+// facts of pair `rec` of this recording (0 = ok), the pairs so far, and "the draw being made is skipped by an exact decision".
+int vkn_query_occ_open(void);
+int vkn_query_occ_cond(void);
+int vkn_query_occ_rec(uint32_t rec, uint32_t *seen, uint32_t *done, int *closed, int *empty);
+void vkn_query_occ_nrec(uint32_t *n);
+void vkn_query_occ_skipped(void);
+
+// ==== [DOS2] VK-NATIVE stage 5 technique B (docs/dos2/nr/VK-OCCLUSION-ALT.md section 5; model, exactness, latency: vkn_occb.h) ====
+//   7 B        group queries + group conditions (Adreno): the pre-pass draws of objects last seen hidden are drawn at the end of their
+//              pass instance in 8 buckets, one occlusion query per bucket; their "full replacement" G-buffer draws at the end of their
+//              pass instance under one VK_EXT_conditional_rendering bracket per bucket; learning queries on up to DM_VK_NATIVE_COND_B
+//              (default 32) other pairs a frame. No query and no condition on a single object of a group. Needs the extension and a
+//              non-tile family, else DM_VK_NATIVE_COND=0 with a line. Never the default (Adreno: 0, VK-STAGE5-PLAN.md section 7).
+//   8 verify   the same captures and order, each member's pre-pass draws in their own query, the captured G-buffer draws drawn
+//              without a condition each in its own query, every other pair queried at its place (as 2); a G-buffer draw whose group
+//              passed 0 samples must pass 0 itself: violations counted / printed red (vkn_occb_census). No predicate anywhere.
+//   9 A + B    both (design 5: "A and B compose"): A's CPU skips first (vkn_occ.c as in mode 5, its learning queries kept), B's groups
+//              for the rest (as mode 7; a pair with a query - A's learning or B's - is never a group member). Without the extension or
+//              on a tile family: mode 5 with a line. Exact as each part: A skips only draws its proof says write nothing (their
+//              samples are 0, so a group query without them reports the same); B moves only order-free draws, so the final depth A's
+//              proof is about is the same in any order, and A's view of a frame (B's captures are "not recorded" there) is the same
+//              in two frames only if B captured the same draws - the same GPU order.
+// vkn_cond_is_a / vkn_cond_is_b say which module(s) a mode drives.
+enum { VKN_COND_B = 7, VKN_COND_B_VERIFY = 8, VKN_COND_AB = 9, VKN_COND_MODES_B = 10 };
+static inline int vkn_cond_is_a(int m) { return m == VKN_COND_A || m == VKN_COND_A_VERIFY || m == VKN_COND_AB; }
+static inline int vkn_cond_is_b(int m) { return m == VKN_COND_B || m == VKN_COND_B_VERIFY || m == VKN_COND_AB; }
+// 1 = the mode in effect may record GPU predicates (1, 3, 7, 9) or redraw captured draws at a pass end (7, 8, 9): the pass module's
+// cover proof of the first draw refuses then (a predicated or replayed draw can be the pass's first). Modes 2 / 4 / 5 / 6 record neither.
+int vkn_query_gpu_pred(void);
+// For vkn_occb.c (recording thread): a query of this recording's slot for B's own bracket (0 = ok, -1 = no slot / pool full; its
+// result is copied with the pass's others and handed to vkn_occb_q_result), the predicate word of a query of this slot, a
+// conditional-rendering bracket on a word (on 1 begin / 0 end; -1 = no extension), "pair rec gets its own query" (a learning pair:
+// its first recorded draw begins it), and "end the open pair's active query now" (it counts as visible: B's own query comes).
+int vkn_query_b_qalloc(VkQueryPool *pool, uint32_t *q);
+void vkn_query_b_pred(uint32_t q, VkBuffer *buf, VkDeviceSize *off);
+int vkn_query_b_cond(VkCommandBuffer cb, int on, VkBuffer buf, VkDeviceSize off);
+void vkn_query_b_learn(uint32_t rec);
+int vkn_query_b_noq(uint32_t rec);   // 1 = pair rec of this recording has no query (only such a pair's draws may be captured)
+void vkn_query_b_end_active(VkCommandBuffer cb);
+
 #ifdef __cplusplus
 }
 #endif

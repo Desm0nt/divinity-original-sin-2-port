@@ -1080,7 +1080,7 @@ extern "C" int dm_android_vk_initialize(const char *path,char *error,size_t byte
     const char *nro=getenv("DM_NR_OCC");const bool nro_ext=nro && (atoi(nro)==1 || atoi(nro)==3);
     // [DOS2] VK-NATIVE stage 4 [queries]: DM_VK_NATIVE=1 with DM_VK_NATIVE_COND 1 / 3 (dm/gfx/vkn/vkn_query.c draws the engine's conditional draws under it).
     const char *vkn_e=getenv("DM_VK_NATIVE"),*vkn_c=getenv("DM_VK_NATIVE_COND");
-    const bool vkn_ext=vkn_e && atoi(vkn_e)==1 && vkn_c && (atoi(vkn_c)==1 || atoi(vkn_c)==3);
+    const bool vkn_ext=vkn_e && atoi(vkn_e)==1 && vkn_c && (atoi(vkn_c)==1 || atoi(vkn_c)==3 || atoi(vkn_c)==7 || atoi(vkn_c)==9);   // [stage 5 technique B] 7 / 9: group conditions
     if(const char *ce=getenv("DM_GFX_COND_RENDER");(ce && atoi(ce)==1) || nro_ext || vkn_ext){
         bool has=false;for(auto &x:available)if(!strcmp(x.extensionName,VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME))has=true;
         VkPhysicalDeviceConditionalRenderingFeaturesEXT have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT};

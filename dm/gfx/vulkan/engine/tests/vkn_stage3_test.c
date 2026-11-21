@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -2709,6 +2709,7 @@ static void test_b1_pass(void);   // [stage 5.2 B1] (end of file)
 static void test_occ_a(void);     // [stage 5] technique A (end of file)
 static void test_v2_drv(void);    // [stage 5.3 V2] driver corrections (end of file)
 static void test_v1_preskin(void);   // [stage 5.3 V1] PRESKIN (end of file)
+static void test_occ_b(void);     // [stage 5] technique B (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
 // without it (render pass of one attachment), re-attaches it for the first draw that tests depth (LOAD of the colour drawn so far), keeps
@@ -3096,6 +3097,7 @@ int main(void) {
     test_b4_prepass();   // [stage 5.2 B4] the pre-pass hybrid (vkn_prepass.c)
     test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
     test_v1_preskin();   // [stage 5.3 V1] PRESKIN (vkn_preskin.c)
+    test_occ_b();  // [stage 5] technique B (vkn_occb.c, DM_VK_NATIVE_COND 7 / 8; forked children, the chain cleared of the earlier tests' functions)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
@@ -4096,4 +4098,300 @@ static void test_v1_preskin(void) {
     targets(NULL, NULL, NULL); frames_n(4);
     CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
     CHECK(vkn_preskin_reason_name(VKN_PSK_W_LATE)[0] != '?');
+}
+
+// ================================================================================================================ [stage 5] technique B
+// vkn_occb.c (DM_VK_NATIVE_COND 7 / 8, docs/dos2/nr/VK-OCCLUSION-ALT.md section 5). One scenario of 64 frames, run in forked children
+// (the switches are read once): a pre-pass (colour + depth, LESS with writes, no blending) with one plain draw and 24 report pairs
+// around their object's draw (objects 0..3 visible, 4..23 hidden; the pair addresses move every frame), then a G-buffer pass with one
+// conditional draw per object (EQUAL without writes). The mock's sample count follows the draw (vkn_occb_test_samples: pre-pass 5 /
+// G-buffer 3 for a visible object, 0 for a hidden one); at frame 40 object 10 shows.
+//   mode 7: learning (round robin, budget 32): every object has a verdict after 12 + 3 frames; then the hidden ones are captured and
+//     drawn at the end of the pre-pass, group by group, each group inside ONE query (no query on a member); their G-buffer draws at
+//     the end of the G-buffer pass inside ONE condition per group, discarded by the GPU; at most 8 groups for 20 members; the reveal
+//     is drawn in that very frame (its group's query sees it), then object 10 is checked alone and leaves the groups;
+//   mode 8: the same reorder, every member and every captured G-buffer draw in its own query, no condition anywhere, nothing
+//     discarded, B's would-discards judged against the draws' own samples: violations 0; a broken scenario (object 5's G-buffer draw
+//     passes samples while its pre-pass draw passes none: a coplanar tie) is caught as a violation;
+//   mode 7 with a blended draw inside the pre-pass (the captures before it drawn first: a second segment of groups) and a LESS draw with
+//     writes inside the G-buffer pass (it commutes with the waiting EQUAL draws: no flush); the fallbacks (no extension, DM_GFX_SIM_GPU=mali:
+//     mode 0); mode 9 (A + B) on technique A's scenario: A skips while it can prove, B's group hides O1 after the camera change, never a
+//     visible object lost;
+//   DM_VK_NATIVE_RT 0 / 9 / 1: the journal of every submission of mode 7 is the same (the recording thread runs B unchanged).
+#include "../../../vkn/vkn_occb.h"
+enum { OB_F = 64, OB_OBJ = 24, OB_VIS = 4, OB_REVEAL = 40, OB_RT_F = 48, OB_JR = 256, OB_AB_F = 90 };
+typedef struct ob_out { int pre_draws, pre_q, pre_inq, pre_tail_inq, gb_draws, gb_cond, gb_disc, gb_tail_cond; } ob_out;
+typedef struct ob_res {
+    int checks, fails, ran, val_errors, mk_errors, mode_after; ob_out o[OB_F]; vkn_occb_stats st; uint32_t njr; mk_jr_rec jr[OB_JR];
+    int ab_live[OB_AB_F], ab_rec[OB_AB_F]; vkn_occ_stats ast;   // mode 9
+} ob_res;
+static int g_ob_mode, g_ob_rt, g_ob_jr, g_ob_broken, g_ob_frames, g_ob_extra, g_ob_noext;
+static uint64_t g_ob_dsz, g_ob_dse;
+static int32_t g_ob_tex[VKN_TEX_SLOTS], g_ob_smp[VKN_TEX_SLOTS];
+// (the reveal is carried by the draw itself - alpha reference -2 instead of -1, both "no alpha test": the recording thread may draw
+// a frame behind the test's own counter)
+static int ob_visible(int i, const vkn_draw_in *in) { return i < OB_VIS || (i == 10 && in->alpha_ref < -1.5f); }
+static void ob_samples(const vkn_draw_in *in, uint32_t first, int replay) {
+    (void)first; (void)replay;
+    const int i = (int)(in->vb_off[0] / 16u) - 1;
+    uint32_t s = 1;   // the plain draw
+    if (i >= 0 && i < OB_OBJ) {
+        if (in->ds == g_ob_dsz) s = ob_visible(i, in) ? 5 : 0;
+        else if (in->ds == g_ob_dse) s = ob_visible(i, in) ? 3 : (g_ob_broken && i == 5 ? 4 : 0);
+    }
+    mk_draw_samples = s;
+}
+static void ob_targets(vkn_tex *c, vkn_tex *d) { vkn_tex *cc[VKN_PASS_COLORS] = {c}; const uint32_t z[VKN_PASS_COLORS] = {0}; vkn_rt_pass_targets(c ? 1 : 0, cc, z, z, d); }
+// events of cb in [from, to): draws, queries, draws inside a query, conditional brackets, discarded draws; of the last `tail` draws
+// those inside a query or a conditional bracket
+static void ob_scan(uint64_t from, uint64_t to, VkCommandBuffer cb, int tail, int *draws, int *q, int *inq, int *cond, int *disc, int *tail_in) {
+    int in_q = 0, in_c = 0, nd = 0, k = 0; *draws = *q = *inq = *cond = *disc = *tail_in = 0;
+    for (uint64_t s = from; s < to; s++) { const mk_ev *e = mk_ev_at(s); if (e && e->cb == cb && e->op == MK_E_DRAW_IDX) nd++; }
+    for (uint64_t s = from; s < to; s++) {
+        const mk_ev *e = mk_ev_at(s); if (!e || e->cb != cb) continue;
+        if (e->op == MK_E_BEGIN_Q) { in_q = 1; (*q)++; }
+        else if (e->op == MK_E_END_Q) in_q = 0;
+        else if (e->op == MK_E_BEGIN_COND) { in_c = 1; (*cond)++; }
+        else if (e->op == MK_E_END_COND) in_c = 0;
+        else if (e->op == MK_E_DRAW_IDX) { (*draws)++; *inq += in_q; *disc += e->u[7] == 1; if (k++ >= nd - tail) *tail_in += in_q || in_c; }
+    }
+}
+static void ob_frame(int f, ob_out *o) {
+    const uint64_t base = 0x7a0000ull + (uint64_t)(f & 7) * 0x1000;
+    vkn_rt_rec_begin(1);
+    const VkCommandBuffer cb = g_ob_rt ? VK_NULL_HANDLE : vkn_cb();
+    ob_targets(g_a2, g_d3); vkn_rt_pass_clear_depth(g_d3, 3, 1.0f, 0);
+    vkn_draw_in in = g_in;
+    in.blend = 0; in.ds = g_ob_dsz; in.alpha_ref = f >= OB_REVEAL ? -2.0f : -1.0f; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = g_ob_tex; in.smp[1] = g_ob_smp; in.tex[2] = NULL; in.smp[2] = NULL;
+    const uint64_t m = mark();
+    in.vb_off[0] = 0; vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 0, 3, 1);
+    for (int i = 0; i < OB_OBJ; i++) {
+        vkn_rt_query_begin(base + 16u * (uint32_t)i);
+        in.vb_off[0] = 16u * (uint32_t)(i + 1); vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 3u * (uint32_t)i, 3, 1);
+        vkn_rt_query_end(base + 16u * (uint32_t)i);
+        if (g_ob_extra && i == 15) {   // a blended draw with depth writes: not order-free - the captures so far are drawn before it
+            vkn_draw_in x = in; x.blend = H(41, 1); x.vb_off[0] = 16u * (OB_OBJ + 2); vkn_rt_query_cond(0); vkn_rt_draw_indexed(&x, 90, 3, 1);
+        }
+    }
+    ob_targets(g_b2, g_d3);
+    const uint64_t m2 = mark();
+    in.ds = g_ob_dse;
+    for (int i = 0; i < OB_OBJ; i++) {
+        in.vb_off[0] = 16u * (uint32_t)(i + 1); vkn_rt_query_cond(base + 16u * (uint32_t)i); vkn_rt_draw_indexed(&in, 3u * (uint32_t)(10 + i), 3, 1);
+        if (g_ob_extra && i == 15) {   // a G-buffer draw with depth writes (LESS, no blending): it commutes with the waiting EQUAL draws
+            vkn_draw_in x = in; x.ds = g_ob_dsz; x.vb_off[0] = 16u * (OB_OBJ + 3); vkn_rt_query_cond(0); vkn_rt_draw_indexed(&x, 93, 3, 1);
+        }
+    }
+    vkn_rt_rec_end(1, g_win, NULL, 1);
+    const uint64_t m3 = mark();
+    const uint64_t cpu3[3] = {0, 0, 0};
+    vkn_rt_frame_tail(cpu3, NULL);
+    if (!g_ob_rt && !g_ob_jr && o) {
+        int d, c, x;
+        ob_scan(m, m2, cb, OB_OBJ - OB_VIS, &o->pre_draws, &o->pre_q, &o->pre_inq, &c, &d, &o->pre_tail_inq);
+        ob_scan(m2, m3, cb, OB_OBJ - OB_VIS, &o->gb_draws, &x, &d, &o->gb_cond, &o->gb_disc, &o->gb_tail_cond);
+    }
+}
+// ---- mode 9 (A + B): technique A's scenario (vkn_occ.c; test_occ_a's objects W, P, door M, O1 behind W, O2 behind P with their gathers;
+// the door reveals O2 at frame 40, the camera changes at frame 60) drawn with B's states. Per frame: the G-buffer draws recorded and the
+// ones the GPU did not discard ("live"); exact = live is the number of visible objects once both techniques learned (A skips on the CPU
+// while it can prove, B's groups take over where A cannot: after the camera change)
+static int g_ab_f;
+static void ab_samples(const vkn_draw_in *in, uint32_t first, int replay) {
+    (void)first; (void)replay;
+    const int i = (int)((in->vb_off[0] % 256u) / 16u) - 1;
+    const int vis = i < 0 || i >= OA_OBJ || i < 3 || (i == 4 && g_ab_f >= 40);
+    mk_draw_samples = in->ds == g_ob_dse ? (vis ? 3u : 0u) : (vis ? 5u : 0u);
+}
+static void ab_frame(int f, int *live, int *rec) {
+    g_ab_f = f;
+    const int door_moved = f >= 40;
+    const float bx[OA_OBJ][2] = {{-1.0f, -0.4f}, {0.4f, 1.0f}, {door_moved ? 0.5f : -0.05f, door_moved ? 0.6f : 0.05f}, {-0.9f, -0.7f}, {0.7f, 0.9f}};
+    const uint64_t ef = (uint64_t)f + 100, B0 = 0x71000000ull, B1 = 0x71100000ull, base = (ef & 1) ? B1 : B0;
+    vkn_occ_gather_bases(B0, B1);
+    float vp[16]; memcpy(vp, k_oa_id, sizeof vp); vp[0] = f >= 60 ? 1.02f : 1.0f;
+    for (int i = 0; i < OA_OBJ; i++) { const float box[6] = {bx[i][0], -0.2f, 0.5f, bx[i][1], 0.2f, 0.6f}; CHECK_EQ(vkn_occ_gather(base + 16u * i, ef, 0x9000 + (uint64_t)i, box, vp), 0); }
+    VkCommandBuffer cb = fbegin(1); targets(g_a2, NULL, g_d3); vkn_pass_clear_depth(g_d3, 3, 1.0f, 0);
+    vkn_draw_in in = g_in;
+    in.blend = 0; in.ds = g_ob_dsz; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = g_ob_tex; in.smp[1] = g_ob_smp; in.tex[2] = NULL; in.smp[2] = NULL;
+    in.vb_off[0] = 0; CHECK_EQ(vkn_draw_indexed(&in, 30, 3, 1), 0);   // a plain pre-pass draw
+    for (int i = 0; i < OA_OBJ; i++) {
+        vkn_query_begin(base + 16u * i);
+        in.vb_off[0] = 16u * (uint32_t)(i + 1) + (i == 2 && door_moved ? 256u : 0u); CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0);
+        vkn_query_end(base + 16u * i);
+    }
+    targets(g_b2, NULL, g_d3);
+    const uint64_t m2 = mark();
+    in.ds = g_ob_dse;
+    for (int i = 0; i < OA_OBJ; i++) { vkn_query_cond(base + 16u * i); in.vb_off[0] = 16u * (uint32_t)(i + 1) + (i == 2 && door_moved ? 256u : 0u); CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)(10 + i), 3, 1), 0); }
+    vkn_pass_end();
+    *live = 0; *rec = 0;
+    for (uint64_t s = m2; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && e->cb == cb && e->op == MK_E_DRAW_IDX) { (*rec)++; *live += e->u[7] != 1; } }
+    fsubmit(0);
+}
+static void ab_run(ob_res *R) {
+    vkn_occ_test_reset(); vkn_occ_test_fns(NULL, oa_facts);
+    vkn_occb_test_samples(ab_samples);
+    vkn_query_init(VKN_COND_AB);
+    CHECK_EQ(vkn_query_mode(), VKN_COND_AB); CHECK_EQ(vkn_occ_mode(), VKN_COND_A); CHECK_EQ(vkn_occb_mode(), VKN_COND_B);
+    for (int f = 0; f < OB_AB_F; f++) ab_frame(f, &R->ab_live[f], &R->ab_rec[f]);
+    vkn_occb_stats_get(&R->st); vkn_occ_stats_get(&R->ast); vkn_occb_census(); vkn_occ_census(); R->mode_after = vkn_query_mode();
+    vkn_query_init(VKN_COND_OFF); vkn_occb_test_samples(NULL); vkn_occ_test_fns(NULL, NULL); mk_draw_samples = 1;
+}
+static void ob_run(ob_res *R) {
+    { static const char *const own[] = {"test", "a5-a", "a5-b", "b4-skipper"}; for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) vkn_fx_drop(own[i]); }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    mk_cond_ext = !g_ob_noext;
+    vkn_occb_test_reset();
+    if (g_ob_mode == VKN_COND_AB) { ab_run(R); R->val_errors = mk_val_errors - v0; R->mk_errors = mk_errors - e0; return; } vkn_occb_test_samples(ob_samples);
+    vkn_rt_install(g_ob_rt, 1);
+    vkn_query_init(g_ob_mode);
+    if (!g_ob_noext && !getenv("DM_GFX_SIM_GPU")) { CHECK_EQ(vkn_query_mode(), g_ob_mode); CHECK_EQ(vkn_occb_mode(), g_ob_mode); CHECK_EQ(vkn_occb_budget(), VKN_OCCB_LEARN); }   // (a fallback may come at once: the device is known)
+    pthread_mutex_lock(&mk_mu); mk_jr_on = g_ob_jr; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);
+    for (int f = 0; f < g_ob_frames; f++) ob_frame(f, &R->o[f]);
+    if (g_ob_rt) vkn_rt_shutdown();
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 0; pthread_mutex_unlock(&mk_mu);
+    R->njr = mk_jr_n < OB_JR ? mk_jr_n : OB_JR; if (R->njr) memcpy(R->jr, mk_jr, R->njr * sizeof R->jr[0]);
+    vkn_occb_stats_get(&R->st); vkn_occb_census(); R->mode_after = vkn_query_mode();
+    R->val_errors = mk_val_errors - v0; R->mk_errors = mk_errors - e0;
+    vkn_query_init(VKN_COND_OFF); vkn_occb_test_samples(NULL); mk_draw_samples = 1;
+}
+static int ob_child(ob_res *out) {
+    memset(out, 0, sizeof *out);
+    int pfd[2]; if (pipe(pfd)) return -1;
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]);
+        ob_res *r = (ob_res *)calloc(1, sizeof *r);
+        alarm(600);   // (a hang fails the child instead of the run)
+        const int c0 = g_checks, f0 = g_fails;
+        ob_run(r);
+        r->checks = g_checks - c0; r->fails = g_fails - f0; r->ran = 1;
+        const uint8_t *p = (const uint8_t *)r; size_t left = sizeof *r;
+        while (left) { const ssize_t w = write(pfd[1], p, left); if (w <= 0) break; p += w; left -= (size_t)w; }
+        close(pfd[1]);
+        _exit(0);
+    }
+    close(pfd[1]);
+    uint8_t *p = (uint8_t *)out; size_t got = 0;
+    while (got < sizeof *out) { const ssize_t n = read(pfd[0], p + got, sizeof *out - got); if (n <= 0) break; got += (size_t)n; }
+    close(pfd[0]);
+    int status = 0; waitpid(pid, &status, 0);
+    const int ok = got == sizeof *out && WIFEXITED(status) && WEXITSTATUS(status) == 0 && out->ran;
+    g_checks += out->checks + 1; g_fails += out->fails;
+    if (!ok) { g_fails++; printf("FAIL %s:%d: occ-b child mode %d rt %d (status %#x)\n", __FILE__, __LINE__, g_ob_mode, g_ob_rt, status); }
+    return ok ? 0 : -1;
+}
+static void ob_print(const char *what, const ob_res *R) {
+    printf("  occ-b %s (pre-pass draws/queries/in a query, G-buffer draws/conditions/discarded):", what);
+    for (int f = 0; f < g_ob_frames; f++)
+        if (f < 4 || (f >= 14 && f <= 18) || (f >= 38 && f <= 48) || f >= 60)
+            printf(" %d:%d/%d/%d,%d/%d/%d", f, R->o[f].pre_draws, R->o[f].pre_q, R->o[f].pre_inq, R->o[f].gb_draws, R->o[f].gb_cond, R->o[f].gb_disc);
+    printf("\n  occ-b %s: captured pre %llu / G-buffer %llu, groups %llu, queries group %llu learn %llu member %llu verify %llu, conditions %llu, flushes %llu, "
+           "postponed %llu, lost %llu, violations %llu (judged %llu), refusals:", what, (unsigned long long)R->st.cap_pre, (unsigned long long)R->st.cap_cond,
+           (unsigned long long)R->st.groups, (unsigned long long)R->st.q_group, (unsigned long long)R->st.q_learn, (unsigned long long)R->st.q_member, (unsigned long long)R->st.q_cver,
+           (unsigned long long)R->st.conds, (unsigned long long)R->st.flushes, (unsigned long long)R->st.postponed, (unsigned long long)R->st.lost,
+           (unsigned long long)R->st.violations, (unsigned long long)R->st.verify_judged);
+    for (int i = 1; i < VKN_OB_R_N; i++) if (R->st.refuse[i]) printf(" %d:%llu", i, (unsigned long long)R->st.refuse[i]);
+    printf("\n");
+}
+static void test_occ_b(void) {
+    if (!g_s1 || !g_a2 || !g_b2 || !g_d3 || !g_win) { CHECK(0); return; }
+    // the states (made in the parent), then a warm-up in mode 0: every pipeline the scenario draws with exists before the forks
+    CHECK(vkn_ds_put(H(95, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0); CHECK(vkn_ds_put(H(96, 1), 1, 0, 2, 0, 0, 0, 0, 0) != 0);
+    g_ob_dsz = H(95, 1); g_ob_dse = H(96, 1);
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) g_ob_tex[i] = g_ob_smp[i] = -1;
+    g_ob_tex[0] = 300; g_ob_smp[0] = 10;
+    g_ob_mode = VKN_COND_OFF; g_ob_rt = 0; g_ob_jr = 0; g_ob_frames = 3;
+    {
+        static ob_out w[3];
+        vkn_occb_test_samples(ob_samples);
+        for (int f = 0; f < 3; f++) ob_frame(f, &w[f]);
+        vkn_occb_test_samples(NULL); mk_draw_samples = 1;
+        CHECK_EQ(w[2].pre_draws, OB_OBJ + 1); CHECK_EQ(w[2].pre_q, 0); CHECK_EQ(w[2].gb_draws, OB_OBJ); CHECK_EQ(w[2].gb_cond, 0);   // mode 0: as the engine asks
+    }
+    unsetenv("DM_VK_NATIVE_COND_B"); unsetenv("DM_GFX_SIM_GPU");
+    static ob_res R, V, X, J[3];
+    const int nh = OB_OBJ - OB_VIS;
+    // ---- mode 7
+    g_ob_mode = VKN_COND_B; g_ob_rt = 0; g_ob_broken = 0; g_ob_frames = OB_F;
+    if (!ob_child(&R)) {
+        ob_print("mode 7", &R);
+        CHECK_EQ(R.val_errors, 0); CHECK_EQ(R.mk_errors, 0);
+        for (int f = 0; f < OB_F; f++) { CHECK_EQ(R.o[f].pre_draws, OB_OBJ + 1); CHECK_EQ(R.o[f].gb_draws, OB_OBJ); }   // every draw recorded (captured ones replayed)
+        for (int f = 24; f < OB_REVEAL; f++) {
+            const ob_out *o = &R.o[f];
+            CHECK(o->gb_cond >= 1 && o->gb_cond <= VKN_OCCB_BUCKETS);   // one condition per group, not one per object
+            CHECK_EQ(o->gb_disc, nh);                                   // the GPU discards every hidden object's G-buffer draw
+            CHECK_EQ(o->gb_tail_cond, nh);                              // ... drawn at the end of the pass under the group conditions
+            CHECK_EQ(o->pre_tail_inq, nh);                              // the members' pre-pass draws: last, inside the group queries
+            CHECK(o->pre_q >= o->gb_cond && o->pre_q - o->gb_cond <= OB_VIS);   // the other queries: learning ones on visible objects only
+        }
+        CHECK(R.o[OB_REVEAL].gb_disc < nh);                             // the reveal is drawn in its own frame (its group saw it)
+        for (int f = 56; f < OB_F; f++) { CHECK_EQ(R.o[f].gb_disc, nh - 1); CHECK_EQ(R.o[f].gb_tail_cond, nh - 1); }   // object 10 left the groups, the rest stay
+        CHECK(R.st.groups >= 1); CHECK(R.st.conds >= 1); CHECK_EQ(R.st.q_member, 0); CHECK_EQ(R.st.q_cver, 0);
+        CHECK(R.st.culled_groups >= 1); CHECK(R.st.flips >= 1); CHECK(R.st.left >= 1); CHECK_EQ(R.st.lost, 0); CHECK_EQ(R.st.replay_drop, 0); CHECK_EQ(R.st.replay_stale, 0);
+    }
+    // ---- mode 8 (verify), then the broken scenario
+    g_ob_mode = VKN_COND_B_VERIFY;
+    if (!ob_child(&V)) {
+        ob_print("mode 8", &V);
+        CHECK_EQ(V.val_errors, 0); CHECK_EQ(V.mk_errors, 0);
+        for (int f = 0; f < OB_F; f++) { CHECK_EQ(V.o[f].pre_draws, OB_OBJ + 1); CHECK_EQ(V.o[f].gb_draws, OB_OBJ); CHECK_EQ(V.o[f].gb_cond, 0); CHECK_EQ(V.o[f].gb_disc, 0); }
+        for (int f = 24; f < OB_REVEAL; f++) { CHECK_EQ(V.o[f].pre_q, OB_OBJ); CHECK_EQ(V.o[f].pre_tail_inq, nh); }   // every pair queried; the members last, each alone
+        CHECK(V.st.verify_judged > 100); CHECK_EQ(V.st.verify_agree, V.st.verify_judged); CHECK_EQ(V.st.violations, 0); CHECK_EQ(V.st.q_group, 0); CHECK_EQ(V.st.conds, 0);
+    }
+    g_ob_broken = 1;
+    if (!ob_child(&X)) { ob_print("mode 8, broken (a tie)", &X); CHECK(X.st.violations >= 1); CHECK_EQ(X.val_errors, 0); CHECK_EQ(X.mk_errors, 0); }
+    g_ob_broken = 0;
+    // ---- a draw that is not order-free in the middle of the pre-pass: the captures before it are drawn first (a second segment of
+    // groups after it), every hidden object still discarded
+    g_ob_mode = VKN_COND_B; g_ob_extra = 1;
+    if (!ob_child(&X)) {
+        ob_print("mode 7, a blended draw inside the pre-pass, a depth-writing one inside the G-buffer pass", &X);
+        CHECK_EQ(X.val_errors, 0); CHECK_EQ(X.mk_errors, 0);
+        for (int f = 24; f < OB_REVEAL; f++) {
+            CHECK_EQ(X.o[f].pre_draws, OB_OBJ + 2); CHECK_EQ(X.o[f].gb_draws, OB_OBJ + 1); CHECK_EQ(X.o[f].gb_disc, nh); CHECK(X.o[f].gb_cond <= 2 * VKN_OCCB_BUCKETS);
+            CHECK_EQ(X.o[f].gb_tail_cond, nh);   // (the G-buffer captures were not drawn early: the depth-writing draw commutes)
+        }
+        CHECK(X.st.flush_why[VKN_OB_F_ORDER] >= OB_REVEAL - 24); CHECK(X.st.flush_why[VKN_OB_F_ORDER] <= OB_F); CHECK_EQ(X.st.lost, 0);
+    }
+    g_ob_extra = 0;
+    // ---- the fallbacks of mode 7: no VK_EXT_conditional_rendering, a tile family (DM_GFX_SIM_GPU=mali): mode 0 with a line, nothing captured
+    g_ob_frames = 6; g_ob_noext = 1;
+    if (!ob_child(&X)) { CHECK_EQ(X.mode_after, VKN_COND_OFF); CHECK_EQ(X.st.cap_pre, 0); for (int f = 0; f < 6; f++) { CHECK_EQ(X.o[f].pre_q, 0); CHECK_EQ(X.o[f].gb_cond, 0); } }
+    g_ob_noext = 0; setenv("DM_GFX_SIM_GPU", "mali", 1);
+    if (!ob_child(&X)) { CHECK_EQ(X.mode_after, VKN_COND_OFF); CHECK_EQ(X.st.cap_pre, 0); for (int f = 0; f < 6; f++) CHECK_EQ(X.o[f].gb_cond, 0); }
+    unsetenv("DM_GFX_SIM_GPU");
+    // ---- mode 9 (A + B) on technique A's scenario
+    g_ob_mode = VKN_COND_AB; g_ob_frames = 0;
+    if (!ob_child(&X)) {
+        printf("  occ-ab mode 9 (G-buffer draws recorded/live):"); for (int f = 0; f < OB_AB_F; f++) if (f < 6 || (f >= 28 && f <= 44) || (f >= 58 && f <= 70) || f >= 86) printf(" %d:%d/%d", f, X.ab_rec[f], X.ab_live[f]);
+        printf("\n  occ-ab: A skipped pre-pass %llu / conditional %llu, violations %llu; B captured %llu, conditions %llu, culled groups %llu\n", (unsigned long long)X.ast.skip_pre,
+               (unsigned long long)X.ast.skip_cond, (unsigned long long)X.ast.violations, (unsigned long long)X.st.cap_pre, (unsigned long long)X.st.conds, (unsigned long long)X.st.culled_groups);
+        CHECK_EQ(X.val_errors, 0); CHECK_EQ(X.mk_errors, 0); CHECK_EQ(X.mode_after, VKN_COND_AB);
+        for (int f = 0; f < OB_AB_F; f++) CHECK(X.ab_live[f] >= (f >= 40 ? 4 : 3));                                // never a visible object lost
+        for (int f = 30; f < 40; f++) CHECK_EQ(X.ab_live[f], 3);                                                     // O1, O2 hidden: skipped by A or discarded by B
+        for (int f = 41; f < 60; f++) CHECK_EQ(X.ab_live[f], 4);
+        int hid60 = 0; for (int f = 60; f < OB_AB_F; f++) { CHECK(X.ab_live[f] <= 5); hid60 += X.ab_live[f] == 4; }
+        CHECK(hid60 >= 20);   // the camera moved: A carries nothing; B's group hides O1 (not in the frames where A's learning query is on it)
+        CHECK(X.ast.skip_pre > 20); CHECK(X.st.conds >= 1); CHECK(X.st.culled_groups >= 1); CHECK_EQ(X.st.lost, 0);
+    }
+    // ---- the recording thread: the journal of mode 7 with DM_VK_NATIVE_RT 0 / 9 / 1
+    g_ob_mode = VKN_COND_B; g_ob_frames = OB_RT_F; g_ob_jr = 1;
+    static const int rts[3] = {0, 9, 1};
+    int ran = 1;
+    for (int k = 0; k < 3; k++) { g_ob_rt = rts[k]; if (ob_child(&J[k])) { ran = 0; break; } CHECK_EQ(J[k].val_errors, 0); CHECK_EQ(J[k].mk_errors, 0); }
+    for (int k = 1; ran && k < 3; k++) {
+        int bad = J[k].njr != J[0].njr, first = -1;
+        for (uint32_t i = 0; i < J[k].njr && i < J[0].njr; i++) if (memcmp(&J[k].jr[i], &J[0].jr[i], sizeof J[0].jr[i])) { if (first < 0) first = (int)i; bad = 1; }
+        CHECK(!bad);
+        CHECK_EQ(J[k].st.cap_pre, J[0].st.cap_pre); CHECK_EQ(J[k].st.conds, J[0].st.conds); CHECK_EQ(J[k].st.q_group, J[0].st.q_group);
+        printf("  occ-b mode 7 DM_VK_NATIVE_RT=%d: %u submissions, journal %s DM_VK_NATIVE_RT=0 (first difference %d); captured %llu, conditions %llu\n", rts[k], J[k].njr,
+               bad ? "DIFFERS from" : "equal to", first, (unsigned long long)J[k].st.cap_pre, (unsigned long long)J[k].st.conds);
+    }
+    if (ran) { CHECK(J[0].njr >= OB_RT_F); CHECK(J[0].st.conds > 0); }
+    g_ob_rt = 0; g_ob_jr = 0;
 }

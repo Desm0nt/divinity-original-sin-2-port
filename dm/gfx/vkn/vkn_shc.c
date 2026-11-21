@@ -88,7 +88,8 @@ static struct {
 // counts alone. Modes 1 / 3 (GPU predicates) stay refused as before (a predicated caster would not be a pure function of its inputs;
 // none is expected, but the phone has not shown it): counted by cond_ref, named in the census.
 // [stage 5 technique A] modes 5 / 6 as 4: their CPU skips (vkn_occ.c, fx order 45) are pair draws and conditional draws only.
-static int cond_ok(void) { const int m = vkn_query_mode(); return m == VKN_COND_OFF || m == VKN_COND_COUNT || m == VKN_COND_ORACLE || m == VKN_COND_A || m == VKN_COND_A_VERIFY; }
+static int cond_ok(void) { const int m = vkn_query_mode(); return m == VKN_COND_OFF || m == VKN_COND_COUNT || m == VKN_COND_ORACLE || m == VKN_COND_A || m == VKN_COND_A_VERIFY ||
+                                                              m == VKN_COND_B || m == VKN_COND_B_VERIFY || m == VKN_COND_AB; }   // [stage 5 technique B] predicates only on EQUAL draws without depth writes (never a caster), replays never in a shadow pass
 static int stage_src(uint8_t st) { return st == 0 ? 0 : st == 1 ? 1 : -1; }   // engine stage (vkn_bind.stage) -> draw-path stage (graphics only)
 static int fixed_depth(VkFormat f) { return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32; }
 static uint32_t depth_bpp(VkFormat f) { return f == VK_FORMAT_D16_UNORM ? 2u : 4u; }

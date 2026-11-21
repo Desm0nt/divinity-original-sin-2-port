@@ -189,6 +189,11 @@ int vkn_shlib_b5_words(void *shader, uint64_t retype, uint32_t **words, size_t *
 VkShaderModule vkn_shlib_b5_module(const uint32_t *words, size_t nwords, const char *key);
 int vkn_shlib_b5_record(const char *pack, const char *key, uint8_t **out, size_t *n);
 
+// ==== [DOS2] VK-NATIVE stage 5 technique A (vkn_occ.c, DM_VK_NATIVE_COND 5 / 6) ====
+// The read mask of a Uniform block (Binding `binding`, the Vulkan binding of the table) of a vertex / fragment shader object of this
+// library: 1 = *bits (nwords 64-bit words, bit = 16-byte element; elements beyond: not read) are the elements its final words can
+// read, 0 = the whole block may be read, -1 = not built (another switch value) / no such block / not a shader of this library. Any thread.
+int vkn_shlib_read_mask(const void *shader, uint32_t binding, const uint64_t **bits, uint32_t *nwords);
 // ---- host tests: the words handed to vkCreateShaderModule are what the comparison test checks (it mocks that entry point) ----
 #ifdef __cplusplus
 }

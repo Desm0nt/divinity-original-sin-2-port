@@ -141,6 +141,7 @@ void dm_dos2_vkn_install(void) {
     if (dm_vkn_imm_register) dm_vkn_imm_register();
     if (dm_vkn_ui_register) dm_vkn_ui_register();
     if (dm_vkn_cmd_register) dm_vkn_cmd_register();
+    { extern void dm_vkn_occ_register(void) __attribute__((weak)); if (dm_vkn_occ_register) dm_vkn_occ_register(); }   // [stage 5 technique A] hle_dos2_vkn_occ.c
     if (mode == VKN_NATIVE && vkn_shc_install && vkn_shc_active) { vkn_shc_install(); if (vkn_shc_active()) dm_vkn_census(vkn_shc_census); }   // [stage 5 A3] the static shadow cache
     if (mode == VKN_NATIVE && vkn_lf_install && vkn_lf_active) { vkn_lf_install(); if (vkn_lf_active()) dm_vkn_census(vkn_lf_census); }   // [stage 5.1 A4] LIGHTFUSE + FOG
     int in = 0, want = 0;

@@ -320,6 +320,7 @@ extern int64_t vkn_shlib_fs_outputs(const void *shader) __attribute__((weak));
 extern int vkn_shlib_fs_facts(const void *shader) __attribute__((weak));
 extern int vkn_shlib_policy(void) __attribute__((weak));
 extern int vkn_query_mode(void) __attribute__((weak));
+extern int vkn_query_gpu_pred(void) __attribute__((weak));   // [stage 5 technique B]
 static int lib_facts(const vkn_shader *s, vkn_pass_cover_sh *o) {
     if (!(vkn_shlib_on && vkn_shlib_on() && vkn_shlib_vs_pos && vkn_shlib_fs_outputs && vkn_shlib_fs_facts)) return -1;
     o->pos = vkn_shlib_vs_pos(s->xs[VKN_SRC_VS]);
@@ -557,7 +558,9 @@ static int cover_why(const tset *s, uint32_t W, uint32_t H, uint32_t samples, co
     if (!f->armed) return VKN_PCV_NOFACTS;
     if (!same_set(&f->set, s) || f->stamp != draw_stamp()) return VKN_PCV_STALE;
     if (f->fx_bad) return VKN_PCV_FX;
-    if (vkn_query_mode && vkn_query_mode() != 0) return VKN_PCV_COND;   // (a GPU predicate may skip the draw)
+    // (a GPU predicate may skip the draw, or a replay of technique B may come first) [stage 5 technique B] only the modes that predicate or
+    // replay refuse (1, 3, 7, 8: vkn_query_gpu_pred); 2 / 4 / 5 / 6 record neither (count-only queries, CPU skips before pass-cover runs)
+    if (vkn_query_mode && (vkn_query_gpu_pred ? vkn_query_gpu_pred() : vkn_query_mode() != 0)) return VKN_PCV_COND;
     if (samples > 1) return VKN_PCV_SAMPLES;
     const vkn_shader *sh = f->sh;
     const uint8_t need = (uint8_t)((1u << VKN_SRC_VS) | (1u << VKN_SRC_FS));
