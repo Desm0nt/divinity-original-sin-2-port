@@ -115,7 +115,8 @@ void vkn_pass_cover_facts_fn(int (*fn)(const struct vkn_shader *s, vkn_pass_cove
 // Outcome of the proof, by reason (VKN_PCV_FULL / _AREA = proven; the rest refusals, first failing check).
 enum { VKN_PCV_FULL, VKN_PCV_AREA, VKN_PCV_NOFACTS, VKN_PCV_STALE, VKN_PCV_FX, VKN_PCV_COND, VKN_PCV_SAMPLES, VKN_PCV_SHADER, VKN_PCV_NOPROG,
        VKN_PCV_OUTPUT, VKN_PCV_BLEND, VKN_PCV_MASK, VKN_PCV_DS, VKN_PCV_RASTER, VKN_PCV_PRIM, VKN_PCV_INPUT, VKN_PCV_BUFFER, VKN_PCV_UBO,
-       VKN_PCV_VERTEX, VKN_PCV_EMPTY, VKN_PCV_GEOMETRY, VKN_PCV_CULLED, VKN_PCV_SMALL, VKN_PCV_AREA_CLEAR, VKN_PCV_3D, VKN_PCV_N };
+       VKN_PCV_VERTEX, VKN_PCV_EMPTY, VKN_PCV_GEOMETRY, VKN_PCV_CULLED, VKN_PCV_SMALL, VKN_PCV_AREA_CLEAR, VKN_PCV_3D,
+       VKN_PCV_HINT /* [B1 + B2] proven, but not for the whole hinted render area */, VKN_PCV_N };
 const char *vkn_pass_cover_name(int why);
 // Why an attachment began without LOAD (counted per attachment): CLEAR of a remembered clear, the cover proof (whole / area), a
 // shared-storage alias (fresh 2), CLEAR to zeros (fresh 1), never written (the stage-3 DONT_CARE).
@@ -131,8 +132,25 @@ typedef struct vkn_pass_stats3 {
     uint64_t violations, would_violations, bans, table_full;
     uint64_t load_bytes, store_bytes, load_saved_bytes, store_saved_bytes, would_bytes, store_would_bytes;   // the model: w x h x texel bytes
     uint64_t tilebar_frag, tilebar_full, tilebar_fix;   // read barriers fragment-only / full; full barriers owed to a later non-fragment read
+    // [B1 + B2] the UI's area hint: hints given; passes begun narrowed by one; hints not applied (empty after the clip, a remembered
+    // CLEAR, a poison mode); narrowed passes ended by vkn_pass_targets of the same set; depth targets marked "never discard the store"
+    // (the same colours seen with and without them) and stores kept for that reason
+    uint64_t hints, hint_passes, hint_empty, hint_clear, hint_poison, area_restart_targets, store_keep_marked, store_keep;
+    uint64_t hint_engine;   // not applied: the pass's first draw is an engine draw that reaches outside the hint
 } vkn_pass_stats3;
 void vkn_pass_stats3_get(vkn_pass_stats3 *s);
+// ==== [stage 5.2 B1 + B2] the render-area hint (the UI pass, vkn_ui.h "the UI pass on tile GPUs", level 2) ====
+// The passes this module opens for the CURRENT target set begin with renderArea = *area (clipped to the attachments) until the set
+// changes, a recording begins, or the next call (NULL = full area again); a hint does not end an open pass. Not applied (full area)
+// when an attachment begins with a remembered CLEAR or under a poison mode (load / store / fresh 3). The caller keeps every draw of
+// the pass inside the area (it ends the pass before one that is not); in-pass clears outside it and vkn_pass_targets() of any caller
+// - the same set included - end a narrowed pass. Combined with the cover proof: DONT_CARE only when the proven rect contains the hinted
+// area (else LOAD, counted as VKN_PCV_HINT); a narrowed pass never discards a store. 0 = stored (-1: empty extent, the hint is dropped).
+// A pass whose first draw is an engine draw (the effect chain saw it) reaching outside the hint begins full (the promise is the UI's).
+// Recording thread (the UI runs there in every DM_VK_NATIVE_RT mode).
+int vkn_pass_area_hint(const VkRect2D *area);
+// 1 + the render area of the pass open in vkn_cb() for the current set; 0 = none open.
+int vkn_pass_area_get(VkRect2D *out);
 
 #ifdef __cplusplus
 }

@@ -243,15 +243,15 @@ static void vkn_pass_census(void) {
         if (p.cover_why[i] != p0.cover_why[i]) n += snprintf(why + n, sizeof why - (size_t)n, "%s%s %.2f", n ? ", " : "", vkn_pass_cover_name(i), D(cover_why[i]));
     vkn_logf("pass policy (%s; LOAD=%d STORE=%d FRESH=%d TILEBAR=%d area %d ubo %d frames %u): a frame over %.0f frames: attachments load %.1f, not loaded %.1f "
              "[clear %.1f, dontcare %.1f = cover %.1f + area %.1f + alias %.1f + never written %.1f, clear to zero %.1f]%s; proofs %.1f: whole %.2f, part %.2f "
-             "(positions copied %.2f, depth too %.2f); refused: %s; area passes %.2f (restarts: draw %.3f, clear %.3f, other draw %.3f); poisoned %.2f, first draw lost %llu; "
-             "stores %.1f: dontcare %.1f, poisoned %.1f, would %.1f, not eligible %.1f, banned %.2f; violations %llu, verify violations %llu, bans %llu, tables full %llu; "
+             "(positions copied %.2f, depth too %.2f); refused: %s; area passes %.2f (restarts: draw %.3f, clear %.3f, other draw %.3f, same targets %.3f); UI hints %.2f -> narrowed passes %.2f (not applied: empty %.3f, clear %.3f, poison %.3f, engine draw outside %.3f); poisoned %.2f, first draw lost %llu; "
+             "stores %.1f: dontcare %.1f, poisoned %.1f, would %.1f, not eligible %.1f, banned %.2f, kept (detached depth) %.2f; violations %llu, verify violations %llu, bans %llu, tables full %llu; "
              "traffic model: load %.1f MB + store %.1f MB a frame, saved load %.1f MB + store %.1f MB%s; tile barriers fragment %.1f, full %.1f, owed full %.2f",
              vkn_policy_family_name(fam), pol.load, pol.store, pol.fresh, pol.tilebar, pol.area, pol.ubo, (unsigned)pol.store_frames, f, D(att_load), nl,
              D(att_nload[VKN_PDC_CLEAR]), dc_rule, D(att_nload[VKN_PDC_COVER]), D(att_nload[VKN_PDC_AREA]), D(att_nload[VKN_PDC_ALIAS]), D(att_nload[VKN_PDC_NEVER]),
              D(att_nload[VKN_PDC_ZERO]), pol.load == 2 ? " (verify: the proof would begin more DONT_CARE, below)" : "", D(cover_tried), D(cover_why[VKN_PCV_FULL]),
              D(cover_why[VKN_PCV_AREA]), D(cover_exact), D(cover_depth), n ? why : "none", D(area_passes), D(area_restart_draw), D(area_restart_clear),
-             D(area_restart_other), D(poison_load), (unsigned long long)p.cover_lost, D(att_store), D(store_dc), D(store_poison), D(store_would), D(store_noelig),
-             D(store_banned), (unsigned long long)p.violations, (unsigned long long)p.would_violations, (unsigned long long)p.bans, (unsigned long long)p.table_full,
+             D(area_restart_other), D(area_restart_targets), D(hints), D(hint_passes), D(hint_empty), D(hint_clear), D(hint_poison), D(hint_engine), D(poison_load), (unsigned long long)p.cover_lost, D(att_store), D(store_dc), D(store_poison), D(store_would), D(store_noelig),
+             D(store_banned), D(store_keep), (unsigned long long)p.violations, (unsigned long long)p.would_violations, (unsigned long long)p.bans, (unsigned long long)p.table_full,
              D(load_bytes) / mb, D(store_bytes) / mb, D(load_saved_bytes) / mb, D(store_saved_bytes) / mb, "", D(tilebar_frag), D(tilebar_full), D(tilebar_fix));
     if (pol.load == 2 || pol.store == 2)
         vkn_logf("pass policy verify: the proof would begin %.1f attachments a frame DONT_CARE (%.1f MB of load); the history would discard %.1f stores (%.1f MB)",

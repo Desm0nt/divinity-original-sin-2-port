@@ -298,6 +298,8 @@ typedef struct ffacts {
 static ffacts g_ff;
 static int g_frag_only;                       // tile barrier: the draw being prepared samples in the fragment stage only
 static int g_area_on, g_area_ok;              // the open pass is an area pass / pass_fx found the draw inside it
+static int g_area_src;                        // [B1 + B2] where its area came from: 1 the cover proof, 2 the UI's hint (vkn_pass_area_hint)
+static int g_hint_on; static VkRect2D g_hint; // [B1 + B2] the hint for the passes of the current target set
 static uint32_t g_open_poison, g_open_dpoison; // store poison of the open pass: colour slot bits / depth (mode 3)
 static uint32_t g_cov_chk; static uint64_t g_cov_draws;   // a pass begun DONT_CARE by a rule: its first draw must be recorded
 static vkn_pass_stats3 g_s3;
@@ -307,7 +309,7 @@ static const char *const k_cv_name[VKN_PCV_N] = {"whole target", "part of the ta
     "no position program", "fragment output missing for a slot", "blending", "write mask short of the format", "depth / stencil test",
     "raster discard / not filled", "primitive / count", "vertex format / stream", "vertex / index bytes", "uniform block", "w != 1 or z outside [0,1]",
     "no pixel in viewport and scissor", "geometry does not cover", "covered but culled", "part too small to pay / area off", "part with a clear / zero target",
-    "3D target"};
+    "3D target", "proof narrower than the hinted area"};
 const char *vkn_pass_cover_name(int why) { return why >= 0 && why < VKN_PCV_N ? k_cv_name[why] : "?"; }
 
 // ---- the shader facts of the proof: the shader library's (weak; absent in host tests unless they install a stand-in) ----
@@ -388,7 +390,7 @@ static int single_sub(const vkn_tex *t) { return t->mips == 1 && t->layers == 1 
 // ---- per-texture records (store history, tile-barrier visibility) and per-key history: open addressing, recording thread ----
 enum { ST_N = 1024, SK_N = 4096, ID_N = 256, PROBE = 32 };
 enum { HS_NONE = 0, HS_PENDING, HS_DEAD, HS_VDEAD };
-typedef struct st_ent { const vkn_tex *t; VkImage img; uint64_t key; uint32_t frame; uint8_t state, banned, fragvis, live; } st_ent;
+typedef struct st_ent { const vkn_tex *t; VkImage img; uint64_t key; uint32_t frame; uint8_t state, banned, fragvis, live, keep; } st_ent;   // keep: never discard (a detached depth)
 typedef struct sk_ent { uint64_t key; uint32_t frame, inc; uint8_t streak, banned, live, pad; } sk_ent;   // frame: last use; inc: frame + 1 of the last streak step
 typedef struct id_ent { uint64_t block, off; const vkn_tex *writer; } id_ent;
 static st_ent g_st_tab[ST_N]; static sk_ent g_sk_tab[SK_N]; static id_ent g_id_tab[ID_N];
@@ -409,7 +411,7 @@ static st_ent *st_get(const vkn_tex *t, int create) {
         if (!e->live) { if (!free_e) free_e = e; }
         // unused for 600 frames: reusable - also a plain pending store (its key only misses one step); never a discarded one (a late
         // read must still be caught), a ban, or a fragment-only visibility
-        else if (!e->banned && (e->state == HS_NONE || e->state == HS_PENDING) && !e->fragvis && frame32() - e->frame > 600 && !old) old = e;
+        else if (!e->banned && !e->keep && (e->state == HS_NONE || e->state == HS_PENDING) && !e->fragvis && frame32() - e->frame > 600 && !old) old = e;
     }
     if (!create) return NULL;
     st_ent *e = free_e ? free_e : old;
@@ -493,6 +495,7 @@ static VkAttachmentStoreOp store_decide(vkn_tex *t, uint32_t slot, int area, int
     st_ent *e = st_get(t, 1); const uint64_t key = mix64(g_prefix, slot + 1);
     sk_ent *k = sk_get(key, 1);
     if (!e || !k) { g_s3.store_bytes += bytes; return VK_ATTACHMENT_STORE_OP_STORE; }
+    if (e->keep) { g_s3.store_keep++; g_s3.store_bytes += bytes; e->key = key; e->frame = frame32(); e->state = HS_PENDING; return VK_ATTACHMENT_STORE_OP_STORE; }
     k->frame = frame32(); e->key = key; e->frame = frame32();
     const int may = !k->banned && !e->banned && k->streak >= g_pol.cur.store_frames && !g_dump.active && !area;
     if (!may) { e->state = HS_PENDING; g_s3.store_bytes += bytes; if (k->banned || e->banned) g_s3.store_banned++; return VK_ATTACHMENT_STORE_OP_STORE; }
@@ -696,10 +699,10 @@ static void b1_pass_closing(void) {
         }
     }
 }
-static void b1_pass_closed(void) { g_area_on = 0; g_area_ok = 0; g_open_poison = g_open_dpoison = 0; g_cov_chk = 0; }
+static void b1_pass_closed(void) { g_area_on = 0; g_area_ok = 0; g_area_src = 0; g_open_poison = g_open_dpoison = 0; g_cov_chk = 0; }
 // (a recording begin: the host's request is applied here, outside every draw - registering the effect function inside a running chain
 // would move the entries vkn_fx_run is walking)
-static void b1_rec_begin(void) { pol_resolve(); b1_pass_closed(); disarm(); g_prefix = mix64(0x51, vkn_rec_presented() ? 1 : 2); }
+static void b1_rec_begin(void) { pol_resolve(); b1_pass_closed(); disarm(); g_hint_on = 0; g_prefix = mix64(0x51, vkn_rec_presented() ? 1 : 2); }
 // tile barrier bookkeeping: t got a full barrier (barrier()): no fragment-only visibility left
 static void b1_on_barrier(vkn_tex *t) {
     if (!g_fragvis_n) return;
@@ -836,8 +839,41 @@ static int begin_set(const tset *s) {
     // [B1] the cover proof of the first draw (its facts are used once)
     cover_res cr; memset(&cr, 0, sizeof cr); int cw = -1;
     if (g_pol.cur.load) { cw = cover_why(s, W, H, samples ? samples : 1, &cr); g_s3.cover_tried++; }
+    // (an engine draw begins this pass: the effect chain saw it - its rect, for the hint below)
+    const int eng = g_ff.armed && same_set(&g_ff.set, s) && g_ff.stamp == draw_stamp();
+    const nb_ua_rect er = eng ? draw_rect(g_ff.vp, g_ff.sc, g_ff.prim_in, W, H) : nb_ua_none();
     g_ff.armed = 0;
-    if (cw == VKN_PCV_AREA) {   // a part: render area + DONT_CARE, only when it pays and nothing of the pass begins with a clear
+    // [B1 + B2] the render area has two sources. The UI's hint H (vkn_pass_area_hint, vkn_ui.c level 2: every draw of the pass stays
+    // inside H - the UI ends the pass before one that does not - with LOAD / STORE semantics: the texels outside H are kept) and the
+    // cover proof's rect P (the first draw writes every texel of P; outside P it writes nothing). They are not intersected: a pass begins
+    //   with H when hinted - clipped to the attachments; full instead when an attachment begins with a remembered CLEAR (a CLEAR clears
+    //     only the area) or under a poison mode - and its attachments begin DONT_CARE only when P contains H (proof for the whole area);
+    //   else with P when the proof covers a part of the target (the cover rules: it pays, nothing begins with a clear, no never-written
+    //     attachment);
+    //   else full.
+    // In a narrowed pass a never-written attachment takes the zero fill (all of it zero) instead of the CLEAR to zeros (the area only),
+    // and its stores are never discarded (the history only knows whole overwrites).
+    int hinted = 0; VkRect2D hint = {{0, 0}, {W, H}};
+    if (g_hint_on && s == &g_cur) {
+        int64_t x0 = g_hint.offset.x, y0 = g_hint.offset.y, x1 = x0 + g_hint.extent.width, y1 = y0 + g_hint.extent.height;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int64_t)W) x1 = W;
+        if (y1 > (int64_t)H) y1 = H;
+        int clr = 0;
+        for (uint32_t i = 0; i < s->n; i++) if (s->c[i]) clr |= s->mip[i] == 0 && clr_find(s->c[i], s->layer[i], NULL, 0);
+        if (s->d) clr |= (s->d->pass_dclr & 3) != 0;
+        const nb_ua_rect hr = {(int32_t)x0, (int32_t)y0, (int32_t)x1, (int32_t)y1};
+        if (x1 <= x0 || y1 <= y0) g_s3.hint_empty++;
+        else if (eng && !nb_ua_contains(hr, er)) g_s3.hint_engine++;   // the hint speaks for the UI's draws: an engine draw outside it gets the full area
+        else if (clr) g_s3.hint_clear++;
+        else if (g_pol.cur.load == 3 || g_pol.cur.store == 3 || g_pol.cur.fresh == 3) g_s3.hint_poison++;
+        else { hinted = 1; hint.offset.x = (int32_t)x0; hint.offset.y = (int32_t)y0; hint.extent.width = (uint32_t)(x1 - x0); hint.extent.height = (uint32_t)(y1 - y0); }
+    }
+    if (hinted && (cw == VKN_PCV_FULL || cw == VKN_PCV_AREA) &&
+        !(cr.r.x0 <= hint.offset.x && cr.r.y0 <= hint.offset.y && cr.r.x1 >= hint.offset.x + (int32_t)hint.extent.width && cr.r.y1 >= hint.offset.y + (int32_t)hint.extent.height))
+        cw = VKN_PCV_HINT;   // the proof does not cover the hinted area: LOAD
+    if (cw == VKN_PCV_AREA && !hinted) {   // a part: render area + DONT_CARE, only when it pays and nothing of the pass begins with a clear
         const uint64_t px = (uint64_t)(cr.r.x1 - cr.r.x0) * (uint64_t)(cr.r.y1 - cr.r.y0), full = (uint64_t)W * H;
         int clr = 0;
         for (uint32_t i = 0; i < s->n; i++) if (s->c[i]) clr |= (s->mip[i] == 0 && clr_find(s->c[i], s->layer[i], NULL, 0)) || !has_content(s->c[i]);
@@ -847,8 +883,8 @@ static int begin_set(const tset *s) {
     }
     if (cw >= 0) { g_s3.cover_why[cw]++; if ((cw == VKN_PCV_FULL || cw == VKN_PCV_AREA) && cr.exact) g_s3.cover_exact++; }
     const int proven = cw == VKN_PCV_FULL || cw == VKN_PCV_AREA, apply = g_pol.cur.load == 1 || g_pol.cur.load == 3;
-    VkRect2D area = {{0, 0}, {W, H}};
-    if (cw == VKN_PCV_AREA && apply) { area.offset.x = cr.r.x0; area.offset.y = cr.r.y0; area.extent.width = (uint32_t)(cr.r.x1 - cr.r.x0); area.extent.height = (uint32_t)(cr.r.y1 - cr.r.y0); }
+    VkRect2D area = hinted ? hint : (VkRect2D){{0, 0}, {W, H}};
+    if (cw == VKN_PCV_AREA && apply && !hinted) { area.offset.x = cr.r.x0; area.offset.y = cr.r.y0; area.extent.width = (uint32_t)(cr.r.x1 - cr.r.x0); area.extent.height = (uint32_t)(cr.r.y1 - cr.r.y0); }
     const int is_area = area.extent.width != W || area.extent.height != H;
     const uint32_t AW = area.extent.width, AH = area.extent.height;
     // [B1] the store-history key of this pass: the chain of the recording's target sets so far
@@ -863,7 +899,7 @@ static int begin_set(const tset *s) {
         float rgba[4]; const uint64_t bytes = att_bytes(t, AW, AH);
         if (s->mip[i] == 0 && clr_find(t, s->layer[i], rgba, 0)) { k.load[i] = VK_ATTACHMENT_LOAD_OP_CLEAR; cv[nv].color = clear_color(t->format, rgba); g_st.clear++; g_st.clears_folded++; g_s3.att_nload[VKN_PDC_CLEAR]++; hist_over(t); }
         else if (proven && apply) {   // the first draw overwrites every component of every pixel of the (proven) area
-            if (!has_content(t) && !single_sub(t)) zero_fill(cb, t);   // (the other levels / layers of a never-written target: zeros, V3_b)
+            if (!has_content(t) && (!single_sub(t) || is_area)) zero_fill(cb, t);   // (the texels it does not write: zeros, V3_b)
             k.load[i] = VK_ATTACHMENT_LOAD_OP_DONT_CARE; g_st.dontcare++; g_s3.att_nload[is_area ? VKN_PDC_AREA : VKN_PDC_COVER]++; g_s3.load_saved_bytes += bytes; chk = 1;
             if (g_pol.cur.load == 3) poison_cov |= 1u << i;
             if (is_area) hist_read(t, RD_LOAD); else hist_over(t);   // (an area pass keeps the old texels outside it)
@@ -872,14 +908,14 @@ static int begin_set(const tset *s) {
             if (g_pol.cur.fresh >= 2 && alias_clobbered(t)) {   // its shared storage holds another image's bytes now (NR-10 "fresh")
                 k.load[i] = VK_ATTACHMENT_LOAD_OP_DONT_CARE; g_st.dontcare++; g_s3.att_nload[VKN_PDC_ALIAS]++; g_s3.load_saved_bytes += bytes; chk = 1;
                 if (g_pol.cur.fresh == 3) poison_alias |= 1u << i;
-                hist_over(t);
+                if (is_area) hist_read(t, RD_LOAD); else hist_over(t);
             } else {
                 k.load[i] = VK_ATTACHMENT_LOAD_OP_LOAD; g_st.load++; if (t->pass_written != vkn_frame() + 1) g_st2.load_stale++;
                 g_s3.att_load++; g_s3.load_bytes += bytes; if (proven) { g_s3.would_dc++; g_s3.would_bytes += bytes; }
                 hist_read(t, RD_LOAD);
             }
         }
-        else if (g_pol.cur.fresh >= 1 && fresh_clear_ok(t)) {   // never written: zeros, as fresh memory on the Switch - by the load op
+        else if (g_pol.cur.fresh >= 1 && fresh_clear_ok(t) && !is_area) {   // never written: zeros, as fresh memory on the Switch - by the load op
             k.load[i] = VK_ATTACHMENT_LOAD_OP_CLEAR; memset(&cv[nv].color, 0, sizeof cv[nv].color); g_st.clear++; g_s3.att_nload[VKN_PDC_ZERO]++; g_s3.load_saved_bytes += bytes;
             g_st2.sampled_undefined++;
             if (red_ok(&g_red_zclr)) vkn_logf("pass: target %#llx (%ux%u, format %d, class %u) loaded before it was ever written: its pass begins with a clear to zeros", (unsigned long long)t->handle, t->w, t->h, (int)t->format, t->cls);
@@ -898,7 +934,7 @@ static int begin_set(const tset *s) {
         vkn_tex *t = s->d; const uint64_t bytes = att_bytes(t, AW, AH);
         int zclr = 0;
         if (!has_content(t) && (t->pass_dclr & 3) != 3) {   // an aspect that is neither cleared nor ever written: zeros
-            if (g_pol.cur.fresh >= 1 && fresh_clear_ok(t)) zclr = 1; else zero_fill(cb, t);
+            if (g_pol.cur.fresh >= 1 && fresh_clear_ok(t) && !is_area) zclr = 1; else zero_fill(cb, t);
         }
         const int hd = (t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0, hs = (t->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, content = has_content(t);
         k.depth = (uint32_t)t->format;
@@ -918,10 +954,11 @@ static int begin_set(const tset *s) {
             g_st.clear++; if (t->pass_dclr & 3) g_st.clears_folded++;
             g_s3.att_nload[zclr && !(t->pass_dclr & 3) ? VKN_PDC_ZERO : VKN_PDC_CLEAR]++;
             if (zclr) { g_st2.sampled_undefined++; if (red_ok(&g_red_zclr)) vkn_logf("pass: depth target %#llx (%ux%u, format %d) loaded before it was ever written: its pass begins with a clear to zeros", (unsigned long long)t->handle, t->w, t->h, (int)t->format); }
-            if (k.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || k.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD) { g_s3.load_bytes += bytes; g_s3.att_load++; }
+            if ((hd && k.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD) || (hs && k.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD)) { g_s3.load_bytes += bytes; g_s3.att_load++; }
         } else if (content) { g_st.load++; if (t->pass_written != vkn_frame() + 1) g_st2.load_stale++; g_s3.att_load++; g_s3.load_bytes += bytes; }
         else { g_st.dontcare++; g_s3.att_nload[VKN_PDC_NEVER]++; }
-        if (k.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || k.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD || (why >= 0 && is_area)) hist_read(t, RD_LOAD); else hist_over(t);
+        // (an aspect the format lacks loads nothing: vkn_state.c makes its ops DONT_CARE)
+        if ((hd && k.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD) || (hs && k.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD) || (why >= 0 && is_area)) hist_read(t, RD_LOAD); else hist_over(t);
         int sp = 0; k.depth_store = k.stencil_store = (uint8_t)store_decide(t, VKN_PASS_COLORS, is_area, &sp, AW, AH); dspoison = sp;
         if (t->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) barrier(cb, t, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         inf.has_depth = (uint8_t)hd; inf.has_stencil = (uint8_t)hs; inf.depth_format = t->format;
@@ -942,10 +979,10 @@ static int begin_set(const tset *s) {
     g_open = 1; g_open_cb = cb; g_open_serial = vkn_cb_serial(); g_open_set = *s;
     g_area = bi.renderArea;
     // [B1] poison of what a rule began DONT_CARE (the first draw must paint the proven rect over; an alias's readers show magenta)
-    if (poison_cov || dpoison_cov) poison_now(poison_cov, dpoison_cov, s, cw == VKN_PCV_AREA ? area : (VkRect2D){{cr.r.x0, cr.r.y0}, {(uint32_t)(cr.r.x1 - cr.r.x0), (uint32_t)(cr.r.y1 - cr.r.y0)}}, &g_s3.poison_load);
+    if (poison_cov || dpoison_cov) poison_now(poison_cov, dpoison_cov, s, cw == VKN_PCV_AREA || hinted ? area : (VkRect2D){{cr.r.x0, cr.r.y0}, {(uint32_t)(cr.r.x1 - cr.r.x0), (uint32_t)(cr.r.y1 - cr.r.y0)}}, &g_s3.poison_load);
     if (poison_alias || dpoison_alias) poison_now(poison_alias, dpoison_alias, s, area, &g_s3.poison_load);
-    g_area_on = is_area; g_area_ok = 0; g_open_poison = spoison; g_open_dpoison = (uint32_t)dspoison;
-    if (is_area) g_s3.area_passes++;
+    g_area_on = is_area; g_area_ok = 0; g_area_src = !is_area ? 0 : hinted ? 2 : 1; g_open_poison = spoison; g_open_dpoison = (uint32_t)dspoison;
+    if (is_area) { if (hinted) g_s3.hint_passes++; else g_s3.area_passes++; }
     g_cov_chk = (uint32_t)chk; if (chk) { vkn_draw_stats ds; vkn_draw_stats_get(&ds); g_cov_draws = ds.draws; }
     // the remembered clears this pass performs leave the records only now (a pass that failed above keeps them)
     for (uint32_t i = 0; i < s->n; i++) if (s->c[i] && k.load[i] == VK_ATTACHMENT_LOAD_OP_CLEAR) clr_find(s->c[i], s->layer[i], NULL, 1);
@@ -972,8 +1009,22 @@ void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const u
         if (s.c[i]) { s.layer[i] = layer ? layer[i] : 0; s.mip[i] = mip ? mip[i] : 0; }
     }
     s.d = depth;
-    if (same_set(&s, &g_cur)) return;   // the open pass (if any) stays open
+    if (same_set(&s, &g_cur)) {   // the open pass (if any) stays open - unless it is narrowed ([B1 + B2]: the caller may draw anywhere next)
+        if (g_open && g_area_on) { end_open(); g_s3.area_restart_targets++; }
+        return;
+    }
     end_open();
+    g_hint_on = 0;   // [B1 + B2] a hint belongs to the set it was given for
+    // [B1 + B2] the same colours with and without a depth target (the UI's depth-stencil detach, vkn_ui.c level 1): the depth's content
+    // must survive the detached passes for a later re-attach with LOAD, whatever the history saw before - its store is never discarded
+    if (g_pol.cur.store && s.d != g_cur.d && s.n == g_cur.n) {
+        int same_c = 1;
+        for (uint32_t i = 0; i < s.n && same_c; i++) same_c = s.c[i] == g_cur.c[i] && (!s.c[i] || (s.layer[i] == g_cur.layer[i] && s.mip[i] == g_cur.mip[i]));
+        for (int j = 0; j < 2 && same_c && s.n; j++) {
+            vkn_tex *d = j ? g_cur.d : s.d; st_ent *e = d ? st_get(d, 1) : NULL;
+            if (e && !e->keep) { e->keep = 1; g_s3.store_keep_marked++; }
+        }
+    }
     // references: the new set first (a texture without any reference left is on its way out: its slot stays empty)
     for (uint32_t i = 0; i <= s.n; i++) {
         vkn_tex **p = i < s.n ? &s.c[i] : &s.d;
@@ -985,6 +1036,19 @@ void vkn_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const u
 }
 
 vkn_tex *vkn_pass_depth(void) { return g_cur.d; }
+// ==== [stage 5.2 B1 + B2] the render-area hint of the UI piece (vkn_pass.h; the combination rule is in begin_set) ====
+int vkn_pass_area_hint(const VkRect2D *area) {
+    vkn_pass_init();
+    if (!area) { g_hint_on = 0; return 0; }
+    if (!area->extent.width || !area->extent.height) { g_hint_on = 0; return -1; }
+    g_hint = *area; g_hint_on = 1; g_s3.hints++;
+    return 0;
+}
+int vkn_pass_area_get(VkRect2D *out) {
+    if (!(g_open && open_here() && same_set(&g_open_set, &g_cur))) return 0;
+    if (out) *out = g_area;
+    return 1;
+}
 
 int vkn_pass_ready(vkn_pass_info *info) {
     vkn_pass_init();
@@ -992,7 +1056,8 @@ int vkn_pass_ready(vkn_pass_info *info) {
     if (open_here() && same_set(&g_open_set, &g_cur)) {
         // [stage 5.2 B1] an area pass serves only draws the effect chain saw inside it (pass_fx); any other draw (the UI, a piece's
         // own, one whose facts went stale) ends it, and it begins again full with LOAD
-        if (!g_area_on || g_area_ok) { g_area_ok = 0; disarm(); if (info) *info = g_info; return 0; }
+        // ([B1 + B2] a hinted pass: the UI keeps its draws inside the area itself; engine draws pass pass_fx's check)
+        if (!g_area_on || g_area_ok || g_area_src == 2) { g_area_ok = 0; disarm(); if (info) *info = g_info; return 0; }
         end_open(); g_s3.area_restart_other++;
     }
     g_area_ok = 0;
@@ -1077,7 +1142,7 @@ void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const
     const int full = x0 == 0 && y0 == 0 && x1 == (int32_t)t->w && y1 == (int32_t)t->h;
     int slot = open_here() ? color_slot(&g_open_set, t, 0, layer) : -1;
     if (slot >= 0 && g_area_on && (x0 < g_area.offset.x || y0 < g_area.offset.y || x1 > g_area.offset.x + (int32_t)g_area.extent.width ||
-                                   y1 > g_area.offset.y + (int32_t)g_area.extent.height)) { end_open(); slot = -1; g_s3.area_restart_clear++; }   // [stage 5.2 B1] outside the area
+                                   y1 > g_area.offset.y + (int32_t)g_area.extent.height)) { end_open(); slot = -1; g_s3.area_restart_clear++; g_hint_on = 0; }   // [stage 5.2 B1] outside the area (a hint is dropped: its promise is broken, the UI drops it too)
     if (slot < 0 && !full && color_slot(&g_cur, t, 0, layer) >= 0 && vkn_cb()) {   // a region of a current target: its pass serves
         if (!vkn_pass_ready(NULL)) slot = color_slot(&g_open_set, t, 0, layer);
     }

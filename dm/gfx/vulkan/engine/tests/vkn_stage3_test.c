@@ -3115,6 +3115,10 @@ int main(void) {
 //            the pass ends; a shared-storage target is never discarded;
 //   tilebar  a fragment-only draw's read barrier waits in the fragment stages; a later compute read of the same texture gets a full
 //            barrier first.
+//   area     [B1 + B2] the UI's hint (vkn_pass_area_hint / _get): a narrowed LOAD pass, kept for the UI's next draw; clears inside / outside;
+//            engine draws (outside: full; inside: DONT_CARE only when the proof covers the hint); clear / poison = full; same-set
+//            targets end it, another set / NULL / a recording drop it; never-written = zero fill; a detached depth and narrowed
+//            passes never discard a store, the same depth pattern attached does.
 #include "../../../vkn/vkn_policy.h"
 #include "../../../nr/nr_cover.h"
 static nr_cv_prog g_b1_prog; static int g_b1_noprog; static uint32_t g_b1_out = 1, g_b1_ff;
@@ -3339,6 +3343,98 @@ static void b1_child(a5_res *r) {
         vkn_pass_stats3_get(&c); CHECK_EQ(c.tilebar_fix - a.tilebar_fix, 1);
         m = mark(); CHECK_EQ(vkn_draw_dispatch(&ci, &ib1, 1, 1, 1, 1), 0); CHECK(barrier_of(m, R->image, 0) == NULL);   // once
         fsubmit(0);
+    }
+    // ---- [B1 + B2] the UI's render-area hint (vkn_pass_area_hint / _get) and how it combines with the proof
+    {
+        b1_pol(1, 0, 1, 0);
+        const int LD = VK_ATTACHMENT_LOAD_OP_LOAD, DC = VK_ATTACHMENT_LOAD_OP_DONT_CARE, CL = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        const VkRect2D H32 = {{0, 0}, {32, 32}}; const float k0[4] = {0, 0, 0, 0}; VkRect2D a; const mk_ev *b = NULL; uint64_t m;
+        vkn_pass_stats3 a3, c3; vkn_pass_stats3_get(&a3);
+        cb = fbegin(1);
+        g_b1 = b1_base(); b1_verts(k_b1_full, 3);
+        targets(g_a2, NULL, NULL); vkn_pass_end();
+        CHECK_EQ(vkn_pass_area_get(&a), 0);
+        CHECK_EQ(vkn_pass_area_hint(&H32), 0);
+        m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); b = nth(m, cb, MK_E_BEGIN_RP, 0);   // a UI draw (not through the chain): narrowed, LOAD
+        CHECK(b && b->rect.extent.width == 32 && b->rect.extent.height == 32); CHECK_EQ(b1_load0(b), LD);
+        CHECK_EQ(vkn_pass_area_get(&a), 1); CHECK(a.offset.x == 0 && a.extent.width == 32 && a.extent.height == 32);
+        m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 0);   // the UI's next draw: the same pass
+        m = mark(); vkn_pass_clear_color(g_a2, 0, k0, (const int32_t[4]){8, 8, 8, 8}); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 0); CHECK_EQ(cnt(m, cb, MK_E_CLEAR_ATT), 1);
+        m = mark(); vkn_pass_clear_color(g_a2, 0, k0, (const int32_t[4]){40, 0, 8, 8}); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 1);   // outside: ends it, drops the hint
+        { const mk_ev *ca = nth(m, cb, MK_E_CLEAR_ATT, 0); CHECK(ca && ca->cr[0].rect.offset.x == 40 && ca->cr[0].rect.extent.width == 8); }
+        CHECK_EQ(vkn_pass_area_get(&a), 1); CHECK_EQ(a.extent.width, 64);   // (the region clear reopened the pass full)
+        CHECK_EQ(vkn_pass_area_hint(&H32), 0);
+        // an engine draw over everything begins the pass full (the hint speaks for the UI); one inside it narrowed: DONT_CARE when the
+        // proof covers the whole hinted area, LOAD (counted "proof narrower than the hinted area") when it does not
+        vkn_pass_end(); CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK(b && b->rect.extent.width == 64); CHECK_EQ(b1_load0(b), DC);
+        g_b1.viewport[2] = 32; g_b1.scissor[2] = 32;
+        vkn_pass_end(); CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_AREA); CHECK(b && b->rect.extent.width == 32); CHECK_EQ(b1_load0(b), DC);
+        g_b1.viewport[2] = 16; g_b1.viewport[3] = 16; g_b1.scissor[2] = 16; g_b1.scissor[3] = 16;
+        vkn_pass_end(); CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_HINT); CHECK(b && b->rect.extent.width == 32); CHECK_EQ(b1_load0(b), LD);
+        vkn_draw_in o = b1_base();   // an engine draw outside the open narrowed pass: it ends, the next one is full
+        m = mark(); CHECK_EQ(b1_draw(&o, 3, &b), VKN_PCV_FULL); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 1); CHECK(b && b->rect.extent.width == 64);
+        g_b1 = b1_base();
+        // a remembered clear / a poison mode: full area
+        vkn_pass_end(); vkn_pass_clear_color(g_a2, 0, k0, NULL);
+        m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); b = nth(m, cb, MK_E_BEGIN_RP, 0); CHECK(b && b->rect.extent.width == 64); CHECK_EQ(b1_load0(b), CL);
+        b1_pol(3, 0, 1, 0); vkn_pass_end();
+        m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); b = nth(m, cb, MK_E_BEGIN_RP, 0); CHECK(b && b->rect.extent.width == 64);
+        b1_pol(1, 0, 1, 0);
+        // vkn_pass_targets of the same set ends a narrowed pass (the hint stays); another set drops the hint
+        vkn_pass_end(); CHECK_EQ(vkn_pass_ready(NULL), 0); CHECK_EQ(vkn_pass_area_get(&a), 1); CHECK_EQ(a.extent.width, 32);
+        m = mark(); targets(g_a2, NULL, NULL); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 1); CHECK_EQ(vkn_pass_area_get(&a), 0);
+        CHECK_EQ(vkn_pass_ready(NULL), 0); CHECK_EQ(vkn_pass_area_get(&a), 1); CHECK_EQ(a.extent.width, 32);
+        targets(g_b2, NULL, NULL); targets(g_a2, NULL, NULL); CHECK_EQ(vkn_pass_ready(NULL), 0); CHECK_EQ(vkn_pass_area_get(&a), 1); CHECK_EQ(a.extent.width, 64);
+        // NULL drops it; a recording begin drops it
+        CHECK_EQ(vkn_pass_area_hint(&H32), 0); CHECK_EQ(vkn_pass_area_hint(NULL), 0); vkn_pass_end(); CHECK_EQ(vkn_pass_ready(NULL), 0); vkn_pass_area_get(&a); CHECK_EQ(a.extent.width, 64);
+        CHECK_EQ(vkn_pass_area_hint(&H32), 0); vkn_pass_end(); fsubmit(0); cb = fbegin(1);
+        CHECK_EQ(vkn_pass_ready(NULL), 0); vkn_pass_area_get(&a); CHECK_EQ(a.extent.width, 64);
+        // a never-written target in a narrowed pass: the zero fill of all of it + LOAD (not the CLEAR to zeros of the area only)
+        vkn_tex *N = mktex(730, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 730, 0); CHECK(N != NULL);
+        if (N) {
+            targets(N, NULL, NULL); CHECK_EQ(vkn_pass_area_hint(&H32), 0);
+            m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); b = nth(m, cb, MK_E_BEGIN_RP, 0);
+            CHECK(b && b->rect.extent.width == 32); CHECK_EQ(b1_load0(b), LD); CHECK_EQ(clears_of(m, N->image), 1);
+        }
+        vkn_pass_stats3_get(&c3);
+        CHECK(c3.hints - a3.hints >= 5); CHECK(c3.hint_passes - a3.hint_passes >= 6); CHECK_EQ(c3.hint_clear - a3.hint_clear, 1); CHECK_EQ(c3.hint_poison - a3.hint_poison, 1);
+        CHECK(c3.hint_engine - a3.hint_engine >= 2); CHECK_EQ(c3.cover_why[VKN_PCV_HINT] - a3.cover_why[VKN_PCV_HINT], 1); CHECK_EQ(c3.area_restart_targets - a3.area_restart_targets, 1);
+        vkn_pass_area_hint(NULL); vkn_pass_end(); fsubmit(0);
+        // ---- store history with narrowed passes and a detached depth: never discarded; the same pattern attached: discarded
+        b1_pol(1, 1, 1, 0);
+        vkn_tex *SC = mktex(731, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 731, 0), *SD = mktex(732, EF_D32F, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 732, 0);
+        vkn_tex *SC2 = mktex(733, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 733, 0), *SD2 = mktex(734, EF_D32F, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 734, 0);
+        vkn_tex *SN = mktex(735, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 735, 0);
+        CHECK(SC && SD && SC2 && SD2 && SN);
+        if (SC && SD && SC2 && SD2 && SN) {
+            int sd[7], sd2[7]; vkn_pass_stats3_get(&a3);
+            for (int f = 0; f < 7; f++) {
+                cb = fbegin(1);
+                targets(SC, NULL, SD); vkn_pass_clear_depth(SD, 1, 1.0f, 0);
+                m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); sd[f] = b1_store(nth(m, cb, MK_E_BEGIN_RP, 0), 1);
+                targets(SC, NULL, NULL); CHECK_EQ(vkn_pass_ready(NULL), 0);                       // detached: the same colour without the depth
+                targets(SC2, NULL, SD2); vkn_pass_clear_depth(SD2, 1, 1.0f, 0);
+                m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); sd2[f] = b1_store(nth(m, cb, MK_E_BEGIN_RP, 0), 1);
+                targets(g_b2, NULL, NULL); CHECK_EQ(vkn_pass_ready(NULL), 0);
+                fsubmit(0);
+            }
+            vkn_pass_stats3_get(&c3);
+            for (int f = 0; f < 7; f++) CHECK_EQ(sd[f], VK_ATTACHMENT_STORE_OP_STORE);
+            for (int f = 0; f < 3; f++) CHECK_EQ(sd2[f], VK_ATTACHMENT_STORE_OP_STORE);
+            for (int f = 3; f < 7; f++) CHECK_EQ(sd2[f], VK_ATTACHMENT_STORE_OP_DONT_CARE);
+            CHECK_EQ(c3.store_keep_marked - a3.store_keep_marked, 1); CHECK(c3.store_keep - a3.store_keep >= 6);
+            // SN in a narrowed pass every frame (never written first: the zero fill; then LOAD - a read): never discarded
+            int sh[5];
+            for (int f = 0; f < 5; f++) {
+                cb = fbegin(1);
+                targets(SN, NULL, NULL); CHECK_EQ(vkn_pass_area_hint(&H32), 0);
+                m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); const mk_ev *bb = nth(m, cb, MK_E_BEGIN_RP, 0);
+                CHECK(bb && bb->rect.extent.width == 32); sh[f] = b1_store(bb, 0);
+                vkn_pass_area_hint(NULL); vkn_pass_end(); fsubmit(0);
+            }
+            for (int f = 0; f < 5; f++) CHECK_EQ(sh[f], VK_ATTACHMENT_STORE_OP_STORE);
+        }
+        b1_pol(0, 0, 1, 0);
     }
     // ---- the family rule of vkn_policy.h (the shader library's xbg_gpu_family + xbg_effective_family)
     CHECK_EQ(vkn_policy_family_from(0x5143, "Adreno (TM) 750", NULL), VKN_FAM_ADRENO);

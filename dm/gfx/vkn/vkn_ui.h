@@ -71,6 +71,54 @@ typedef struct vkn_ui_stats {
 } vkn_ui_stats;
 void vkn_ui_stats_get(vkn_ui_stats *s);
 
+// ==== [stage 5.2 B2] the UI pass on tile GPUs (DM_VK_NATIVE_UIPASS; replaces DM_NR_UIX_DS / DM_NR_UIX_AREA of the old path) ====
+// Port of NB-18b-6 + NR-UIX (xbg_nb_uiarea.inc, xbg_nr_uix.inc, docs/dos2/nr/NR-UIX.md) with their pure parts as they are
+// (dm/gfx/nb/nb_uiarea.h rects / seed / history, dm/gfx/nr/nr_uix.h ordinal keys / decay). The unit is an "epoch": one GDraw target
+// set from vkn_ui_targets to the next different one (or the next recording, or a fence); its first pass-opening event (a draw, a
+// region clear, a depth-stencil clear) takes the decisions, before vkn_pass_ready opens anything:
+//   depth-stencil detach (level 1): GDraw gives every target its UI depth-stencil (+0xb8), the filter ping-pong targets too, but only
+//     clip-mask draws (stencil) and depth-tested draws use it. The epoch is drawn into (colour, no depth) unless THIS pass start (key =
+//     colour, depth, first event kind / fragment program, scissor, viewport + how many such starts came before in this frame) used its
+//     DS within the last 120 frames (NR-UIX rule, play-1118 evidence) - or, rule 1, unless the previous frame's UI used DS at all.
+//     A draw that needs depth / stencil (or a masked stencil clear) in a detached epoch re-attaches: vkn_pass_targets(colour, depth)
+//     ends the DS-less pass and the next one LOADs both (exact either way: nothing touches the DS while it is detached; clears of it
+//     are remembered by vkn_pass on the texture and folded / run as before).
+//   render area (level 2): the epoch's first event rect (scissor ∩ viewport + 4 px, the region of a region clear) ∪ what the same pass
+//     start drew last time (history, refreshed after 60 frames), aligned to 32 px, at least 10 % saved; hinted to vkn_pass
+//     (vkn_pass_area_hint below, weak); every later event whose rect is not inside it ends the narrowed pass and drops the hint (the
+//     rest of the epoch is drawn full area, LOAD): exact on any GPU because Vulkan keeps the attachments outside renderArea (LOAD /
+//     STORE). No vertex boxes: the backend has no CPU position program of GDraw's vertex shaders (the old path ran NR-10b's SPIR-V
+//     interpreter); scissor ∩ viewport is the proven superset.
+//   fence (vkn_ui_pass_fence): before the engine may draw / clear with GDraw's targets bound (custom draws, RenderingEnd) the epoch
+//     puts the NVN-visible set back (re-attach) and drops the area hint.
+// Levels: DM_VK_NATIVE_UIPASS 0 off (the stage-3 code path exactly), 1 DS detach, 2 = 1 + area, 3 stress (every epoch with a DS
+// detached, area = the first rect alone, no history / alignment: exercises re-attach and restart); unset = family default (2 on Mali /
+// PowerVR and DM_GFX_SIM_GPU mali / powervr models, 0 elsewhere). DM_VK_NATIVE_UIPASS_VERIFY=1: the level's decisions are taken and
+// counted (would detach / would re-attach / would narrow / would restart, bytes), the old targets and area are drawn.
+// DM_VK_NATIVE_UIPASS_RULE: 0 per pass start (default, NR-UIX), 1 per frame (the whole UI layer detached only after a frame without DS).
+// mode -1 = the family default; sim_tiler: DM_GFX_SIM_GPU names a tile model. Install time (the host's registration).
+void vkn_ui_pass_config(int mode, int verify, int rule, int sim_tiler);
+void vkn_ui_pass_fence(void);
+enum { VKN_UIP_DS_HIST, VKN_UIP_DS_FRAME, VKN_UIP_DS_SHARED, VKN_UIP_DS_SIZE, VKN_UIP_DS_DYING, VKN_UIP_DS_N };   // detach refusals
+enum { VKN_UIP_AR_API, VKN_UIP_AR_CLEAR, VKN_UIP_AR_MS, VKN_UIP_AR_SAVE, VKN_UIP_AR_N };                          // area refusals
+typedef struct vkn_ui_pass_stats {
+    int mode, verify, rule, tile, api;   // in effect (mode -1 until the device is known); api: the pass module has the area functions
+    uint64_t ui_frames, epochs, epochs_ds, detached, kept_off, reattach, fence_reattach, fence_end, fence_draw, set_lost;
+    uint64_t area_hinted, area_applied, area_ignored, restarts, hint_dropped, px_full, px_area, ds_bytes, area_bytes;
+    uint64_t ds_refused[VKN_UIP_DS_N], area_refused[VKN_UIP_AR_N];
+    uint64_t w_detach, w_reattach, w_area, w_restart, w_ds_bytes, w_area_bytes;   // verify: what the level would have done
+} vkn_ui_pass_stats;
+void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
+// What the pass module must provide for level 2 (declared weak in vkn_ui.c; absent = level 2 acts as level 1, refusal "api"):
+//   int vkn_pass_area_hint(const VkRect2D *area)  the passes vkn_pass opens for the CURRENT target set begin with renderArea = *area
+//       (clipped to the attachments) until the set changes, a recording begins, or the next call (NULL = full area again). Ignored
+//       (full area) by a pass that loads an attachment with CLEAR and under the poison load / store modes. Does not end an open pass.
+//       While a narrowed pass is open: an in-pass clear (vkn_pass_clear_color / _clear_depth) whose rect is not inside renderArea must
+//       end the pass first (vkCmdClearAttachments must lie inside it; the depth clear's rect is the whole level), and the region clip of
+//       vkn_pass_clear_color must use offset + extent; vkn_pass_targets() of any caller ends a narrowed pass even for the same set.
+//       0 = stored.
+//   int vkn_pass_area_get(VkRect2D *out)  1 + the render area of the pass open in vkn_cb() for the current set; 0 = none open.
+
 #ifdef __cplusplus
 }
 #endif
