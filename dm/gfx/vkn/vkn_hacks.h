@@ -22,6 +22,15 @@
 //                      no fusion: the cap module draws); 1 the cap wins the simple way: LIGHTFUSE is not installed while the cap module
 //                      will be used (DM_HACK_LIGHTS > 0 and DM_VK_NATIVE_SH=1), one line; 0 no cap (red line, LIGHTFUSE as it is).
 //                      A/B on the phone: LCAP=2 against 1 with DM_HACK_LIGHTS=4 (fps, "[vkn] lightfuse" fused count, the picture).
+//   DM_VK_NATIVE_LCAP_SEL  [gpu2] WHICH lights the cap drops (docs/dos2/nr/NR-HACKS.md section 9, tools/dos2_light_cap.py):
+//                      1 (default) the weak ones of each pixel, every light judged alone: a light whose largest possible addition (its
+//                      colour x x's own attenuation x the BRDF peak) is below tau of the light the pixel has without the clustered
+//                      lights (ambient + sun + emissive after exposure) is skipped, faded in between tau and 2 tau; tau 1/64 for
+//                      DM_HACK_LIGHTS=4, 1/16 for 2; anisotropic pixels draw every light. Stable (no list order in it), no pop, the error
+//                      bounded by 2 tau of the pixel's light per light; NOT a count cap (a pixel with many strong lights keeps them);
+//                      0 the old cap: after the first N contributing lights of the engine's list the loops stop (cheaper, but the list
+//                      order changes from frame to frame: lights flicker in the shadows, owner, runs S04 / S05); 2 = 1 + poison: a pixel
+//                      where a light was skipped or faded is magenta (with its brightness), the cap module only (LIGHTFUSE yields).
 //   DM_VK_NATIVE_TEXHACK  vkn_tex.h end block.
 // Lines: "[vkn] hacks: ..." once at the first census (every DM_HACK_* value in effect, where it came from, which backend switch / file
 // implements it and what that part reports), "【红】[vkn] hacks: ..." for a value that is set but has no working implementation; every
@@ -41,6 +50,7 @@ extern "C" {
 #endif
 
 int vkn_hacks_lcap_mode(void);       // DM_VK_NATIVE_LCAP (0 / 1 / 2), read once; any thread
+int vkn_hacks_lcap_sel(void);        // [gpu2] DM_VK_NATIVE_LCAP_SEL (0 / 1 / 2), read once; any thread
 // 0 = LIGHTFUSE must not install: the light cap module will replace the Light shader (DM_HACK_LIGHTS > 0, DM_VK_NATIVE_LCAP=1,
 // DM_VK_NATIVE_SH=1 - unset = 1, xbg_nr_sh_default on every family). 1 = no conflict. Install time (vkn_lightfuse.c vkn_lf_install).
 int vkn_hacks_lightfuse_ok(void);

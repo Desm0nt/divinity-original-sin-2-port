@@ -111,6 +111,7 @@ int vkn_shlib_named_same_bundle(const char *key_a, const char *key_b);
 typedef struct vkn_shlib_named_hacks {
     int read, sh_mode;              // read: the library read its first bundle (values below valid); DM_VK_NATIVE_SH in effect
     int fsr, lights, lcap;          // DM_HACK_FSR / DM_HACK_LIGHTS in effect here (0 = not applied), DM_VK_NATIVE_LCAP
+    int lsel;                       // [gpu2] DM_VK_NATIVE_LCAP_SEL (0 first N, 1 weak lights, 2 weak lights + poison)
     int state[2];                   // [0 FSR, 1 light cap]: 0 no bundle seen yet, 1 swapped (or checked: FSR=2), -1 refused
     uint64_t swapped[2], refused[2], checked;
     int lcf; uint64_t lcf_bundles;  // DM_VK_NATIVE_LCAP=2: 0 not checked, 1 the capped fused modules match the player's Sky c1, -1 not; bundles made

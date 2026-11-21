@@ -25,11 +25,18 @@ int vkn_lf_active(void) __attribute__((weak));
 int vkn_post_level(void) __attribute__((weak));
 
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
-static int g_v[NRH_N]; static char g_from[NRH_N]; static int g_lcap, g_any, g_lf_yield;
+static int g_v[NRH_N]; static char g_from[NRH_N]; static int g_lcap, g_any, g_lf_yield, g_lsel = 1;
 static void read_once(void) {
     for (int k = 0; k < NRH_N; k++) g_v[k] = nrh_value(k, &g_from[k]);
     const char *e = getenv("DM_VK_NATIVE_LCAP"); int m = e && *e ? atoi(e) : 2;
     if (m < 0 || m > 2) { vkn_logf(HK_RED "hacks: DM_VK_NATIVE_LCAP=%s is not 0 / 1 / 2: 2 (the cap inside the fused Sky -> Light draw)", e); m = 2; }
+    // [gpu2] which lights the cap drops (vkn_hacks.h DM_VK_NATIVE_LCAP_SEL): 1 the weak ones, each judged alone (default), 0 the old
+    // "after the first N in the engine's list" (flickers: the list order changes from frame to frame), 2 = 1 + poison (the cap module
+    // only: LIGHTFUSE yields as with DM_VK_NATIVE_LCAP=1, the poison twins have no fused form)
+    const char *se = getenv("DM_VK_NATIVE_LCAP_SEL"); int sel = se && *se ? atoi(se) : 1;
+    if (sel < 0 || sel > 2) { vkn_logf(HK_RED "hacks: DM_VK_NATIVE_LCAP_SEL=%s is not 0 / 1 / 2: 1 (the weak lights of each pixel)", se); sel = 1; }
+    g_lsel = sel;
+    if (sel == 2 && m == 2) { m = 1; vkn_logf("hacks: DM_VK_NATIVE_LCAP_SEL=2 (poison): DM_VK_NATIVE_LCAP=2 -> 1 (the poison cap module has no fused form: LIGHTFUSE yields)"); }
     g_lcap = m;
     for (int k = 0; k < NRH_N; k++) g_any |= g_v[k] != 0;
 }
@@ -39,6 +46,7 @@ void vkn_hacks_values(int *v, char *from) {
     if (from) memcpy(from, g_from, sizeof g_from);
 }
 int vkn_hacks_lcap_mode(void) { pthread_once(&g_once, read_once); return g_lcap; }
+int vkn_hacks_lcap_sel(void) { pthread_once(&g_once, read_once); return g_lsel; }
 int vkn_hacks_lightfuse_ok(void) {
     pthread_once(&g_once, read_once);
     if (!g_v[NRH_LIGHTS] || g_lcap != 1) return 1;   // (2: the fused draw carries the cap itself)
@@ -109,7 +117,8 @@ static void install_line(void) {
         tier && *tier ? tier : "0", g_v[NRH_SCALE], src(NRH_SCALE));
     put(&t, " | FSR=%d%s -> vkn_shlib_named PPFXAA module (DM_VK_NATIVE_SH=%d): %s", g_v[NRH_FSR], src(NRH_FSR), nh.sh_mode,
         !g_v[NRH_FSR] ? "off" : !nh.read ? "library not read yet" : !nh.fsr ? "NOT APPLIED" : nh.fsr == 2 ? (nh.state[0] == 1 ? "checked (=2: not used)" : mstate(nh.state[0])) : mstate(nh.state[0]));
-    put(&t, " | LIGHTS=%d%s -> vkn_shlib_named LCAP module (DM_VK_NATIVE_LCAP=%d, LIGHTFUSE %s%s): %s", g_v[NRH_LIGHTS], src(NRH_LIGHTS), g_lcap,
+    put(&t, " | LIGHTS=%d%s -> vkn_shlib_named LCAP module (DM_VK_NATIVE_LCAP=%d, DM_VK_NATIVE_LCAP_SEL=%d %s, LIGHTFUSE %s%s): %s", g_v[NRH_LIGHTS], src(NRH_LIGHTS), g_lcap,
+        g_lsel, g_lsel == 0 ? "first N of the list" : g_lsel == 1 ? "weak lights of each pixel" : "weak lights + poison",
         lf < 0 ? "n/a" : lf ? "on" : "off", g_lcap != 2 || !g_v[NRH_LIGHTS] ? "" : nh.lcf > 0 ? ", the capped fused module" : nh.lcf < 0 ? ", capped fusion REFUSED (Sky c1)" : ", capped fusion not asked yet",
         !g_v[NRH_LIGHTS] ? "off" : !nh.read ? "library not read yet" : !nh.lights ? "NOT APPLIED" : mstate(nh.state[1]));
     put(&t, " | SHPCF=%d%s -> vkn_shlib_named shadow class (DM_VK_NATIVE_SH_PCF%s)", g_v[NRH_SHPCF], src(NRH_SHPCF), getenv("DM_VK_NATIVE_SH_PCF") ? " set: it wins" : " unset: the hack wins");

@@ -14,7 +14,7 @@
 // Every reader of a bundle goes through xpack::read (load_shader, warm-up, alpha variants, pipeguard's spv), so they all see the same
 // bytes; DM_GFX_NATIVE_SHADERS (keyed by the translated key) is not applied to a bundle this replaced.
 namespace nrsh {
-int mode=0,pcf=0,fd=-1,fsr=0,lights=0;   // fsr / lights: [DOS2] N6 DM_HACK_FSR / DM_HACK_LIGHTS (hacks() below)
+int mode=0,pcf=0,fd=-1,fsr=0,lights=0,lsel=1;   // fsr / lights: [DOS2] N6 DM_HACK_FSR / DM_HACK_LIGHTS (hacks() below); lsel: [gpu2] DM_VK_NATIVE_LCAP_SEL
 const char *pcf_name(int q){return q==1?"exact":q==2?"mobile":q==3?"dref":"translated";}
 // [DOS2] PERF-X19 T11 (DM_NR_SH_PCF=3, docs/dos2/DOS2_PORT.md "Мобильный резолв теней", Dref): the 'd' shadow bundles sample the atlas with
 // OpImageSampleDrefExplicitLod; the host gives that binding a compare sampler (LESS, linear: hardware 2x2 PCF per tap, xbg_game.cpp
@@ -46,8 +46,11 @@ int on(){std::call_once(init_once,[]{const char *e=getenv("DM_NR_SH");int m=e &&
             "is below 100 %%: tools/dos2_post/PPFXAA_fsr.frag; RCAS = the gear's sharpening at present)%s",fsr,hf=='t'?" (tier)":"",
             fsr==1?"the FXAA + EASU half-precision module":fsr==3?"the FXAA + EASU fp32 module":"check only",m?"":" - DM_NR_SH=0: not used");
          char lf=0;lights=nrh_value(NRH_LIGHTS,&lf);
-         if(lights)xbg_logf("[hack] DM_HACK_LIGHTS=%d%s: ClusteredLightingWithSSAO -> the first %d clustered lights that light a pixel (points, then spots, list order)%s",lights,lf=='t'?" (tier)":"",
-            lights<=2?2:4,m?"":" - DM_NR_SH=0: not used");}
+         {const char *se=getenv("DM_VK_NATIVE_LCAP_SEL");lsel=se && *se?atoi(se):1;if(lsel<0 || lsel>2)lsel=1;}   // [gpu2] the same switch as mode 1 (vkn_hacks.h)
+         if(lights && !lsel)xbg_logf("[hack] DM_HACK_LIGHTS=%d%s: ClusteredLightingWithSSAO -> the first %d clustered lights that light a pixel (points, then spots, list order; DM_VK_NATIVE_LCAP_SEL=0)%s",lights,lf=='t'?" (tier)":"",
+            lights<=2?2:4,m?"":" - DM_NR_SH=0: not used");
+         if(lights && lsel)xbg_logf("[hack] DM_HACK_LIGHTS=%d%s: ClusteredLightingWithSSAO -> the clustered lights that add less than 1/%d of the pixel's own light skipped (DM_VK_NATIVE_LCAP_SEL=%d%s)%s",
+            lights,lf=='t'?" (tier)":"",lights<=2?16:64,lsel,lsel==2?": POISON":"",m?"":" - DM_NR_SH=0: not used");}
         if(m && q==NR_SH_PCF_DREF && !dref_device())q=NR_SH_PCF_MOBILE;   // T11: no linear compare on the atlas format -> the gather variant
         pcf=q;mode=m;
         if(m)xbg_logf("[nr] sh DM_NR_SH=%d (%s): engine shaders by name, %d in the table (post 5, lighting 2, shadows 3: DM_NR_SH_PCF=%d %s, "
@@ -93,6 +96,19 @@ static const uint32_t lcap2_spv[]={
 static const uint32_t lcap4_spv[]={
 #include "../../../android/shaders/light_lcap4.frag.spv.inc"
 };
+// [gpu2] DM_VK_NATIVE_LCAP_SEL=1 (default): the per-light threshold, =2 its poison twin (tools/dos2_light_cap.py thr_source); 0 = the first N above
+static const uint32_t lcap2t_spv[]={
+#include "../../../android/shaders/light_lcap2t.frag.spv.inc"
+};
+static const uint32_t lcap4t_spv[]={
+#include "../../../android/shaders/light_lcap4t.frag.spv.inc"
+};
+static const uint32_t lcap2tp_spv[]={
+#include "../../../android/shaders/light_lcap2tp.frag.spv.inc"
+};
+static const uint32_t lcap4tp_spv[]={
+#include "../../../android/shaders/light_lcap4tp.frag.spv.inc"
+};
 bool hack_apply(int i,int slot,const std::string &key,std::vector<uint8_t> &bytes,const uint32_t *spv,size_t spv_bytes,const char *what,bool use){
     const size_t th=nr_sh_head(bytes.data(),bytes.size());if(!th)return false;
     std::vector<uint8_t> nb(bytes.begin(),bytes.begin()+th);nb.resize(th+spv_bytes);memcpy(nb.data()+th,spv,spv_bytes);
@@ -110,8 +126,13 @@ bool hacks(int i,const std::string &key,std::vector<uint8_t> &bytes){
     const char *n=nr_sh_table[i].name;
     if(fsr && !strcmp(n,"PPFXAA"))return fsr==3?hack_apply(i,0,key,bytes,fsr_spv,sizeof fsr_spv,"DM_HACK_FSR=3 FXAA + EASU fp32 module",true)
                                               :hack_apply(i,0,key,bytes,fsrh_spv,sizeof fsrh_spv,"DM_HACK_FSR FXAA + EASU half module",fsr==1);
-    if(lights && !strcmp(n,"ClusteredLightingWithSSAO"))return lights<=2?hack_apply(i,1,key,bytes,lcap2_spv,sizeof lcap2_spv,"DM_HACK_LIGHTS=2 light cap module",true)
-                                                                       :hack_apply(i,1,key,bytes,lcap4_spv,sizeof lcap4_spv,"DM_HACK_LIGHTS=4 light cap module",true);
+    if(lights && !strcmp(n,"ClusteredLightingWithSSAO")){
+        if(lsel==1)return lights<=2?hack_apply(i,1,key,bytes,lcap2t_spv,sizeof lcap2t_spv,"DM_HACK_LIGHTS=2 light cap module (weak lights)",true)
+                                   :hack_apply(i,1,key,bytes,lcap4t_spv,sizeof lcap4t_spv,"DM_HACK_LIGHTS=4 light cap module (weak lights)",true);
+        if(lsel==2)return lights<=2?hack_apply(i,1,key,bytes,lcap2tp_spv,sizeof lcap2tp_spv,"DM_HACK_LIGHTS=2 light cap module (weak lights, POISON)",true)
+                                   :hack_apply(i,1,key,bytes,lcap4tp_spv,sizeof lcap4tp_spv,"DM_HACK_LIGHTS=4 light cap module (weak lights, POISON)",true);
+        return lights<=2?hack_apply(i,1,key,bytes,lcap2_spv,sizeof lcap2_spv,"DM_HACK_LIGHTS=2 light cap module",true)
+                        :hack_apply(i,1,key,bytes,lcap4_spv,sizeof lcap4_spv,"DM_HACK_LIGHTS=4 light cap module",true);}
     return false;}
 // With the translated bundle in hand: mode 1 may swap in the named one (true), mode 2 checks it.
 bool apply(const std::string &key,std::vector<uint8_t> &bytes){
