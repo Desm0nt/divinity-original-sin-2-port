@@ -34,6 +34,14 @@
 //   DM_VK_NATIVE_SHFAR     (replaces DM_HACK_SHFAR for the backend; default = DM_HACK_SHFAR / DM_HACK_TIER as before, i.e. 0)
 //                          1 the far cascade's draws are skipped before any hashing (its tile keeps the clear: no far shadows);
 //                          2 counted only.
+//   DM_VK_NATIVE_SHRATE    [gpu2 P8, docs/dos2/nr/VK-MOBILE-GPU-PLAN.md section 8] the far cascade every second frame; needs SHCACHE=1:
+//                          1 every frame (default on every GPU class until the phone's verify run); 2 a far cascade whose static casters
+//                          hit the cache (so the light's projection did not move: a member with another hash ends in a RECOVER - every
+//                          kept draw drawn again, exact) and whose frame before drew the far tile takes that tile from the image F and
+//                          skips every far draw - static shadows bit for bit, a MOVING caster's far shadow one frame late (13..33 ms);
+//                          frames alternate (F is saved only from a drawn tile); 3 verify: drawn every frame, the frame before's tile
+//                          compared with this frame's every second frame (census "rate cmp": texels differing, largest depth step).
+//                          F = one more image of the atlas's size (4.5 MB at 1536^2 D16), made at the first far save.
 // Lines: "[vkn] DM_VK_NATIVE_SHCACHE=..." once; "[vkn] shcache ..." / "[vkn] shcache why ..." in the 10 s census; red lines
 // "【红】[vkn] shcache: ..." (first 16 of each kind).
 #ifndef DM_VKN_SHC_H
@@ -67,6 +75,11 @@ typedef struct vkn_shc_stats {
     uint64_t far_draws, far_skipped;
     uint64_t img_bytes, model_bytes;                                           // layer (+ verify) images, model tables + kept draws (alive)
     uint64_t far_not_sun;                                                      // [stage 5.4 G2] atlas draws the far rule left alone: not square >= 1024
+    // [gpu2 P8] DM_VK_NATIVE_SHRATE: far cascades seen, reused (the frame before's tile), would be reused (mode 3), reused but recovered,
+    // draws skipped by a reuse (non-members; the members are in `skipped`), tiles saved into F / lost (the atlas cleared or copied first);
+    // mode 3: tiles compared, texels compared / differing, the largest difference in depth steps (1 / 65535 for D16)
+    uint64_t rate_far, rate_reused, rate_would, rate_recover, rate_skipped, rate_saved, rate_lost, rate_cmp, rate_cmp_all, rate_cmp_px; uint32_t rate_cmp_max;
+    uint64_t rate_drawn;                                                       // draws of a reused cascade that could not be kept: drawn over F's tile
 } vkn_shc_stats;
 void vkn_shc_stats_get(vkn_shc_stats *s);   // the current window (since the last census)
 // [stage 5.4 G2] DM_VK_NATIVE_SHFAR in effect (0 / 1 / 2), -1 = not installed yet. The far-cascade rule is the old path's

@@ -2270,8 +2270,10 @@ static void test_a5_shc(void) {
     static const char *const e_far1[][2] = {{"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHFAR", "1"}, A5_BASE};
     static const char *const e_far2[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "2"}, A5_BASE};
     static const char *const e_far1c[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "1"}, A5_BASE};
+    static const char *const e_rate2[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", "2"}, A5_BASE};   // [gpu2 P8]
+    static const char *const e_rate3[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", "3"}, A5_BASE};
 #undef A5_BASE
-    static a5_res T, Tb, C1, C2, C2b, C3, C4, C5, C6;
+    static a5_res T, Tb, C1, C2, C2b, C3, C4, C5, C6, C7, C8;
     CHECK(mkshader(H(80, 1), "v300000000000001", "f300000000000001", NULL) != NULL); CHECK(mkshader(H(81, 1), "v300000000000001", "f300000000000001", NULL) != NULL);
     g_a5.behind = 0; g_a5.hold = 0; a5_child(e_truth, a5_shc, &T);
     g_a5.behind = 1; a5_child(e_truth, a5_shc, &Tb);
@@ -2282,6 +2284,8 @@ static void test_a5_shc(void) {
     a5_child(e_far1, a5_shc, &C4);
     a5_child(e_far2, a5_shc, &C5);
     a5_child(e_far1c, a5_shc, &C6);
+    a5_child(e_rate2, a5_shc, &C7);
+    a5_child(e_rate3, a5_shc, &C8);
     if (!T.ran || !C1.ran) return;
     // the model draws something everywhere (else equality would prove nothing)
     CHECK(T.model_draws >= (uint64_t)A5_F * 3 * A5_N);
@@ -2351,6 +2355,32 @@ static void test_a5_shc(void) {
     if (C6.ran && C4.ran) {   // SHFAR 1 with the cache on: the truth of SHFAR 1 alone
         bad = 0; for (int f = 0; f < A5_BEHIND; f++) bad += C6.h[f] != C4.h[f];
         CHECK_EQ(bad, 0); CHECK(C6.st.far_skipped > 0); CHECK(C6.st.skipped > 0);
+    }
+    // [gpu2 P8] SHRATE 2: the 512 atlas (frames 0..37) is not the sun atlas: the truth; on the 1024 atlas the near tiles are the truth every
+    // frame and the far tile is either this frame's truth or, on a reused frame, the frame before's truth (its moving casters one frame
+    // late) - frames alternate; SHRATE 3: drawn every frame (the truth), the frame before's far tile compared with this one's
+    if (C7.ran) {
+        int near = 0, far_now = 0, far_prev = 0, other = 0, reused_run = 0, last_reused = -2;
+        for (int f = 0; f < A5_F; f++) {
+            if (f < 38) { near += C7.h[f] == T.h[f]; continue; }
+            near += C7.th[f][0] == T.th[f][0] && C7.th[f][1] == T.th[f][1];
+            if (C7.th[f][2] == T.th[f][2]) far_now++;
+            else if (C7.th[f][2] == T.th[f - 1][2]) { far_prev++; if (last_reused == f - 1) reused_run++; last_reused = f; }
+            else { other++; printf("  shc SHRATE 2: frame %d far tile is neither this frame's nor the frame before's\n", f); }
+        }
+        CHECK_EQ(near, A5_F); CHECK_EQ(other, 0); CHECK(far_prev >= 1); CHECK_EQ(reused_run, 0);   // never two reused frames in a row
+        CHECK_EQ(C7.st.rate_reused, (uint64_t)far_prev); CHECK(C7.st.rate_skipped >= (uint64_t)far_prev * A5_DYN); CHECK(C7.st.rate_saved >= 1);
+        CHECK_EQ(C7.st.replay_drop, 0); CHECK_EQ(C7.st.recover_bad, 0);
+        printf("  shc SHRATE 2: far tiles this frame's %d, the frame before's %d (reused %llu, would %llu, recovered %llu, draws skipped %llu, tiles saved %llu, lost %llu)\n",
+               far_now, far_prev, (unsigned long long)C7.st.rate_reused, (unsigned long long)C7.st.rate_would, (unsigned long long)C7.st.rate_recover,
+               (unsigned long long)C7.st.rate_skipped, (unsigned long long)C7.st.rate_saved, (unsigned long long)C7.st.rate_lost);
+    }
+    if (C8.ran) {
+        bad = 0; for (int f = 0; f < A5_BEHIND; f++) bad += C8.h[f] != T.h[f];
+        CHECK_EQ(bad, 0); CHECK_EQ(C8.st.rate_reused, 0); CHECK(C8.st.rate_cmp >= 1); CHECK(C8.st.rate_cmp_px > 0);   // the moving casters differ
+        CHECK(C8.st.rate_cmp_px < C8.st.rate_cmp_all);
+        printf("  shc SHRATE 3: tiles compared %llu, texels differing %llu of %llu (max %u steps), would reuse %llu\n", (unsigned long long)C8.st.rate_cmp,
+               (unsigned long long)C8.st.rate_cmp_px, (unsigned long long)C8.st.rate_cmp_all, (unsigned)C8.st.rate_cmp_max, (unsigned long long)C8.st.rate_would);
     }
 }
 

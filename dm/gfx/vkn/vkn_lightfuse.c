@@ -588,6 +588,15 @@ static void fog_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (w >= 0) {
         g.s.fog_why[w]++; g.fog_learned = 0;
         if (fused) g.s.fog_back++;   // drawn as recorded: exact (Df holds the Light's result; Sp got the fog, nobody reads it)
+        // [gpu2 small] a partial Fog (dynamic resolution draws a part of the target, T06-T08) is the designed refusal: the Fog draws as
+        // recorded (exact). Not an error: the first 4 of a run as plain lines, then only the census count (line "lightfuse fog ...", "refused: the Fog draw does not cover its target N")
+        if (w == VKN_LF_F_COVER) {
+            static unsigned told;
+            if (told < 4) { told++; vkn_logf("lightfuse fog: Fog draw refused (designed): %s, viewport %gx%g of %ux%u%s - drawn as recorded, exact; counted from now on",
+                                             vkn_lf_reason_name(1, w), in->viewport[2], in->viewport[3], ctx->color[0] ? ctx->color[0]->w : 0u, ctx->color[0] ? ctx->color[0]->h : 0u,
+                                             fused ? " (after a fused Sky + Fog Light)" : ""); }
+            return;
+        }
         if (w != VKN_LF_F_NOLIGHT || fused) lf_red(R_FOG, "Fog draw refused: %s%s", vkn_lf_reason_name(1, w), fused ? " (after a fused Sky + Fog Light: the Fog draws as recorded)" : "");
         return;
     }

@@ -64,7 +64,7 @@ static struct {
     // the model (lazy)
     nrshc_cas *cas[NRSHC_CAS]; nrshc_range *rg; sdraw *sv; int model; uint64_t salt_n;
     // the cascade being drawn
-    int live; struct { int refused, k, save, verify, unrep; int32_t rect[4]; uint32_t clear_bits; } R;
+    int live; struct { int refused, k, save, verify, unrep, far, reuse; int32_t rect[4]; uint32_t clear_bits; } R;   // far / reuse: [gpu2 P8]
     // work for the next safe point
     int pend; struct { int kind, k; int32_t rect[4]; uint32_t bits; } P;
     // tiles whose layer was copied into the atlas at the frame's first cascade (precopy) and not yet taken by a hit: bit k = slot k,
@@ -75,6 +75,10 @@ static struct {
     const uint8_t *ring;
     struct { uint64_t frame; uint32_t off, n; uint64_t h; const void *mk; } um[2][VKN_UBO_SLOTS];   // the content hash of the last block of (stage, slot); [rt P3-GPU] mk: the read mask it was made with
     vkn_shc_stats s; uint8_t red[R_N];
+    // [gpu2 P8] DM_VK_NATIVE_SHRATE (vkn_shc.h): F = the far tile as the last frame that DREW it left it (a private image like S);
+    // f_ok / f_rect / f_frame / f_gen / f_bits: what F holds; f_pend: the far cascade of this frame ended drawn - copy its tile into F at the
+    // next safe point (fp_rect); cur_far: the draw in hand is into the far tile (nrh_far)
+    int rate; vkn_tex *F; int f_ok, f_pend, cur_far; int32_t f_rect[4], fp_rect[4]; uint64_t f_frame, f_gen; uint32_t f_bits;
 } g;
 
 #define SHC_RED(k, ...) do { if (g.red[k] < 16) { g.red[k]++; vkn_logf(RED "shcache: " __VA_ARGS__); } } while (0)
@@ -109,11 +113,12 @@ static int shape_why(const vkn_tex *t, int colours, int arms) {
 }
 
 // ---- images ----
-static uint64_t img_bytes(void) { return (g.S ? g.S->bytes : 0) + (g.X ? g.X->bytes : 0); }
+static uint64_t img_bytes(void) { return (g.S ? g.S->bytes : 0) + (g.X ? g.X->bytes : 0) + (g.F ? g.F->bytes : 0); }
 static void img_free(void) {
     if (g.S) vkn_tex_private_free(g.S);
     if (g.X) vkn_tex_private_free(g.X);
-    g.S = g.X = NULL;
+    if (g.F) vkn_tex_private_free(g.F);
+    g.S = g.X = g.F = NULL; g.f_ok = g.f_pend = 0;
 }
 static vkn_tex *img_make(const char *name) {
     vkn_tex *t = vkn_tex_private_depth(g.atlas->format, g.atlas->w, g.atlas->h, name);
@@ -333,6 +338,47 @@ static void end_range(int why) {
     } else if (e == NRSHC_E_NONE && g.R.verify) {
         if (why == END_NEXT) pend(P_VERIFY); else g.s.verify_skip++;
     }
+    if (g.R.far && g.rate >= 2) {   // [gpu2 P8] a reused tile that held (no RECOVER) is last frame's; any other far tile is this frame's: into F
+        if (g.R.reuse && e != NRSHC_E_RECOVER) g.s.rate_reused++;
+        else if (why != END_CLEAR && why != END_USE) { g.f_pend = 1; memcpy(g.fp_rect, g.R.rect, sizeof g.fp_rect); }
+        if (g.R.reuse && e == NRSHC_E_RECOVER) g.s.rate_recover++;
+    }
+}
+// [gpu2 P8] mode 3 (verify): the tile F holds (the far tile of the frame before) against the tile this frame drew, at retire
+typedef struct rjob { vkn_block a, b; uint64_t n; uint32_t bpp; uint8_t x8; } rjob;
+static void rate_cmp_done(void *ctx) {
+    rjob *j = (rjob *)ctx;
+    const uint8_t *x = (const uint8_t *)j->a.cpu, *y = (const uint8_t *)j->b.cpu;
+    if (x && y) {
+        uint64_t px = 0; uint32_t mx = 0;
+        for (uint64_t q = 0; q + j->bpp <= j->n; q += j->bpp) {
+            uint32_t u = 0, v = 0; memcpy(&u, x + q, j->bpp); memcpy(&v, y + q, j->bpp);
+            if (j->x8) { u &= 0xffffffu; v &= 0xffffffu; }   // (the top byte of an X8_D24 texel copy is not defined)
+            if (u != v) { px++; const uint32_t d = u > v ? u - v : v - u; if (d > mx) mx = d; }
+        }
+        g.s.rate_cmp++; g.s.rate_cmp_px += px; if (mx > g.s.rate_cmp_max) g.s.rate_cmp_max = mx; g.s.rate_cmp_all += j->n / j->bpp;
+    }
+    vkn_block_free(&j->a); vkn_block_free(&j->b); free(j);
+}
+// At the safe point after a drawn far cascade: (mode 3: compare F with it every second frame), then the tile into F.
+static void far_save(void) {
+    g.f_pend = 0;
+    if (!g.atlas || (!g.F && !(g.F = img_make("shc far")))) return;
+    const int32_t *r = g.fp_rect;
+    if (g.rate == 3 && g.f_ok && g.f_frame + 1 == g.frame && g.f_gen == g.atlas_gen && !memcmp(g.f_rect, r, sizeof g.f_rect) && (g.frame & 1)) {
+        rjob *j = (rjob *)calloc(1, sizeof *j);
+        if (j && !read_tile(g.F, r, &j->a)) {
+            if (!read_tile(g.atlas, r, &j->b)) {
+                const VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+                vkCmdPipelineBarrier(vkn_cb(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+                j->bpp = depth_bpp(g.atlas->format); j->x8 = g.atlas->format == VK_FORMAT_X8_D24_UNORM_PACK32; j->n = (uint64_t)r[2] * (uint64_t)r[3] * j->bpp;
+                vkn_retire(rate_cmp_done, j); j = NULL;
+            } else vkn_retire_block(&j->a);
+        }
+        free(j);
+    }
+    if (copy_tile(g.atlas, g.F, r)) { g.f_ok = 0; return; }
+    g.f_ok = 1; memcpy(g.f_rect, r, sizeof g.f_rect); g.f_frame = g.frame; g.f_gen = g.atlas_gen; g.f_bits = g.clear_bits; g.s.rate_saved++;
 }
 
 // ---- precopy: one pass break a frame instead of one per hit. At the frame's first cascade (the atlas cleared this frame, the
@@ -433,6 +479,18 @@ static void start_range(const int32_t rect[4], int exact) {
         // no copy: nothing may be skipped (the frame stays exact); the model sees a normal range
         g.rg->action = NRSHC_A_NORMAL; c->layer = 0; g.slot_real[k] = 0; g.R.save = 0;
         SHC_RED(R_IMG, "cascade %d: the layer copy could not be recorded: drawn as the engine asks", k);
+    }
+    // [gpu2 P8] the far cascade every second frame: its static part is a hit (the members come with this frame's hashes - the light's
+    // projection did not move, else the end is a RECOVER: every kept draw drawn again, exact), and F holds the far tile the frame before
+    // drew: F's tile goes into the atlas and every draw of the cascade is skipped (kept: a RECOVER draws them all)
+    g.R.far = g.cur_far;
+    if (g.cur_far && g.rate >= 2) {
+        const int can = g.rg->action == NRSHC_A_HIT && g.F && g.f_ok && g.f_frame + 1 == g.frame && g.f_gen == g.atlas_gen &&
+                        g.f_bits == g.R.clear_bits && !memcmp(g.f_rect, rect, sizeof g.f_rect);
+        if (can && g.rate == 2 && g.mode == NRSHC_ON && g.R.save) {
+            if (!copy_tile(g.F, g.atlas, rect)) g.R.reuse = 1;
+        } else if (can) g.s.rate_would++;
+        g.s.rate_far++;
     }
 }
 
@@ -595,6 +653,9 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
         if (!t.ok) SHC_RED(R_SAVE, "cascade %d draw %u: not replayable (engine primitive %u, %u textures, %u constant blocks)", k, o, in->prim, t.ntex, t.nubo);
     }
     if (r->action == NRSHC_A_HIT && skip) { g.s.skipped++; g.s.cskip[k]++; if (g.mode != NRSHC_CHECK) out->skip = 1; }
+    // [gpu2 P8] a reused far tile: a moving caster's shadow is last frame's - only a draw a RECOVER can draw again is skipped (kept, replayable);
+    // another one is drawn over F's tile (its shadow this frame's, its old one stays for this frame: counted)
+    else if (g.R.reuse && r->action == NRSHC_A_HIT && g.mode == NRSHC_ON) { if (t.ok && o < NRSHC_DRAWS) { out->skip = 1; g.s.rate_skipped++; } else g.s.rate_drawn++; }
 }
 
 // ---- the atlas ----
@@ -641,6 +702,7 @@ static void on_watch(vkn_tex *t, int ev, float depth) {
     if (ev == VKN_PASS_EV_CLEAR) {
         if (g.live) end_range(END_CLEAR);
         pend_lost(END_CLEAR); pre_lost(END_CLEAR);
+        if (g.f_pend) { g.f_pend = 0; g.s.rate_lost++; }   // [gpu2 P8] the far tile was not saved before the next clear
         memcpy(&g.clear_bits, &depth, 4); g.clear_frame = vkn_frame(); g.clear_seen = 1;
         if (g.clear_frame != g.frame || !g.frame_seen) new_frame(g.clear_frame);
         g.ntiles = 0; g.dirty = 0;   // cleared whole: no tile of this frame is drawn yet
@@ -649,7 +711,7 @@ static void on_watch(vkn_tex *t, int ev, float depth) {
     const int why = ev == VKN_PASS_EV_SAMPLE ? END_READ : END_USE;
     if (g.live) end_range(why);
     pend_lost(why); pre_lost(why);
-    if (ev == VKN_PASS_EV_USE) g.dirty = 1;   // (a copy may write it)
+    if (ev == VKN_PASS_EV_USE) { g.dirty = 1; if (g.f_pend) { g.f_pend = 0; g.s.rate_lost++; } }   // (a copy may write it; [gpu2 P8] not saved)
 }
 static void on_close(void) {
     if (g.live) end_range(END_CLOSE);
@@ -665,10 +727,11 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     (void)user;
     vkn_tex *d = ctx->depth;
     if (d != g.atlas) {                       // every draw that is not into the atlas
-        if (g.live | g.pend | (int)g.pre) {  // the cascade drawn before ends here: the safe point for its work
+        if (g.live | g.pend | (int)g.pre | g.f_pend) {  // the cascade drawn before ends here: the safe point for its work
             if (g.live) end_range(END_NEXT);
             if (g.pend) run_pending();
             if (g.pre) pre_undo_all();
+            if (g.f_pend) far_save();   // [gpu2 P8] (after a RECOVER's replay: the repaired tile)
         }
         if (d == g.rej || !d) return;
         if (!adopt(ctx, d)) return;
@@ -688,11 +751,14 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     const int exact = (float)rect[0] == in->viewport[0] && (float)rect[1] == in->viewport[1] && (float)rect[2] == in->viewport[2] && (float)rect[3] == in->viewport[3];
     if (g.live && memcmp(rect, g.R.rect, sizeof rect)) end_range(END_NEXT);
     if (g.pend) run_pending();
-    if (g.far) {   // the far cascade (nrh_far: the frame's tiles in order of their first draw, the last one of 3 / of 2 for a 2048 atlas)
+    if (g.f_pend) far_save();   // [gpu2 P8]
+    g.cur_far = 0;
+    if (g.far || g.rate >= 2) {   // the far cascade (nrh_far: the frame's tiles in order of their first draw, the last one of 3 / of 2 for a 2048 atlas)
         // [stage 5.4 G2] only the sun atlas, as xbg_nr_hacks.inc far_draw (square, >= 1024): the cache adopts any depth-only image >= 256
         if (a->w != a->h || a->w < 1024) g.s.far_not_sun++;
         else if (nrh_far(&g.ftiles, rect, a->w) == 1) {
-            g.s.far_draws++;
+            g.cur_far = 1;
+            if (g.far) g.s.far_draws++;
             if (g.far == 1) { out->skip = 1; g.s.far_skipped++; return; }
         }
     }
@@ -722,6 +788,16 @@ void vkn_shc_install(void) {
     if (f && *f) from = 'v';
     if (fr < 0 || fr > 2) fr = 0;
     g.mode = m; g.far = fr; g.inst = m || fr; g_far_read = 1;
+    {   // [gpu2 P8] DM_VK_NATIVE_SHRATE (vkn_shc.h): 1 every frame (default), 2 the far cascade every second frame, 3 verify (drawn, compared)
+        const char *q = getenv("DM_VK_NATIVE_SHRATE"); int rt = q && *q ? atoi(q) : 1;
+        if (rt < 1 || rt > 3) { vkn_logf(RED "shcache: DM_VK_NATIVE_SHRATE=%s is not 1 / 2 / 3: 1", q); rt = 1; }
+        if (rt >= 2 && m != NRSHC_ON && m != NRSHC_CHECK) { vkn_logf("shcache: DM_VK_NATIVE_SHRATE=%d needs DM_VK_NATIVE_SHCACHE=1 (it is %d): 1", rt, m); rt = 1; }
+        if (rt == 2 && m == NRSHC_CHECK) rt = 3;   // (the cache's verify draws everything: the rate's verify)
+        g.rate = rt;
+        if (rt >= 2) vkn_logf("shcache: DM_VK_NATIVE_SHRATE=%d (gpu2 P8): %s", rt, rt == 2 ? "the far cascade every second frame: a frame whose far static casters hit the cache and "
+                              "whose frame before drew the far tile takes that tile and skips every far draw (moving casters' far shadows one frame late)"
+                              : "verify: drawn every frame, the frame before's far tile compared with this frame's every second frame (\"rate cmp\" in the census)");
+    }
     { const char *k = getenv("DM_VK_NATIVE_SHC_MASK"); vkn_shc_mask_set(k && *k ? atoi(k) : 0);   // [rt P3-GPU] (default 0 until the phone's verify run)
       vkn_logf("shcache: DM_VK_NATIVE_SHC_MASK=%d (%s)", g_shm, g_shm == 1 ? "constant blocks hashed only over the rows the shader reads" : g_shm == 2 ? "whole blocks hashed, the masked hash counted" : "whole blocks"); }
     vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u; DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
@@ -763,6 +839,10 @@ void vkn_shc_census(void) {
         s->copies / fr, (ull)s->precopied, (ull)s->pre_hit, (ull)s->pre_undone, (ull)s->pre_lost, s->tile_clears / fr, (ull)s->verify_eq, (ull)s->verify_ne, (ull)s->verify_runs, (ull)s->verify_skip, g.far, s->far_draws / fr, g.far == 1 ? "skipped" : "would skip",
         g.far == 1 ? s->far_skipped / fr : s->far_draws / fr, s->img_bytes / 1048576.0, s->model_bytes / 1048576.0);
     { int r = 0; for (int i = 0; i < R_N; i++) r += g.red[i]; put(&a, " %d", r); }
+    if (g.rate >= 2)   // [gpu2 P8]
+        put(&a, "; far rate %d: far cascades %llu, reused %llu (would %llu), recovered %llu, draws skipped %.0f a frame, tiles saved %llu (lost %llu); rate cmp %llu tiles: "
+            "texels differing %.3f %% (max %u steps); drawn over a reused tile %llu", g.rate, (ull)s->rate_far, (ull)s->rate_reused, (ull)s->rate_would, (ull)s->rate_recover, s->rate_skipped / fr,
+            (ull)s->rate_saved, (ull)s->rate_lost, (ull)s->rate_cmp, s->rate_cmp_all ? 100.0 * (double)s->rate_cmp_px / (double)s->rate_cmp_all : 0.0, (unsigned)s->rate_cmp_max, (ull)s->rate_drawn);
     if (g.cond_ref) put(&a, "; refused for DM_VK_NATIVE_COND=%d (GPU predicates) %llu", vkn_query_mode(), (ull)g.cond_ref);   // (in "backend" above)
     g.cond_ref = 0;
     vkn_logf("%s", a.b);
