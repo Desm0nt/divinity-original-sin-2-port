@@ -98,7 +98,7 @@ final class Tl2Gear {
         if (a.drivers() != null) { l.add(GearPages.driver(a.drivers())); l.add(note(R.string.d3_driver_note)); }
         l.add(GearPages.safeMode(a));   // [DOS2][safe-mode] off / auto / on, shown on Mali / PowerVR only (SafeMode.eligible); DM_SAFE_MODE
         l.add(group(R.string.dos2_group_controls));
-        l.add(dos2Touch()); l.add(dos2Column()); l.add(dos2LStick()); l.add(dos2RStick());
+        l.add(dos2Touch()); l.add(dos2UiMode(a)); l.add(dos2Column()); l.add(dos2LStick()); l.add(dos2RStick());   // UI mode: dos2-uimodes (merged 21.11)
         l.add(GearPages.padControls());
         l.add(GearPages.deadzone());
         l.add(GearPages.rumble());
@@ -568,6 +568,34 @@ final class Tl2Gear {
             public void env(GearSettings g) throws ErrnoException {
                 DmActivity.dos2Touch = g.gamePrefs().getBoolean("dos2_touch", true);
                 if (DmActivity.dos2Touch) Os.setenv("DM_DOS2_TOUCH", "1", true);
+            }
+        };
+    }
+    // ---- [DOS2] the in-game UI mode (owner 19.11; docs/dos2/TOUCH_MODES_PLAN.md "Implemented: UI mode switch"; hle_dos2_uimode.c):
+    //   0 Switch  the console UI only: stock movies, the on-screen pad (both sticks, its own layout), taps on the game do nothing
+    //   1 hybrid  the default, today's behaviour (console UI + touch, the gear's touch / stick rows as they are)
+    //   2 touch   the iPad-like UI (experiment): keyboard-and-mouse UI, no on-screen pad (only its gear button), a real pad press = controller UI
+    // Pref "dos2_ui_mode" in the front prefs (Ui.PREFS). At the start env() sets DM_DOS2_UI_MODE (and DM_DOS2_TOUCH=1 for touch; after dos2Touch's
+    // env, so it wins over that row); dm/env still wins over both (DmActivity.dos2TouchUiEnv reads the mode the native side got). A change while
+    // the game runs: DmActivity.dos2UiModeChanged (nativeDos2UiMode: menus at once, the HUD at the next load; the toast says which).
+    static int dos2UiModePref(android.content.Context c) { int m = c.getSharedPreferences(Ui.PREFS, android.content.Context.MODE_PRIVATE).getInt("dos2_ui_mode", 1); return m < 0 || m > 2 ? 1 : m; }
+    static GearSettings.Section dos2UiMode(DmActivity a) {
+        return new GearSettings.Section() {
+            android.widget.RadioGroup r; int was;
+            public void build(GearSettings g, LinearLayout box) {
+                was = dos2UiModePref(g.a);
+                g.heading(box, g.when(g.str(R.string.dos2_ui_mode), true));
+                r = g.radios(box, new String[] {g.str(R.string.dos2_ui_switch), g.str(R.string.dos2_ui_hybrid), g.str(R.string.dos2_ui_touch)}, was, false);
+                g.note(box, g.str(R.string.dos2_ui_mode_note));
+            }
+            public void save(GearSettings g, SharedPreferences.Editor game, SharedPreferences.Editor pd) {
+                g.a.getSharedPreferences(Ui.PREFS, android.content.Context.MODE_PRIVATE).edit().putInt("dos2_ui_mode", GearSettings.picked(r)).apply();
+            }
+            public void after(GearSettings g) { int m = GearSettings.picked(r); if (m != was) { was = m; a.dos2UiModeChanged(m); } }
+            public void env(GearSettings g) throws ErrnoException {
+                int m = dos2UiModePref(g.a);
+                Os.setenv("DM_DOS2_UI_MODE", Integer.toString(m), true); DmActivity.dos2UiMode = m;
+                if (m == 2) { Os.setenv("DM_DOS2_TOUCH", "1", true); DmActivity.dos2Touch = true; }   // touch mode = touches as the mouse, whatever the row above says
             }
         };
     }

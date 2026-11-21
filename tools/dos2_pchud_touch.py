@@ -46,6 +46,7 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        movies with one addition, the iPad's 50 px close button: the PC's 23 px close button gets a transparent 50 x 50 hit area
                        (PANEL_CLOSE: where it sits in each movie). Size, position and every other gesture are the PC movie's own (tap, double
                        click = use / equip, right click = context menu, drag, wheel): see the plan for why the iPad's 76 px cells are not here.
+                       partyInventory_p and characterSheet_p are made by tools/dos2_ppanel_inv.py instead (the iPad's layout: centred, x 1.52 / x 1.2).
 
   python -I tools/dos2_pchud_touch.py build <Switch Game.pak | dir of the PC movies> <out dir>
   python -I tools/dos2_pchud_touch.py check <Switch Game.pak | dir of the PC movies>
@@ -491,6 +492,8 @@ def _closer(name): return lambda data: closer(data, PANEL_CLOSE[name])
 MAKE = {'hotBar_p.swf': hotbar, 'minimap_p.swf': minimap, 'statusConsole_p.swf': status, 'playerInfo_p.swf': same, 'combatLog_p.swf': combatlog, 'dmSide_p.swf': side}
 MAKE.update({n + '_p.swf': _closer(n) for n in PANEL_CLOSE})
 MAKE.update(pps.MAKE)   # iPad layout instead of the close button only (tools/dos2_ppanel_skills.py)
+import dos2_ppanel_inv as ppi   # partyInventory_p / characterSheet_p: the iPad's layout (its own module and checks) instead of the close-button pass
+MAKE.update(ppi.MAKE)
 
 
 def build(src):
@@ -507,6 +510,7 @@ def check(src):
         print('%s -> %s: %d B -> %d B, +%d definition tags, +%d root instances, +%d methods, sha256 %s' % (
             OUT[o], o, len(data), len(out), rep['defs'], len(rep['placed']), len(rep['methods']), hashlib.sha256(out).hexdigest()[:16]))
         if MAKE[o] is same: say(out == data, 'the PC movie byte for byte'); continue
+        if o in ppi.MAKE: ppi.check(o, data, out, rep, say); continue
         b = Swf(out); (tb, pb, B), = b.abcs()
         errs = verify_all(B)
         for who, why in errs: print('       %s: %s' % (who, why))

@@ -594,6 +594,9 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // [DOS2] VK-NATIVE: with DM_VK_NATIVE=1 (launch env or dm/env, both read above) the NB / NR rows are not applied: the presenter's
     // and the translator's init read some of them before host_preload's dm_dos2_vkn_pre (hle_dos2_vkn_exec.c) forces them to 0. The
     // other rows (present thread, particles) are no NVN-stream features and stay.
+    // Owner 21.11: the native backend is the default build (series U5: 74.5 against 61.8 fps of the old path, Mi 14 Ultra). dm/env /
+    // the launch env still win (read above, overwrite 0 here); the safe-mode ladder's step 3 sets DM_VK_NATIVE=0 over it (overwrite 1).
+    setenv("DM_VK_NATIVE", "1", 0);
     const char *vkn = getenv("DM_VK_NATIVE"); const int vk_native = vkn && atoi(vkn) == 1;
     for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) {
         if (vk_native && (!strncmp(k_nb_on[i][0], "DM_NB", 5) || !strncmp(k_nb_on[i][0], "DM_NR", 5))) continue;

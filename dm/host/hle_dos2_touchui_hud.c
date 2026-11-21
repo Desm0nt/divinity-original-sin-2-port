@@ -629,6 +629,53 @@ static void hu_act_step(void) {
 }
 
 // ---- ExternalInterface of the `_p` movies ----
+// A panel of the iPad column (code 2..7 as dmSide) through the player's PC hot bar: "hotbarBtnPressed"(PC id), a toggle. only_open: nothing
+// is sent when the host's object of that panel type for the player is visible already (an "open", not a toggle; the iPad's long press on a
+// portrait, hle_dos2_touch_gaps.c). 1 = sent.
+static int hu_panel(void *ui, int code, int only_open, const char *who_asks) {
+    static const char *const k_nm[8] = {"?", "options", "map", "character", "inventory", "skills", "crafting", "journal"};
+    const int pc = hu_side_panel(code);
+    if (pc < 0) return 0;
+    uint8_t *mgr = hu_mgr(), *hb = NULL;
+    const uint16_t who = ui ? *(const volatile uint16_t *)((const uint8_t *)ui + HU_OBJ_PLAYER) : 0;
+    for (int i = 0; i < g_nobj && mgr; i++) if (g_obj[i].type == HU_T_HOTBAR && (!hb || g_obj[i].player == who)) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
+    if (!hb || !g_btn_ok) { if (g_nside++ < 20) LOG("【红】[hud] %s (%s): %s: nothing opened", who_asks, k_nm[code], hb ? "the hot bar class's handler differs in this build" : "no PC hot bar object of the host"); return 0; }
+    void *fn = g_main->base + HU_HB_CALLED;
+    if ((*(void ***)(void *)hb)[0] != fn) { if (g_nside++ < 20) LOG("【红】[hud] %s (%s): the hot bar object's vt[0] is not main+%#x: nothing opened", who_asks, k_nm[code], HU_HB_CALLED); return 0; }
+    const uint16_t hbp = *(volatile uint16_t *)(hb + HU_OBJ_PLAYER);
+    if (only_open) {
+        const uint32_t want = (uint32_t)hu_side_type(code);
+        for (int i = 0; i < g_nobj; i++) if (g_obj[i].type == want && g_obj[i].player == hbp) {
+            const uint8_t *o = hu_obj(mgr, g_obj[i].h);
+            if (o && *(const volatile uint32_t *)(o + HU_OBJ_TYPE) == want && (o[HU_OBJ_FLAGS] & HU_F_VISIBLE)) {
+                if (g_dbg || g_nside++ < 12) LOG("[hud] %s (%s): type %#x of player %u is open already: nothing sent", who_asks, k_nm[code], want, (unsigned)hbp);
+                return 0;
+            }
+        }
+    }
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)pc;
+    if (g_dbg || g_nside++ < 12) LOG("[hud] %s (%s): \"hotbarBtnPressed\"(%d) to the PC hot bar object %p (player %u), as its own button does", who_asks, k_nm[code], pc, (void *)hb, (unsigned)hbp);
+    ((void (*)(void *, const char *, unsigned, const dm_ei_val *))fn)(hb, "hotbarBtnPressed", 1, &v);
+    return 1;
+}
+static int hu_panels(uint8_t *mgr, uint16_t who, uint8_t *o[5]); static uint8_t *hu_hotbar(uint8_t *mgr, uint16_t who);
+static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a);
+int dm_dos2_touchui_hud_panel(void *ui, int code, int only_open, const char *who_asks);   // hle_dos2_touch_gaps.c (game thread, from an EI handler)
+int dm_dos2_touchui_hud_panel(void *ui, int code, int only_open, const char *who_asks) {
+    if (!hu_on() || !dm_dos2_touchui_may_press(ui)) return 0;
+    if (g_one) {   // one window at a time (dmSide's rule): the same plan as the column's button; only_open = nothing when that window is up already
+        uint8_t *mgr = hu_mgr(), *o[5];
+        uint8_t *hb = hu_hotbar(mgr, ui ? *(const volatile uint16_t *)((const uint8_t *)ui + HU_OBJ_PLAYER) : 0);
+        if (hb) {
+            const int want = hu_view_want(code), vis = hu_panels(mgr, *(volatile uint16_t *)(hb + HU_OBJ_PLAYER), o);
+            if (only_open && want && (vis & want) == want) { if (g_dbg || g_nside++ < 12) LOG("[hud] %s: open already, nothing sent", who_asks ? who_asks : "panel"); return 0; }
+            dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)code;
+            hu_ei_side(NULL, NULL, ui, "dmSide", 1, &v);
+            return 1;
+        }
+    }
+    return hu_panel(ui, code, only_open, who_asks ? who_asks : "panel");
+}
 // the panel group of one player: which of its windows are on the screen (HU_P_* bits), the objects themselves (o[bit index])
 static const uint32_t g_panel_type[5] = {0x77, 0x74, 0x29, 0x66, 0x16};
 static int hu_panels(uint8_t *mgr, uint16_t who, uint8_t *o[5]) {

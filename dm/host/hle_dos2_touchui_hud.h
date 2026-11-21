@@ -29,17 +29,19 @@ static inline float hu_tune(float v, int given) {
     return v < 0.5f ? 0.5f : v > 2.0f ? 2.0f : v;
 }
 // ExternalInterface dmSide(code) of dmSide_p.swf / minimap_p.swf: 1 = options (the pause menu), 2..7 = the iPad column's panels in its order
-// (map, character, inventory, skills, crafting, journal) -> the id the PC hot bar's own button sends in hotbarBtnPressed (hotBarButton.setImage:
-// 0 the sheet ("ico_menu"), 1 inventory, 2 skills, 3 crafting, 4 map, 5 journal; main+0x1230904.. jump table); -1 = not a panel
+// (map, character, inventory, skills, crafting, journal) -> the id the PC hot bar's own button sends in hotbarBtnPressed (jump table
+// main+0x1f52e1e -> main+0x1230904..: 0 = the GAME MENU (0x10c6360 toggles the record's +0x88 gameMenu: "ico_menu" is the menu, not the
+// sheet - phone run 21.11: the armour icon opened the pause menu), 1 = the inventory AND the sheet together (0x10d6240: both up -> both
+// closed, else both opened: the DE PC has no toggle of the sheet alone), 2 skills, 3 crafting, 4 map, 5 journal); -1 = not a panel
 static inline int hu_side_panel(int code) {
-    static const int8_t k[6] = {4, 0, 1, 2, 3, 5};
+    static const int8_t k[6] = {4, 1, 1, 2, 3, 5};
     return code >= 2 && code <= 7 ? k[code - 2] : -1;
 }
 // One window at a time, as on the iPad (owner 20.11): the panels the column opens are one group; opening one closes the others. The one pair is
 // the EQUIPMENT VIEW (dmSide 8, from the doll button of partyInventory_p / characterSheet_p): the sheet movie shows only its doll panel and the
 // inventory stands right of it (both in their state 1, tools/dos2_ppanel_inv.py). Bits of the group / the PC hot bar id that toggles each:
 enum { HU_P_SHEET = 1, HU_P_INV = 2, HU_P_SKILLS = 4, HU_P_CRAFT = 8, HU_P_JOURNAL = 16, HU_P_ALL = 31, HU_VIEW_EQUIP = 8, HU_PAIR_GRACE_MS = 400 };
-static inline int hu_panel_pc(int bit) { return bit == HU_P_SHEET ? 0 : bit == HU_P_INV ? 1 : bit == HU_P_SKILLS ? 2 : bit == HU_P_CRAFT ? 3 : bit == HU_P_JOURNAL ? 5 : -1; }
+static inline int hu_panel_pc(int bit) { return bit == HU_P_SHEET ? 1 : bit == HU_P_INV ? 1 : bit == HU_P_SKILLS ? 2 : bit == HU_P_CRAFT ? 3 : bit == HU_P_JOURNAL ? 5 : -1; }
 static inline int hu_view_want(int code) {
     return code == 3 ? HU_P_SHEET : code == 4 ? HU_P_INV : code == 5 ? HU_P_SKILLS : code == 6 ? HU_P_CRAFT : (code == 2 || code == 7) ? HU_P_JOURNAL : code == HU_VIEW_EQUIP ? HU_P_SHEET | HU_P_INV : 0;
 }
@@ -60,10 +62,52 @@ static inline int hu_view_plan(int code, int vis, int view, int *close, int *ope
     if (want & (HU_P_SHEET | HU_P_INV)) *state = pair;
     return pair ? HU_VIEW_EQUIP : 0;
 }
+// The sheet and the inventory have ONE engine toggle (hot bar id 1 = main+0x10d6240: both up -> both closed; otherwise both opened) and one
+// "hide" each (main+0x10c01d0 the sheet, main+0x10c7b30 the inventory: vt+0x58 of the record's +0x238 / +0x228 object when it is visible).
+// From the halves on the screen (vis) to the halves wanted (want), both masked to HU_P_SHEET | HU_P_INV: *press = send the toggle once,
+// *hide = the halves to hide after it. Run 21.11: "the bag opens the inventory AND the character stats" (the toggle opened both, the host
+// believed id 1 was the inventory alone) and "the armour icon opens the pause menu" (id 0).
+static inline void hu_pair_ops(int vis, int want, int *press, int *hide) {
+    const int pair = HU_P_SHEET | HU_P_INV;
+    vis &= pair; want &= pair; *press = 0; *hide = 0;
+    if (vis == want) return;
+    if (want & ~vis) { *press = 1; *hide = pair & ~want; return; }   // something to open: the toggle opens both (not both are up), the other half goes
+    if (!want && vis == pair) { *press = 1; return; }                 // both up, both to go: the toggle closes them as the PC does
+    *hide = vis & ~want;                                               // one half (of what is up) to go
+}
 // the pair lives and dies together: one of the two was closed by its own close button -> the other goes too (after the grace: an opening pair
 // is not "one closed"). 1 = close what is left of it and forget the view.
 static inline int hu_pair_broken(int view, int vis, uint64_t ms_since_plan) {
     return view == HU_VIEW_EQUIP && ms_since_plan >= HU_PAIR_GRACE_MS && (vis & (HU_P_SHEET | HU_P_INV)) != (HU_P_SHEET | HU_P_INV);
+}
+// Run 21.11 (owner: the inventory's close button at the left of its header, the journal's close missed with a finger): a tap in the
+// TOP-RIGHT CORNER of an open panel closes it, whatever its movie did with its own close button. The windows are centred on the screen
+// (design px of a 1080-high screen, sw = its width): journal / map 1197 wide (tools/dos2_ppanel_skills.py x0.88), skills 1211, crafting 612,
+// all from y 8; the inventory 770 x min(cell / 50, (sw - 160) / 770) and the sheet 680 x min(1.7 cell / 76, (sw - 160) / 680, 1080 / 572)
+// (tools/dos2_ppanel_inv.py inv_spec / cs_spec, top 0); the equipment view the doll panel (408.7) + the inventory as one block. The zone:
+// HU_CORNER px left of the right edge .. 30 right of it, 10 above the top .. HU_CORNER below it. vis = HU_P_* bits; returns the dmSide code
+// that closes the window hit (3 sheet, 4 inventory, 5 skills, 6 crafting, 8 the equipment view; 7 = the journal / map: the host sends the
+// escape key there - its toggle switches the page instead when the other page is shown), 0 = not in a corner.
+enum { HU_CORNER = 120 };
+static inline int hu_corner_code(int vis, int view, float x, float y, float sw, int cell) {
+    const float mx = sw - 160.0f, doll = 341.0f * 1080.0f / 901.0f;
+    float w = 0, top = 8; int code = 0;
+    const int pair = (vis & (HU_P_SHEET | HU_P_INV)) == (HU_P_SHEET | HU_P_INV);
+    if (vis & HU_P_JOURNAL) { w = 1197; code = 7; }
+    else if (vis & HU_P_SKILLS) { w = 1211; code = 5; }
+    else if (vis & HU_P_CRAFT) { w = 612; code = 6; }
+    else if (pair && view == HU_VIEW_EQUIP) { float s = cell / 50.0f, a = (mx - doll) / 770.0f; w = doll + 770.0f * (s < a ? s : a); top = 0; code = 8; }
+    else if (vis & HU_P_INV) { float s = cell / 50.0f, a = mx / 770.0f; w = 770.0f * (s < a ? s : a); top = 0; code = 4; }
+    else if (vis & HU_P_SHEET) { float s = 1.7f * cell / 76.0f, a = mx / 680.0f, b = 1080.0f / 572.0f; s = s < a ? s : a; s = s < b ? s : b; w = 680.0f * s; top = 0; code = 3; }
+    if (!code) return 0;
+    const float right = sw / 2 + w / 2;
+    return x >= right - HU_CORNER && x <= right + 30 && y >= top - 10 && y <= top + HU_CORNER ? code : 0;
+}
+// the UI type of the window a dmSide panel code opens (the host's object in the player's record): map / journal 0x16, sheet 0x77,
+// inventory 0x74, skills 0x29, crafting 0x66; -1 = not a panel
+static inline int hu_side_type(int code) {
+    static const int16_t k[6] = {0x16, 0x77, 0x74, 0x29, 0x66, 0x16};
+    return code >= 2 && code <= 7 ? k[code - 2] : -1;
 }
 // The aimed point for CONFIRM / cancel: the last place the cursor RESTED before it went to where it is now (a tap on the button moves the cursor
 // onto the button; the click must land where the player aimed). Fed with the cursor on every poll.

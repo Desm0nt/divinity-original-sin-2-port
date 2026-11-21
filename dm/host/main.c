@@ -186,13 +186,16 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_touchui_install(void); dm_dos2_touchui_install(); }   // [DOS2] DM_DOS2_TOUCHUI: iPad touch movies under the Switch UI types; before the touch hook, it turns DM_DOS2_TOUCH / _KBM on (hle_dos2_touchui.c)
     { void dm_dos2_touchui_ei_install(void); dm_dos2_touchui_ei_install(); }   // [DOS2] DM_DOS2_TOUCHUI_EI: ExternalInterface / invoke log + host EI handlers (hle_dos2_touchui_ei.c)
     { void dm_dos2_touchui_ie_install(void); dm_dos2_touchui_ie_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: the iPad's input events "IE Tap" ... for the `_t` movies (hle_dos2_touchui_ie.c, run tu05a)
-    { void dm_dos2_touchui_hud_install(void); dm_dos2_touchui_hud_install(); }   // [DOS2] DM_DOS2_TOUCHUI_HUD: the iPad touch HUD in game; before the touch hook, it turns DM_DOS2_TOUCH_LIVE on (hle_dos2_touchui_hud.c)
+    { void dm_dos2_touchui_hud_install(void); dm_dos2_touchui_hud_install(); }   // [DOS2] touch HUD (UI mode touch / DM_DOS2_TOUCHUI_HUD), step 1: site checks + switches only, before the touch hook (hle_dos2_touchui_hud.c)
+    { void dm_dos2_touch_gaps_install(void); dm_dos2_touch_gaps_install(); }   // [DOS2] UI mode touch: EI calls the Switch classes lack (portrait long press = inventory), after the EI hook (hle_dos2_touch_gaps.c)
+    { void dm_dos2_touch_tips_install(void); dm_dos2_touch_tips_install(); }   // [DOS2] UI mode touch: keyboard-only loading screen tips out of the PC pick (hle_dos2_touch_tips.c)
     { void dm_dos2_touchui_vis_install(void); dm_dos2_touchui_vis_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: "dmPanel" of bottomBar_d's panel column = the radial menu's openPanel (hle_dos2_touchui_vis.c)
     { void dm_dos2_touchui_route_install(void); dm_dos2_touchui_route_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: per-movie mouse routing, modal guard, a tap is not "accept" (hle_dos2_touchui_route.c)
     { void dm_dos2_touch_kit_install(void); dm_dos2_touch_kit_install(); }   // [DOS2] DM_DOS2_TOUCH_KIT / _M0 (default 0): the dmTouch kit's host side and the M0 experiment, after the EI / IE / route hooks (hle_dos2_touch_kit.c)
     { void dm_dos2_touch_world_install(void); dm_dos2_touch_world_install(); }   // [DOS2] DM_DOS2_TOUCH_WORLD=3: PC world clicks by touch in controller mode: picking from the cursor, Action1 (hle_dos2_touch_world.c)
     { void dm_dos2_touch_guard_install(void); dm_dos2_touch_guard_install(); }   // [DOS2] with DM_DOS2_TOUCH: NULL check the game lacks in its pending-tooltip path (hle_dos2_touchui.c, run tu03 crash)
     { void dm_dos2_touch_install(void); dm_dos2_touch_install(); }   // [DOS2] DM_DOS2_TOUCH: touches as mouse records through the engine's InjectInput (hle_dos2_touch.c)
+    { void dm_dos2_touchui_hud_hook(void); dm_dos2_touchui_hud_hook(); }   // [DOS2] touch HUD, step 2: its create-all / destroy-all jumps go in AFTER hle_dos2_touch.c compared those prologues (the TU-07 install-order bug)
     { void dm_dos2_vkn_install(void); dm_dos2_vkn_install(); }   // [DOS2] DM_VK_NATIVE: the native Vulkan backend behind the engine's renderer (hle_dos2_vkn.c); LAST: its hooks chain over the others'
 #endif
     uint64_t ta = now_ns();

@@ -127,6 +127,12 @@
     <string name="dos2_touch">Touch as mouse (experiment): tap = click, hold = right click, pinch = zoom</string>
     <string name="dos2_drs_target">Target frame rate, fps</string>
     <string name="dos2_drs_min">Lowest 3D resolution it may drop to (per side; it holds the target but never goes below this)</string>
+    <!-- [DOS2] the in-game UI mode (owner 19.11, Tl2Gear.dos2UiMode, hle_dos2_uimode.c, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: UI mode switch") -->
+    <string name="dos2_ui_mode">Interface in the game</string>
+    <string name="dos2_ui_switch">Switch: the console interface and the on-screen gamepad; taps on the game do nothing</string>
+    <string name="dos2_ui_hybrid">Hybrid: the console interface + touch (as before)</string>
+    <string name="dos2_ui_touch">Touch (experiment): like on the iPad, no on-screen gamepad; a press on a real gamepad brings the console interface</string>
+    <string name="dos2_ui_mode_note">Menus change at once, the game screen after the next load or the return to the main menu.</string>
     <!-- [DOS2] dynamic resolution tied to the Switch mode (owner 17.11, Tl2Gear.dos2Drs, docs/dos2/nr/DRS-MODE.md) -->
     <string name="dos2_mode_handheld">Handheld: %1$s (lighter on the GPU)</string>
     <string name="dos2_fps_uncapped">No limit</string>

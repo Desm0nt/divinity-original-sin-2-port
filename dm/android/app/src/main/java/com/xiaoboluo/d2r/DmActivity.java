@@ -1060,7 +1060,11 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             if (!v.isEmpty() && !"0".equals(v) && !dos2Touch) { dos2Touch = true; crumb("DM_DOS2_TOUCHUI: touches off the pad's controls go to the game (touch as mouse)"); }
             String b = Os.getenv("DM_DOS2_TOUCHUI_BACK"); b = b == null ? "" : b.trim();
             dos2BackB = !v.isEmpty() && !"0".equals(v) && !"0".equals(b);
-            if (dos2BackB) crumb("DM_DOS2_TOUCHUI: Back (gesture / key) = pad B; the pause menu opens from the pad's gear button (DM_DOS2_TOUCHUI_BACK=0: Back opens it)");
+            // run 20.11 review: UI mode touch takes Back as the PC escape (nativeDos2Back) whether DM_DOS2_TOUCHUI is in the environment or not - the
+            // native side turns the touch UI on by itself when TouchUI.pak is there, so without dm/env Back used to open the pause menu instead
+            if (dos2UiMode == 2 && !"0".equals(b) && !"0".equals(v)) dos2BackB = true;
+            if (dos2BackB) crumb(dos2UiMode == 2 ? "UI mode touch: Back (gesture / key) = escape; the pause menu opens from the gear button (DM_DOS2_TOUCHUI_BACK=0: Back opens it)"
+                : "DM_DOS2_TOUCHUI: Back (gesture / key) = pad B; the pause menu opens from the pad's gear button (DM_DOS2_TOUCHUI_BACK=0: Back opens it)");
         } catch (Throwable t) { }
     }
     // [DOS2] the gear's UI mode changed (Tl2Gear.dos2UiMode.after): live when the game runs (hle_dos2_uimode.c), a toast says what applies when;
