@@ -838,6 +838,12 @@ static void ui_census(void) {
              (unsigned long long)s.drop_set, (unsigned long long)s.drop_ring, (unsigned long long)s.drop_vb, (unsigned long long)s.drop_empty, (unsigned long long)g_n_no_vb,
              (unsigned long long)g_n_identical, (unsigned long long)g_n_tex0_null, (unsigned long long)s.pairs, (unsigned long long)s.pair_fail, (unsigned long long)s.pipelines,
              (unsigned long long)s.pipe_fail, (unsigned long long)s.sets, (unsigned long long)s.pools, (unsigned long long)s.feedback, (unsigned long long)s.placeholder);
+    {   // [rt P6]
+        uint64_t h = 0, m = 0, w = 0; vkn_ui_set_cache_stats(&h, &m, &w);
+        static uint64_t oh, om, ow;
+        vkn_logf("ui: set cache (DM_VK_NATIVE_UISET): reused %llu, new %llu, would reuse %llu (since the last line)", (unsigned long long)(h - oh), (unsigned long long)(m - om), (unsigned long long)(w - ow));
+        oh = h; om = m; ow = w;
+    }
     vkn_logf("ui: programs %llu (bad %llu); GDraw textures made %llu (failed %llu, freed %llu), vertex buffers %llu (failed %llu, freed %llu); updates: antialias %llu, "
              "MakeTextureEnd %llu, UpdateTextureRect %llu, engine immediate %llu, packet 0x2c %llu, without a native texture %llu; vkn_tex_update recorded %llu, queued %llu, "
              "%.1f MB, dropped (dead %llu, rectangle %llu, format %llu, memory %llu)",
@@ -865,6 +871,11 @@ void dm_vkn_ui_register(void) {
             for (unsigned i = 0; i < sizeof k_tile / sizeof k_tile[0]; i++) if (n == strlen(k_tile[i]) && !strncmp(t, k_tile[i], n)) sim_tiler = 1;
         }
         vkn_ui_pass_config(e && *e ? atoi(e) : -1, v && *v ? atoi(v) : 0, r && *r ? atoi(r) : 0, sim_tiler);
+    }
+    {   // [rt P6] DM_VK_NATIVE_UISET (vkn_ui.h): 0 a fresh set per UI draw, 1 (default) sets of the recording by content, 2 = 1 without reuse (counted)
+        const char *e = getenv("DM_VK_NATIVE_UISET"); const int m = e && *e ? atoi(e) : 1;
+        vkn_ui_set_cache(m);
+        vkn_logf("ui: DM_VK_NATIVE_UISET=%d%s", m, e && *e ? "" : " (default)");
     }
     g_re_stub = dm_vkn_stack_stub_ex((void *)ui_rendering_end, "GDraw RenderingEnd", DM_VKN_SF_ENC);   // ([stage 5.5] its scissor is a record)
     if (!g_re_stub) vkn_logf(RED "ui: no host-stack stub for RenderingEnd: the GDraw table keeps the game's 0x1bf4200 (NVN)");

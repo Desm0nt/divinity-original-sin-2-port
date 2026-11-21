@@ -491,6 +491,21 @@ static VkPipeline pipe_get(const pipe_k *k, const vkn_shader *s, const vkn_pass_
 enum { MAX_POOLS = 64 };
 static VkDescriptorPool g_pool[MAX_POOLS]; static uint32_t g_npool, g_pool_left, g_pool_serial; static int g_pool_valid;
 static void pool_destroy(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroyDescriptorPool(d->dev, (VkDescriptorPool)(uintptr_t)ctx, NULL); }
+// ---- [rt P6] DM_VK_NATIVE_UISET (vkn_ui.h): sets of this recording by content. A UI draw's uniform blocks are fresh copies in the
+// recording ring at new offsets, so a set holding those offsets is never the same twice; with the cache on, a DYNAMIC uniform binding
+// gets (ring buffer, ring base) in the set and the copy's offset from the base as its dynamic offset - the bytes read are the same (the
+// descriptor's offset + the dynamic offset), the set content now repeats: (layout, per binding buffer / offset / range or view /
+// sampler). Sets live in the pools of the recording (retired with them at the next recording), so the cache empties at the same point.
+// Mode 2: the same dynamic offsets, the lookup made and counted (would hit), every draw a fresh set (the reuse alone is what 1 adds).
+enum { USC = 512, USW = 2 + 3 * 32 };
+static struct { uint64_t h; uint32_t nw; VkDescriptorSet set; uint64_t w[USW]; } g_usc[USC];
+static uint32_t g_usc_serial; static int g_usc_valid, g_uiset; static uint64_t g_usc_hits, g_usc_miss, g_usc_would;
+void vkn_ui_set_cache(int mode) { g_uiset = mode == 1 || mode == 2 ? mode : 0; g_usc_valid = 0; }
+void vkn_ui_set_cache_stats(uint64_t *hits, uint64_t *miss, uint64_t *would) { if (hits) *hits = g_usc_hits; if (miss) *miss = g_usc_miss; if (would) *would = g_usc_would; }
+static uint64_t usc_hash(const uint64_t *w, uint32_t n) { uint64_t h = 0x9e3779b97f4a7c15ull ^ n; for (uint32_t i = 0; i < n; i++) { h ^= w[i]; h *= 0xff51afd7ed558ccdull; h ^= h >> 32; } return h; }
+static void usc_check_serial(void) {   // a new recording: its sets are new (the pools of the last one are being retired)
+    if (!g_usc_valid || g_usc_serial != vkn_cb_serial()) { memset(g_usc, 0, sizeof g_usc); g_usc_serial = vkn_cb_serial(); g_usc_valid = 1; }
+}
 static VkDescriptorSet set_alloc(VkDescriptorSetLayout lay) {
     const vkn_dev *d = vkn_device(); if (!d) return VK_NULL_HANDLE;
     if (!g_pool_valid || g_pool_serial != vkn_cb_serial()) {   // a new recording: the last one's pools go after the frame delay
@@ -582,7 +597,11 @@ int vkn_ui_draw(const vkn_ui_draw_in *in) {
                 if (!c1->size) { g_st.drop_bind++; UI_RED(RR_BIND, "pair %u: C1 binding without data: draw dropped", pair); return 1; }
                 o->buffer = c1->buf; o->offset = c1->off; o->range = c1->size;
             }
-            if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) { if (ndyn < 32) dyn[ndyn++] = 0; }
+            if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                uint32_t dv = 0;
+                if (g_uiset && b->kind == VKN_BK_UNIFORM) { const uint64_t base = vkn_ring2_base(); dv = (uint32_t)(o->offset - base); o->offset = base; }   // [rt P6]
+                if (ndyn < 32) dyn[ndyn++] = dv;
+            }
             w->pBufferInfo = o;
         } else if (b->kind == VKN_BK_TEXTURE && b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             const int u = b->stage == VKN_STAGE_FS ? unit_of_slot(b->slot) : -1;
@@ -621,10 +640,27 @@ int vkn_ui_draw(const vkn_ui_draw_in *in) {
         if (!in->quads && (!in->idx || ring_put(in->idx, in->nidx * 2u, 0, &ibuf, &ioff, NULL))) { g_st.drop_ring++; UI_RED(RR_RING, "no ring space for %u indices: draw dropped", in->nidx); return 1; }
     }
     if ((ioff & 1) && !in->quads) { g_st.drop_vb++; UI_RED(RR_VB, "odd index offset %llu: draw dropped", (unsigned long long)ioff); return 1; }
-    VkDescriptorSet set = set_alloc(s->set_layout);
-    if (!set) { g_st.drop_set++; UI_RED(RR_SET, "descriptor set allocation failed: draw dropped"); return 1; }
-    for (uint32_t i = 0; i < nw; i++) wr[i].dstSet = set;
-    vkUpdateDescriptorSets(vkn_device()->dev, nw, wr, 0, NULL);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint64_t kw[USW]; uint32_t nk = 0; uint32_t ci = 0; uint64_t kh = 0;
+    if (g_uiset) {   // [rt P6] the set's content as a key
+        usc_check_serial();
+        kw[nk++] = (uint64_t)(uintptr_t)s->set_layout; kw[nk++] = nw;
+        for (uint32_t i = 0; i < nw && nk + 3 <= USW; i++) {
+            if (wr[i].pBufferInfo) { kw[nk++] = (uint64_t)(uintptr_t)wr[i].pBufferInfo->buffer | (uint64_t)wr[i].dstBinding << 56; kw[nk++] = wr[i].pBufferInfo->offset; kw[nk++] = wr[i].pBufferInfo->range; }
+            else { kw[nk++] = (uint64_t)(uintptr_t)wr[i].pImageInfo->imageView | (uint64_t)wr[i].dstBinding << 56; kw[nk++] = (uint64_t)(uintptr_t)wr[i].pImageInfo->sampler; kw[nk++] = wr[i].pImageInfo->imageLayout; }
+        }
+        kh = usc_hash(kw, nk); ci = (uint32_t)(kh >> 40) & (USC - 1);
+        if (g_usc[ci].set && g_usc[ci].h == kh && g_usc[ci].nw == nk && !memcmp(g_usc[ci].w, kw, nk * sizeof kw[0])) {
+            if (g_uiset == 1) { set = g_usc[ci].set; g_usc_hits++; } else g_usc_would++;
+        } else g_usc_miss++;
+    }
+    if (!set) {
+        set = set_alloc(s->set_layout);
+        if (!set) { g_st.drop_set++; UI_RED(RR_SET, "descriptor set allocation failed: draw dropped"); return 1; }
+        for (uint32_t i = 0; i < nw; i++) wr[i].dstSet = set;
+        vkUpdateDescriptorSets(vkn_device()->dev, nw, wr, 0, NULL);
+        if (g_uiset == 1 || (g_uiset == 2 && !g_usc[ci].set)) { g_usc[ci].set = set; g_usc[ci].h = kh; g_usc[ci].nw = nk; memcpy(g_usc[ci].w, kw, nk * sizeof kw[0]); }
+    }
     // record
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s->layout, 0, 1, &set, ndyn, ndyn ? dyn : NULL);

@@ -4,7 +4,8 @@
 //   0  nothing (every probe below is one predictable branch, every pass / frame hook one test of a flag);
 //   1  default in mode 1: the 10 s lines "draw by part" and "backend measured" (draw parts timed on 1 of every 128 draws), and one
 //      GPU-sampled presented frame every 20 s ("gpu by pass", the top 24 kinds of pass + the rest summed);
-//   2  as 1, a GPU-sampled frame every 2 s and the per-pass list not truncated.
+//   2  as 1, a GPU-sampled frame every 2 s and the per-pass list not truncated;
+//   3  [rt P0] as 2 + the split measurement (block "[rt P0]" below).
 // GPU: on a sampled presented recording a timestamp (BOTTOM_OF_PIPE) at its top, before every vkCmdBeginRenderPass, after every
 // vkCmdEndRenderPass and at its bottom, into this module's query pool (one region per command buffer of vkn_frame's ring: the region
 // is reset at the top of the recording that uses it and read in vkn_frame's slot_done, i.e. once that buffer's fence was seen
@@ -69,7 +70,7 @@ enum {
     VKN_PROF_TAIL,      // the rest up to vkn_prof_draw_end (dm_vkn_draw_tail_post, counters, drop paths)
     VKN_PROF_PARTS
 };
-typedef struct vkn_prof_hot { uint32_t left, on; uint64_t last; } vkn_prof_hot;
+typedef struct vkn_prof_hot { uint32_t left, on; uint64_t last; uint32_t on3, pad; } vkn_prof_hot;   // on3: [rt] a sampled draw at level 3
 extern vkn_prof_hot vkn_prof_h;          // (written only by the recording thread)
 void vkn_prof_draw_slow(void);
 void vkn_prof_mark_slow(int part);
@@ -77,6 +78,39 @@ void vkn_prof_end_slow(void);
 static inline void vkn_prof_draw_begin(void) { if (__builtin_expect((--vkn_prof_h.left == 0) | (vkn_prof_h.on != 0), 0)) vkn_prof_draw_slow(); }
 static inline void vkn_prof_mark(int part) { if (__builtin_expect(vkn_prof_h.on != 0, 0)) vkn_prof_mark_slow(part); }
 static inline void vkn_prof_draw_end(void) { if (__builtin_expect(vkn_prof_h.on != 0, 0)) vkn_prof_end_slow(); }
+
+// ==== [rt P0] DM_VK_NATIVE_PROF=3: the split measurement (docs/dos2/nr/VK-RT-ANALYSIS.md section 2.4) ====
+// Level 3 = level 2's lines plus, on the same sampled draws (1 of 128):
+//   * fine parts inside the coarse ones (vkn_prof_mark_f): each fine mark adds the time since the previous probe to its fine part AND to
+//     the coarse part it belongs to, so "draw by part" keeps its meaning; line "draw by part 3: ...; driver X ms a frame (calls N), ours Y";
+//     the driver's share = the fine parts that are only a vkCmd* call (VKN_PROF_F_*_CMD);
+//   * the effect chain by function (vkn_fx.c, line "fx by function");
+//   * the recording thread's records by kind (vkn_rt.c exec, 1 of 64 records timed, line "rt by record");
+//   * what differs between a new pipeline key and the previous one (vkn_draw.c, line "pipeline changes");
+//   * contended locks of vkn_buf.c / vkn_tex.c lookups (trylock failed first, line "locks").
+// Levels 0..2: every fine probe is one predictable branch (on3 stays 0), nothing else changes.
+enum {
+    VKN_PROF_F_TEX_LOOK,   // tex+set: texture-pool / sampler-pool lookups (bind_textures)
+    VKN_PROF_F_TEX_SAMPLE, // tex+set: vkn_pass_sample of the bound textures
+    VKN_PROF_F_TEX_REST,   // tex+set: the rest of the texture phase (placeholders, element writes, the reuse checks)
+    VKN_PROF_F_SET_KEY,    // tex+set: uniform elements + the set key
+    VKN_PROF_F_SET_FIND,   // tex+set: set cache lookup / build
+    VKN_PROF_F_SET_CMD,    // tex+set: vkCmdBindDescriptorSets (driver)
+    VKN_PROF_F_PIPE_KEY,   // pipeline: key packing
+    VKN_PROF_F_PIPE_FIND,  // pipeline: front cache / vkn_pipe_get
+    VKN_PROF_F_PIPE_CMD,   // pipeline: vkCmdBindPipeline (driver)
+    VKN_PROF_F_BUF_LOOK,   // buffers: lookups (index / vertex buffers, folds)
+    VKN_PROF_F_BUF_CMD,    // buffers: vkCmdBindVertexBuffers / vkCmdBindIndexBuffer (driver)
+    VKN_PROF_F_VIEW_CMD,   // viewport: vkCmdSetViewport / vkCmdSetScissor (driver)
+    VKN_PROF_F_Q_PRE,      // draw-cmd: the query module's pre bracket
+    VKN_PROF_F_DRAW_CMD,   // draw-cmd: vkCmdDraw* (driver)
+    VKN_PROF_FINE
+};
+extern int vkn_prof_lvl3;                // 1 = DM_VK_NATIVE_PROF=3 (read anywhere; set once at init)
+void vkn_prof_mark_f_slow(int fine);
+static inline void vkn_prof_mark_f(int fine) { if (__builtin_expect(vkn_prof_h.on3 != 0, 0)) vkn_prof_mark_f_slow(fine); }
+static inline int vkn_prof_sampled3(void) { return vkn_prof_h.on3 != 0; }
+void vkn_prof_driver_calls(uint32_t n);  // driver calls made by the sampled draw (counted with the fine parts)
 
 #ifdef __cplusplus
 }

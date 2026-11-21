@@ -56,6 +56,7 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_buf.h"
 #include "../gfx/vkn/vkn_draw.h"
+#include "../gfx/vkn/vkn_fx.h"   // [rt P4] vkn_fx_gate_mode
 #include "../gfx/vkn/vkn_prof.h"   // [stage 5.1 G] the measurement probes (DM_VK_NATIVE_PROF "draw by part")
 #include "../gfx/vkn/vkn_query.h"
 #include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: every backend call of this part is a record
@@ -492,6 +493,13 @@ static void draw_census(void) {
              (unsigned long long)k.support_hits, (unsigned long long)k.vfmt_hits, (unsigned long long)k.state_hits, (unsigned long long)k.ring_hits,
              (unsigned long long)g_k.ubo_reuse[0], (unsigned long long)g_k.ubo_reuse[1], (unsigned long long)g_k.ubo_reuse[2], g_k.ubo_bytes / 1024.0, (unsigned long long)g_k.ubo_cmp,
              (unsigned long long)g_k.ann_skip, (unsigned long long)g_k.ann_skip_blocks, (unsigned long long)g_k.tex_clean, (unsigned long long)g_k.tid_hits);
+    {   // [rt P3] the lock-free texture paths (totals since start)
+        vkn_draw_cost3_stats c3; vkn_draw_cost3_stats_get(&c3);
+        vkn_logf("draw cost 3: pool-id mirror %llu hits / %llu misses (bit 0x100); shader binding memory %llu hits / %llu misses, its set %llu hits (bit 0x200); "
+                 "DM_VK_NATIVE_COST_CHECK compares %llu, differ %llu",
+                 (unsigned long long)c3.mirror_hits, (unsigned long long)c3.mirror_miss, (unsigned long long)c3.shmem_hits, (unsigned long long)c3.shmem_miss,
+                 (unsigned long long)c3.shmem_set_hits, (unsigned long long)c3.check_runs, (unsigned long long)c3.check_differ);
+    }
 }
 
 void dm_vkn_draw_register(void);
@@ -521,8 +529,20 @@ void dm_vkn_draw_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;   // mode 2: no site of this part goes in (VKN_M_NATIVE), nothing else either
     {   // [stage 5] DM_VK_NATIVE_COST (vkn_draw.h): bit mask of the draw-cost shortcuts, default all; 0 = the stage-4 draw path exactly
         const char *e = getenv("DM_VK_NATIVE_COST");
-        g_hcost = e && *e ? (uint32_t)strtoul(e, NULL, 0) & VKN_COST_ALL : VKN_COST_ALL;
+        g_hcost = e && *e ? (uint32_t)strtoul(e, NULL, 0) & VKN_COST_ALL2 : VKN_COST_ALL2;   // [rt P3] + 0x100 MIRROR, 0x200 SHMEM
         vkn_draw_cost_set(g_hcost);
+        {   // [rt P3] DM_VK_NATIVE_COST_CHECK=1: every reuse of the texture / set fast paths compared with the full path (counted)
+            const char *c = getenv("DM_VK_NATIVE_COST_CHECK");
+            vkn_draw_cost_check(c && *c && atoi(c) == 1);
+            vkn_logf("draw: DM_VK_NATIVE_COST bits 0x100 (pool-id mirror, no texture lock) %d, 0x200 (bindings + set per shader) %d; DM_VK_NATIVE_COST_CHECK=%d",
+                     !!(g_hcost & VKN_COST_MIRROR), !!(g_hcost & VKN_COST_SHMEM), c && *c && atoi(c) == 1);
+        }
+        {   // [rt P4] DM_VK_NATIVE_FXGATE (vkn_fx.h: 0 off, 1 gate, 2 verify; default 1) and DM_VK_NATIVE_SHC_EHASH (vkn_rt.h: 0 / 1 / 2 verify; default 1)
+            const char *g = getenv("DM_VK_NATIVE_FXGATE"), *h = getenv("DM_VK_NATIVE_SHC_EHASH");
+            vkn_fx_gate_mode(g && *g ? atoi(g) : 1);
+            vkn_rt_ehash_set(h && *h ? atoi(h) : 1);
+            vkn_logf("draw: DM_VK_NATIVE_FXGATE=%s, DM_VK_NATIVE_SHC_EHASH=%d%s", g && *g ? g : "1 (default)", vkn_rt_ehash(), h && *h ? "" : " (default)");
+        }
         // [stage 5.1 G] bit 0x80 VFOLD (default on): the vertex fold alone (it changes vertexOffset / firstVertex; needs bit VB);
         // DM_VK_NATIVE_COST=0x7f = everything but the fold (the A/B run). The generations it and the texture / state caches need:
         // vkn_tex_bind_gen, vkn_state_handle_gen, vkn_shader_vindex (all present in this build).

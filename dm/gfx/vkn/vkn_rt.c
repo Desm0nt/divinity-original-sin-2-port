@@ -24,6 +24,7 @@
 #include "vkn_query.h"
 #include "vkn_state.h"
 #include "vkn_ui.h"
+#include "../nr/nr_shc.h"   // [rt P4] nrshc_bytes (the shadow cache's block hash)
 _Static_assert(VKN_PASS_COLORS_RT == VKN_PASS_COLORS, "vkn_rt.h colour count");
 
 #define RT_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark as a literal of its own
@@ -51,27 +52,44 @@ static int g_owner_engine;          // after a sync: the encoder owns the record
 static void (*g_yield)(int);
 static uint64_t g_ring_limit;
 
-static vkn_rt_stats g_st;           // ops / bytes / slots / encode-side: the encoder; idle / busy / frames: the worker (atomics)
-#define ST_ADD(f, v) __atomic_add_fetch(&g_st.f, (v), __ATOMIC_RELAXED)
+// [rt P1] DM_VK_NATIVE_RT_LEAN / [rt P2] DM_VK_NATIVE_RT_RES (vkn_rt.h): install time (nothing encoded)
+static int g_lean, g_res;
+static __thread int t_enc;          // [rt P1] this thread was bound as the encoder (its counters: plain load + store, see ST_ADD)
+static vkn_rt_stats g_st __attribute__((aligned(64)));   // ops / bytes / slots / encode-side: the encoder; idle / busy / frames: the worker
+// [rt P1] LEAN: the encoder's own counters without an atomic read-modify-write (a relaxed load and store: one writer; a foreign thread's
+// rare record still adds atomically - a count it races with may be lost, the census is statistics). Without LEAN: atomic adds as before.
+#define ST_ADD(f, v) do { if (g_lean && t_enc) __atomic_store_n(&g_st.f, __atomic_load_n(&g_st.f, __ATOMIC_RELAXED) + (v), __ATOMIC_RELAXED); \
+                          else __atomic_add_fetch(&g_st.f, (v), __ATOMIC_RELAXED); } while (0)
 static vkn_rt_site *g_sites; static pthread_mutex_t g_site_mu = PTHREAD_MUTEX_INITIALIZER;
 static vkn_rt_site g_site_ring = VKN_RT_SITE("ring guard"),
                    g_site_off = VKN_RT_SITE("off-frame end"), g_site_rebase = VKN_RT_SITE("frame rebase"), g_site_oom = VKN_RT_SITE("stream full");
 
 // ================================================================ the stream
 enum { CHUNK = 256 << 10, HDR = 8, SLOT_ARR = 4 };
-enum { K_NEXT = 1, K_DRAW, K_DISPATCH, K_UBO, K_SLOTS, K_CALL, K_BEGIN, K_END, K_TAIL };
+enum { K_NEXT = 1, K_DRAW, K_DISPATCH, K_UBO, K_SLOTS, K_CALL, K_BEGIN, K_END, K_TAIL, K_SLOTS2 };
 typedef struct rt_hdr { uint32_t size; uint16_t kind; uint16_t n; } rt_hdr;   // size: whole record, 16-byte multiple
 typedef struct rt_chunk { struct rt_chunk *next, *free_next; uint32_t cap; uint32_t pad; uint8_t data[]; } rt_chunk;
 static rt_chunk *g_wc; static uint32_t g_wo;          // producer: chunk, offset
 static rt_chunk *g_rc; static uint32_t g_ro;          // consumer
-static uint64_t g_written, g_published, g_done_local; // producer counts / consumer's own
-static uint64_t g_pushed, g_done;                     // atomics: published by the producer / executed by the consumer
+static uint64_t g_written, g_published; // producer counts
+// [rt P1] the queue's shared words on cache lines of their own (by writer): the producer's count, the consumer's counts, the waits.
+// (Before: g_pushed and g_done in one line, written by the two threads at every record and every publish.)
+static struct { uint64_t pushed, enc_tails; } g_qp __attribute__((aligned(64)));            // the encoder writes
+static struct { uint64_t done, wk_tails; } g_qc __attribute__((aligned(64)));               // the worker writes
+static struct { uint64_t wait_done, wait_tails; int sleeping, stop; } g_qw __attribute__((aligned(64)));   // rare writes (waits)
+static struct { uint64_t done_local; char pad[56]; } g_qwl __attribute__((aligned(64)));    // the worker's private count
+#define g_pushed (g_qp.pushed)          // atomic: published by the producer
+#define g_enc_tails (g_qp.enc_tails)    // frame tails written (the encoder)
+#define g_done (g_qc.done)              // atomic: executed by the consumer
+#define g_wk_tails (g_qc.wk_tails)      // atomic: frame tails executed
+#define g_wait_done (g_qw.wait_done)    // atomic: the encoder waits for g_done >= this (0 = nobody)
+#define g_wait_tails (g_qw.wait_tails)  // atomic: backpressure target
+#define g_sleeping (g_qw.sleeping)      // atomics
+#define g_stop (g_qw.stop)
+#define g_done_local (g_qwl.done_local)
 static rt_chunk *g_free; static uint32_t g_nfree; static pthread_mutex_t g_free_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv_work = PTHREAD_COND_INITIALIZER, g_cv_done = PTHREAD_COND_INITIALIZER;
-static int g_sleeping, g_stop;                        // atomics
-static uint64_t g_wait_done;                          // atomic: the encoder waits for g_done >= this (0 = nobody)
-static uint64_t g_enc_tails, g_wk_tails, g_wait_tails;   // frame tails written / executed; backpressure target (atomics)
 static uint64_t g_since_sync;                         // records written since the last sync (mode 9: what a sync would have waited for)
 
 static rt_chunk *chunk_get(uint32_t need) {
@@ -220,11 +238,25 @@ static void *worker_main(void *arg) {
             continue;
         }
         const uint64_t t1 = vkn_now_ns();
+        const int lean = g_lean;
         while (g_done_local < avail) {
             rt_hdr *h = (rt_hdr *)(g_rc->data + g_ro);
             if (h->kind == K_NEXT) { rt_chunk *c = g_rc; g_rc = c->next; g_ro = 0; chunk_put(c); }
             else { if (g_yield) g_yield(1); t_dec++; exec(h); t_dec--; g_ro += h->size; }
             g_done_local++;
+            if (lean) continue;   // [rt P1] published once for the batch, below
+            __atomic_store_n(&g_done, g_done_local, __ATOMIC_SEQ_CST);
+            const uint64_t w = __atomic_load_n(&g_wait_done, __ATOMIC_SEQ_CST);
+            if (w && g_done_local >= w) { pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv_done); pthread_mutex_unlock(&g_mu); }
+        }
+        if (lean) {
+            // [rt P1] the batch's count published at its end. Why a waiter never sleeps forever: the encoder stores g_wait_done (seq_cst,
+            // under g_mu) and then loads g_done; the worker stores g_done (seq_cst) and then loads g_wait_done: in the single total order
+            // of these four, either the encoder sees the new count (no wait) or the worker sees the target and broadcasts under g_mu
+            // (the encoder holds g_mu from its store to its cond_wait, so the broadcast cannot fall between its check and its wait). A
+            // sync waits for everything written; its target lies inside a batch the worker has loaded or will load, whose end publishes.
+            // Mid-batch readers of g_done (vkn_rt_sync's "had", foreign_wait, the retirement list) only see a smaller count: they wait
+            // or defer, never run early.
             __atomic_store_n(&g_done, g_done_local, __ATOMIC_SEQ_CST);
             const uint64_t w = __atomic_load_n(&g_wait_done, __ATOMIC_SEQ_CST);
             if (w && g_done_local >= w) { pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv_done); pthread_mutex_unlock(&g_mu); }
@@ -257,7 +289,7 @@ static uint64_t wait_done(void) {
     pthread_mutex_unlock(&g_mu);
     return vkn_now_ns() - t0 + 1;
 }
-static void retire_pending_run(int all);
+static void retire_pending_run(int all, uint64_t done);
 static void rebase(void) {   // the worker is idle: the frame counter as it is
     g_enc_frame = vkn_frame(); g_enc_due = vkn_rec_end_due(); g_rebase = 0;
 }
@@ -280,7 +312,7 @@ void vkn_rt_sync(vkn_rt_site *s) {
     g_since_sync = 0;
     __atomic_store_n(&g_owner_engine, 1, __ATOMIC_RELEASE);
     rebase();
-    retire_pending_run(1);
+    retire_pending_run(1, 0);
     if (had && s) { __atomic_add_fetch(&s->syncs, 1, __ATOMIC_RELAXED); __atomic_add_fetch(&s->wait_ns, w, __ATOMIC_RELAXED); }
     if (had) { ST_ADD(syncs, 1); ST_ADD(sync_wait_ns, w); }
 }
@@ -300,8 +332,15 @@ void vkn_rt_install(int mode, int slots) {
     if (mode != VKN_RT_AHEAD1 && mode != VKN_RT_AHEAD2 && mode != VKN_RT_VERIFY) mode = VKN_RT_OFF;
     g_mode = mode; g_slots = slots >= 0 && slots <= 3 ? slots : VKN_RT_SLOTS_CMP;
 }
+void vkn_rt_lean_set(int lean) { g_lean = lean == 1; }
+static int g_ehash;   // [rt P4]
+void vkn_rt_ehash_set(int mode) { g_ehash = mode == 1 || mode == 2 ? mode : 0; }
+int vkn_rt_ehash(void) { return g_ehash; }
+void vkn_rt_res_set(int res) { g_res = res == 1 || res == 2 ? res : 0; }
+int vkn_rt_lean(void) { return g_lean; }
+int vkn_rt_res(void) { return g_res; }
 static void bind_encoder(void) {
-    g_enc = pthread_self();
+    g_enc = pthread_self(); t_enc = 1;
     if (!g_wc) { g_wc = g_rc = chunk_get(CHUNK); g_wo = g_ro = 0; }
     if (!g_wc) { RT_REDLN(R_OOM, "no memory for the stream: DM_VK_NATIVE_RT off"); g_mode = VKN_RT_OFF; return; }
     rebase();
@@ -309,6 +348,8 @@ static void bind_encoder(void) {
     if (g_mode == VKN_RT_AHEAD1 || g_mode == VKN_RT_AHEAD2) g_threaded = !g_wk_run ? worker_start() == 0 : 1;
     __atomic_store_n(&g_owner_engine, 1, __ATOMIC_RELEASE);
     vkn_rt_live_ = 1;
+    vkn_logf("rt: DM_VK_NATIVE_RT_LEAN=%d (%s), DM_VK_NATIVE_RT_RES=%d (%s)", g_lean, g_lean ? "queue words apart, batch publish, no empty records, changed slot arrays only" : "as stage 5.5",
+             g_res, g_res == 1 ? "shader / state ids / buffers resolved at encode" : g_res == 2 ? "resolved at encode AND looked up again: differences counted" : "looked up by the recording thread");
     vkn_logf("rt: DM_VK_NATIVE_RT=%d: %s; slot arrays %s", g_mode,
              g_mode == VKN_RT_VERIFY ? "every record executed at once on the engine thread (verify)" : g_threaded ? (g_mode == 1 ? "recording thread, engine at most 1 frame ahead" : "recording thread, engine at most 2 frames ahead") : "no recording thread",
              g_slots == 0 ? "copied at every draw" : g_slots == 1 ? "copied on change (compare)" : g_slots == 2 ? "copied on change (the engine's dirty ranges)" : "dirty ranges checked by compare");
@@ -319,7 +360,7 @@ void vkn_rt_shutdown(void) {
         pthread_mutex_lock(&g_mu); __atomic_store_n(&g_stop, 1, __ATOMIC_SEQ_CST); pthread_cond_signal(&g_cv_work); pthread_mutex_unlock(&g_mu);
         pthread_join(g_wk, NULL); g_wk_run = 0;
     }
-    retire_pending_run(1);
+    retire_pending_run(1, 0);
     vkn_rt_live_ = 0; g_threaded = 0; g_eslot_ok = 0; g_dslot_mask = 0; g_cond_on = 0;
     __atomic_store_n(&g_owner_engine, 0, __ATOMIC_RELEASE);
 }
@@ -345,11 +386,10 @@ static void retire_fn(void *p) { const retire_job *j = (const retire_job *)p; vk
 // it executed that many (at the next frame tail) or at the next sync - never earlier than at the same point of the recording.
 typedef struct pend_ret { void (*fn)(void *); void *ctx; uint64_t at; struct pend_ret *next; } pend_ret;
 static pend_ret *g_pret; static pthread_mutex_t g_pret_mu = PTHREAD_MUTEX_INITIALIZER; static int g_pret_n;
-static void retire_pending_run(int all) {
+static void retire_pending_run(int all, uint64_t done) {   // done: records executed (the worker's own count: [rt P1] exact without a publish)
     if (!__atomic_load_n(&g_pret_n, __ATOMIC_ACQUIRE)) return;
     pthread_mutex_lock(&g_pret_mu);
     pend_ret **pp = &g_pret, *run = NULL;
-    const uint64_t done = __atomic_load_n(&g_done, __ATOMIC_ACQUIRE);
     while (*pp) { pend_ret *p = *pp; if (all || p->at <= done) { *pp = p->next; p->next = run; run = p; g_pret_n--; } else pp = &p->next; }
     pthread_mutex_unlock(&g_pret_mu);
     while (run) { pend_ret *n = run->next; vkn_retire(run->fn, run->ctx); free(run); run = n; }
@@ -373,30 +413,54 @@ void vkn_rt_retire_block(const vkn_block *b) {
 }
 
 // ---- constant blocks ----
-typedef struct ubo_e { uint8_t stage, slot, pad[2]; uint32_t off, size, pad2; } ubo_e;   // 16 bytes
+typedef struct ubo_e { uint8_t stage, slot, hashed, pad; uint32_t off, size, pad2; } ubo_e;   // 16 bytes; [rt P4] hashed: 16 more bytes follow (the hash)
+// [rt P4] SHC_EHASH: the encoder's current target set is depth-only (vkn_rt_pass_targets), and a memo of the hashes of this frame
+static int g_enc_donly;
+static struct { uint32_t off, size; uint64_t frame, h; } g_ehm[256];
+static uint64_t g_eh_n, g_eh_bytes;
+static uint64_t ehash_of(uint32_t off, uint32_t size) {
+    const uint32_t i = (off >> 8 ^ off >> 16) & 255;
+    if (g_ehm[i].frame == g_enc_frame + 1 && g_ehm[i].off == off && g_ehm[i].size == size) return g_ehm[i].h;
+    const uint8_t *ring = (const uint8_t *)vkn_ring_cpu();
+    const uint64_t h = ring ? nrshc_bytes(0x55424f, ring + off, size) : 0x5542ffffull;
+    g_eh_n++; g_eh_bytes += size;
+    g_ehm[i].off = off; g_ehm[i].size = size; g_ehm[i].frame = g_enc_frame + 1; g_ehm[i].h = h;
+    return h;
+}
 typedef struct op_ubo { rt_hdr h; uint32_t pad[2]; } op_ubo;                              // entries after (16-aligned)
 static void ubo_bad_fn(void *p) { const int32_t *a = (const int32_t *)p; vkn_draw_ubo(a[0], (uint32_t)a[1], (uint32_t)a[2], (uint32_t)a[3]); }
 uint32_t vkn_rt_ubo_gen(void) { return vkn_rt_live_ ? g_ubo_gen : vkn_draw_ubo_gen(); }
 void vkn_rt_ubo(int stage, uint32_t slot, uint32_t off, uint32_t size) {
     if (!vkn_rt_live_) { vkn_draw_ubo(stage, slot, off, size); return; }
+    const int inl0 = inline_here();   // [rt P1] (asked once: a foreign thread's call waits and counts there)
     if (stage >= 0 && stage < VKN_STAGE_SLOTS && slot < VKN_UBO_SLOTS) {   // vkn_draw_ubo's generation rule (out of range: ignored there)
-        if (!g_eubo[stage][slot].valid || g_eubo[stage][slot].off != off || g_eubo[stage][slot].size != size) g_ubo_gen++;
+        const int same = g_eubo[stage][slot].valid && g_eubo[stage][slot].off == off && g_eubo[stage][slot].size == size;
+        // [rt P1] LEAN: an announce of what the slot holds already changes nothing there but vkn_draw's announce counter: not written.
+        // The recording side's slot equals this view: only these records write it, and the pieces that re-announce blocks for their
+        // replays (lightfuse, shcache, post, occb) put the previous value back (a slot they found empty stays theirs: then this view
+        // is "not valid" and the engine's next announce is written).
+        if (same && g_lean && !inl0) { ST_ADD(lean_ubo_skip, 1); return; }
+        if (!same) g_ubo_gen++;
         g_eubo[stage][slot].off = off; g_eubo[stage][slot].size = size; g_eubo[stage][slot].valid = 1;
     }
     ST_ADD(ops[VKN_RT_OP_UBO], 1);
-    const ubo_e e = {(uint8_t)stage, (uint8_t)(slot < 256 ? slot : 255), {0, 0}, off, size, 0};
+    const ubo_e e = {(uint8_t)stage, (uint8_t)(slot < 256 ? slot : 255), 0, 0, off, size, 0};
+    // [rt P4] the block's hash for the shadow cache (depth-only sets only; not inline: there the shadow cache hashes on this thread anyway)
+    const int hashed = g_ehash && g_threaded && g_enc_donly && !inl0 && stage >= 0 && stage < 2 && slot < VKN_UBO_SLOTS && (uint64_t)off + size <= VKN_RING_BYTES;
+    uint64_t hv[2] = {0, 0}; ubo_e eh = e; const uint32_t esz = hashed ? 32 : 16;
+    if (hashed) { hv[0] = ehash_of(off, size); eh.hashed = 1; }
     if (stage < 0 || stage > 255 || slot > 254) { const int32_t a[4] = {stage, (int32_t)slot, (int32_t)off, (int32_t)size}; vkn_rt_call(ubo_bad_fn, a, sizeof a); return; }   // (counted and logged there)
-    const int inl0 = inline_here();
     // the previous record is an unpublished announce at the end of this chunk: one more entry
     if (!inl0 && g_last_ubo_ok && g_last_ubo && g_last_ubo_idx + 1 == g_written && g_last_ubo_idx >= g_published &&
-        (uint8_t *)g_last_ubo + g_last_ubo->size == g_wc->data + g_wo && g_wo + 16 + 16 <= g_wc->cap && g_last_ubo->n < 0xffff) {
-        memcpy((uint8_t *)g_last_ubo + g_last_ubo->size, &e, sizeof e);
-        g_last_ubo->size += 16; g_last_ubo->n++; g_wo += 16; ST_ADD(bytes, 16);
+        (uint8_t *)g_last_ubo + g_last_ubo->size == g_wc->data + g_wo && g_wo + esz + 16 <= g_wc->cap && g_last_ubo->n < 0xffff) {
+        uint8_t *at = (uint8_t *)g_last_ubo + g_last_ubo->size;
+        memcpy(at, &eh, sizeof eh); if (hashed) memcpy(at + 16, hv, sizeof hv);
+        g_last_ubo->size += esz; g_last_ubo->n++; g_wo += esz; ST_ADD(bytes, esz);
         return;
     }
-    op_ubo *u = (op_ubo *)rec_new_at(K_UBO, sizeof(op_ubo) + sizeof e, inl0);
+    op_ubo *u = (op_ubo *)rec_new_at(K_UBO, sizeof(op_ubo) + esz, inl0);
     if (!u) { vkn_rt_own_begin(&g_site_oom); vkn_draw_ubo(stage, slot, off, size); vkn_rt_own_end(); return; }
-    u->h.n = 1; memcpy(u + 1, &e, sizeof e);
+    u->h.n = 1; memcpy(u + 1, &eh, sizeof eh); if (hashed) memcpy((uint8_t *)(u + 1) + 16, hv, sizeof hv);
     rec_done(&u->h, inl0, 0);
     if (!inl0) { g_last_ubo = &u->h; g_last_ubo_idx = g_written - 1; g_last_ubo_ok = 1; }
 }
@@ -409,6 +473,10 @@ void vkn_rt_query_cond(uint64_t key) {
 
 // ---- slot arrays: stages 0 / 1, textures then samplers ----
 typedef struct op_slots { rt_hdr h; uint8_t mask, pad[7]; int32_t a[SLOT_ARR][VKN_TEX_SLOTS]; } op_slots;
+// [rt P1] LEAN: mask = the arrays the draws have (as op_slots), chg = those whose 32 numbers follow (in k order); the others keep the
+// worker's copy, which equals the encoder's g_eslot[k] (both written only by these records, in order; an array absent from a record is
+// never read while absent and is sent again when it comes back).
+typedef struct op_slots2 { rt_hdr h; uint8_t mask, chg, pad[6]; } op_slots2;
 void vkn_rt_slots_touch(void) { if (vkn_rt_live_) g_slot_gen++; }
 static const int32_t *arr_of(const vkn_draw_in *in, int k) { return k < 2 ? in->tex[k] : in->smp[k - 2]; }
 // Writes a slot record when what the draw names differs from the last one written; 0 = ok, -1 = no memory.
@@ -428,6 +496,20 @@ static int slots_enc(const vkn_draw_in *in) {
         } else same = g_eslot_gen == g_slot_gen;   // VKN_RT_SLOTS_GEN: trust the engine's ranges
     } else if (g_slots == VKN_RT_SLOTS_COPY) same = 0;
     if (same) return 0;
+    if (g_lean && g_slots != VKN_RT_SLOTS_COPY) {   // [rt P1] only the arrays that changed (or appeared) since the last record
+        uint8_t chg = 0; uint32_t nchg = 0;
+        for (int k = 0; k < SLOT_ARR; k++)
+            if ((mask >> k & 1) && (!g_eslot_ok || !(g_eslot_mask >> k & 1) || memcmp(arr_of(in, k), g_eslot[k], sizeof g_eslot[k]))) { chg |= (uint8_t)(1u << k); nchg++; }
+        int inl2; op_slots2 *s2 = (op_slots2 *)rec_new(K_SLOTS2, (uint32_t)sizeof(op_slots2) + nchg * (uint32_t)sizeof g_eslot[0], &inl2);
+        if (!s2) return -1;
+        s2->mask = mask; s2->chg = chg;
+        int32_t *dst = (int32_t *)(s2 + 1);
+        for (int k = 0; k < SLOT_ARR; k++) if (chg >> k & 1) { memcpy(dst, arr_of(in, k), sizeof g_eslot[k]); memcpy(g_eslot[k], dst, sizeof g_eslot[k]); dst += VKN_TEX_SLOTS; }
+        g_eslot_mask = mask; g_eslot_ok = 1; g_eslot_gen = g_slot_gen;
+        ST_ADD(ops[VKN_RT_OP_SLOTS], 1); ST_ADD(slot_copies, 1); ST_ADD(lean_slot_arrays, nchg);
+        rec_done(&s2->h, inl2, 0);
+        return 0;
+    }
     int inl; op_slots *s = (op_slots *)rec_new(K_SLOTS, sizeof(op_slots), &inl);
     if (!s) return -1;
     s->mask = mask;
@@ -442,8 +524,12 @@ static int slots_enc(const vkn_draw_in *in) {
 }
 
 // ---- draws ----
-typedef struct op_draw { rt_hdr h; uint8_t indexed, cond_on, pad[2]; uint32_t first, count, instances, snap; uint32_t pad2[3]; uint64_t cond; vkn_draw_in in; } op_draw;
-#define DRAW_SNAP(d) ((uint8_t *)(d) + ((sizeof(op_draw) + 15u) & ~15u))
+typedef struct op_draw { rt_hdr h; uint8_t indexed, cond_on, has_pre, pad; uint32_t first, count, instances, snap; uint32_t pad2[3]; uint64_t cond; vkn_draw_in in; } op_draw;
+// [rt P2] RES: the resolution (vkn_draw_pre) after the fixed part, then the index snapshot
+#define DRAW_FIX ((sizeof(op_draw) + 15u) & ~15u)
+#define PRE_BYTES ((sizeof(vkn_draw_pre) + 15u) & ~15u)
+#define DRAW_PRE(d) ((vkn_draw_pre *)((uint8_t *)(d) + DRAW_FIX))
+#define DRAW_SNAP(d) ((uint8_t *)(d) + DRAW_FIX + ((d)->has_pre ? PRE_BYTES : 0))
 static const vkn_vfmt *vf_of(uint64_t h) {
     if (!h) return NULL;
     if (h == g_vf_h && g_vf) return g_vf;
@@ -462,16 +548,19 @@ static void mark(const vkn_draw_in *in, int indexed, vkn_buf_info *ib, int *ib_r
 static int rw_prim(uint8_t p) { return p == 2 || p == 4 || p == 7; }
 static int draw_enc(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t count, uint32_t instances) {
     vkn_buf_info ib; int ib_rc = -1; memset(&ib, 0, sizeof ib);
-    mark(in, indexed, &ib, &ib_rc);
+    vkn_draw_pre pre; const int res = g_res != 0;
+    if (res) { vkn_draw_resolve(in, indexed, &pre); if (indexed) { ib = pre.ib; ib_rc = pre.ib_rc; } ST_ADD(res_draws, 1); }   // [rt P2] (it marks as mark() does)
+    else mark(in, indexed, &ib, &ib_rc);
     uint32_t snap = 0; const void *src = NULL;
     if (indexed && rw_prim(in->prim) && count && !ib_rc && ib.blk.size && ib.blk.buf && ib.blk.cpu) {   // the rewrite reads the engine's indices: now
         const uint32_t isz = ib.index_size == 4 ? 4 : 2;
         if (((uint64_t)first + count) * isz <= ib.size && (uint64_t)count * isz < (64u << 20)) { snap = count * isz; src = (const uint8_t *)ib.blk.cpu + (uint64_t)first * isz; }
     }
     if (slots_enc(in)) return -1;
-    int inl; op_draw *d = (op_draw *)rec_new(K_DRAW, (uint32_t)((sizeof(op_draw) + 15u) & ~15u) + snap, &inl);
+    int inl; op_draw *d = (op_draw *)rec_new(K_DRAW, (uint32_t)DRAW_FIX + (res ? (uint32_t)PRE_BYTES : 0u) + snap, &inl);
     if (!d) return -1;
     d->indexed = (uint8_t)indexed; d->first = first; d->count = count; d->instances = instances; d->snap = snap;
+    d->has_pre = (uint8_t)res; if (res) *DRAW_PRE(d) = pre;
     d->cond_on = (uint8_t)g_cond_on; d->cond = g_cond; g_cond_on = 0;
     d->in = *in; for (int k = 0; k < VKN_STAGE_SLOTS; k++) { d->in.tex[k] = NULL; d->in.smp[k] = NULL; }
     if (snap) { memcpy(DRAW_SNAP(d), src, snap); ST_ADD(ops[VKN_RT_OP_SNAP], 1); }
@@ -519,7 +608,7 @@ void vkn_rt_rec_begin(int presented) {
     if (!vkn_rt_live_) { (void)vkn_rec_begin(presented); return; }
     if (g_threaded && !pthread_equal(pthread_self(), g_enc)) {   // another thread renders frames now: it becomes the encoder
         RT_REDLN(R_FRAME, "a frame begins on another thread than the last one: that thread encodes from now on");
-        foreign_wait(); g_enc = pthread_self(); __atomic_store_n(&g_owner_engine, 1, __ATOMIC_RELEASE); rebase();
+        foreign_wait(); g_enc = pthread_self(); t_enc = 1; __atomic_store_n(&g_owner_engine, 1, __ATOMIC_RELEASE); rebase();
     }
     if (g_rebase && g_threaded) vkn_rt_sync(&g_site_rebase);
     if (presented && g_enc_due) { g_enc_frame++; g_enc_due = 0; }
@@ -579,6 +668,7 @@ typedef struct { uint32_t n, pad; vkn_tex *c[VKN_PASS_COLORS]; uint32_t l[VKN_PA
 static void targets_fn(void *p) { targets_job *j = (targets_job *)p; vkn_pass_targets(j->n, j->c, j->l, j->m, j->d); }
 void vkn_rt_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const uint32_t *layer, const uint32_t *mip, vkn_tex *depth) {
     if (!vkn_rt_live_) { vkn_pass_targets(n, color, layer, mip, depth); return; }
+    { int any = 0; for (uint32_t i = 0; color && i < n && i < VKN_PASS_COLORS; i++) any |= color[i] != NULL; g_enc_donly = !any && depth != NULL; }   // [rt P4] (a hint only)
     targets_job j; memset(&j, 0, sizeof j);
     j.n = n; j.d = depth;
     for (int i = 0; i < VKN_PASS_COLORS; i++) { j.c[i] = color ? color[i] : NULL; j.l[i] = layer ? layer[i] : 0; j.m[i] = mip ? mip[i] : 0; }   // (NULL arrays = zeros there)
@@ -619,8 +709,11 @@ void vkn_rt_pass_copy(vkn_tex *dst, vkn_tex *src) {
 }
 static void qbegin_fn(void *p) { vkn_query_begin(*(const uint64_t *)p); }
 static void qend_fn(void *p) { vkn_query_end(*(const uint64_t *)p); }
-void vkn_rt_query_begin(uint64_t key) { if (!vkn_rt_live_) vkn_query_begin(key); else vkn_rt_call(qbegin_fn, &key, sizeof key); }
-void vkn_rt_query_end(uint64_t key) { if (!vkn_rt_live_) vkn_query_end(key); else vkn_rt_call(qend_fn, &key, sizeof key); }
+// [rt P1] LEAN: with no bracket tracked (DM_VK_NATIVE_COND 0 and no GBUF_LE: vkn_query.c g_track == 0) a begin / end only counts there:
+// not written (counted here). g_track only goes down after install (b_gate: mode 9 -> 5 / 7 -> 0), so "0 now" stays 0 when the record would run.
+static int q_untracked(void) { return g_lean && !vkn_query_mode() && !vkn_query_le_asked(); }
+void vkn_rt_query_begin(uint64_t key) { if (!vkn_rt_live_) vkn_query_begin(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qbegin_fn, &key, sizeof key); }
+void vkn_rt_query_end(uint64_t key) { if (!vkn_rt_live_) vkn_query_end(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qend_fn, &key, sizeof key); }
 typedef struct { vkn_tex *a, *b; int32_t v[4]; int k, has; } ui_job;
 static void ui_fn(void *p) {
     ui_job *j = (ui_job *)p;
@@ -721,7 +814,37 @@ static void guard_core(const uint64_t *starts, uint64_t cum_end, uint64_t lim, v
 }
 
 // ================================================================ execution
+// [rt P0] DM_VK_NATIVE_PROF=3: 1 of 64 records timed by kind (closures by their function), every record counted (the worker only)
+enum { RB_DRAW, RB_DISP, RB_UBO, RB_SLOTS, RB_UIDRAW, RB_TARGETS, RB_CLEAR, RB_QUERY, RB_UI, RB_CALL, RB_BEGIN, RB_END, RB_TAIL, RB_N };
+static const char *const k_rb[RB_N] = {"draw", "dispatch", "announces", "slots", "UI draw", "targets", "clears", "queries", "UI state", "other calls", "begin", "end", "tail"};
+static struct { uint64_t n[RB_N], tn[RB_N], ns[RB_N]; uint32_t tick; } g_rb;
+static void uidraw_fn(void *p); static void targets_fn(void *p); static void clear_fn(void *p); static void cds_fn(void *p); static void cds_bound_fn(void *p);
+static void qbegin_fn(void *p); static void qend_fn(void *p); static void ui_fn(void *p); static void copy_fn(void *p);
+static int rb_kind(const rt_hdr *h) {
+    switch (h->kind) {
+    case K_DRAW: return RB_DRAW;
+    case K_DISPATCH: return RB_DISP;
+    case K_UBO: return RB_UBO;
+    case K_SLOTS: case K_SLOTS2: return RB_SLOTS;
+    case K_BEGIN: return RB_BEGIN;
+    case K_END: return RB_END;
+    case K_TAIL: return RB_TAIL;
+    case K_CALL: {
+        void (*const f)(void *) = ((const op_call *)h)->fn;
+        return f == uidraw_fn ? RB_UIDRAW : f == targets_fn ? RB_TARGETS : (f == clear_fn || f == cds_fn || f == cds_bound_fn || f == copy_fn) ? RB_CLEAR :
+               (f == qbegin_fn || f == qend_fn) ? RB_QUERY : f == ui_fn ? RB_UI : RB_CALL;
+    }
+    default: return RB_CALL;
+    }
+}
+static void exec_one(rt_hdr *h);
 static void exec(rt_hdr *h) {
+    if (__builtin_expect(!vkn_prof_lvl3, 1)) { exec_one(h); return; }
+    const int k = rb_kind(h); g_rb.n[k]++;
+    if ((++g_rb.tick & 63) != 0) { exec_one(h); return; }
+    const uint64_t t0 = vkn_now_ns(); exec_one(h); g_rb.ns[k] += vkn_now_ns() - t0; g_rb.tn[k]++;
+}
+static void exec_one(rt_hdr *h) {
     switch (h->kind) {
     case K_DRAW: {
         op_draw *d = (op_draw *)h;
@@ -731,8 +854,9 @@ static void exec(rt_hdr *h) {
         const int prof = g_threaded;
         if (prof) vkn_prof_draw_begin();
         if (d->snap) { vkn_draw_rt_snap = DRAW_SNAP(d); vkn_draw_rt_in = &in; }
+        if (d->has_pre) { vkn_draw_rt_pre = DRAW_PRE(d); vkn_draw_rt_res_verify = g_res == 2; vkn_draw_rt_in = &in; }   // [rt P2]
         if (d->indexed) (void)vkn_draw_indexed(&in, d->first, d->count, d->instances); else (void)vkn_draw_arrays(&in, d->first, d->count);
-        vkn_draw_rt_snap = NULL; vkn_draw_rt_in = NULL;
+        vkn_draw_rt_snap = NULL; vkn_draw_rt_in = NULL; vkn_draw_rt_pre = NULL;
         if (prof) vkn_prof_draw_end();
         break;
     }
@@ -746,11 +870,21 @@ static void exec(rt_hdr *h) {
         break;
     }
     case K_UBO: {
-        const ubo_e *e = (const ubo_e *)((op_ubo *)h + 1);
-        for (uint32_t i = 0; i < h->n; i++) vkn_draw_ubo(e[i].stage, e[i].slot, e[i].off, e[i].size);
+        const uint8_t *p = (const uint8_t *)((op_ubo *)h + 1);
+        for (uint32_t i = 0; i < h->n; i++) {
+            const ubo_e *e = (const ubo_e *)p;
+            if (e->hashed) { uint64_t hv; memcpy(&hv, p + 16, 8); vkn_draw_ubo_h(e->stage, e->slot, e->off, e->size, hv); p += 32; }   // [rt P4]
+            else { vkn_draw_ubo(e->stage, e->slot, e->off, e->size); p += 16; }
+        }
         break;
     }
     case K_SLOTS: { op_slots *s = (op_slots *)h; g_dslot_mask = s->mask; memcpy(g_dslot, s->a, sizeof g_dslot); break; }
+    case K_SLOTS2: {   // [rt P1]
+        const op_slots2 *s = (const op_slots2 *)h; const int32_t *src = (const int32_t *)(s + 1);
+        g_dslot_mask = s->mask;
+        for (int k = 0; k < SLOT_ARR; k++) if (s->chg >> k & 1) { memcpy(g_dslot[k], src, sizeof g_dslot[k]); src += VKN_TEX_SLOTS; }
+        break;
+    }
     case K_CALL: { op_call *c = (op_call *)h; c->fn(c->bytes ? CALL_PAY(c) : NULL); break; }
     case K_BEGIN: {
         op_begin *b = (op_begin *)h;
@@ -773,7 +907,7 @@ static void exec(rt_hdr *h) {
         vkn_prof_frame_cpu(t->cpu[0], t->cpu[1], t->cpu[2]);
         if (t->tick) t->tick();
         if (g_threaded && t_wk) {
-            retire_pending_run(0);
+            retire_pending_run(0, g_done_local);
             const uint64_t n = __atomic_add_fetch(&g_wk_tails, 1, __ATOMIC_SEQ_CST), w = __atomic_load_n(&g_wait_tails, __ATOMIC_SEQ_CST);
             if (w && n >= w) { pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv_done); pthread_mutex_unlock(&g_mu); }
         }
@@ -808,6 +942,28 @@ void vkn_rt_census(void) {
              n ? ts : " none", PF(bp_wait_ns) / 1e6, PF(idle_ns) / 1e6, PF(busy_ns) / 1e6, (unsigned long long)(s.ahead[0] - o.ahead[0]), (unsigned long long)(s.ahead[1] - o.ahead[1]),
              (unsigned long long)(s.ahead[2] - o.ahead[2]), (unsigned long long)(s.ahead[3] - o.ahead[3]), (unsigned long long)s.guard_ring, (unsigned long long)s.guard_cpu, (unsigned long long)s.mispredict,
              (unsigned long long)s.foreign, PF(inline_ops), (unsigned long long)s.oom, (unsigned long long)s.slot_gen_miss);
+    {   // [rt P1] / [rt P2]
+        vkn_draw_res_stats r; vkn_draw_res_stats_get(&r);
+        static vkn_draw_res_stats ro;
+        vkn_logf("rt lean / res: DM_VK_NATIVE_RT_LEAN=%d: announces not written %.0f a frame, query records not written %.0f, slot arrays sent %.1f (of %.1f records); "
+                 "DM_VK_NATIVE_RT_RES=%d: draws resolved at encode %.0f a frame, used %.0f, verified %.0f, verify differ %llu (shader %llu, state ids %llu, vertex buffers %llu, index buffer %llu) in this window",
+                 g_lean, PF(lean_ubo_skip), PF(lean_q_skip), PF(lean_slot_arrays), PF(ops[VKN_RT_OP_SLOTS]), g_res, PF(res_draws), (double)(r.used - ro.used) / f, (double)(r.verified - ro.verified) / f,
+                 (unsigned long long)(r.differ - ro.differ), (unsigned long long)(r.differ_shader - ro.differ_shader), (unsigned long long)(r.differ_state - ro.differ_state),
+                 (unsigned long long)(r.differ_vb - ro.differ_vb), (unsigned long long)(r.differ_ib - ro.differ_ib));
+        if (r.differ != ro.differ) vkn_logf(RT_RED "rt res: verify differ %llu in this window (DM_VK_NATIVE_RT_RES=2): the record's resolution is not what the recording thread finds", (unsigned long long)(r.differ - ro.differ));
+        ro = r;
+    }
+    if (vkn_prof_lvl3) {   // [rt P0] rt by record (worker counts read here: statistics, the census runs on the recording thread)
+        static __typeof__(g_rb) rbo;
+        char rl[900]; int k = 0; rl[0] = 0; double sum = 0;
+        for (int i = 0; i < RB_N && k < (int)sizeof rl - 64; i++) {
+            const uint64_t n = g_rb.n[i] - rbo.n[i], tn = g_rb.tn[i] - rbo.tn[i]; const uint64_t ns = g_rb.ns[i] - rbo.ns[i];
+            const double us = tn ? (double)ns / (double)tn / 1000.0 : 0.0, ms = us * (double)n / f / 1000.0; sum += ms;
+            if (n) k += snprintf(rl + k, sizeof rl - (size_t)k, "%s%s %.0f x %.2f us = %.2f ms", k ? ", " : "", k_rb[i], (double)n / f, us, ms);
+        }
+        vkn_logf("rt by record (1 of 64 timed, a frame): %s; sum %.2f ms of busy %.2f ms (the rest: the loop, chunk hand-back, timer)", rl, sum, PF(busy_ns) / 1e6);
+        rbo = g_rb;
+    }
 #undef PF
     if (s.mispredict != o.mispredict || s.foreign != o.foreign || s.oom != o.oom)
         vkn_logf(RT_RED "rt: unexpected in this window: mispredicted frames %llu, foreign records %llu, stream full %llu", (unsigned long long)(s.mispredict - o.mispredict),

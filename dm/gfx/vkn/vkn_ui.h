@@ -119,6 +119,10 @@ void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
 //       0 = stored.
 //   int vkn_pass_area_get(VkRect2D *out)  1 + the render area of the pass open in vkn_cb() for the current set; 0 = none open.
 
+// ==== [rt P6] DM_VK_NATIVE_UISET (vkn_ui.c "[rt P6]"): 0 a fresh set per UI draw (as before), 1 sets of the recording by content (the
+// copies' offsets as dynamic offsets), 2 = 1 without the reuse (fresh sets, lookups counted). Install time. Totals of hits / misses / would-hit (mode 2).
+void vkn_ui_set_cache(int mode);
+void vkn_ui_set_cache_stats(uint64_t *hits, uint64_t *miss, uint64_t *would);
 #ifdef __cplusplus
 }
 #endif

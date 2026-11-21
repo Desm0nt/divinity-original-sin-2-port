@@ -74,6 +74,21 @@ void vkn_shc_stats_get(vkn_shc_stats *s);   // the current window (since the las
 // cascades as tiles; another depth-only image the cache adopted (>= 256, any shape) is left alone (counted far_not_sun).
 int vkn_shc_far(void);
 
+// [rt P3-GPU] DM_VK_NATIVE_SHC_MASK (docs/dos2/nr/VK-MOBILE-GPU-PLAN.md item P3): 0 = a caster's constant block is hashed whole (as
+// before), 1 = only the 16-byte rows its shader's SPIR-V reads (the library's read mask, vkn_shlib_read_mask: every use of the block is an
+// access chain (block, member 0, constant index) into its vec4 array; anything else - a dynamic index, the whole array - = the whole
+// block); 2 = hashed whole, the masked hash made too and counted (bytes, blocks narrowed). Exact: a byte the shader never reads cannot
+// change the depth it writes. Read at vkn_shc_install (the library builds the masks at shader load: the same switch, read there).
+int vkn_shc_mask(void);
+void vkn_shc_mask_set(int mode);
+typedef struct vkn_shc_mask_stats { uint64_t blocks, narrowed, bytes_whole, bytes_masked; } vkn_shc_mask_stats;
+void vkn_shc_mask_stats_get(vkn_shc_mask_stats *s);
+struct vkn_shader;
+uint64_t vkn_shc_masked_hash(const uint8_t *p, uint32_t n, const uint64_t *bits, uint32_t nwords, uint32_t *hashed);   // (the masked hash: tests)
+// Host tests: the read-mask lookup (vkn_shlib_read_mask's contract); NULL = the library's.
+void vkn_shc_test_mask(int (*fn)(const struct vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nwords));
+// [rt P4] DM_VK_NATIVE_SHC_EHASH (vkn_rt.h): the engine thread's block hashes taken / compared (mode 2) / different (totals)
+void vkn_shc_ehash_stats(uint64_t *used, uint64_t *verified, uint64_t *differ);
 #ifdef __cplusplus
 }
 #endif

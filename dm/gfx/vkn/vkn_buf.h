@@ -127,6 +127,14 @@ VkBuffer vkn_ring2_buffer(void);
 void *vkn_ring2_cpu(void);
 uint64_t vkn_ring2_base(void);
 
+// ==== [rt P0] DM_VK_NATIVE_PROF=3: the lookups' lock (vkn_buf_get / _lookup / _get_n / _mark / _mark_get) taken / found taken ====
+extern int vkn_buf_lockprof;              // 1 = count (vkn_prof_init at level 3)
+void vkn_buf_lock_stats(uint64_t *locks, uint64_t *contended);
+// ==== [rt P2] DM_VK_NATIVE_RT_RES (vkn_rt.h): the encoder resolves a draw's vertex buffers at encode ====
+// vkn_buf_mark's marks (the encoder view, frame vkn_rt_frame()) and, under the same lock, out[i] = the block of h[i] in the ENCODER view
+// (i.blk: what a record executed later finds in the recording view, vkn_buf.h "[stage 5.5]": the commit record of every rename before
+// this point executes before the draw's record, every later one after it); a handle that is 0 / not live / without memory: out[i] all zero.
+void vkn_buf_mark_get(int kind, const uint64_t *h, uint32_t n, vkn_block *out);
 #ifdef __cplusplus
 }
 #endif

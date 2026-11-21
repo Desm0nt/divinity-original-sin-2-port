@@ -740,7 +740,7 @@ static void stage5_line(void) {
     if (ns.mode >= 0) { snprintf(sh, sizeof sh, "%d", ns.mode); snprintf(pcf, sizeof pcf, "%d", ns.pcf); }
     else { snprintf(sh, sizeof sh, "%s", vkn_shlib_named_stats_get ? "not read" : "n/a"); snprintf(pcf, sizeof pcf, "%s", sh); }
     const char *c = getenv("DM_VK_NATIVE_COST");   // hle_dos2_vkn_draw.c
-    const uint32_t cost = c && *c ? (uint32_t)strtoul(c, NULL, 0) & VKN_COST_ALL : VKN_COST_ALL;
+    const uint32_t cost = c && *c ? (uint32_t)strtoul(c, NULL, 0) & VKN_COST_ALL2 : VKN_COST_ALL2;   // [rt P3]
     const char *s = getenv("DM_VK_NATIVE_SHCACHE");   // vkn_shc_install
     int shc = s && *s ? atoi(s) : 1; if (shc < 0 || shc > 3) shc = 0;
     const char *f = getenv("DM_VK_NATIVE_SHFAR"); char from = 0;

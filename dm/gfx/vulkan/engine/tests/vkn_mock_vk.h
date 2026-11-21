@@ -74,6 +74,7 @@ typedef struct mk_gp {   // a graphics pipeline create info, deep
 } mk_gp;
 typedef struct mk_obj {
     int kind, live;
+    uint64_t kser;                             // [rt P6] the object's number among the objects of its kind (the journal names objects by it)
     uint64_t size; uint32_t mem_type, usage;   // buffer: size, usage; memory: size, type
     void *cpu;                                 // memory: host backing (host-visible types); buffer: the bound memory's backing
     uint64_t bound;                            // buffer / image: memory handle bound
@@ -110,7 +111,7 @@ static void mk_err(const char *fmt, ...) {
 static uint64_t mk_new(int kind, mk_obj **out) {   // under mk_mu
     if (mk_nobj >= MK_MAX_OBJ) { mk_err("registry full"); *out = NULL; return 0; }
     mk_obj *o = (mk_obj *)calloc(1, sizeof *o);
-    o->kind = kind; o->live = 1;
+    o->kind = kind; o->live = 1; o->kser = mk_created[kind];
     mk_obj_tab[mk_nobj] = o; mk_created[kind]++;
     *out = o;
     return MK_BASE + MK_STEP * mk_nobj++;
@@ -1423,6 +1424,15 @@ void xbg_support_defaults(void *bytes1392, float width, float height) {   // the
 // ---------------------------------------------------------------- [stage 5.5] the canonical journal (mk_jr_on; test_rt)
 typedef struct mk_jr_rec { uint64_t h; uint32_t nev, ndraw; } mk_jr_rec;
 static mk_jr_rec *mk_jr; static uint32_t mk_jr_n, mk_jr_cap;
+// [rt P6] a value that is a handle of this mock as (kind, number among its kind): a run that makes fewer objects of one kind (descriptor
+// sets reused) names the objects of the other kinds the same
+static uint64_t mk_jr_hnd(uint64_t v) {
+    if (v < MK_BASE || (v - MK_BASE) % MK_STEP) return v;
+    const uint64_t i = (v - MK_BASE) / MK_STEP;
+    if (i >= mk_nobj) return v;
+    const mk_obj *o = mk_obj_tab[i];
+    return 0xC0DE000000000000ull | (uint64_t)o->kind << 40 | o->kser;
+}
 static uint64_t mk_jr_mix(uint64_t h, uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); return h * 0xff51afd7ed558ccdull; }
 static uint64_t mk_jr_bytes(uint64_t h, const void *p, uint64_t n) { const uint8_t *b = (const uint8_t *)p; for (uint64_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull; return h; }
 // The last event of op in cb's recording before `to` (BIND_VB: the one that set `binding`); NULL = none.
@@ -1496,8 +1506,30 @@ static void mk_jr_submit(mk_obj *cbo, VkCommandBuffer cb, const mk_ev *sub) {   
             nd++; h = mk_jr_mix(h, e->u[0]); h = mk_jr_mix(h, e->u[1]); h = mk_jr_mix(h, op == MK_E_DRAW_IDX ? e->u[4] : e->u[3]); h = mk_jr_mix(h, e->u[7]); h = mk_jr_mix(h, e->jh);
             continue;
         }
-        if (op == MK_E_SUBMIT) { h = mk_jr_mix(h, e->a[0]); continue; }
-        for (int i = 0; i < 4; i++) h = mk_jr_mix(h, e->a[i]);
+        if (op == MK_E_SUBMIT) { h = mk_jr_mix(h, mk_jr_hnd(e->a[0])); continue; }
+        if (op == MK_E_BIND_SETS) {   // [rt P6] the set by what it holds (descriptors in binding order, a dynamic offset added to its descriptor's),
+                                      // not by its handle: a set reused / made fresh with the same content, or an offset moved between the
+                                      // descriptor and the dynamic offset, reads the same
+            mk_obj *so = mk_any(e->a[1]);   // (under mk_mu)
+            h = mk_jr_mix(h, e->u[0]); h = mk_jr_mix(h, mk_jr_hnd(e->a[0])); h = mk_jr_mix(h, e->u[1]); h = mk_jr_mix(h, e->u[2]);
+            if (!so || so->kind != MK_DSET) { h = mk_jr_mix(h, e->a[1]); for (uint32_t k = 0; k < e->n; k++) h = mk_jr_mix(h, e->dyn[k]); continue; }
+            uint8_t used[256]; memset(used, 0, sizeof used); uint32_t kd = 0;
+            for (uint32_t c = 0; c < so->ndw && c < 256; c++) {
+                uint32_t best = ~0u;
+                for (uint32_t j = 0; j < so->ndw && j < 256; j++) if (!used[j] && (best == ~0u || so->dw[j].binding < so->dw[best].binding ||
+                    (so->dw[j].binding == so->dw[best].binding && so->dw[j].elem < so->dw[best].elem))) best = j;
+                if (best == ~0u) break;
+                used[best] = 1; const mk_dw *x = &so->dw[best];
+                h = mk_jr_mix(h, (uint64_t)x->binding << 32 | x->elem); h = mk_jr_mix(h, (uint64_t)x->type);
+                if (mk_is_buf_desc(x->type)) {
+                    uint64_t off = x->off;
+                    if (x->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || x->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) off += kd < e->n ? e->dyn[kd++] : 0;
+                    h = mk_jr_mix(h, mk_jr_hnd(MK_H(x->buf))); h = mk_jr_mix(h, off); h = mk_jr_mix(h, x->range);
+                } else { h = mk_jr_mix(h, mk_jr_hnd(MK_H(x->view))); h = mk_jr_mix(h, mk_jr_hnd(MK_H(x->smp))); h = mk_jr_mix(h, (uint64_t)x->layout); }
+            }
+            continue;
+        }
+        for (int i = 0; i < 4; i++) h = mk_jr_mix(h, mk_jr_hnd(e->a[i]));
         for (int i = 0; i < 8; i++) h = mk_jr_mix(h, e->u[i]);
         h = mk_jr_mix(h, (uint64_t)e->l0 << 32 | (uint32_t)e->l1);
         h = mk_jr_bytes(h, &e->r, sizeof e->r); h = mk_jr_bytes(h, &e->rect, sizeof e->rect); h = mk_jr_bytes(h, &e->vp, sizeof e->vp);

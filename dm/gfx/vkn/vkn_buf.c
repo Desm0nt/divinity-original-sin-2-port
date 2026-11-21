@@ -18,6 +18,18 @@ static vkn_buf_ustats g_ust;   // stage 4: staged updates (vkn_buf_update)
 static uint64_t g_ver;
 #define VER_BUMP(r) __atomic_store_n(&(r)->ver, ++g_ver, __ATOMIC_RELEASE)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+// [rt P0] DM_VK_NATIVE_PROF=3: the lookups' lock counted (taken / found taken by another thread first)
+int vkn_buf_lockprof; static uint64_t g_lk_n, g_lk_busy;
+static inline void lk_lock(void) {
+    if (__builtin_expect(vkn_buf_lockprof, 0)) {
+        __atomic_add_fetch(&g_lk_n, 1, __ATOMIC_RELAXED);
+        if (pthread_mutex_trylock(&g_mu)) { __atomic_add_fetch(&g_lk_busy, 1, __ATOMIC_RELAXED); pthread_mutex_lock(&g_mu); }
+    } else pthread_mutex_lock(&g_mu);
+}
+void vkn_buf_lock_stats(uint64_t *locks, uint64_t *contended) {
+    if (locks) *locks = __atomic_load_n(&g_lk_n, __ATOMIC_RELAXED);
+    if (contended) *contended = __atomic_load_n(&g_lk_busy, __ATOMIC_RELAXED);
+}
 // ==== [stage 5.5] the recording thread (vkn_rt.h; weak: the stage-2 host test links without it) ====
 // Two views of a buffer's block: i.blk is the ENCODER's (what the engine writes through, what the rename rule looks at, what the hooks
 // read), rblk the RECORDING's (what vkn_buf_get / _lookup / _get_n return while a record executes). They differ only between a rename
@@ -126,7 +138,7 @@ void vkn_buf_destroy(int kind, uint64_t handle) {
 const vkn_block *vkn_buf_get(int kind, uint64_t handle) {
     if (kind < 0 || kind >= VKN_BUF_KINDS) return NULL;
     const int rec = rec_side();
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     vkn_buf_rec *r = g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], handle) : NULL;
     const vkn_block *b = r && r->i.blk.size ? (rec ? &r->rblk : &r->i.blk) : NULL;
     if (b && !rec) mark_locked(r, cur_frame());   // a draw path binds what it gets (vkn_buf_update renames such a block)
@@ -137,7 +149,7 @@ const vkn_block *vkn_buf_get(int kind, uint64_t handle) {
 int vkn_buf_lookup(int kind, uint64_t handle, vkn_buf_info *out) {
     if (kind < 0 || kind >= VKN_BUF_KINDS) return -1;
     const int rec = rec_side();
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     vkn_buf_rec *r = g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], handle) : NULL;
     if (r && out) { *out = r->i; if (rec && r->i.blk.size) out->blk = r->rblk; }
     if (r && r->i.blk.size && !rec) mark_locked(r, cur_frame());
@@ -306,7 +318,7 @@ uint32_t vkn_buf_get_n(int kind, const uint64_t *h, uint32_t n, const vkn_block 
     if (kind < 0 || kind >= VKN_BUF_KINDS || !n) return 0;
     uint32_t i = 0;
     const int rec = rec_side();
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     const uint64_t f = rec ? 0 : cur_frame();
     for (; i < n; i++) {
         vkn_buf_rec *r = h[i] && g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], h[i]) : NULL;
@@ -353,10 +365,23 @@ int vkn_ring2_alloc(uint32_t size, uint32_t *off) {
 VkBuffer vkn_ring2_buffer(void) { pthread_mutex_lock(&g_ring2_mu); const VkBuffer b = g_ring2_state > 0 ? g_ring2.buf : VK_NULL_HANDLE; pthread_mutex_unlock(&g_ring2_mu); return b; }
 void *vkn_ring2_cpu(void) { pthread_mutex_lock(&g_ring2_mu); void *p = ring2_locked() ? g_ring2.cpu : NULL; pthread_mutex_unlock(&g_ring2_mu); return p; }
 uint64_t vkn_ring2_base(void) { pthread_mutex_lock(&g_ring2_mu); const uint64_t o = g_ring2_state > 0 ? g_ring2.off : 0; pthread_mutex_unlock(&g_ring2_mu); return o; }
+// ==== [rt P2] the encoder's marks + its view of the blocks (vkn_buf.h) ====
+void vkn_buf_mark_get(int kind, const uint64_t *h, uint32_t n, vkn_block *out) {
+    if (!n) return;
+    memset(out, 0, n * sizeof *out);
+    if (kind < 0 || kind >= VKN_BUF_KINDS) return;
+    lk_lock();
+    const uint64_t f = cur_frame();
+    for (uint32_t i = 0; i < n; i++) {
+        vkn_buf_rec *r = h[i] && g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], h[i]) : NULL;
+        if (r && r->i.blk.size) { mark_locked(r, f); out[i] = r->i.blk; }
+    }
+    pthread_mutex_unlock(&g_mu);
+}
 // ==== [stage 5.5] the encoder's marks (vkn_rt.c at encode: the buffers a draw reads) ====
 void vkn_buf_mark(int kind, const uint64_t *h, uint32_t n) {
     if (kind < 0 || kind >= VKN_BUF_KINDS || !n) return;
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     const uint64_t f = cur_frame();
     for (uint32_t i = 0; i < n; i++) {
         vkn_buf_rec *r = h[i] && g_tab_ok > 0 ? (vkn_buf_rec *)vkn_tab_get(&g_tab[kind], h[i]) : NULL;

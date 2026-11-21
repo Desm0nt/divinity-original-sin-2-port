@@ -451,6 +451,11 @@ void dm_vkn_frame_register(void) {
         const int cond = qc && *qc ? atoi(qc) : 0;
         if ((cond == 1 || cond == 3) && rt) { vkn_logf("rt: DM_VK_NATIVE_COND=%d: the engine reads the visibility verdicts the recording makes: DM_VK_NATIVE_RT=%d forced 0", cond, rt); rt = 0; }
         vkn_rt_install(rt, sl && *sl ? atoi(sl) : VKN_RT_SLOTS_CMP);
+        {   // [rt P1] / [rt P2] DM_VK_NATIVE_RT_LEAN (0 / 1, default 1), DM_VK_NATIVE_RT_RES (0 / 1 / 2 verify, default 1): vkn_rt.h
+            const char *ln = getenv("DM_VK_NATIVE_RT_LEAN"), *rs = getenv("DM_VK_NATIVE_RT_RES");
+            vkn_rt_lean_set(ln && *ln ? atoi(ln) : 1); vkn_rt_res_set(rs && *rs ? atoi(rs) : 1);
+            vkn_logf("rt: DM_VK_NATIVE_RT_LEAN=%d%s, DM_VK_NATIVE_RT_RES=%d%s", vkn_rt_lean(), ln && *ln ? "" : " (default)", vkn_rt_res(), rs && *rs ? "" : " (default)");
+        }
         vkn_logf("rt: DM_VK_NATIVE_RT=%d%s, DM_VK_NATIVE_RT_SLOTS=%s (the recording thread starts at the first BeginFrame)", vkn_rt_mode(), e && *e ? "" : " (default)", sl && *sl ? sl : "1 (default)");
         if (vkn_rt_mode()) dm_vkn_census(vkn_rt_census);
         // the frame hooks encode their backend work themselves: no default sync at their entry (their nested engine calls may sync)

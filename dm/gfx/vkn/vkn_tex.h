@@ -243,6 +243,13 @@ void vkn_tex_hack_get(vkn_tex_hack_stats *s);
 int vkn_tex_hack_set(int mode, float bias, int aniso);
 VkSampler vkn_sampler_hack_by_id(uint32_t sampler_id);   // the twin of an id (VK_NULL_HANDLE = none); tests and logs
 
+// ==== [rt P0] DM_VK_NATIVE_PROF=3: the draw-time lookups' lock (vkn_tex_view_by_id / vkn_sampler_by_id / _cmp_by_id) taken / found taken ====
+extern int vkn_tex_lockprof;
+void vkn_tex_lock_stats(uint64_t *locks, uint64_t *contended);
+// ==== [rt P3] DM_VK_NATIVE_COST bit 0x100 (vkn_draw.c, the lock-free mirror of the pool ids) ====
+// 1 = vkn_sampler_by_id(id) answers from the id alone (no DM_VK_NATIVE_TEXHACK=1 rule that looks at the texture of this thread's last
+// vkn_tex_view_by_id). 0 = the mirror stays off (it would skip the view lookup that rule reads). Lock-free; any thread.
+int vkn_sampler_by_id_pure(void);
 #ifdef __cplusplus
 }
 #endif

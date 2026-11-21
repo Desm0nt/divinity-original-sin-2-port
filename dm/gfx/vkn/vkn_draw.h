@@ -19,6 +19,7 @@
 #ifndef DM_VKN_DRAW_H
 #define DM_VKN_DRAW_H
 #include "vkn.h"
+#include "vkn_buf.h"   // [rt P2] vkn_buf_info (vkn_draw_pre)
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -148,6 +149,61 @@ void vkn_draw_cost_stats_get(vkn_draw_cost_stats *s);
 // cache's replays) is nested in the engine draw being prepared: it keeps that draw's state (call values, fold) intact and does not enter
 // the query module (vkn_query.h brackets, conditions, predicates and counts are the engine's draws only).
 
+// ==== [rt P0] DM_VK_NATIVE_PROF=3: what differs between a new pipeline key and the previous one of the recording (vkn_prof.c line) ====
+// f[]: 0 shader, 1 module variants, 2 vertex format, 3 depth-stencil, 4 raster, 5 blend, 6 stencil reference, 7 write masks, 8 primitive,
+// 9 pass, 10 effect bits, 11 own vertex module (vkn_fx_out.vin); dyn_only: changes where only ds / raster / stencil ref / blend differ
+// (what dynamic state could remove), dyn_only_nb: the same without blend.
+typedef struct vkn_draw_prof3 { uint64_t changes, f[12], dyn_only, dyn_only_nb; } vkn_draw_prof3;
+void vkn_draw_prof3_get(vkn_draw_prof3 *s);
+
+// ==== [rt P2] DM_VK_NATIVE_RT_RES (vkn_rt.h): what the encoder resolved for a draw, carried in its record ====
+// The engine thread looks the shader object, the four state ids and the buffers up at encode (as the engine's NVN draw read them at
+// that point); the recording thread's draw takes them from here instead of looking up again (its locks and table walks). Exact:
+//   shader     vkn_shader_get(in->shader) changes only by a destroy (DestroyShaderIfOld: a sync point, every record before it executed)
+//              or a replacement on a loader thread (the old object stays valid 3 frames: vkn_retire; the engine thread is at most 2
+//              frames ahead) - the record then holds what the engine's draw named at its call, which mode 0 uses too;
+//   state ids  handle -> id changes only by hmap (a new handle) / hkill (the destroy hooks have the default sync: no record in flight);
+//   buffers    the encoder view at encode = the recording view at execution (vkn_buf.h "[rt P2]");
+// Verify mode (2): the recording thread looks everything up as before, compares, counts differences (vkn_draw_res_stats) and uses its
+// own lookups. Never used for a piece's nested draw (only for the record's own vkn_draw_in, as vkn_draw_rt_snap).
+typedef struct vkn_draw_pre {
+    const struct vkn_shader *shader;               // NULL: none (the draw drops with the old red line)
+    uint16_t blend, ds, raster, vfmt;              // ids (0: handle 0, or not known -> the draw drops)
+    VkBuffer vb[3]; uint64_t vb_off[3];            // the block of in->vb[st] (buf VK_NULL_HANDLE: 0 / not live / no memory)
+    vkn_buf_info ib; int32_t ib_rc;                // vkn_buf_lookup of in->ib (indexed draws; rc -1 = not live / 0 handle)
+    uint32_t pad;
+} vkn_draw_pre;
+// The encoder side (vkn_rt.c draw_enc): fills *p (its own caches, keyed like the recording side's by vkn_pipe_forget_gen /
+// vkn_state_handle_gen); marks the buffers as vkn_buf_mark / vkn_buf_lookup do. The IB only when indexed.
+void vkn_draw_resolve(const vkn_draw_in *in, int indexed, vkn_draw_pre *p);
+extern const vkn_draw_pre *vkn_draw_rt_pre;        // vkn_rt.c exec: the record's resolution for the draw vkn_draw_rt_in (NULL = none)
+extern int vkn_draw_rt_res_verify;                 // 1 = compare instead of use (vkn_rt.c, DM_VK_NATIVE_RT_RES=2)
+typedef struct vkn_draw_res_stats { uint64_t used, verified, differ, differ_shader, differ_state, differ_vb, differ_ib; } vkn_draw_res_stats;
+void vkn_draw_res_stats_get(vkn_draw_res_stats *s);
+
+// ==== [rt P4] DM_VK_NATIVE_SHC_EHASH (vkn_rt.h): an announce with the block's hash made on the engine thread ====
+// vkn_draw_ubo + the hash of its `size` bytes; vkn_draw_ubo clears a slot's hash. vkn_draw_ubo_hash: 0 = the slot holds (off, size) with a
+// hash given in this frame (vkn_frame()), *h = it; -1 = none (the caller hashes itself).
+void vkn_draw_ubo_h(int stage, uint32_t slot, uint32_t ring_off, uint32_t size, uint64_t hash);
+int vkn_draw_ubo_hash(int stage, uint32_t slot, uint32_t ring_off, uint32_t size, uint64_t *h);
+
+// ==== [rt P3] DM_VK_NATIVE_COST bits 0x100 / 0x200 (textures and set without locks) ====
+//   MIRROR (0x100)  this module's own table "texture-pool id -> (view, texture)", "sampler-pool id -> sampler" for bind_textures: an
+//                   entry holds what the locked lookup answered under vkn_tex_bind_gen() G (read BEFORE that lookup); it answers while the
+//                   generation is still G. Why the lock-free read is safe: every write that changes an answer bumps the generation
+//                   under vkn_tex.c's mutex (release), and the reader loads it (acquire) before using an entry; a write in flight that
+//                   this load does not see yet is ordered after the reader's use, exactly as a locked lookup that took the mutex first;
+//                   the objects stay valid: a destroy is a sync point (no record in flight) and retires them 3 frames later. Off while
+//                   DM_VK_NATIVE_TEXHACK=1 rules (vkn_sampler_by_id_pure() == 0).
+//   SHMEM (0x200)   the texture bindings and the set of the last 2 draws of each of 64 shaders (by shader object; was: of the last draw
+//                   only, VKN_COST_SET): reused under the conditions of the SET reuse (same shader object, shader generation, texture
+//                   generation, all-zero effect output, every (texture id, sampler id), vkn_pass_sample asked again with the same
+//                   answers); the set key of that shader's last draw is compared before the hash probe.
+//   DM_VK_NATIVE_COST_CHECK=1: every reuse / mirror answer is compared with the full path (which is then used), differences counted.
+enum { VKN_COST_MIRROR = 0x100, VKN_COST_SHMEM = 0x200, VKN_COST_ALL2 = 0x3ff };
+void vkn_draw_cost_check(int on);
+typedef struct vkn_draw_cost3_stats { uint64_t mirror_hits, mirror_miss, shmem_hits, shmem_miss, shmem_set_hits, check_runs, check_differ; } vkn_draw_cost3_stats;
+void vkn_draw_cost3_stats_get(vkn_draw_cost3_stats *s);
 #ifdef __cplusplus
 }
 #endif

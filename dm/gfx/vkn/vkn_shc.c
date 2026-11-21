@@ -16,6 +16,7 @@
 #include "vkn_shader.h"
 #include "vkn_state.h"
 #include "vkn_tex.h"
+#include "vkn_rt.h"     // [rt P4] vkn_rt_ehash
 #include "../nr/nr_shc.h"
 #include "../nr/nr_sort.h"
 #include "../nr/nr_hacks.h"
@@ -72,7 +73,7 @@ static struct {
     int self;                                 // this module is calling vkn_pass itself (its watch events are ours)
     uint64_t cond_ref;                        // [stage 5.1 G] cascades refused for DM_VK_NATIVE_COND 1 / 3 (since the last census)
     const uint8_t *ring;
-    struct { uint64_t frame; uint32_t off, n; uint64_t h; } um[2][VKN_UBO_SLOTS];   // the content hash of the last block of (stage, slot)
+    struct { uint64_t frame; uint32_t off, n; uint64_t h; const void *mk; } um[2][VKN_UBO_SLOTS];   // the content hash of the last block of (stage, slot); [rt P3-GPU] mk: the read mask it was made with
     vkn_shc_stats s; uint8_t red[R_N];
 } g;
 
@@ -436,15 +437,74 @@ static void start_range(const int32_t rect[4], int exact) {
 }
 
 // ---- one draw of an armed cascade: its hash (everything its depth output depends on), the model's decision, the copy for replays ----
-static uint64_t ubo_hash(int st, uint32_t slot, uint32_t off, uint32_t n) {
+// [rt P3-GPU] DM_VK_NATIVE_SHC_MASK (vkn_shc.h): the rows the caster's shader reads
+extern int vkn_shlib_on(void) __attribute__((weak));
+extern int vkn_shlib_read_mask(const void *shader, uint32_t binding, const uint64_t **bits, uint32_t *nwords) __attribute__((weak));
+static int g_shm; static vkn_shc_mask_stats g_shms, g_shmo;
+static int (*g_t_shmask)(const vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nwords);
+int vkn_shc_mask(void) { return g_shm; }
+void vkn_shc_mask_set(int mode) { g_shm = mode == 1 || mode == 2 ? mode : 0; }
+void vkn_shc_mask_stats_get(vkn_shc_mask_stats *s) { if (s) *s = g_shms; }
+void vkn_shc_test_mask(int (*fn)(const vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nwords)) { g_t_shmask = fn; }
+static int shc_rmask(const vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nw) {   // 1 = bits, 0 / -1 = the whole block
+    if (!g_shm || !s || vkn_fx_shader_is(s)) return -1;
+    if (g_t_shmask) return g_t_shmask(s, src, binding, bits, nw);
+    if (vkn_shlib_on && vkn_shlib_on() && vkn_shlib_read_mask) return vkn_shlib_read_mask(s->xs[src], binding, bits, nw);
+    return -1;
+}
+// The hash of the rows of [0, n) set in bits (runs of consecutive rows in one nrshc_bytes); the run positions mixed in.
+uint64_t vkn_shc_masked_hash(const uint8_t *p, uint32_t n, const uint64_t *bits, uint32_t nw, uint32_t *hashed) {
+    uint64_t h = nrshc_mix(0x55424d31ull, n); uint32_t row = 0; const uint32_t rows = (n + 15u) / 16u; *hashed = 0;
+    while (row < rows) {
+        while (row < rows && !(row / 64u < nw && bits[row / 64u] >> (row & 63) & 1)) row++;
+        if (row >= rows) break;
+        const uint32_t r0 = row;
+        while (row < rows && row / 64u < nw && bits[row / 64u] >> (row & 63) & 1) row++;
+        const uint32_t at = r0 * 16u, end = row * 16u < n ? row * 16u : n;
+        h = nrshc_bytes(nrshc_mix(h, r0), p + at, end - at); *hashed += end - at;
+    }
+    return h;
+}
+// [rt P4] DM_VK_NATIVE_SHC_EHASH (vkn_rt.h): the engine thread's hash of the whole block, when the shader reads all of it (n == size)
+static struct { uint64_t used, verified, differ, na; } g_eh;
+static uint64_t g_ehc[3];   // (totals: used, verified, differ)
+void vkn_shc_ehash_stats(uint64_t *used, uint64_t *verified, uint64_t *differ) { *used = g_ehc[0]; *verified = g_ehc[1]; *differ = g_ehc[2]; }
+static uint64_t ubo_hash(int st, uint32_t slot, uint32_t off, uint32_t n, uint32_t size, const vkn_shader *sh, const vkn_bind *b) {
+    const uint64_t *mbits = NULL; uint32_t mnw = 0;
+    const int mk = g_shm ? shc_rmask(sh, st == 0 ? VKN_SRC_VS : VKN_SRC_FS, b->binding, &mbits, &mnw) : -1;   // [rt P3-GPU]
+    const void *mkey = g_shm == 1 && mk == 1 ? (const void *)mbits : NULL;
     if (slot < VKN_UBO_SLOTS) {
         const __typeof__(g.um[0][0]) *m = &g.um[st][slot];
-        if (m->frame == g.frame + 1 && m->off == off && m->n == n) { g.s.ubo_memo++; return m->h; }
+        if (m->frame == g.frame + 1 && m->off == off && m->n == n && m->mk == mkey) { g.s.ubo_memo++; return m->h; }
+    }
+    if (g_shm) {   // [rt P3-GPU] the masked hash (mode 1: used; mode 2: counted only)
+        if (!g.ring) g.ring = (const uint8_t *)vkn_ring_cpu();
+        if (g.ring && (uint64_t)off + n <= VKN_RING_BYTES) {
+            g_shms.blocks++; g_shms.bytes_whole += n;
+            if (mk == 1 && mbits) {
+                uint32_t hashed = 0; const uint64_t hm = vkn_shc_masked_hash(g.ring + off, n, mbits, mnw, &hashed);
+                g_shms.bytes_masked += hashed; if (hashed < n) g_shms.narrowed++;
+                if (g_shm == 1) {
+                    g.s.ubo_bytes += hashed;
+                    if (slot < VKN_UBO_SLOTS) { g.um[st][slot].frame = g.frame + 1; g.um[st][slot].off = off; g.um[st][slot].n = n; g.um[st][slot].h = hm; g.um[st][slot].mk = mkey; }
+                    return hm;
+                }
+            } else g_shms.bytes_masked += n;
+        }
+    }
+    const int em = vkn_rt_ehash();
+    uint64_t eh = 0; const int have = em && n == size && !vkn_draw_ubo_hash(st, slot, off, size, &eh);
+    if (em && !have) g_eh.na++;
+    if (have && em == 1) {
+        g_eh.used++; g_ehc[0]++;
+        if (slot < VKN_UBO_SLOTS) { g.um[st][slot].frame = g.frame + 1; g.um[st][slot].off = off; g.um[st][slot].n = n; g.um[st][slot].h = eh; g.um[st][slot].mk = NULL; }
+        return eh;
     }
     if (!g.ring) g.ring = (const uint8_t *)vkn_ring_cpu();
     if (!g.ring || (uint64_t)off + n > VKN_RING_BYTES) return 0x5542ffffull;
     const uint64_t h = nrshc_bytes(0x55424f, g.ring + off, n); g.s.ubo_bytes += n;
-    if (slot < VKN_UBO_SLOTS) { g.um[st][slot].frame = g.frame + 1; g.um[st][slot].off = off; g.um[st][slot].n = n; g.um[st][slot].h = h; }
+    if (have) { g_eh.verified++; g_ehc[1]++; if (h != eh) g_ehc[2]++; if (h != eh && g_eh.differ++ < 16) SHC_RED(R_UBO, "DM_VK_NATIVE_SHC_EHASH=2: the engine thread's hash of block %u+%u (stage %d slot %u) differs", off, n, st, slot); }
+    if (slot < VKN_UBO_SLOTS) { g.um[st][slot].frame = g.frame + 1; g.um[st][slot].off = off; g.um[st][slot].n = n; g.um[st][slot].h = h; g.um[st][slot].mk = NULL; }
     return h;
 }
 static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
@@ -483,7 +543,7 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
                 if (vkn_draw_ubo_get(st, slot, &off, &size)) { h = nrshc_mix(h, 0x55420000u + slot + ((uint64_t)st << 8)); break; }
                 const uint32_t n = size < (b->bytes ? b->bytes : 65536u) ? size : (b->bytes ? b->bytes : 65536u);
                 h = nrshc_mix(h, 0x55430000u + slot + ((uint64_t)st << 8) + ((uint64_t)n << 32));
-                hu = nrshc_mix(hu, ubo_hash(st, slot, off, n));
+                hu = nrshc_mix(hu, ubo_hash(st, slot, off, n, size, sh, b));
                 if (t.nubo < SV_UBO) { t.ub[t.nubo].st = (uint8_t)st; t.ub[t.nubo].slot = (uint8_t)slot; t.ub[t.nubo].off = off; t.ub[t.nubo].size = size; t.nubo++; }
                 else t.ok = 0;
                 break;
@@ -662,6 +722,8 @@ void vkn_shc_install(void) {
     if (f && *f) from = 'v';
     if (fr < 0 || fr > 2) fr = 0;
     g.mode = m; g.far = fr; g.inst = m || fr; g_far_read = 1;
+    { const char *k = getenv("DM_VK_NATIVE_SHC_MASK"); vkn_shc_mask_set(k && *k ? atoi(k) : 0);   // [rt P3-GPU] (default 0 until the phone's verify run)
+      vkn_logf("shcache: DM_VK_NATIVE_SHC_MASK=%d (%s)", g_shm, g_shm == 1 ? "constant blocks hashed only over the rows the shader reads" : g_shm == 2 ? "whole blocks hashed, the masked hash counted" : "whole blocks"); }
     vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u; DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
              m == 0 ? "off" : m == 1 ? "on" : m == 2 ? "verify - decided and counted, drawn as the engine asks, would-be hits compared" : "poison - a hit keeps the cleared tile",
              g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
@@ -711,8 +773,14 @@ void vkn_shc_census(void) {
             put(&w, "%s%s %llu", n++ ? ", " : "", nrshc_t_name(i), (ull)s->tw[i]);
             if (i == NRSHC_T_ORDER) { put(&w, " ("); for (int j = 1, m = 0; j < NRS_W_N; j++) if (s->nrs[j]) put(&w, "%s%s %llu", m++ ? ", " : "", nrs_why_name(j), (ull)s->nrs[j]); put(&w, ")"); }
         }
-        put(&w, "]; not replayable draws %llu; draws without a content version (never members) %llu; constant blocks hashed %.1f KB a frame (memo %llu), unrestored %llu; per armed cascade known / new by constants / new other / new by content / not compared:",
-            (ull)s->unrep, (ull)s->salted, s->ubo_bytes / fr / 1024.0, (ull)s->ubo_memo, (ull)s->ubo_unrestored);
+        put(&w, "]; not replayable draws %llu; draws without a content version (never members) %llu; constant blocks hashed %.1f KB a frame (memo %llu), unrestored %llu; "
+            "engine-thread hashes (DM_VK_NATIVE_SHC_EHASH=%d) used %llu, verified %llu, differ %llu, not given %llu; read masks (DM_VK_NATIVE_SHC_MASK=%d): blocks %llu, "
+            "narrowed %llu, %.1f of %.1f KB a frame; per armed cascade known / new by constants / new other / new by content / not compared:",
+            (ull)s->unrep, (ull)s->salted, s->ubo_bytes / fr / 1024.0, (ull)s->ubo_memo, (ull)s->ubo_unrestored, vkn_rt_ehash(), (ull)g_eh.used, (ull)g_eh.verified, (ull)g_eh.differ, (ull)g_eh.na,
+            g_shm, (ull)(g_shms.blocks - g_shmo.blocks), (ull)(g_shms.narrowed - g_shmo.narrowed), (g_shms.bytes_masked - g_shmo.bytes_masked) / fr / 1024.0,
+            (g_shms.bytes_whole - g_shmo.bytes_whole) / fr / 1024.0);
+        g_shmo = g_shms;
+        memset(&g_eh, 0, sizeof g_eh);
         for (int i = 0; i < NRSHC_CAS; i++) if (s->cranges[i]) {
             const double rr = (double)s->cranges[i];
             put(&w, " c%d (%llu) %.0f/%.0f/%.0f/%.0f/%.0f", i, (ull)s->cranges[i], s->known[i] / rr, s->newu[i] / rr, s->newo[i] / rr, s->ncont[i] / rr, s->unc[i] / rr);

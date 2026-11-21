@@ -164,6 +164,18 @@ static VkComponentMapping fmt_swizzle(uint32_t nvn, int x) {
 enum { TEX_HANDLES = 1u << 17, TEX_SLOTS = 1u << 17, COOKIE_BUCKETS = 1u << 16, ID_PAGE = 4096, ID_PAGES = 0x100000 / ID_PAGE, SAMP_IDS = 0x1000, SAMP_HANDLES = 1u << 14 };
 typedef struct samp_rec { VkSampler s; uint32_t id; } samp_rec;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+// [rt P0] DM_VK_NATIVE_PROF=3: the draw-time lookups' lock counted (vkn_tex_view_by_id / vkn_sampler_by_id / vkn_sampler_cmp_by_id)
+int vkn_tex_lockprof; static uint64_t g_lk_n, g_lk_busy;
+static inline void lk_lock(void) {
+    if (__builtin_expect(vkn_tex_lockprof, 0)) {
+        __atomic_add_fetch(&g_lk_n, 1, __ATOMIC_RELAXED);
+        if (pthread_mutex_trylock(&g_mu)) { __atomic_add_fetch(&g_lk_busy, 1, __ATOMIC_RELAXED); pthread_mutex_lock(&g_mu); }
+    } else pthread_mutex_lock(&g_mu);
+}
+void vkn_tex_lock_stats(uint64_t *locks, uint64_t *contended) {
+    if (locks) *locks = __atomic_load_n(&g_lk_n, __ATOMIC_RELAXED);
+    if (contended) *contended = __atomic_load_n(&g_lk_busy, __ATOMIC_RELAXED);
+}
 static int g_init;                                // 1 ok, -1 failed
 static vkn_tab g_handles;                         // vkn_tex * by engine handle
 static vkn_tex **g_slot; static uint32_t *g_free_slot, g_nfree, g_slot_hi;
@@ -811,7 +823,7 @@ vkn_tex *vkn_tex_by_cookie(uint64_t cookie) {
 }
 VkImageView vkn_tex_view_by_id(uint32_t pool_id, vkn_tex **tex) {
     VkImageView v = VK_NULL_HANDLE; vkn_tex *t = NULL;
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     const uint32_t *c = g_init > 0 ? id_cell_locked(pool_id, 0) : NULL;
     if (c && *c) {
         const uint32_t s = (*c >> 3) - 1, vi = *c & 7;
@@ -1099,12 +1111,14 @@ int vkn_sampler_destroy(uint64_t handle) {
     pthread_mutex_unlock(&g_mu);
     return known;
 }
+// [rt P3] (vkn_tex.h): mode 1 of DM_VK_NATIVE_TEXHACK picks the twin by the texture of the previous view lookup (t_hk_last)
+int vkn_sampler_by_id_pure(void) { return !(__atomic_load_n(&g_hk.on, __ATOMIC_ACQUIRE) && __atomic_load_n(&g_hk.mode, __ATOMIC_RELAXED) == 1); }
 VkSampler vkn_sampler_by_id(uint32_t id) {
     // [stage 5.4 G2] the texture this thread looked up last (vkn_tex_view_by_id: the draw path asks view then sampler per binding)
     vkn_tex *const lt = g_hk.on ? t_hk_last : NULL;
     if (lt) t_hk_last = NULL;
     if (id >= SAMP_IDS) return VK_NULL_HANDLE;
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     VkSampler s = g_samp_by_id[id];
     if (g_hk.on && s && g_samp_hk[id]) {   // mode 2: a twin exists only where the rule holds; mode 1: only for a material texture
         if (g_hk.mode == 2 || hk_material(lt)) { s = g_samp_hk[id]; g_hk_picked++; }
@@ -1119,7 +1133,7 @@ VkSampler vkn_sampler_by_id(uint32_t id) {
 VkSampler vkn_sampler_cmp_by_id(uint32_t id) {
     const vkn_dev *d = vkn_device();
     if (id >= SAMP_IDS || !d) return VK_NULL_HANDLE;
-    pthread_mutex_lock(&g_mu);
+    lk_lock();
     VkSampler c = g_samp_cmp[id]; const VkSampler base = g_samp_by_id[id]; const samp_args a = g_samp_args[id]; const uint32_t gen = g_samp_gen[id];
     if (!c && base && a.known && a.compare) { c = g_samp_cmp[id] = base; g_samp_cmp_own[id] = 0; g_cmp_game++; bind_gen_bump(); }   // [stage 5.1 G] twin installed
     const int none = !c && (!base || !a.known);

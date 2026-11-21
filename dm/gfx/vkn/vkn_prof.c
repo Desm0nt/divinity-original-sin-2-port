@@ -12,6 +12,7 @@
 #include "vkn_frame.h"
 #include "vkn_pass.h"
 #include "vkn_ui.h"
+#include "vkn_tex.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,13 @@
 
 enum { VKN_PROF_SLOTS = 4, MAXP = 384, QPF = 2 + 2 * MAXP, NAME = 96, DRAW_PERIOD = 128, TOP_KINDS = 24 };
 static const char *const k_part[VKN_PROF_PARTS] = {"flush", "fill", "state", "fx", "buffers", "tex+set", "pass", "pipeline", "viewport", "draw-cmd", "tail"};
+// [rt P0] the fine parts (vkn_prof.h): name, coarse part, 1 = only a driver call
+static const struct { const char *name; uint8_t coarse, drv; } k_fine[VKN_PROF_FINE] = {
+    {"tex lookups", VKN_PROF_TEX, 0}, {"pass sample", VKN_PROF_TEX, 0}, {"tex rest", VKN_PROF_TEX, 0}, {"set key", VKN_PROF_TEX, 0},
+    {"set find", VKN_PROF_TEX, 0}, {"vkCmdBindDescriptorSets", VKN_PROF_TEX, 1}, {"pipe key", VKN_PROF_PIPE, 0}, {"pipe find", VKN_PROF_PIPE, 0},
+    {"vkCmdBindPipeline", VKN_PROF_PIPE, 1}, {"buf lookups", VKN_PROF_BUF, 0}, {"vkCmdBind*Buffer(s)", VKN_PROF_BUF, 1}, {"vkCmdSetViewport/Scissor", VKN_PROF_VIEW, 1},
+    {"query pre", VKN_PROF_CMD, 0}, {"vkCmdDraw*", VKN_PROF_CMD, 1}};
+int vkn_prof_lvl3;
 
 vkn_prof_hot vkn_prof_h __attribute__((aligned(64))) = {.left = 0xffffffffu};
 int vkn_prof_gpu_on, vkn_prof_gpu_cur;
@@ -40,6 +48,7 @@ static struct {
     double last_gpu_ms; uint64_t last_gpu_frame, last_gpu_t;
     // draw parts (since init; the census takes deltas)
     uint64_t acc[VKN_PROF_PARTS], cnt[VKN_PROF_PARTS], hits, samples, unended, t0;
+    uint64_t facc[VKN_PROF_FINE], fcnt[VKN_PROF_FINE], dcalls;   // [rt P0] level 3
     double timer_ns;
     // the host's frame times
     uint64_t fc_n, fc_begin, fc_rec, fc_end;
@@ -52,7 +61,9 @@ static uint64_t draws_now(void) {   // draws recorded so far (engine draws + UI 
 }
 
 void vkn_prof_init(int level) {
-    g.level = level < 0 ? 0 : level > 2 ? 2 : level;
+    g.level = level < 0 ? 0 : level > 3 ? 3 : level;
+    vkn_prof_lvl3 = g.level == 3;   // [rt P0]
+    vkn_buf_lockprof = vkn_tex_lockprof = g.level == 3;
     g.interval_ns = g.level >= 2 ? 2000000000ull : 20000000000ull;
     const uint64_t now = vkn_now_ns();
     g.next_ns = now + g.interval_ns; g.init_t = now;
@@ -65,6 +76,7 @@ void vkn_prof_init(int level) {
     if (g.level)
         vkn_logf("prof: DM_VK_NATIVE_PROF=%d: draw parts on 1 of %d draws (timer read %.0f ns, subtracted), a GPU-sampled frame every %llu s, per-pass list %s",
                  g.level, DRAW_PERIOD, g.timer_ns, (unsigned long long)(g.interval_ns / 1000000000ull), g.level >= 2 ? "complete" : "top 24 kinds");
+    if (g.level == 3) vkn_logf("prof: DM_VK_NATIVE_PROF=3: + the split (draw by part 3, fx by function, rt by record, pipeline changes, locks)");
     else vkn_logf("prof: DM_VK_NATIVE_PROF=0: no measurement lines");
 }
 int vkn_prof_level(void) { return g.level; }
@@ -215,25 +227,34 @@ void vkn_prof_slot_done_(int slot) {
 // ---- draw probes ----
 void vkn_prof_draw_slow(void) {
     vkn_prof_hot *h = &vkn_prof_h;
-    if (h->on) { h->on = 0; g.unended++; }   // the previous sampled draw left without vkn_prof_draw_end (its parts are kept)
+    if (h->on) { h->on = 0; h->on3 = 0; g.unended++; }   // the previous sampled draw left without vkn_prof_draw_end (its parts are kept)
     if (h->left) return;
     if (!g.level) { h->left = 0xffffffffu; return; }
     h->left = DRAW_PERIOD; g.hits++;
-    g.samples++; h->on = 1; g.t0 = h->last = vkn_now_ns();
+    g.samples++; h->on = 1; h->on3 = g.level == 3; g.t0 = h->last = vkn_now_ns();
 }
+void vkn_prof_mark_f_slow(int f) {   // [rt P0]
+    const uint64_t t = vkn_now_ns();
+    if ((unsigned)f >= VKN_PROF_FINE) f = VKN_PROF_F_TEX_REST;
+    const uint64_t d = t - vkn_prof_h.last;
+    g.facc[f] += d; g.fcnt[f]++; g.acc[k_fine[f].coarse] += d; g.cnt[k_fine[f].coarse]++;
+    vkn_prof_h.last = t;
+}
+void vkn_prof_driver_calls(uint32_t n) { if (vkn_prof_h.on3) g.dcalls += n; }
 void vkn_prof_mark_slow(int part) {
     const uint64_t t = vkn_now_ns();
     if ((unsigned)part >= VKN_PROF_PARTS) part = VKN_PROF_TAIL;
     g.acc[part] += t - vkn_prof_h.last; g.cnt[part]++;
     vkn_prof_h.last = t;
 }
-void vkn_prof_end_slow(void) { vkn_prof_mark_slow(VKN_PROF_TAIL); vkn_prof_h.on = 0; }
+void vkn_prof_end_slow(void) { vkn_prof_mark_slow(VKN_PROF_TAIL); vkn_prof_h.on = 0; vkn_prof_h.on3 = 0; }
 
 // ---- census (every 10 s, from the host's census): deltas since the last call ----
 void vkn_prof_census(void) {
     if (!g.level) return;
     static struct {
         uint64_t acc[VKN_PROF_PARTS], cnt[VKN_PROF_PARTS], calls, samples, unended, fc_n, fc_begin, fc_rec, fc_end, frames, t;
+        uint64_t facc[VKN_PROF_FINE], fcnt[VKN_PROF_FINE], dcalls; vkn_draw_prof3 p3; uint64_t lk[4];
         vkn_draw_stats d; vkn_pass_stats p; vkn_ui_stats u; uint64_t ring;
     } o;
     const uint64_t now = vkn_now_ns();
@@ -259,6 +280,31 @@ void vkn_prof_census(void) {
              "timer %.0f ns a probe subtracted",
              secs, DRAW_PERIOD, (unsigned long long)dsamp, (unsigned long long)dcalls, (unsigned long long)(g.unended - o.unended), per, pl, draw_ms, cpf,
              (unsigned long long)frames, g.timer_ns);
+    if (g.level == 3) {   // [rt P0] the split
+        char fl[900]; int k = 0; fl[0] = 0; double drv = 0, fine_sum = 0;
+        for (int i = 0; i < VKN_PROF_FINE && k < (int)sizeof fl - 48; i++) {
+            const double a = (double)(g.facc[i] - o.facc[i]) - (double)(g.fcnt[i] - o.fcnt[i]) * g.timer_ns;
+            const double us = dsamp && a > 0 ? a / (double)dsamp / 1000.0 : 0.0;
+            fine_sum += us; if (k_fine[i].drv) drv += us;
+            k += snprintf(fl + k, sizeof fl - (size_t)k, "%s%s %.3f", i ? ", " : "", k_fine[i].name, us);
+        }
+        const double dc = dsamp ? (double)(g.dcalls - o.dcalls) / (double)dsamp : 0.0;
+        vkn_logf("draw by part 3 (us a draw call, the same samples): %s; driver %.2f ms a frame (%.1f vkCmd calls a draw call, %.0f a frame), ours %.2f ms a frame (fine parts %.2f us of %.2f)",
+                 fl, drv * cpf / 1000.0, dc, dc * cpf, (per - drv) * cpf / 1000.0, fine_sum, per);
+        vkn_draw_prof3 p3; vkn_draw_prof3_get(&p3);
+        const double nch = (double)(p3.changes - o.p3.changes);
+#define P3(x) (nch > 0 ? 100.0 * (double)(p3.x - o.p3.x) / nch : 0.0)
+        vkn_logf("pipeline changes: %.0f a frame (%.0f binds); field differs in %% of changes: shader %.0f, variants %.0f, vertex format %.0f, depth-stencil %.0f, raster %.0f, "
+                 "blend %.0f, stencil ref %.0f, write masks %.0f, primitive %.0f, pass %.0f, effect bits %.0f, own vertex module %.0f; only dynamic-state candidates (ds / raster / stencil ref / "
+                 "blend) %.0f %%, only ds / raster / stencil ref %.0f %%", nch / fr, (double)(d.pipe_binds - o.d.pipe_binds) / fr,
+                 P3(f[0]), P3(f[1]), P3(f[2]), P3(f[3]), P3(f[4]), P3(f[5]), P3(f[6]), P3(f[7]), P3(f[8]), P3(f[9]), P3(f[10]), P3(f[11]), P3(dyn_only), P3(dyn_only_nb));
+#undef P3
+        uint64_t lk[4] = {0, 0, 0, 0}; vkn_buf_lock_stats(&lk[0], &lk[1]); vkn_tex_lock_stats(&lk[2], &lk[3]);
+        vkn_logf("locks (lookups of the draw path, any thread): buffers %.0f a frame, contended %.2f a frame; textures / samplers %.0f a frame, contended %.2f a frame",
+                 (double)(lk[0] - o.lk[0]) / fr, (double)(lk[1] - o.lk[1]) / fr, (double)(lk[2] - o.lk[2]) / fr, (double)(lk[3] - o.lk[3]) / fr);
+        memcpy(o.lk, lk, sizeof lk); o.p3 = p3;
+    }
+    memcpy(o.facc, g.facc, sizeof o.facc); memcpy(o.fcnt, g.fcnt, sizeof o.fcnt); o.dcalls = g.dcalls;
     // backend measured
     const uint64_t fn = g.fc_n - o.fc_n; const double fcn = fn ? (double)fn : 1.0;
     const double rec_ms = (double)(g.fc_rec - o.fc_rec) / fcn / 1e6, beg_ms = (double)(g.fc_begin - o.fc_begin) / fcn / 1e6, end_ms = (double)(g.fc_end - o.fc_end) / fcn / 1e6;

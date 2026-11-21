@@ -28,6 +28,15 @@
 //   * a swapped shader has no module variants: no alpha-test variant (in->alpha_ref is ignored for it) and no vertex retype;
 //   * pieces do not edit vkn_draw.c / hle_dos2_vkn_draw.c (the draw-cost piece owns them); a missing capability is asked from the lead.
 // The draw-cost fast paths of vkn_draw.c must treat every field of vkn_fx_out as part of what a draw binds (vkn_fx_out_same).
+// [rt P4] The gate (DM_VK_NATIVE_FXGATE, vkn_fx_gate below; registration is unchanged): a function may be left out of the chain for the
+// draws of a TARGET-SET CLASS it provably ignores. The rule, for whoever adds a gate entry: the function, called for a draw of a set of
+// that class, must (a) return without touching `out` and (b) change no state that any later call reads - EXCEPT on the "edge" draws,
+// where every function is always called: the first chain call of a frame (ctx->draw_no 0) and the first one after the target set
+// (ctx->color[] / ctx->depth) changed. So a function whose only per-draw work in such a set happens at its first draw (a per-frame
+// census, a "the cascade ended" check) can still be gated. A condition the class does not show (a module switch) goes in the entry's
+// `still` callback, asked once at each edge: 0 = call the function for the whole set. Entries are matched by the function's name;
+// built-in ones live in vkn_fx.c (k_gates, each with its proof); a piece may add its own with vkn_fx_gate. Mode 2 calls every function
+// and counts the gated calls that changed `out` (must stay 0): it checks (a), not (b) - (b) is the entry's proof.
 // No game addresses. Host tests: vkn_stage3_test (block "fx").
 #ifndef DM_VKN_FX_H
 #define DM_VKN_FX_H
@@ -117,6 +126,21 @@ static inline int vkn_fx_shader_is(const vkn_shader *s) { return s && s->id >= (
 // A depth-stencil state by content that no engine handle names (arguments of vkn_ds_put). 0 = the id table is full.
 uint16_t vkn_fx_ds(uint8_t depth_test, uint8_t depth_write, uint8_t depth_func, uint8_t stencil_enable, uint8_t stencil_mask,
                    uint8_t stencil_func, uint8_t depth_fail_op, uint8_t pass_op);
+
+// ---- [rt P4] the gate (head comment "[rt P4]") ----
+enum { VKN_FX_G_C0 = 1,      // the set has colour target 0
+       VKN_FX_G_CX = 2,      // ... some colour target
+       VKN_FX_G_D = 4,       // ... a depth target
+       VKN_FX_G_NOC = 8,     // ... no colour target
+       VKN_FX_G_ND = 16 };   // ... no depth target
+// The function `name` is not called for a draw whose target set has ALL the bits of `when` (when 0 = never gated), except on edge draws,
+// and while still() (NULL = always) returned 1 at the set's edge. Any thread, before or after the function registers. 0 = ok, -1 = full.
+int vkn_fx_gate(const char *name, uint32_t when, int (*still)(void));
+void vkn_fx_gate_mode(int mode);                   // DM_VK_NATIVE_FXGATE 0 off / 1 gate / 2 verify (install time)
+typedef struct vkn_fx_gate_stats { uint64_t gated, verified, differ, edges; } vkn_fx_gate_stats;
+void vkn_fx_gate_stats_get(vkn_fx_gate_stats *s);
+// [rt P0] DM_VK_NATIVE_PROF=3: vkn_draw.c sets this before vkn_fx_run of a sampled draw: the chain times each function (line "fx by function")
+extern int vkn_fx_time_next;
 
 // ---- provided by vkn_draw.c for the pieces ----
 // The constant block a draw would bind now for (stage 0 vertex / 1 fragment, slot): 0 = ok, -1 = never announced.

@@ -62,6 +62,7 @@
 #include "../../../vkn/vkn_lightfuse.h"   // [stage 5.1 A4]
 #include "../../../vkn/vkn_post.h"     // [stage 5.2 B3] test_post (end of file)
 #include "../../../vkn/vkn_rt.h"       // [stage 5.5] test_rt
+#include "../../../vkn/vkn_shc.h"      // [rt P4] vkn_shc_ehash_stats
 #include <sched.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -1460,6 +1461,8 @@ static void rt_frame(uint32_t f) {
         in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = rt_ctex; in.smp[2] = rt_csmp;
         in.viewport[2] = (float)(64 - (k % 3) * 8); in.scissor[2] = 64 - (int32_t)(k % 2) * 16; in.vb_off[0] = 16 * (k % 4);
         vkn_rt_query_cond(0);   // what dm_vkn_draw_fill does before every draw
+        if (k == 3) vkn_rt_query_begin(0x7700 + f % 5);   // [rt P1] a report pair around draws 3..4 (COND 0: counted only; LEAN writes no record)
+        if (k == 5) vkn_rt_query_end(0x7700 + f % 5);
         switch (k % 6) {
         case 0: case 1: in.ib = H(52, 1); vkn_rt_draw_indexed(&in, k % 8, 3 + 3 * (k % 2), 1); break;
         case 2: in.ib = H(53, 1); vkn_rt_draw_indexed(&in, 2, 6, 1 + (f % 2)); break;
@@ -1510,6 +1513,8 @@ static void rt_frame(uint32_t f) {
         static const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
         d.quads = 0; d.idx = idx; d.nidx = 6; d.tex[0] = (f & 1) ? g_t3 : NULL; d.blend = 0;
         vkn_rt_ui_draw(&d);
+        vsc[0] = (float)f * 0.5f; d.quads = 1; d.idx = NULL; d.nidx = 0; d.tex[0] = g_t0; d.blend = 1;   // [rt P6] the first draw's set content again (other constants)
+        vkn_rt_ui_draw(&d);
     }
     vkn_rt_rec_end(1, g_win, NULL, 1);
     const uint64_t cpu3[3] = {0, 0, 0};
@@ -1533,12 +1538,19 @@ static void rt_yield(int where) {   // the stress run: random yields / short sle
     if ((r & 1023) == 7) { const struct timespec ts = {0, 20000}; nanosleep(&ts, NULL); }
     if (where == 1 && (r & 127) == 3) { const struct timespec ts = {0, 150000}; nanosleep(&ts, NULL); }   // a slow recording thread: the engine runs ahead
 }
+// [rt P3-GPU] the test's read mask: rows 0..3 and 5 of every block (the library's masks need its SPIR-V: absent in this test)
+static const uint64_t k_rt_rows[4] = {0x2full, 0, 0, 0};
+static int rt_shmask(const struct vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nw) { (void)s; (void)src; (void)binding; *bits = k_rt_rows; *nw = 4; return 1; }
 typedef struct rt_res {
     int ran, checks, fails, val_errors, mk_errors; uint32_t n, frames, mode;
     vkn_rt_stats st; uint64_t sync_upd, sync_tex, xm;
+    vkn_draw_res_stats rs; vkn_draw_cost3_stats c3;   // [rt P2] / [rt P3]
+    vkn_fx_gate_stats gs; uint64_t eh_used, eh_ver, eh_differ;   // [rt P4]
+    uint64_t us_hits, us_miss, us_would; vkn_shc_mask_stats shm;  // [rt P6] / [rt P3-GPU]
     mk_jr_rec rec[4600];
 } rt_res;
-typedef struct { int mode, slots, yield; uint32_t frames; uint64_t ring_limit; int ext; } rt_cfg;
+// [rt P1..P3] lean / res: DM_VK_NATIVE_RT_LEAN / _RES; cost: DM_VK_NATIVE_COST (0 = VKN_COST_ALL, the reference's); check: DM_VK_NATIVE_COST_CHECK
+typedef struct { int mode, slots, yield; uint32_t frames; uint64_t ring_limit; int ext; int lean, res; uint32_t cost; int check; int fxgate, ehash, uiset, shmask; } rt_cfg;   // [rt P4] fxgate / ehash
 static void rt_run(const rt_cfg *c, rt_res *r) {
     const int c0 = g_checks, f0 = g_fails, v0 = mk_val_errors, e0 = mk_errors;
     pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);
@@ -1546,6 +1558,10 @@ static void rt_run(const rt_cfg *c, rt_res *r) {
     alarm(600);   // (a hang fails the child instead of the run)
     g_rtx = c->ext; if (c->ext) rtx_on(c->ext);
     vkn_rt_install(c->mode, c->slots);
+    vkn_rt_lean_set(c->lean); vkn_rt_res_set(c->res);                                    // [rt P1] / [rt P2]
+    vkn_draw_cost_set(c->cost ? c->cost : VKN_COST_ALL); vkn_draw_cost_check(c->check);    // [rt P3]
+    vkn_fx_gate_mode(c->fxgate); vkn_rt_ehash_set(c->ehash);                              // [rt P4]
+    vkn_ui_set_cache(c->uiset); vkn_shc_mask_set(c->shmask); vkn_shc_test_mask(c->shmask ? rt_shmask : NULL);   // [rt P6] / [rt P3-GPU]
     vkn_rt_test_yield(c->yield ? rt_yield : NULL);
     vkn_rt_test_ring_limit(c->ring_limit);
     for (uint32_t f = 0; f < c->frames; f++) rt_frame(f);
@@ -1553,6 +1569,9 @@ static void rt_run(const rt_cfg *c, rt_res *r) {
     pthread_mutex_lock(&mk_mu); mk_jr_on = 0; pthread_mutex_unlock(&mk_mu);
     r->n = mk_jr_n < 4600 ? mk_jr_n : 4600; if (mk_jr_n > 4600) g_fails++;
     memcpy(r->rec, mk_jr, r->n * sizeof r->rec[0]);
+    vkn_draw_res_stats_get(&r->rs); vkn_draw_cost3_stats_get(&r->c3); vkn_fx_gate_stats_get(&r->gs);
+    vkn_shc_ehash_stats(&r->eh_used, &r->eh_ver, &r->eh_differ);   // [rt P4]
+    vkn_ui_set_cache_stats(&r->us_hits, &r->us_miss, &r->us_would); vkn_shc_mask_stats_get(&r->shm);
     vkn_rt_stats_get(&r->st); r->sync_upd = g_rts_upd.syncs; r->sync_tex = g_rts_tex.syncs; r->xm = c->ext ? rtx_metric(c->ext) : 0;
     r->frames = c->frames; r->mode = (uint32_t)c->mode;
     r->checks = g_checks - c0; r->fails = g_fails - f0; r->val_errors = mk_val_errors - v0; r->mk_errors = mk_errors - e0;
@@ -1610,6 +1629,19 @@ static void rt_slots_init(void) {
 }
 static void test_rt(void) {
     { static const char *const own[] = {"test", "a5-a", "a5-b", "b4-skipper"}; for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) vkn_fx_drop(own[i]); }   // (earlier tests' own functions: not the game's)
+    {   // [rt P3-GPU] the masked hash: an unread row changes nothing, a read row (or its position) does; the tail row is cut at n
+        uint8_t b[160]; for (int i = 0; i < 160; i++) b[i] = (uint8_t)(i * 7 + 3);
+        const uint64_t m1[1] = {0x15ull};   // rows 0, 2, 4
+        uint32_t hb = 0; const uint64_t h0 = vkn_shc_masked_hash(b, 150, m1, 1, &hb);
+        CHECK_EQ(hb, 16 + 16 + 16);
+        b[20] ^= 0x55; CHECK_EQ(vkn_shc_masked_hash(b, 150, m1, 1, &hb), h0); b[20] ^= 0x55;   // row 1: not read
+        b[150] ^= 1; CHECK_EQ(vkn_shc_masked_hash(b, 150, m1, 1, &hb), h0); b[150] ^= 1;      // past n
+        b[33] ^= 1; CHECK(vkn_shc_masked_hash(b, 150, m1, 1, &hb) != h0); b[33] ^= 1;         // row 2: read
+        const uint64_t m2[1] = {0x07ull};   // rows 0..2 in one run
+        uint32_t h2 = 0; (void)vkn_shc_masked_hash(b, 40, m2, 1, &h2); CHECK_EQ(h2, 40);
+        const uint64_t m3[1] = {0x0bull};   // rows 0, 1, 3: not the hash of rows 0..2
+        CHECK(vkn_shc_masked_hash(b, 150, m3, 1, &hb) != vkn_shc_masked_hash(b, 150, m2, 1, &hb));
+    }
     rt_setup();
     // Warm-up in this process (mode 0): every shader pair, module variant and pipeline the scenario needs exists before the forks (a
     // forked child has no vkn_shader worker thread: a module request there would wait for it forever), and every child starts from
@@ -1627,8 +1659,8 @@ static void test_rt(void) {
         // refuses threads in a child forked from a process with threads: work/rt_test.sh compares the files of separate processes)
         const char *d = getenv("VKN_RT_DIRECT");
         if (d && *d) {
-            rt_cfg c = {0, 1, 0, 240, 0, 0}; unsigned long long rl = 0;
-            sscanf(d, "%d:%d:%d:%u:%llu:%d", &c.mode, &c.slots, &c.yield, &c.frames, &rl, &c.ext); c.ring_limit = rl;
+            rt_cfg c = {0, 1, 0, 240, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; unsigned long long rl = 0;
+            sscanf(d, "%d:%d:%d:%u:%llu:%d:%d:%d:%x:%d:%d:%d:%d:%d", &c.mode, &c.slots, &c.yield, &c.frames, &rl, &c.ext, &c.lean, &c.res, &c.cost, &c.check, &c.fxgate, &c.ehash, &c.uiset, &c.shmask); c.ring_limit = rl;
             rt_res *r = (rt_res *)calloc(1, sizeof *r);
             rt_run(&c, r);
             const char *o = getenv("VKN_RT_OUT");
@@ -1636,6 +1668,7 @@ static void test_rt(void) {
             if (fo) { for (uint32_t i = 0; i < r->n; i++) fprintf(fo, "%016llx %u %u\n", (unsigned long long)r->rec[i].h, r->rec[i].nev, r->rec[i].ndraw); fclose(fo); }
             CHECK_EQ(r->val_errors, 0); CHECK_EQ(r->mk_errors, 0);
             if (c.mode == 1 || c.mode == 2) { CHECK(r->st.busy_ns > 0); CHECK_EQ(r->st.mispredict, 0); CHECK_EQ(r->st.foreign, 0); }
+            CHECK_EQ(r->rs.differ, 0); CHECK_EQ(r->c3.check_differ, 0);   // [rt P2] / [rt P3]
             printf("rt direct %s: %u submissions, syncs %llu, ahead 0:%llu 1:%llu 2:%llu 3+:%llu, ring guards %llu\n", d, r->n, (unsigned long long)r->st.syncs,
                    (unsigned long long)r->st.ahead[0], (unsigned long long)r->st.ahead[1], (unsigned long long)r->st.ahead[2], (unsigned long long)r->st.ahead[3], (unsigned long long)r->st.guard_ring);
             free(r);
@@ -1661,10 +1694,55 @@ static void test_rt(void) {
         if (runs[i].c.slots == 3) CHECK_EQ(x.st.slot_gen_miss, 0);
         if (runs[i].c.mode == 2 && runs[i].c.yield) CHECK(x.st.guard_cpu > 0);   // the CPU-written ring wrapped onto frames in flight
     }
+    {   // [rt P1..P3] the lean queue, the resolution in the record, the lock-free texture paths: journals equal to the reference
+        const uint32_t C3 = VKN_COST_ALL2;
+        const struct { rt_cfg c; const char *what; } runs3[] = {
+            {{9, 1, 0, F, 0, 0, 1, 1, C3, 0}, "RT=9 lean res cost3"}, {{0, 1, 0, F, 0, 0, 0, 0, C3, 1}, "RT=0 cost3 checked"},
+            {{1, 1, 0, F, 0, 0, 1, 1, C3, 0}, "RT=1 lean res cost3"}, {{2, 1, 0, F, 0, 0, 1, 1, C3, 0}, "RT=2 lean res cost3"},
+            {{1, 1, 1, F, 0, 0, 1, 2, C3, 1}, "RT=1 yields res=2 checked"}, {{2, 1, 1, F, 0, 0, 1, 2, C3, 1}, "RT=2 yields res=2 checked"},
+            {{1, 0, 1, F, 0, 0, 1, 1, C3, 0}, "RT=1 lean slots copied"}, {{2, 2, 1, F, 0, 0, 1, 1, C3, 0}, "RT=2 lean slots by ranges"},
+            {{2, 1, 1, F, 12 * 1024, 0, 1, 1, C3, 0}, "RT=2 lean guard 12 KB"}, {{1, 1, 1, F, 0, 0, 1, 0, 0, 0}, "RT=1 yields lean only"},
+            {{2, 1, 1, F, 0, 0, 0, 1, 0, 0}, "RT=2 yields res only"}, {{1, 1, 1, F, 0, 0, 0, 0, VKN_COST_ALL | VKN_COST_MIRROR, 1}, "RT=1 yields mirror checked"},
+            {{0, 1, 0, F, 0, 0, 0, 0, 0, 0, 0, 0, 2}, "RT=0 UISET=2"}, {{0, 1, 0, F, 0, 0, 0, 0, 0, 0, 0, 0, 1}, "RT=0 UISET=1"},
+            {{2, 1, 1, F, 0, 0, 1, 1, C3, 0, 1, 1, 1}, "RT=2 yields everything"},
+        };
+        for (size_t i = 0; i < sizeof runs3 / sizeof runs3[0]; i++) {
+            if (rt_child(&runs3[i].c, &x)) continue;
+            rt_same(runs3[i].what, &ref, &x);
+            const rt_cfg *c = &runs3[i].c;
+            const int thr = c->mode == 1 || c->mode == 2;
+            if (thr) { CHECK(x.st.busy_ns > 0); CHECK_EQ(x.st.mispredict, 0); CHECK_EQ(x.st.foreign, 0); CHECK_EQ(x.st.oom, 0); }
+            CHECK_EQ(x.rs.differ, 0); CHECK_EQ(x.c3.check_differ, 0);
+            if (c->res && c->mode) CHECK(x.st.res_draws > 0);
+            if (c->res == 2 && c->mode) CHECK(x.rs.verified > 0);
+            if (c->res == 1 && c->mode) CHECK(x.rs.used > 0);
+            if (c->lean && thr && c->slots) { CHECK(x.st.lean_ubo_skip > 0); CHECK(x.st.lean_slot_arrays > 0); }
+            if (c->lean && thr) CHECK(x.st.lean_q_skip > 0);   // (rt_announce re-announces slot 9; the slot arrays change by one array)
+            if (c->cost & VKN_COST_MIRROR) CHECK(x.c3.mirror_hits > 0);
+            if (c->cost & VKN_COST_SHMEM) { CHECK(x.c3.shmem_hits > 0); CHECK(x.c3.shmem_set_hits > 0); }
+            if (c->check) CHECK(x.c3.check_runs > 0);
+            if (c->uiset == 1) CHECK(x.us_hits > 0);
+            if (c->uiset == 2) CHECK(x.us_would > 0);
+            printf("rt %-28s lean: announces skipped %llu, query records skipped %llu, slot arrays %llu; res: draws %llu used %llu verified %llu differ %llu; "
+                   "mirror %llu / %llu, shader memory %llu / %llu (sets %llu), checks %llu differ %llu\n", runs3[i].what,
+                   (unsigned long long)x.st.lean_ubo_skip, (unsigned long long)x.st.lean_q_skip, (unsigned long long)x.st.lean_slot_arrays, (unsigned long long)x.st.res_draws,
+                   (unsigned long long)x.rs.used, (unsigned long long)x.rs.verified, (unsigned long long)x.rs.differ, (unsigned long long)x.c3.mirror_hits, (unsigned long long)x.c3.mirror_miss,
+                   (unsigned long long)x.c3.shmem_hits, (unsigned long long)x.c3.shmem_miss, (unsigned long long)x.c3.shmem_set_hits, (unsigned long long)x.c3.check_runs, (unsigned long long)x.c3.check_differ);
+        }
+    }
     {   // [stage 5.2 audit] the pieces merged after stage 5.5: a reference per extension, the modes against it
         static const struct { int ext; const char *what; } ex[] = {{RTX_UI1, "UIPASS=1"}, {RTX_UI3, "UIPASS=3"}, {RTX_POL, "LOAD=1 STORE=1 FRESH=2"},
                                                                    {RTX_MAT, "MAT=2 gate"}, {RTX_SHC, "SHCACHE=1"}, {RTX_LF, "LIGHTFUSE"}};
         static rt_res xr;
+        {   // [rt P3-GPU] DM_VK_NATIVE_SHC_MASK=1 with the test's mask: its own reference (more hits than without the mask), the threaded modes against it
+            const rt_cfg m0 = {0, 1, 0, 160, 0, RTX_SHC, 0, 0, 0, 0, 0, 0, 0, 1}, mm[2] = {{1, 1, 1, 160, 0, RTX_SHC, 1, 1, VKN_COST_ALL2, 0, 1, 1, 1, 1}, {2, 1, 1, 160, 0, RTX_SHC, 1, 2, VKN_COST_ALL2, 1, 2, 2, 2, 1}};
+            if (!rt_child(&m0, &xr)) {
+                CHECK_EQ(xr.val_errors, 0); CHECK_EQ(xr.mk_errors, 0); CHECK(xr.shm.blocks > 0); CHECK(xr.shm.narrowed > 0); CHECK(xr.shm.bytes_masked < xr.shm.bytes_whole);
+                printf("rt SHCACHE=1 SHC_MASK=1 reference: %u submissions, blocks %llu narrowed %llu, %llu of %llu bytes hashed\n", xr.n, (unsigned long long)xr.shm.blocks,
+                       (unsigned long long)xr.shm.narrowed, (unsigned long long)xr.shm.bytes_masked, (unsigned long long)xr.shm.bytes_whole);
+                for (int m = 0; m < 2; m++) if (!rt_child(&mm[m], &x)) { rt_same(m ? "SHC_MASK=1 RT=2 everything" : "SHC_MASK=1 RT=1 everything", &xr, &x); CHECK_EQ(x.eh_differ, 0); CHECK_EQ(x.gs.differ, 0); }
+            }
+        }
         for (size_t i = 0; i < sizeof ex / sizeof ex[0]; i++) {
             const uint32_t XF = 160;
             const rt_cfg r0 = {0, 1, 0, XF, 0, ex[i].ext};
@@ -1672,11 +1750,20 @@ static void test_rt(void) {
             CHECK_EQ(xr.val_errors, 0); CHECK_EQ(xr.mk_errors, 0);
             printf("rt %s reference: %u submissions, the piece acted %llu times\n", ex[i].what, xr.n, (unsigned long long)xr.xm);
             CHECK(xr.xm > 0);
-            const rt_cfg rm[3] = {{9, 1, 0, XF, 0, ex[i].ext}, {1, 1, 1, XF, 0, ex[i].ext}, {2, 1, 1, XF, 0, ex[i].ext}};
-            for (int m = 0; m < 3; m++) {
+            const rt_cfg rm[8] = {{9, 1, 0, XF, 0, ex[i].ext}, {1, 1, 1, XF, 0, ex[i].ext}, {2, 1, 1, XF, 0, ex[i].ext},
+                                  {1, 1, 1, XF, 0, ex[i].ext, 1, 1, VKN_COST_ALL2, 0}, {2, 1, 1, XF, 0, ex[i].ext, 1, 2, VKN_COST_ALL2, 1},   // [rt P1..P3]
+                                  {0, 1, 0, XF, 0, ex[i].ext, 0, 0, 0, 0, 2, 0}, {1, 1, 1, XF, 0, ex[i].ext, 1, 1, VKN_COST_ALL2, 0, 1, 1},     // [rt P4]
+                                  {2, 1, 1, XF, 0, ex[i].ext, 1, 1, VKN_COST_ALL2, 0, 2, 2}};
+            for (int m = 0; m < 8; m++) {
                 if (rt_child(&rm[m], &x)) continue;
-                char w[64]; snprintf(w, sizeof w, "%s RT=%d%s", ex[i].what, rm[m].mode, rm[m].yield ? " yields" : "");
+                char w[80]; snprintf(w, sizeof w, "%s RT=%d%s%s%s", ex[i].what, rm[m].mode, rm[m].yield ? " yields" : "", rm[m].lean ? " lean res cost3" : "", rm[m].fxgate ? (rm[m].fxgate == 2 ? " gate2 ehash" : " gate ehash") : "");
                 rt_same(w, &xr, &x);
+                CHECK_EQ(x.rs.differ, 0); CHECK_EQ(x.c3.check_differ, 0); CHECK_EQ(x.gs.differ, 0); CHECK_EQ(x.eh_differ, 0);   // [rt P4]
+                if (rm[m].fxgate == 2 && ex[i].ext == RTX_MAT) CHECK(x.gs.verified > 0);
+                if (rm[m].fxgate == 1 && ex[i].ext == RTX_MAT) CHECK(x.gs.gated > 0);
+                if (rm[m].ehash && ex[i].ext == RTX_SHC) CHECK(x.eh_used + x.eh_ver > 0);
+                if (rm[m].fxgate || rm[m].ehash) printf("rt %-28s gate: left out %llu, verified %llu, differ %llu; engine hashes used %llu, verified %llu, differ %llu\n", w,
+                    (unsigned long long)x.gs.gated, (unsigned long long)x.gs.verified, (unsigned long long)x.gs.differ, (unsigned long long)x.eh_used, (unsigned long long)x.eh_ver, (unsigned long long)x.eh_differ);
                 CHECK_EQ(x.xm, xr.xm);   // the piece decided the same in every mode
             }
         }
@@ -1690,10 +1777,12 @@ static void test_rt(void) {
     if (rt_child(&cr, &ref2)) return;
     uint32_t same = 0;
     for (uint32_t k = 0; k < reps; k++) for (int m = 1; m <= 2; m++) {
-        const rt_cfg cs = {m, k % 3 == 2 ? 3 : 1, 1, sf, k & 1 ? 12 * 1024 : 0};
+        const int nw = k % 4 >= 2;   // [rt P1..P3] half of the runs with the new paths (res verify on every 4th)
+        const rt_cfg cs = {m, k % 3 == 2 ? 3 : 1, 1, sf, k & 1 ? 12 * 1024 : 0, 0, nw, nw ? (k % 4 == 3 ? 2 : 1) : 0, nw ? VKN_COST_ALL2 : 0, k % 4 == 3, nw ? (k % 4 == 3 ? 2 : 1) : 0, nw ? (k % 4 == 3 ? 2 : 1) : 0};
         if (rt_child(&cs, &x)) continue;
-        char w[64]; snprintf(w, sizeof w, "stress %u x %u RT=%d%s%s", k + 1, sf, m, k & 1 ? " guard" : "", k % 3 == 2 ? " slots 3" : "");
+        char w[64]; snprintf(w, sizeof w, "stress %u x %u RT=%d%s%s%s", k + 1, sf, m, k & 1 ? " guard" : "", k % 3 == 2 ? " slots 3" : "", nw ? " new" : "");
         same += (uint32_t)rt_same(w, &ref2, &x);
+        CHECK_EQ(x.rs.differ, 0); CHECK_EQ(x.c3.check_differ, 0);
     }
     printf("rt stress: %u of %u runs (%u frames each, random yields) with the journal of DM_VK_NATIVE_RT=0\n", same, 2 * reps, sf);
 }

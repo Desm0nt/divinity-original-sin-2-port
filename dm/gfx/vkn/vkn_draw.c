@@ -59,7 +59,7 @@ static uint32_t g_ubo_gen;
 uint32_t vkn_draw_ubo_gen(void) { return g_ubo_gen; }
 
 // ---- uniform blocks announced by the constant flushes: (stage, slot) -> ring offset / size; persist like NVN's bindings ----
-typedef struct ubo_slot { uint32_t off, size; uint8_t valid; } ubo_slot;
+typedef struct ubo_slot { uint32_t off, size; uint8_t valid, has_h; uint64_t h, hframe; } ubo_slot;   // [rt P4] has_h / h / hframe
 static ubo_slot g_ubo[VKN_STAGE_SLOTS][VKN_UBO_SLOTS];
 void vkn_draw_ubo(int stage, uint32_t slot, uint32_t ring_off, uint32_t size) {
     if (stage < 0 || stage >= VKN_STAGE_SLOTS || slot >= VKN_UBO_SLOTS) {
@@ -69,8 +69,19 @@ void vkn_draw_ubo(int stage, uint32_t slot, uint32_t ring_off, uint32_t size) {
     }
     ubo_slot *u = &g_ubo[stage][slot];
     if (!u->valid || u->off != ring_off || u->size != size) g_ubo_gen++;   // [stage 5, draw cost] what the slot holds changed
-    u->off = ring_off; u->size = size; u->valid = 1;
+    u->off = ring_off; u->size = size; u->valid = 1; u->has_h = 0;
     g_st2.ubo_announce++;
+}
+void vkn_draw_ubo_h(int stage, uint32_t slot, uint32_t ring_off, uint32_t size, uint64_t hash) {   // [rt P4]
+    vkn_draw_ubo(stage, slot, ring_off, size);
+    if (stage < 0 || stage >= VKN_STAGE_SLOTS || slot >= VKN_UBO_SLOTS) return;
+    ubo_slot *u = &g_ubo[stage][slot]; u->has_h = 1; u->h = hash; u->hframe = vkn_frame();
+}
+int vkn_draw_ubo_hash(int stage, uint32_t slot, uint32_t ring_off, uint32_t size, uint64_t *h) {
+    if (stage < 0 || stage >= VKN_STAGE_SLOTS || slot >= VKN_UBO_SLOTS) return -1;
+    const ubo_slot *u = &g_ubo[stage][slot];
+    if (!u->valid || !u->has_h || u->off != ring_off || u->size != size || u->hframe != vkn_frame()) return -1;
+    *h = u->h; return 0;
 }
 int vkn_draw_ubo_get(int stage, uint32_t slot, uint32_t *ring_off, uint32_t *size) {   // [stage 5] vkn_fx.h: a piece's deferred replay
     if (stage < 0 || stage >= VKN_STAGE_SLOTS || slot >= VKN_UBO_SLOTS || !g_ubo[stage][slot].valid) return -1;
@@ -85,6 +96,7 @@ int vkn_fx_active(void) __attribute__((weak));
 void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) __attribute__((weak));
 VkSampler vkn_sampler_cmp_by_id(uint32_t sampler_id) __attribute__((weak));
 int vkn_fx_out_same(const vkn_fx_out *a, const vkn_fx_out *b) __attribute__((weak));   // [stage 5, draw cost]
+extern int vkn_fx_time_next __attribute__((weak));   // [rt P0] (vkn_fx.c)
 static const vkn_fx_out *g_fx; static vkn_fx_out g_fx_out;
 static struct { uint8_t indexed; uint32_t first, count, instances; } g_call;
 static uint64_t g_fx_drop;   // draws dropped for an fx binding without a source (red)
@@ -98,6 +110,17 @@ static int g_fx_nest;
 // engine's draw was encoded (the rewrite below reads them; the buffer's bytes may be newer by now). Only for that very draw (`in`), never
 // for a piece's nested draw or a later replay of a copy.
 const void *vkn_draw_rt_snap; const vkn_draw_in *vkn_draw_rt_in;
+// [rt P2] the record's resolution (vkn_draw.h vkn_draw_pre): only for the draw vkn_draw_rt_in, never for a piece's nested draw
+const vkn_draw_pre *vkn_draw_rt_pre; int vkn_draw_rt_res_verify;
+static vkn_draw_res_stats g_rs;
+static const vkn_draw_pre *pre_of(const vkn_draw_in *in) { return !g_fx_nest && vkn_draw_rt_pre && vkn_draw_rt_in == in ? vkn_draw_rt_pre : NULL; }
+void vkn_draw_res_stats_get(vkn_draw_res_stats *s) { if (s) *s = g_rs; }
+// [rt P0] DM_VK_NATIVE_PROF=3 pipeline-change census; [rt P3] its counters and the check switch
+static vkn_draw_prof3 g_p3; static vkn_pipe_desc g_ppd; static uint16_t g_ppd_vin; static int g_ppd_ok;
+void vkn_draw_prof3_get(vkn_draw_prof3 *s) { if (s) *s = g_p3; }
+static vkn_draw_cost3_stats g_c3; static int g_ccheck;
+void vkn_draw_cost_check(int on) { g_ccheck = on ? 1 : 0; }
+void vkn_draw_cost3_stats_get(vkn_draw_cost3_stats *s) { if (s) *s = g_c3; }
 
 // ---- what this recording has bound (forgotten at every recording begin and by vkn_draw_raw_begin) ----
 static struct {
@@ -123,7 +146,7 @@ void vkn_query_draw_post(VkCommandBuffer cb) __attribute__((weak));
 #define Q_PRE(cb) do { if (!g_fx_nest && vkn_query_draw_pre) vkn_query_draw_pre(cb); } while (0)     // (a piece's nested draw: not the engine's)
 #define Q_POST(cb) do { if (!g_fx_nest && vkn_query_draw_post) vkn_query_draw_post(cb); } while (0)
 // [/stage 4: queries]
-static void forget_bound(void) { const uint32_t s = g_b.serial; memset(&g_b, 0, sizeof g_b); g_b.serial = s; }
+static void forget_bound(void) { const uint32_t s = g_b.serial; memset(&g_b, 0, sizeof g_b); g_b.serial = s; g_ppd_ok = 0; }
 void vkn_draw_raw_begin(void) { forget_bound(); }
 
 // ---- static helpers of this module: zero uniform block, null stream, default samplers, placeholders ----
@@ -342,11 +365,55 @@ static VkImageViewType tex_view_type(const vkn_tex *t, VkImageView v) {
 typedef struct te_rec { int32_t tid, sid; vkn_tex *t; uint8_t fb, tex; } te_rec;
 static struct { int ok; const vkn_shader *s; uint32_t gen, sgen, ne; uint64_t d_unknown_tex, d_empty, d_feedback, d_mismatch, d_unknown_smp; te_rec e[MAX_ELEMS]; } g_te;
 
+// ---- [rt P3] DM_VK_NATIVE_COST bit MIRROR (vkn_draw.h): pool id -> answer, valid while vkn_tex_bind_gen() is the generation the entry
+// was filled under (read before that fill's locked lookup). Recording thread only (this module's tables). ----
+int vkn_sampler_by_id_pure(void) __attribute__((weak));
+enum { MT = 4096 };
+static struct { uint32_t id, gen; uint8_t ok, pad[3]; VkImageView v; vkn_tex *t; } g_mt[MT];
+static struct { uint32_t id, gen; uint8_t ok, pad[3]; VkSampler s; } g_ms[MT], g_mc[MT];
+static int g_mir; static uint32_t g_mirgen;   // this bind_textures call: mirror on, the generation loaded at its start
+static void mirror_begin(void) {
+    g_mir = (g_cost & VKN_COST_MIRROR) && vkn_tex_bind_gen && vkn_sampler_by_id_pure && vkn_sampler_by_id_pure();
+    if (g_mir) g_mirgen = vkn_tex_bind_gen();
+}
+static void check_differ(const char *what, uint32_t id) {
+    g_c3.check_differ++;
+    DRAW_RED(R_TEX, "DM_VK_NATIVE_COST_CHECK: %s of id %u differs from the locked lookup (the lookup used)", what, id);
+}
+static VkImageView tex_lookup(uint32_t id, vkn_tex **t) {
+    if (!g_mir) return vkn_tex_view_by_id(id, t);
+    __typeof__(g_mt[0]) *e = &g_mt[id & (MT - 1)];
+    if (e->ok && e->id == id && e->gen == g_mirgen) {
+        g_c3.mirror_hits++;
+        if (g_ccheck) { g_c3.check_runs++; vkn_tex *x = NULL; const VkImageView v = vkn_tex_view_by_id(id, &x); if (v != e->v || x != e->t) check_differ("texture view", id); *t = x; return v; }
+        *t = e->t; return e->v;
+    }
+    g_c3.mirror_miss++;
+    const VkImageView v = vkn_tex_view_by_id(id, t);
+    e->id = id; e->gen = g_mirgen; e->v = v; e->t = *t; e->ok = 1;
+    return v;
+}
+static VkSampler smp_lookup(uint32_t id, int cmp) {
+    VkSampler (*const f)(uint32_t) = cmp ? vkn_sampler_cmp_by_id : vkn_sampler_by_id;
+    if (!g_mir) return f(id);
+    __typeof__(g_ms[0]) *e = cmp ? &g_mc[id & (MT - 1)] : &g_ms[id & (MT - 1)];
+    if (e->ok && e->id == id && e->gen == g_mirgen) {
+        g_c3.mirror_hits++;
+        if (g_ccheck) { g_c3.check_runs++; const VkSampler x = f(id); if (x != e->s) check_differ(cmp ? "comparison sampler" : "sampler", id); return x; }
+        return e->s;
+    }
+    g_c3.mirror_miss++;
+    const VkSampler x = f(id);
+    // (a comparison twin made now bumps the generation: this entry never answers - the next call fills it again under the new one)
+    e->id = id; e->gen = g_mirgen; e->s = x; e->ok = 1;
+    return x;
+}
 // Phase 1: textures and storage images of the table. compute: the dispatch path (the pass is already ended; an attachment of the
 // current target set is transitioned for reading instead of being replaced). 0 = ok, -1 = drop (counted).
 static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_img_bind *img, uint32_t nimg, int compute) {
     uint32_t e = 0;
     g_te.ok = 0;   // [stage 5, draw cost] g_el is rewritten now
+    mirror_begin();   // [rt P3]
     for (uint32_t i = 0; i < s->nbind; i++) {
         const vkn_bind *b = &s->bind[i];
         for (uint32_t k = 0; k < b->count; k++, e++) {
@@ -358,8 +425,9 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                 if (st < 0 || (compute ? st != 2 : st == 2)) { g_st2.dropped_bind++; DRAW_RED(R_BIND, "shader %#llx binding %u: texture of engine stage %u in a %s", (unsigned long long)s->handle, b->binding, b->stage, compute ? "dispatch" : "draw"); return -1; }
                 const int32_t id = in->tex[st] && slot < VKN_TEX_SLOTS ? in->tex[st][slot] : -1;
                 const int32_t sid = in->smp[st] && slot < VKN_TEX_SLOTS ? in->smp[st][slot] : -1;
-                vkn_tex *t = NULL; VkImageView v = id >= 0 ? vkn_tex_view_by_id((uint32_t)id, &t) : VK_NULL_HANDLE;
-                VkSampler sm = sid >= 0 ? vkn_sampler_by_id((uint32_t)sid) : VK_NULL_HANDLE;
+                vkn_tex *t = NULL; VkImageView v = id >= 0 ? tex_lookup((uint32_t)id, &t) : VK_NULL_HANDLE;   // [rt P3] (the mirror when on)
+                VkSampler sm = sid >= 0 ? smp_lookup((uint32_t)sid, 0) : VK_NULL_HANDLE;
+                vkn_prof_mark_f(VKN_PROF_F_TEX_LOOK);   // [rt P0]
                 te->tex = 1; te->tid = id; te->sid = sid;
                 int use_ph = 0;
                 if (!v || !t) {
@@ -376,11 +444,13 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                         }
                     }
                     te->t = t;
+                    vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
                     if (vkn_pass_sample(t) == 1) {
                         te->fb = 1;
                         if (compute) vkn_pass_layout(t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                         else { use_ph = 1; g_st.feedback_tex++; }
                     }
+                    vkn_prof_mark_f(VKN_PROF_F_TEX_SAMPLE);   // [rt P0]
                 }
                 if (use_ph) {
                     int cls = PH_FLOAT; v = placeholder(b->flags, &cls);
@@ -394,7 +464,7 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                 // [stage 5] depth comparison (vkn_fx.h): the binding's flag (a named Dref bundle) or the chain's mask picks the slot
                 // sampler's comparison twin; never for a placeholder (no depth image behind it).
                 if (sid >= 0 && !use_ph && vkn_sampler_cmp_by_id && ((b->flags & VKN_BF_CMP) || (g_fx && slot < 32 && (g_fx->cmp_mask[st] >> slot & 1)))) {
-                    const VkSampler c = vkn_sampler_cmp_by_id((uint32_t)sid); if (c) sm = c;
+                    const VkSampler c = smp_lookup((uint32_t)sid, 1); if (c) sm = c;   // [rt P3]
                 }
                 if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) { if (!sm) { g_st2.dropped_bind++; return -1; } el->img.sampler = sm; }
                 else if (b->type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) { g_st2.dropped_bind++; DRAW_RED(R_BIND, "shader %#llx binding %u: texture with descriptor type %d", (unsigned long long)s->handle, b->binding, (int)b->type); return -1; }
@@ -438,8 +508,83 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
 // textures in the same order (the same calls bind_textures makes; a call it makes twice is a no-op: the layout is then right); a
 // different answer (a texture became / stopped being an attachment of the target set) takes the full path. Lookups have no effect,
 // so leaving them out changes nothing but the counters, which are replayed.
+// ---- [rt P3] DM_VK_NATIVE_COST bit SHMEM (vkn_draw.h): what g_te keeps for the last draw, kept for the last TM_WAYS draws of each of
+// TM_SETS shader objects (direct-mapped by shader id), with the image half of the elements and the set key / set of that draw. ----
+enum { TM_SETS = 64, TM_WAYS = 2, TM_E = 48, TM_KW = 2 + 2 * TM_E };
+typedef struct te_mem {
+    const vkn_shader *s; uint32_t gen, sgen, ne, ok, nw, age;
+    uint64_t d_unknown_tex, d_empty, d_feedback, d_mismatch, d_unknown_smp;
+    VkDescriptorSet set; uint64_t kw[TM_KW];
+    te_rec e[TM_E]; VkDescriptorImageInfo img[TM_E];
+} te_mem;
+static te_mem g_tm[TM_SETS][TM_WAYS]; static uint32_t g_tm_age;
+static te_mem *g_tm_cur;   // the entry of the draw being prepared (its set key / set go there), NULL = none
+static void tm_forget(void) { for (int i = 0; i < TM_SETS; i++) for (int w = 0; w < TM_WAYS; w++) { g_tm[i][w].ok = 0; g_tm[i][w].s = NULL; g_tm[i][w].set = VK_NULL_HANDLE; g_tm[i][w].nw = 0; } g_tm_cur = NULL; }
+static te_mem *tm_find(const vkn_shader *s) {
+    te_mem *row = g_tm[(s->id ^ s->id >> 6) & (TM_SETS - 1)];
+    for (int w = 0; w < TM_WAYS; w++) if (row[w].ok && row[w].s == s) return &row[w];
+    return NULL;
+}
+static te_mem *tm_slot(const vkn_shader *s) {   // the way to (re)fill for s: its own, else the older one
+    te_mem *row = g_tm[(s->id ^ s->id >> 6) & (TM_SETS - 1)];
+    for (int w = 0; w < TM_WAYS; w++) if (row[w].ok && row[w].s == s) return &row[w];
+    te_mem *o = &row[0];
+    for (int w = 1; w < TM_WAYS; w++) if (!row[w].ok || (o->ok && row[w].age < o->age)) o = &row[w];
+    return o;
+}
+static int tex_bind_mem(const vkn_shader *s, const vkn_draw_in *in, int fx_zero, uint32_t gen) {
+    g_tm_cur = NULL;
+    const uint32_t sg = vkn_pipe_forget_gen();
+    te_mem *m = fx_zero ? tm_find(s) : NULL;
+    if (m && m->gen == gen && m->sgen == sg) {
+        int same = 1; uint32_t e = 0;
+        for (uint32_t i = 0; same && i < s->nbind; i++) {
+            const vkn_bind *b = &s->bind[i];
+            for (uint32_t k = 0; k < b->count; k++, e++) {
+                if (b->kind != VKN_BK_TEXTURE) continue;
+                const int st = src_of_stage(b->stage); const uint32_t slot = b->slot + k;
+                const int32_t id = in->tex[st] && slot < VKN_TEX_SLOTS ? in->tex[st][slot] : -1;
+                const int32_t sid = in->smp[st] && slot < VKN_TEX_SLOTS ? in->smp[st][slot] : -1;
+                if (id != m->e[e].tid || sid != m->e[e].sid) { same = 0; break; }
+            }
+        }
+        for (uint32_t j = 0; same && j < m->ne; j++) if (m->e[j].t && vkn_pass_sample(m->e[j].t) != m->e[j].fb) same = 0;
+        vkn_prof_mark_f(VKN_PROF_F_TEX_SAMPLE);   // [rt P0]
+        if (same) {
+            for (uint32_t j = 0; j < m->ne; j++) { memset(&g_el[j], 0, sizeof g_el[j]); g_el[j].img = m->img[j]; }
+            g_te.ok = 0;   // (g_el is the memory's now)
+            if (g_ccheck) {   // the full path once more (the same lookups, the same vkn_pass_sample answers): compare, use it
+                const vkn_draw_stats a = g_st; const vkn_draw_stats2 a2 = g_st2;
+                g_c3.check_runs++;
+                if (bind_textures(s, in, NULL, 0, 0)) { g_st = a; g_st2 = a2; check_differ("shader binding memory (full path dropped)", s->id); return -1; }
+                int d = g_te.ne != m->ne;
+                for (uint32_t j = 0; !d && j < m->ne; j++) d = memcmp(&g_el[j].img, &m->img[j], sizeof m->img[j]) != 0;
+                if (d) check_differ("shader binding memory", s->id);
+                g_st = a; g_st2 = a2;
+            }
+            g_st.unknown_tex += m->d_unknown_tex; g_st2.empty_tex += m->d_empty; g_st.feedback_tex += m->d_feedback;
+            g_st2.view_mismatch += m->d_mismatch; g_st.unknown_smp += m->d_unknown_smp;
+            g_c3.shmem_hits++; g_cs.set_tex_reuse++; m->age = ++g_tm_age; g_tm_cur = m;
+            return 0;
+        }
+    }
+    g_c3.shmem_miss++; g_cs.set_tex_lookups++;
+    const uint64_t u0 = g_st.unknown_tex, e0 = g_st2.empty_tex, f0 = g_st.feedback_tex, m0 = g_st2.view_mismatch, s0 = g_st.unknown_smp;
+    if (bind_textures(s, in, NULL, 0, 0)) return -1;
+    if (fx_zero && g_te.ne <= TM_E) {
+        m = tm_slot(s);
+        if (m->s != s || m->gen != gen || m->sgen != sg) { m->set = VK_NULL_HANDLE; m->nw = 0; }   // (another draw's set key: not this one's)
+        m->ok = 1; m->s = s; m->gen = gen; m->sgen = sg; m->ne = g_te.ne; m->age = ++g_tm_age;   // gen / sg read before the lookups
+        m->d_unknown_tex = g_st.unknown_tex - u0; m->d_empty = g_st2.empty_tex - e0; m->d_feedback = g_st.feedback_tex - f0;
+        m->d_mismatch = g_st2.view_mismatch - m0; m->d_unknown_smp = g_st.unknown_smp - s0;
+        for (uint32_t j = 0; j < g_te.ne; j++) { m->e[j] = g_te.e[j]; m->img[j] = g_el[j].img; }
+        g_tm_cur = m;
+    }
+    return 0;
+}
 static int tex_bind_draw(const vkn_shader *s, const vkn_draw_in *in, int fx_zero) {
     const int on = (g_cost & VKN_COST_SET) && g_tex_gen;
+    if (on && (g_cost & VKN_COST_SHMEM)) return tex_bind_mem(s, in, fx_zero, g_tex_gen());   // [rt P3]
     uint32_t gen = 0;
     if (on) {
         gen = g_tex_gen();
@@ -553,15 +698,16 @@ static uint64_t key_hash(const uint64_t *w, uint32_t n) {
 static uint64_t g_lk[2 + 2 * MAX_ELEMS]; static uint32_t g_lk_n; static VkDescriptorSet g_lk_set; static int g_lk_ok;
 static void lk_keep(uint32_t nw, VkDescriptorSet set) { if (g_cost & VKN_COST_SET) { memcpy(g_lk, g_kw, nw * sizeof g_kw[0]); g_lk_n = nw; g_lk_set = set; g_lk_ok = 1; } }
 static void cost_forget(void) {
-    g_lk_ok = 0; g_te.ok = 0;
+    g_lk_ok = 0; g_te.ok = 0; tm_forget();   // [rt P3] (the shader memory names sets / shader objects too)
     memset(g_shc, 0, sizeof g_shc); memset(g_pfc, 0, sizeof g_pfc);
 }
 void vkn_draw_cost_set(uint32_t mask) {
-    mask &= VKN_COST_ALL;
+    mask &= VKN_COST_ALL2;   // [rt P3] bits 0x100 / 0x200
     if ((mask ^ g_cost) & VKN_COST_SET) __atomic_store_n(&g_forget_req, 1, __ATOMIC_RELEASE);   // set keys hashed the other way: a new generation
     g_cost = mask;
     if (!g_gens_test) { g_tex_gen = vkn_tex_bind_gen; g_state_gen = vkn_state_handle_gen; g_vindex = vkn_shader_vindex ? vindex_weak : NULL; }
     cost_forget(); memset(g_stc, 0, sizeof g_stc); g_nsupc = 0; g_ring_ok = 0;
+    memset(g_mt, 0, sizeof g_mt); memset(g_ms, 0, sizeof g_ms); memset(g_mc, 0, sizeof g_mc);   // [rt P3]
 }
 uint32_t vkn_draw_cost(void) { return g_cost; }
 void vkn_draw_cost_gens(uint32_t (*tex_gen)(void), uint32_t (*state_gen)(void), int (*vindex)(const void *shader)) {
@@ -627,8 +773,21 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
         }
     }
     *ndyn = s->ndyn;
+    vkn_prof_mark_f(VKN_PROF_F_SET_KEY);   // [rt P0]
+    // [rt P3] SHMEM: the key of this shader's draw the binding memory answered for (its set is in the cache: cost_forget clears both)
+    te_mem *const tm = g_tm_cur; g_tm_cur = NULL;
+    if (tm && tm->set && tm->nw == nw && !memcmp(tm->kw, g_kw, nw * sizeof g_kw[0])) {
+        g_c3.shmem_set_hits++;
+        if (!g_ccheck) { g_st.set_cache++; *out = tm->set; return 0; }
+        g_c3.check_runs++;   // (checked below: the probe must find the same set)
+    }
     // [stage 5, draw cost] the previous lookup's key: the same set (still in the cache: cost_forget clears this with it)
-    if ((g_cost & VKN_COST_SET) && g_lk_ok && g_lk_n == nw && !memcmp(g_lk, g_kw, nw * sizeof g_kw[0])) { g_st.set_cache++; g_cs.set_key_same++; *out = g_lk_set; return 0; }
+    if ((g_cost & VKN_COST_SET) && g_lk_ok && g_lk_n == nw && !memcmp(g_lk, g_kw, nw * sizeof g_kw[0])) {
+        g_st.set_cache++; g_cs.set_key_same++; *out = g_lk_set;
+        if (tm && g_ccheck && tm->set && tm->nw == nw && !memcmp(tm->kw, g_kw, nw * sizeof g_kw[0]) && tm->set != g_lk_set) check_differ("shader set memory", s->id);
+        if (tm && nw <= TM_KW) { memcpy(tm->kw, g_kw, nw * sizeof g_kw[0]); tm->nw = nw; tm->set = g_lk_set; }
+        return 0;
+    }
     // lookup
     const uint64_t h = (g_cost & VKN_COST_SET) ? key_hash(g_kw, nw) : vkn_fnv(g_kw, nw * sizeof g_kw[0]);
     if (!g_sets) { g_sets = (set_e *)calloc(SET_TAB, sizeof *g_sets); if (!g_sets) { g_st2.dropped_set++; DRAW_RED(R_SET, "set cache: out of memory"); return -1; } }
@@ -636,8 +795,15 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
     for (uint32_t n = 0; n < SET_TAB; n++, pos = (pos + 1) & (SET_TAB - 1)) {
         set_e *x = &g_sets[pos];
         if (!x->w) break;
-        if (x->hash == h && x->nw == nw && !memcmp(x->w, g_kw, nw * sizeof g_kw[0])) { g_st.set_cache++; *out = x->set; lk_keep(nw, x->set); return 0; }
+        if (x->hash == h && x->nw == nw && !memcmp(x->w, g_kw, nw * sizeof g_kw[0])) {
+            g_st.set_cache++; *out = x->set; lk_keep(nw, x->set);
+            if (tm && g_ccheck && tm->set && tm->nw == nw && !memcmp(tm->kw, g_kw, nw * sizeof g_kw[0]) && tm->set != x->set) check_differ("shader set memory", s->id);
+            if (tm && nw <= TM_KW) { memcpy(tm->kw, g_kw, nw * sizeof g_kw[0]); tm->nw = nw; tm->set = x->set; }   // [rt P3]
+            vkn_prof_mark_f(VKN_PROF_F_SET_FIND);
+            return 0;
+        }
     }
+    if (tm && g_ccheck && tm->set && tm->nw == nw && !memcmp(tm->kw, g_kw, nw * sizeof g_kw[0])) check_differ("shader set memory (not in the cache)", s->id);
     // miss: a new set (a full cache starts a new generation first)
     if (g_nsets >= SET_BUDGET) { forget_now(); pos = (uint32_t)h & (SET_TAB - 1); }
     VkDescriptorSet set = set_alloc(s->set_layout);
@@ -668,10 +834,15 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
     if (kw) {
         memcpy(kw, g_kw, nw * sizeof *kw);
         for (uint32_t n = 0; n < SET_TAB; n++, pos = (pos + 1) & (SET_TAB - 1))
-            if (!g_sets[pos].w) { g_sets[pos].hash = h; g_sets[pos].w = kw; g_sets[pos].nw = nw; g_sets[pos].set = set; g_nsets++; g_st2.set_bytes_words += nw; kw = NULL; lk_keep(nw, set); break; }
+            if (!g_sets[pos].w) {
+                g_sets[pos].hash = h; g_sets[pos].w = kw; g_sets[pos].nw = nw; g_sets[pos].set = set; g_nsets++; g_st2.set_bytes_words += nw; kw = NULL; lk_keep(nw, set);
+                if (tm && nw <= TM_KW) { memcpy(tm->kw, g_kw, nw * sizeof g_kw[0]); tm->nw = nw; tm->set = set; }   // [rt P3] (only a set the cache keeps)
+                break;
+            }
         free(kw);   // table full (cannot happen below the budget): the set is used once, not cached
     }
     *out = set;
+    vkn_prof_mark_f(VKN_PROF_F_SET_FIND);   // [rt P0]
     return 0;
 }
 
@@ -687,8 +858,13 @@ static VkCommandBuffer cb_ready(void) {
 }
 
 // Shader of a draw: both graphics stages present and usable (a stage the engine shader does not have is fine only for fragment).
-static const vkn_shader *shader_for(const vkn_draw_in *in, int compute) {
-    const vkn_shader *s = in->shader ? shader_lookup(in->shader) : NULL;
+static const vkn_shader *shader_for(const vkn_draw_in *in, int compute, const vkn_draw_pre *pre) {
+    const vkn_shader *s;
+    if (pre && !vkn_draw_rt_res_verify) { s = pre->shader; g_rs.used++; }   // [rt P2] resolved at encode
+    else {
+        s = in->shader ? shader_lookup(in->shader) : NULL;
+        if (pre) { g_rs.verified++; if (s != pre->shader) { g_rs.differ++; g_rs.differ_shader++; } }
+    }
     if (!s) { g_st.dropped_shader++; DRAW_RED(R_SHADER, "engine shader %#llx: no native object (%s dropped)", (unsigned long long)in->shader, compute ? "dispatch" : "draw"); return NULL; }
     const uint8_t bad = s->missing | s->unusable;
     const int ok = compute ? (s->stages & (1u << VKN_SRC_CS)) && !(bad & (1u << VKN_SRC_CS))
@@ -708,7 +884,9 @@ static void bind_set(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayou
     uint32_t *bn = g ? &g_b.gndyn : &g_b.cndyn, *bd = g ? g_b.gdyn : g_b.cdyn;
     if (!set) return;
     if (*bs == set && *bl == layout && *bn == ndyn && !memcmp(bd, dyn, ndyn * sizeof *dyn)) return;
+    vkn_prof_mark_f(VKN_PROF_F_SET_FIND);   // [rt P0]
     vkCmdBindDescriptorSets(cb, bp, layout, 0, 1, &set, ndyn, ndyn ? dyn : NULL);
+    vkn_prof_mark_f(VKN_PROF_F_SET_CMD); vkn_prof_driver_calls(1);
     *bs = set; *bl = layout; *bn = ndyn; memcpy(bd, dyn, ndyn * sizeof *dyn);
     g_st.set_binds++;
 }
@@ -719,11 +897,19 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     const uint8_t call_indexed = g_call.indexed; const uint32_t call_first = g_call.first;   // [stage 5.1 G] (a nested draw rewrites g_call)
     VkCommandBuffer cb = cb_ready();
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "draw without an open recording (dropped)"); return -1; }
-    const vkn_shader *s = shader_for(in, 0); if (!s) return -1;
+    g_tm_cur = NULL;   // [rt P3]
+    const vkn_draw_pre *const pre = pre_of(in); const int puse = pre && !vkn_draw_rt_res_verify;   // [rt P2]
+    const vkn_shader *s = shader_for(in, 0, pre); if (!s) return -1;
     // state ids (handle 0 = the default: blend off / depth-stencil off / default raster / no vertex input)
-    const uint16_t bid = in->blend ? state_id(ST_BLEND, in->blend) : 0, rid = in->raster ? state_id(ST_RASTER, in->raster) : 0;
-    uint16_t did = in->ds ? state_id(ST_DS, in->ds) : 0;
-    const uint16_t vid = in->vfmt ? state_id(ST_VFMT, in->vfmt) : 0;
+    uint16_t bid, rid, did, vid;
+    if (puse) { bid = in->blend ? pre->blend : 0; rid = in->raster ? pre->raster : 0; did = in->ds ? pre->ds : 0; vid = in->vfmt ? pre->vfmt : 0; }   // [rt P2]
+    else {
+        bid = in->blend ? state_id(ST_BLEND, in->blend) : 0; rid = in->raster ? state_id(ST_RASTER, in->raster) : 0;
+        did = in->ds ? state_id(ST_DS, in->ds) : 0; vid = in->vfmt ? state_id(ST_VFMT, in->vfmt) : 0;
+        if (pre && ((in->blend ? pre->blend : 0) != bid || (in->raster ? pre->raster : 0) != rid || (in->ds ? pre->ds : 0) != did || (in->vfmt ? pre->vfmt : 0) != vid)) {
+            g_rs.differ++; g_rs.differ_state++;
+        }
+    }
     if ((in->blend && !bid) || (in->ds && !did) || (in->raster && !rid) || (in->vfmt && !vid)) {
         g_st.dropped_state++;
         DRAW_RED(R_STATE, "unknown state handle: blend %#llx -> %u, depth-stencil %#llx -> %u, raster %#llx -> %u, vertex format %#llx -> %u (shader %#llx, draw dropped)",
@@ -746,6 +932,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         fc.shader = s; for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) fc.color[i] = vkn_pass_color(i);
         fc.depth = vkn_pass_depth(); fc.blend = bid; fc.ds = did; fc.raster = rid; fc.vfmt = vid; fc.prim = prim;
         fc.indexed = g_call.indexed; fc.first = g_call.first; fc.count = g_call.count; fc.instances = g_call.instances; fc.frame = vkn_frame();
+        if (&vkn_fx_time_next) vkn_fx_time_next = vkn_prof_sampled3();   // [rt P0] (the chain times its functions on this sampled draw)
         g_fx_nest++; vkn_fx_run(in, &fc, &g_fx_out); g_fx_nest--;   // [stage 5.1 G] (a piece's draws inside: nested)
         if (g_fx_out.skip) { vkn_prof_mark(VKN_PROF_FX); return 1; }
         g_fx = &g_fx_out;
@@ -781,7 +968,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     uint32_t vstride[VKN_VFMT_NULL_BINDING + 1] = {0, 0, 0, 0};
     const int cvb = (g_cost & VKN_COST_VB) != 0;
     const vkn_block *vblk[VKN_VFMT_STREAMS]; uint32_t nvfound = 0;
-    if (vf && cvb) {   // [stage 5, draw cost] every stream the format reads under one lock (stops where the loop below drops)
+    if (vf && cvb && !puse) {   // [stage 5, draw cost] every stream the format reads under one lock (stops where the loop below drops)
         uint64_t vh[VKN_VFMT_STREAMS]; uint32_t nh = 0;
         for (uint32_t i = 0; i < vf->nbind; i++) if (vf->bind[i].binding < VKN_VFMT_STREAMS && vf->bind[i].binding != vin_st && nh < VKN_VFMT_STREAMS) vh[nh++] = in->vb[vf->bind[i].binding];
         nvfound = nh ? vkn_buf_get_n(VKN_BUF_VB, vh, nh, vblk) : 0; g_cs.vb_batched++;
@@ -793,14 +980,20 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             vstride[st] = vf->bind[i].stride; if (vf->bind[i].inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) vinst |= (uint8_t)(1u << st);
             continue;
         }
-        const vkn_block *blk = cvb ? (j < nvfound ? vblk[j] : NULL) : in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL;
+        VkBuffer bb = VK_NULL_HANDLE; uint64_t bo = 0;
+        if (puse) { bb = pre->vb[st]; bo = pre->vb_off[st]; }   // [rt P2] resolved at encode (buf NULL: what a failed lookup drops)
+        else {
+            const vkn_block *blk = cvb ? (j < nvfound ? vblk[j] : NULL) : in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL;
+            if (blk) { bb = blk->buf; bo = blk->off; }
+            if (pre && (pre->vb[st] != bb || (bb && pre->vb_off[st] != bo))) { g_rs.differ++; g_rs.differ_vb++; }
+        }
         j++;
-        if (!blk || !blk->buf) {
+        if (!bb) {
             g_st2.dropped_vb++;
             DRAW_RED(R_VB, "vertex format %#llx reads stream %u, vertex buffer %#llx is not a live native buffer (draw dropped)", (unsigned long long)in->vfmt, st, (unsigned long long)in->vb[st]);
             return -1;
         }
-        vbuf[st] = blk->buf; voff[st] = blk->off + in->vb_off[st]; vuse |= (uint8_t)(1u << st);
+        vbuf[st] = bb; voff[st] = bo + in->vb_off[st]; vuse |= (uint8_t)(1u << st);
         vstride[st] = vf->bind[i].stride; if (vf->bind[i].inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) vinst |= (uint8_t)(1u << st);
     }
     if (vs_inputs & ~(vf ? vf->loc_mask : 0)) {
@@ -824,12 +1017,14 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             if (g_vfold) { for (uint32_t b = 0; b <= VKN_VFMT_NULL_BINDING; b++) if (vuse >> b & 1) voff[b] = out16[b]; g_cs.vb_folded++; }
         } else g_cs.vb_vindex++;
     }
+    vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK);   // [rt P0]
     vkn_prof_mark(VKN_PROF_BUF);   // [stage 5 A0 probes]
     // textures (vkn_pass_sample may end the open pass), then the pass
     if (g_cost & VKN_COST_SET) {   // [stage 5, draw cost] the previous draw's texture bindings when nothing they depend on changed
         const int fx_zero = g_tex_gen && (!g_fx || (vkn_fx_out_same && vkn_fx_out_same(g_fx, NULL)));   // (only asked when it can matter)
         if (tex_bind_draw(s, in, fx_zero)) return -1;
     } else if (bind_textures(s, in, NULL, 0, 0)) return -1;
+    vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
     vkn_prof_mark(VKN_PROF_TEX);   // [stage 5 A0 probes]
     if (vkn_pass_ready(pi)) { g_st.dropped_pass++; DRAW_RED(R_PASS, "no render pass for the current targets (shader %#llx, draw dropped)", (unsigned long long)in->shader); return -1; }
     vkn_prof_mark(VKN_PROF_PASS);   // [stage 5 A0 probes]
@@ -840,7 +1035,21 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     for (int i = 0; i < 8; i++) pd.write_mask[i] = (uint8_t)(pi->write_mask[i] & 0xf);
     vkn_pipe_key key = vkn_pipe_key_pack(&pd);
     if (vin) key.w[2] |= (uint64_t)vin->vs_id << 48;   // [stage 5.3 V1] the per-draw vertex module (bits 48..63 are 0 in every packed key)
+    vkn_prof_mark_f(VKN_PROF_F_PIPE_KEY);   // [rt P0]
     if (!g_b.gpipe_ok || memcmp(&key, &g_b.gkey, sizeof key)) {
+        if (vkn_prof_lvl3) {   // [rt P0] what differs from the previous key of this recording
+            const uint16_t vsid = vin ? vin->vs_id : 0;
+            if (g_ppd_ok) {
+                const vkn_pipe_desc *o = &g_ppd; uint8_t f[12];
+                f[0] = o->shader != pd.shader; f[1] = o->vs_variant != pd.vs_variant || o->fs_variant != pd.fs_variant; f[2] = o->vfmt != pd.vfmt; f[3] = o->ds != pd.ds;
+                f[4] = o->raster != pd.raster; f[5] = o->blend != pd.blend; f[6] = o->stencil_ref != pd.stencil_ref; f[7] = memcmp(o->write_mask, pd.write_mask, sizeof pd.write_mask) != 0;
+                f[8] = o->prim != pd.prim; f[9] = o->pass != pd.pass; f[10] = o->fx != pd.fx; f[11] = g_ppd_vin != vsid;
+                g_p3.changes++; int other = 0, nb = 0;
+                for (int i = 0; i < 12; i++) if (f[i]) { g_p3.f[i]++; if (i != 3 && i != 4 && i != 5 && i != 6) other = 1; if (i == 5) nb = 1; }
+                if (!other) { g_p3.dyn_only++; if (!nb) g_p3.dyn_only_nb++; }
+            }
+            g_ppd = pd; g_ppd_vin = vsid; g_ppd_ok = 1;
+        }
         VkPipeline p = VK_NULL_HANDLE; uint32_t fslot = 0, fgen = 0; int fhit = 0;
         if (g_cost & VKN_COST_PIPE) {   // [stage 5, draw cost] the front cache (generation read before the lookup / build below)
             fslot = pfc_slot(&key); fgen = vkn_pipe_forget_gen();
@@ -863,7 +1072,9 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             return -1;
         }
         if ((g_cost & VKN_COST_PIPE) && !fhit) { g_pfc[fslot].k = key; g_pfc[fslot].p = p; g_pfc[fslot].gen = fgen; }
-        if (p != g_b.gpipe) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); g_st.pipe_binds++; }
+        vkn_prof_mark_f(VKN_PROF_F_PIPE_FIND);   // [rt P0]
+        if (p != g_b.gpipe) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); g_st.pipe_binds++; vkn_prof_driver_calls(1); }
+        vkn_prof_mark_f(VKN_PROF_F_PIPE_CMD);
         g_b.gpipe = p; g_b.gkey = key; g_b.gpipe_ok = 1;
     }
     vkn_prof_mark(VKN_PROF_PIPE);   // [stage 5 A0 probes]
@@ -884,6 +1095,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             if (g_b.ovb[b] != vbuf[b] || g_b.ovb_off[b] != vraw[b]) { g_b.ovb[b] = vbuf[b]; g_b.ovb_off[b] = vraw[b]; g_cs.vb_calls_old++; }   // the stage-4 path's bind
         }
         uint8_t rf[8], rc[8]; const unsigned nrun = nr_vb_runs(changed, vuse, rf, rc);
+        vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK); vkn_prof_driver_calls(nrun);   // [rt P0]
         for (unsigned r = 0; r < nrun; r++) {
             vkCmdBindVertexBuffers(cb, rf[r], rc[r], &vbuf[rf[r]], &voff[rf[r]]);
             for (uint32_t b = rf[r]; b < (uint32_t)rf[r] + rc[r]; b++) { g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; }
@@ -893,8 +1105,9 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     for (uint32_t b = 0; b <= VKN_VFMT_NULL_BINDING; b++) {
         if (!(vuse >> b & 1) || (g_b.vb[b] == vbuf[b] && g_b.vb_off[b] == voff[b])) continue;
         vkCmdBindVertexBuffers(cb, b, 1, &vbuf[b], &voff[b]);
-        g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; g_st.vb_binds++;
+        g_b.vb[b] = vbuf[b]; g_b.vb_off[b] = voff[b]; g_st.vb_binds++; vkn_prof_driver_calls(1);
     }
+    vkn_prof_mark_f(VKN_PROF_F_BUF_CMD);   // [rt P0]
     vkn_prof_mark(VKN_PROF_BUF);   // [stage 5 A0 probes]
     // Viewport. NVN with the UPPER_LEFT window origin (the engine sets it) maps NDC y = +1 to row 0; Vulkan maps NDC y = -1 to row 0.
     // The packs' SPIR-V is the game's own clip space (no flip inside), so the viewport is flipped (negative height, Vulkan 1.1), exactly
@@ -902,7 +1115,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     // (First phone run V3_a: without the flip every back-face-culled draw vanished - a black frame with 0 dropped draws.) Depth 0..1.
     // Scissor is in framebuffer rows already (upper-left origin in both APIs), clamped to the pass.
     const VkViewport vp = {in->viewport[0], in->viewport[1] + in->viewport[3], in->viewport[2], -in->viewport[3], 0.0f, 1.0f};
-    if (!g_b.vp_ok || memcmp(&vp, &g_b.vp, sizeof vp)) { vkCmdSetViewport(cb, 0, 1, &vp); g_b.vp = vp; g_b.vp_ok = 1; g_st.viewport_sets++; }
+    if (!g_b.vp_ok || memcmp(&vp, &g_b.vp, sizeof vp)) { vkCmdSetViewport(cb, 0, 1, &vp); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.vp = vp; g_b.vp_ok = 1; g_st.viewport_sets++; }
     int64_t x0 = in->scissor[0], y0 = in->scissor[1], x1 = x0 + in->scissor[2], y1 = y0 + in->scissor[3];
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
@@ -910,7 +1123,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     if (y1 > (int64_t)pi->height) y1 = pi->height;
     if (x1 <= x0 || y1 <= y0) { g_st2.scissor_empty++; return 1; }
     const VkRect2D sc = {{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}};
-    if (!g_b.sc_ok || memcmp(&sc, &g_b.sc, sizeof sc)) { vkCmdSetScissor(cb, 0, 1, &sc); g_b.sc = sc; g_b.sc_ok = 1; }
+    if (!g_b.sc_ok || memcmp(&sc, &g_b.sc, sizeof sc)) { vkCmdSetScissor(cb, 0, 1, &sc); vkn_prof_mark_f(VKN_PROF_F_VIEW_CMD); vkn_prof_driver_calls(1); g_b.sc = sc; g_b.sc_ok = 1; }
     // Debug (DM_VK_NATIVE_DUMP): in the dumped frame, the whole state of every draw into a big RGBA8 target (the post chain, the
     // window): what the pipeline was built from, where it draws, what it samples. At most 160 lines a dump.
     if (vkn_pass_dump_active()) {
@@ -1058,7 +1271,18 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
     Q_ENTER();   // [stage 4: queries]
     // the index buffer first: no pass or pipeline work for a draw that cannot be made
     vkn_buf_info ib; memset(&ib, 0, sizeof ib);
-    if (!in->ib || vkn_buf_lookup(VKN_BUF_IB, in->ib, &ib) || !ib.blk.size || !ib.blk.buf) {
+    int ib_rc;
+    const vkn_draw_pre *const pre = pre_of(in);   // [rt P2] the IB resolved at encode
+    if (pre && !vkn_draw_rt_res_verify) { ib = pre->ib; ib_rc = in->ib ? pre->ib_rc : -1; }
+    else {
+        ib_rc = in->ib ? vkn_buf_lookup(VKN_BUF_IB, in->ib, &ib) : -1;
+        if (pre) {
+            const int prc = in->ib ? pre->ib_rc : -1;
+            if (prc != ib_rc || (!ib_rc && (ib.blk.buf != pre->ib.blk.buf || ib.blk.off != pre->ib.blk.off || ib.blk.size != pre->ib.blk.size || ib.blk.cpu != pre->ib.blk.cpu ||
+                                            ib.size != pre->ib.size || ib.index_size != pre->ib.index_size))) { g_rs.differ++; g_rs.differ_ib++; }
+        }
+    }
+    if (!in->ib || ib_rc || !ib.blk.size || !ib.blk.buf) {
         g_st2.dropped_ib++; DRAW_RED(R_IB, "index buffer %#llx is not a live native buffer (draw of %u indices dropped)", (unsigned long long)in->ib, count); return 1;
     }
     const uint32_t isz = ib.index_size == 4 ? 4 : 2;
@@ -1092,13 +1316,16 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
         if (g_b.oib != ib.blk.buf || g_b.oib_off != ib.blk.off || g_b.oib_type != it) { g_b.oib = ib.blk.buf; g_b.oib_off = ib.blk.off; g_b.oib_type = it; g_cs.ib_calls_old++; }
     }
     if (g_b.ib != ib.blk.buf || g_b.ib_off != ioff || g_b.ib_type != it) {
-        vkCmdBindIndexBuffer(cb, ib.blk.buf, ioff, it);
+        vkn_prof_mark_f(VKN_PROF_F_BUF_LOOK); vkCmdBindIndexBuffer(cb, ib.blk.buf, ioff, it); vkn_prof_driver_calls(1);   // [rt P0]
         g_b.ib = ib.blk.buf; g_b.ib_off = ioff; g_b.ib_type = it; g_st.ib_binds++;
         if (g_cost & VKN_COST_IB) g_cs.ib_calls++;
     }
     vkn_prof_mark(VKN_PROF_BUF);   // [stage 5 A0 probes]
+    vkn_prof_mark_f(VKN_PROF_F_BUF_CMD);   // [rt P0]
     Q_PRE(cb);   // [stage 4: queries]
+    vkn_prof_mark_f(VKN_PROF_F_Q_PRE);
     vkCmdDrawIndexed(cb, count, instances ? instances : 1, fi, (int32_t)g_vfold, 0);   // vertexOffset: the vertex fold of prepare (0 without)
+    vkn_prof_mark_f(VKN_PROF_F_DRAW_CMD); vkn_prof_driver_calls(1);
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
     g_st.draws++; g_st.indexed++;
@@ -1115,7 +1342,9 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     const int r = prepare(in, in->prim, &cb, &pi, &vf);
     if (r) return r < 0 ? 1 : 0;
     Q_PRE(cb);   // [stage 4: queries]
+    vkn_prof_mark_f(VKN_PROF_F_Q_PRE);   // [rt P0]
     vkCmdDraw(cb, count, 1, first + g_vfold, 0);   // firstVertex + the vertex fold of prepare (0 without; nr_fold_vertex keeps it in int32)
+    vkn_prof_mark_f(VKN_PROF_F_DRAW_CMD); vkn_prof_driver_calls(1);
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
     g_st.draws++; g_st.arrays++;
@@ -1127,7 +1356,8 @@ int vkn_draw_dispatch(const vkn_draw_in *in, const vkn_img_bind *img, uint32_t n
     if (!in) return 1;
     VkCommandBuffer cb = cb_ready();
     if (!cb) { g_st2.dropped_cb++; DRAW_RED(R_CB, "dispatch without an open recording (dropped)"); return 1; }
-    const vkn_shader *s = shader_for(in, 1); if (!s) return 1;
+    g_tm_cur = NULL;   // [rt P3]
+    const vkn_shader *s = shader_for(in, 1, NULL); if (!s) return 1;
     if (!x || !y || !z) return 0;
     vkn_pass_end();   // a dispatch is recorded outside every render pass
     if (bind_textures(s, in, img, nimg, 1)) return 1;
@@ -1142,6 +1372,48 @@ int vkn_draw_dispatch(const vkn_draw_in *in, const vkn_img_bind *img, uint32_t n
     vkCmdDispatch(cb, x, y, z);
     g_st.dispatches++;
     return 0;
+}
+
+// ==== [rt P2] the encoder's resolution (vkn_draw.h vkn_draw_pre): the engine thread, own caches (the recording thread's g_shc / g_stc
+// stay its own: no cache line shared). Each cache entry is valid under the generation read BEFORE its lookup, as on the recording side. ====
+static struct { uint64_t h; const vkn_shader *s; uint32_t gen; } g_eshc[SHC];
+static struct { uint64_t h; uint16_t id; uint32_t gen; } g_estc[ST_KINDS][2];
+static uint64_t g_evf_h; static const vkn_vfmt *g_evf; static uint16_t g_evf_id;
+static uint16_t enc_state_id(int kind, uint64_t h) {
+    uint16_t (*const f[ST_KINDS])(uint64_t) = {vkn_blend_id, vkn_ds_id, vkn_raster_id, vkn_vfmt_id};
+    if (!h) return 0;
+    const int on = (g_cost & VKN_COST_LOOKUP) && (vkn_state_handle_gen || kind == ST_VFMT);
+    if (!on) return f[kind](h);
+    const uint32_t gen = vkn_state_handle_gen ? vkn_state_handle_gen() : 0;
+    for (int j = 0; j < 2; j++) if (g_estc[kind][j].id && g_estc[kind][j].h == h && g_estc[kind][j].gen == gen) return g_estc[kind][j].id;
+    const uint16_t id = f[kind](h);
+    if (id) { g_estc[kind][1] = g_estc[kind][0]; g_estc[kind][0].h = h; g_estc[kind][0].id = id; g_estc[kind][0].gen = gen; }
+    return id;
+}
+void vkn_draw_resolve(const vkn_draw_in *in, int indexed, vkn_draw_pre *p) {
+    memset(p, 0, sizeof *p); p->ib_rc = -1;
+    if (in->shader) {
+        if (g_cost & VKN_COST_LOOKUP) {
+            const uint64_t h = in->shader;
+            const uint32_t i = (uint32_t)((h ^ h >> 29) * 0x9e3779b97f4a7c15ull >> 58) & (SHC - 1), gen = vkn_pipe_forget_gen();
+            if (g_eshc[i].s && g_eshc[i].h == h && g_eshc[i].gen == gen) p->shader = g_eshc[i].s;
+            else { p->shader = vkn_shader_get(h); if (p->shader) { g_eshc[i].h = h; g_eshc[i].s = p->shader; g_eshc[i].gen = gen; } }
+        } else p->shader = vkn_shader_get(in->shader);
+    }
+    p->blend = enc_state_id(ST_BLEND, in->blend); p->ds = enc_state_id(ST_DS, in->ds); p->raster = enc_state_id(ST_RASTER, in->raster); p->vfmt = enc_state_id(ST_VFMT, in->vfmt);
+    // the vertex streams the format reads (marked as vkn_buf_mark does), the index buffer (marked by the lookup)
+    const vkn_vfmt *vf = NULL;
+    if (p->vfmt) { if (g_evf && g_evf_id == p->vfmt && g_evf_h == in->vfmt) vf = g_evf; else { vf = vkn_vfmt_info(p->vfmt); if (vf) { g_evf = vf; g_evf_id = p->vfmt; g_evf_h = in->vfmt; } } }   // (contents never change)
+    uint64_t h[VKN_VFMT_STREAMS]; uint8_t st_of[VKN_VFMT_STREAMS]; uint32_t n = 0;
+    for (uint32_t i = 0; vf && i < vf->nbind; i++) {
+        const uint32_t st = vf->bind[i].binding;
+        if (st < VKN_VFMT_STREAMS && st < 3 && in->vb[st] && n < VKN_VFMT_STREAMS) { int dup = 0; for (uint32_t k = 0; k < n; k++) dup |= st_of[k] == st; if (!dup) { h[n] = in->vb[st]; st_of[n++] = (uint8_t)st; } }
+    }
+    if (n) {
+        vkn_block b[VKN_VFMT_STREAMS]; vkn_buf_mark_get(VKN_BUF_VB, h, n, b);
+        for (uint32_t k = 0; k < n; k++) { p->vb[st_of[k]] = b[k].size ? b[k].buf : VK_NULL_HANDLE; p->vb_off[st_of[k]] = b[k].off; }
+    }
+    if (indexed) p->ib_rc = in->ib ? vkn_buf_lookup(VKN_BUF_IB, in->ib, &p->ib) : -1;
 }
 
 void vkn_draw_stats_get(vkn_draw_stats *s) { if (s) *s = g_st; }

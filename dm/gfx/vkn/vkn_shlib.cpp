@@ -672,6 +672,16 @@ Sh *load(const std::string &key, const void *control, const void *code) {
                 p->rmask.push_back(std::move(m));
             }
     }
+    {   // [rt P3-GPU] DM_VK_NATIVE_SHC_MASK (vkn_shc.h): the same read masks for the shadow cache's constant hash, when technique A did not build them
+        static const bool shm_on = [] { const char *e = getenv("DM_VK_NATIVE_SHC_MASK"); return e && atoi(e) > 0; }();
+        if (shm_on && p->rmask.empty() && (h.stage == 0 || h.stage == 4))
+            for (auto &b : p->bindings) if (b.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b.source == XBG_SOURCE_UNIFORM) {
+                Sh::Rm m; m.binding = b.binding; m.bits.assign(((b.bytes ? b.bytes : 65536u) / 16u + 63u) / 64u, 0);
+                m.kind = vkn_occ_spv_read_mask(words.data(), words.size(), b.binding, m.bits.data(), uint32_t(m.bits.size())) == 1 ? 1 : 0;
+                if (!m.kind) m.bits.clear();
+                p->rmask.push_back(std::move(m));
+            }
+    }
     if (p->unusable.empty() && make_module(words, &p->module, key) != VK_SUCCESS) p->unusable = "vkCreateShaderModule failed";
     if (!p->unusable.empty()) ++st_unusable;
     Sh *out = p.get(); g_sh.emplace(key, std::move(p)); ++st_loads; st_ns += now_ns() - t0;

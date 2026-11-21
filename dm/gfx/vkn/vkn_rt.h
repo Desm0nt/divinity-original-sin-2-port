@@ -45,6 +45,26 @@ enum { VKN_RT_OFF = 0, VKN_RT_AHEAD1 = 1, VKN_RT_AHEAD2 = 2, VKN_RT_VERIFY = 9 }
 enum { VKN_RT_SLOTS_COPY = 0, VKN_RT_SLOTS_CMP = 1, VKN_RT_SLOTS_GEN = 2, VKN_RT_SLOTS_GEN_VERIFY = 3 };
 // Install time (or a test between scenarios with nothing encoded): the mode (anything else than 1 / 2 / 9 = 0) and the slot policy.
 void vkn_rt_install(int mode, int slots);
+// [rt P1] DM_VK_NATIVE_RT_LEAN (read by hle_dos2_vkn_frame.c; module default 0, host default 1): 1 = the queue's shared words on cache
+// lines of their own, the worker publishes its count once a batch (vkn_rt.c worker_main: why a waiter is still woken), the encoder's
+// counters without atomic read-modify-writes, and no record for what changes nothing where it runs: an announce of the block the slot
+// holds already, a query begin / end with no bracket tracked; slot records carry only the arrays that changed.
+// [rt P2] DM_VK_NATIVE_RT_RES (module default 0, host default 1): 1 = a draw record carries what the engine thread resolved at encode
+// (vkn_draw.h vkn_draw_pre: shader object, state ids, vertex / index buffer blocks) and the recording thread uses it; 2 = carried AND
+// looked up again by the recording thread, which uses its own lookup and counts differences ("rt res: verify differ N", must be 0).
+// Both: install time (nothing encoded); the census line names them.
+// [rt P4] DM_VK_NATIVE_SHC_EHASH (module default 0, host default 1): 1 = in a depth-only target set (the shadow atlas's kind) the engine
+// thread hashes each announced constant block (nrshc_bytes over its `size` ring bytes, as vkn_shc.c's ubo_hash does) and the announce
+// record carries it; the recording thread's shadow cache takes it instead of hashing the bytes again (written by the other core); 2 =
+// both, compared, counted ("shcache ... engine hashes ... differ N", must be 0). The bytes of an announced block never change in its
+// frame (the ring is handed out linearly and guarded against overwriting frames in flight), so the hash at encode is the hash at use;
+// a hash is used only in the frame it was made for (vkn_draw_ubo_hash).
+void vkn_rt_ehash_set(int mode);
+int vkn_rt_ehash(void);
+void vkn_rt_lean_set(int lean);
+void vkn_rt_res_set(int res);
+int vkn_rt_lean(void);
+int vkn_rt_res(void);
 int vkn_rt_mode(void);
 extern int vkn_rt_live_;                                  // 1 once the encoder is bound (the first vkn_rt_rec_begin of a mode != 0)
 static inline int vkn_rt_live(void) { return vkn_rt_live_; }
@@ -113,6 +133,7 @@ void vkn_rt_census(void);                                 // the "[vkn] rt:" lin
 typedef struct vkn_rt_stats {
     uint64_t ops[8], bytes, frames, syncs, sync_wait_ns, bp_wait_ns, idle_ns, busy_ns, ahead[4];
     uint64_t guard_ring, mispredict, foreign, slot_copies, slot_gen_miss, oom, inline_ops, guard_cpu;
+    uint64_t lean_ubo_skip, lean_q_skip, lean_slot_arrays, res_draws;   // [rt P1] announces / query records not written, arrays sent; [rt P2] draws resolved
 } vkn_rt_stats;
 enum { VKN_RT_OP_DRAW, VKN_RT_OP_DISPATCH, VKN_RT_OP_UBO, VKN_RT_OP_SLOTS, VKN_RT_OP_CALL, VKN_RT_OP_FRAME, VKN_RT_OP_SNAP, VKN_RT_OP_NEXT };
 void vkn_rt_stats_get(vkn_rt_stats *s);
