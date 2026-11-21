@@ -184,6 +184,47 @@ static uint8_t kind_of(uint32_t source) {
     }
 }
 
+// [VK-DRV] docs/dos2/nr/VK-DRIVERS.md: a layout beyond the device's per-stage / per-set descriptor limits is invalid Vulkan (stock
+// drivers fail the layout or the pipeline, some crash in vkCreateGraphicsPipelines; the spec minimums are 12 UBO / 16 samplers / 16
+// sampled images / 4 SSBO / 4 storage images / 128 resources per stage, 8 dynamic UBO per set - PowerVR and old Mali report about that).
+// Nothing can be split here: a red line names the limit (one per distinct overflow, 16 at most), the creation goes on as before. A limit
+// the driver reports as 0 is unknown (host mocks): not checked.
+static void limits_note(const VkDescriptorSetLayoutBinding *b, uint32_t nb) {
+    const vkn_dev *d = vkn_device(); if (!d) return;
+    const VkPhysicalDeviceLimits *L = &d->props.limits;
+    uint32_t ubo[6] = {0}, smp[6] = {0}, img[6] = {0}, ssbo[6] = {0}, simg[6] = {0}, all[6] = {0}, dyn = 0, sdyn = 0;
+    for (uint32_t i = 0; i < nb; i++) {
+        const uint32_t c = b[i].descriptorCount; const VkDescriptorType t = b[i].descriptorType;
+        if (t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) dyn += c;
+        if (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) sdyn += c;
+        for (int s = 0; s < 6; s++) {
+            if (!(b[i].stageFlags & (1u << s))) continue;
+            if (t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) ubo[s] += c;
+            else if (t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) { smp[s] += c; img[s] += c; }
+            else if (t == VK_DESCRIPTOR_TYPE_SAMPLER) smp[s] += c;
+            else if (t == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || t == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) img[s] += c;
+            else if (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) ssbo[s] += c;
+            else if (t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || t == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) simg[s] += c;
+            all[s] += c;
+        }
+    }
+    const char *what = NULL; uint32_t have = 0, lim = 0;
+#define LIM_CHECK(v, l, name) do { if (!what && (l) && (v) > (l)) { what = name; have = (v); lim = (l); } } while (0)
+    for (int s = 0; s < 6; s++) {
+        LIM_CHECK(ubo[s], L->maxPerStageDescriptorUniformBuffers, "maxPerStageDescriptorUniformBuffers");
+        LIM_CHECK(smp[s], L->maxPerStageDescriptorSamplers, "maxPerStageDescriptorSamplers");
+        LIM_CHECK(img[s], L->maxPerStageDescriptorSampledImages, "maxPerStageDescriptorSampledImages");
+        LIM_CHECK(ssbo[s], L->maxPerStageDescriptorStorageBuffers, "maxPerStageDescriptorStorageBuffers");
+        LIM_CHECK(simg[s], L->maxPerStageDescriptorStorageImages, "maxPerStageDescriptorStorageImages");
+        LIM_CHECK(all[s], L->maxPerStageResources, "maxPerStageResources");
+    }
+    LIM_CHECK(dyn, L->maxDescriptorSetUniformBuffersDynamic, "maxDescriptorSetUniformBuffersDynamic");
+    LIM_CHECK(sdyn, L->maxDescriptorSetStorageBuffersDynamic, "maxDescriptorSetStorageBuffersDynamic");
+#undef LIM_CHECK
+    static int reds;
+    if (what && __atomic_add_fetch(&reds, 1, __ATOMIC_RELAXED) <= 16)
+        vkn_logf(RED "shaders: a descriptor layout (%u bindings) needs %u against %s %u of this device: invalid Vulkan, the driver may refuse or crash (created as before)", nb, have, what, lim);
+}
 // The set layout + pipeline layout of a binding list: shared by content; *own = 1 when the cache is full (the caller owns them).
 static int layouts_get(const VkDescriptorSetLayoutBinding *b, uint32_t nb, VkDescriptorSetLayout *set, VkPipelineLayout *pl, uint8_t *own) {
     const vkn_dev *d = vkn_device(); if (!d) return -1;
@@ -193,6 +234,7 @@ static int layouts_get(const VkDescriptorSetLayoutBinding *b, uint32_t nb, VkDes
     for (uint32_t i = 0; i < g_nlay; i++)
         if (g_lay[i].hash == h && g_lay[i].nb == nb && !memcmp(g_lay[i].b, b, sizeof *b * nb)) { *set = g_lay[i].set; *pl = g_lay[i].pl; pthread_mutex_unlock(&g_mu); return 0; }
     pthread_mutex_unlock(&g_mu);
+    limits_note(b, nb);   // [VK-DRV] (a layout is made once per content)
     const VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = nb ? b : NULL};
     VkDescriptorSetLayout s = VK_NULL_HANDLE; VkPipelineLayout p = VK_NULL_HANDLE;
     if (vkCreateDescriptorSetLayout(d->dev, &li, NULL, &s) != VK_SUCCESS) return -1;

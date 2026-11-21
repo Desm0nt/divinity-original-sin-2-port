@@ -137,10 +137,13 @@ static VkFormat bc_decoded(uint32_t f) {
     default: return VK_FORMAT_UNDEFINED;
     }
 }
+static int sim_no_d24(void);              // [VK-DRV] (below)
+static int fmt_is_d24(VkFormat f);
 static VkFormatFeatureFlags fmt_feat(VkFormat f) {
     const vkn_dev *d = vkn_device(); if (!d || f == VK_FORMAT_UNDEFINED) return 0;
     VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(d->phys, f, &p);
     VkFormatFeatureFlags v = p.optimalTilingFeatures;
+    if (fmt_is_d24(f) && sim_no_d24()) return 0;   // [VK-DRV] the no-D24 model
     // TRANSFER_DST is a 1.1 bit (KHR_maintenance1): a 1.0 driver does not report it, copies into a sampled format work there anyway.
     if (d->props.apiVersion < VK_API_VERSION_1_1 && (v & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) v |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
     return v;
@@ -152,6 +155,57 @@ static int sim_no_bc(void) {
     static int v = -1;
     if (v < 0) v = vkn_policy_sim_nobc(getenv("DM_GFX_SIM_GPU"));
     return v;
+}
+// [VK-DRV] DM_GFX_SIM_GPU=xclipse / nod24 (XBG_SIM_NOD24): the model of a device without X8_D24 / D24S8 (stock Xclipse) - their format
+// properties read as none here, as xbg_sim_format_props does for the old path.
+static int sim_no_d24(void) {
+    static int v = -1;
+    if (v < 0) v = vkn_policy_sim_nod24(getenv("DM_GFX_SIM_GPU"));
+    return v;
+}
+static int fmt_is_d24(VkFormat f) { return f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D24_UNORM_S8_UINT; }
+// ---- [VK-DRV] D24 stand-ins and the depth plane of uploads (vkn_tex.h) ----
+static uint64_t g_d24_made, g_d24_conv; static int g_d24_on;
+static int d24_mode(void) {   // DM_VK_NATIVE_D24: 0 never, 1 where the device lacks D24 (default), 2 always
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_NATIVE_D24"); v = e && *e ? atoi(e) : 1; if (v < 0 || v > 2) v = 1; }
+    return v;
+}
+static int depth_up_on(void) {   // DM_VK_NATIVE_DEPTH_UP: 1 the depth plane converted at upload (default), 0 raw bytes
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_NATIVE_DEPTH_UP"); v = e && *e ? atoi(e) != 0 : 1; }
+    return v;
+}
+static void d24_note(VkFormat was, VkFormat to, VkFormatFeatureFlags ff, int mode) {
+    const uint64_t n = __atomic_add_fetch(&g_d24_made, 1, __ATOMIC_RELAXED); __atomic_store_n(&g_d24_on, 1, __ATOMIC_RELAXED);
+    if (n <= 4)
+        vkn_logf("tex: D24 stand-in #%llu: format %d -> %d (features %#x; %s; DM_VK_NATIVE_D24=%d, DM_GFX_SIM_GPU=%s): depth uploads converted to float%s; depth bias of passes on it: vkn_state DM_VK_NATIVE_D24_BIAS",
+                 (unsigned long long)n, (int)was, (int)to, (unsigned)ff, mode == 2 ? "forced" : "the device has no X8_D24 / D24S8 for this use", mode,
+                 getenv("DM_GFX_SIM_GPU") ? getenv("DM_GFX_SIM_GPU") : "-", depth_up_on() ? "" : " - NO: DM_VK_NATIVE_DEPTH_UP=0, raw bytes");
+}
+void vkn_tex_depth_stats(uint64_t *standins, uint64_t *converted, int *on) {
+    if (standins) *standins = __atomic_load_n(&g_d24_made, __ATOMIC_RELAXED);
+    if (converted) *converted = __atomic_load_n(&g_d24_conv, __ATOMIC_RELAXED);
+    if (on) *on = __atomic_load_n(&g_d24_on, __ATOMIC_RELAXED);
+}
+uint32_t vkn_tex_depth_plane(uint32_t nvn, int d24f, const uint8_t *src, uint64_t n, uint8_t *dst) {
+    if (!src || !dst) return 0;
+    static int told; if (!__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED))
+        vkn_logf("tex: first depth upload: NVN format %#x, %llu texels, as the Vulkan depth plane%s (DM_VK_NATIVE_DEPTH_UP=0: raw bytes)", nvn, (unsigned long long)n,
+                 d24f ? " of a D32F stand-in (float)" : "");
+    switch (nvn) {
+    case 0x32: memcpy(dst, src, (size_t)n * 2); return 2;                                   // D16: as is
+    case 0x34: memcpy(dst, src, (size_t)n * 4); return 4;                                   // D32F: as is
+    case 0x36: for (uint64_t i = 0; i < n; i++) memcpy(dst + i * 4, src + i * 8, 4); return 4;   // Z32F_X24S8: the float, stencil dropped
+    case 0x33: case 0x35:                                                                    // X8Z24 / Z24S8: depth in bits 8..31
+        for (uint64_t i = 0; i < n; i++) {
+            uint32_t v; memcpy(&v, src + i * 4, 4); v >>= 8;
+            if (d24f) { const float f = (float)v / 16777215.0f; memcpy(dst + i * 4, &f, 4); } else memcpy(dst + i * 4, &v, 4);
+        }
+        if (d24f) __atomic_add_fetch(&g_d24_conv, n, __ATOMIC_RELAXED);
+        return 4;
+    default: return 0;
+    }
 }
 static VkComponentMapping fmt_swizzle(uint32_t nvn, int x) {
     VkComponentMapping m = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
@@ -443,7 +497,7 @@ static void up_run(VkCommandBuffer cb, void *ctx) {
 // ---- data preparation: every region into one staging block ----
 static uint64_t lcm16(uint32_t b) { uint64_t a = 16; while (a % (b ? b : 1)) a += 16; return a; }
 static uint32_t mipdim(uint32_t s, uint32_t l) { s >>= l; return s ? s : 1; }
-typedef struct prep { const vkn_tex_desc *d; vkn_tex *t; uint32_t nvn; int bw, bh, bpb; int mode; uint32_t cs, one, dbpb; uint64_t align; } prep;   // mode 0 copy, 1 BC decode, 2 widen
+typedef struct prep { const vkn_tex_desc *d; vkn_tex *t; uint32_t nvn; int bw, bh, bpb; int mode; uint32_t cs, one, dbpb; uint64_t align; uint8_t d24f; } prep;   // mode 0 copy, 1 BC decode, 2 widen, 3 [VK-DRV] depth plane
 // Destination bytes of a (w, h, d) region.
 static uint64_t dst_bytes(const prep *p, uint32_t w, uint32_t h, uint32_t d) {
     if (p->mode == 0) return (uint64_t)((w + p->bw - 1) / p->bw) * ((h + p->bh - 1) / p->bh) * p->bpb * d;
@@ -456,6 +510,7 @@ static int convert(const prep *p, const uint8_t *src, uint32_t w, uint32_t h, ui
     for (uint32_t z = 0; z < d; z++) {
         const uint8_t *s = src + z * srow * srows; uint8_t *o = dst + (uint64_t)z * w * h * p->dbpb;
         if (p->mode == 1) { if (nvn_bc_decode(p->nvn, s, (size_t)srow, w, h, o, (size_t)w * p->dbpb)) return -1; continue; }
+        if (p->mode == 3) { if (!vkn_tex_depth_plane(p->nvn, p->d24f, s, (uint64_t)w * h, o)) return -1; continue; }   // [VK-DRV]
         for (uint64_t i = 0, n = (uint64_t)w * h; i < n; i++) {   // widen RGB -> RGBA with alpha = one
             memcpy(o + i * 4 * p->cs, s + i * 3 * p->cs, 3 * p->cs);
             if (p->cs == 1) o[i * 4 + 3] = (uint8_t)p->one; else if (p->cs == 2) { const uint16_t v = (uint16_t)p->one; memcpy(o + i * 8 + 6, &v, 2); } else memcpy(o + i * 16 + 12, &p->one, 4);
@@ -552,11 +607,21 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
         VkFormat to;
         if (widen_of(nvn, &to, &p.cs, &p.one)) { p.mode = 2; p.dbpb = 4 * p.cs; fmt = to; widened = 1; ff = fmt_feat(fmt); }
     }
-    if (d->cls == VKN_TC_DEPTH && !(ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {   // D24 stand-ins (Mali / PowerVR class drivers)
-        if (fmt == VK_FORMAT_X8_D24_UNORM_PACK32) fmt = VK_FORMAT_D32_SFLOAT; else if (fmt == VK_FORMAT_D24_UNORM_S8_UINT) fmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
-        ff = fmt_feat(fmt);
-        if (!(ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) { *why = "depth format not renderable"; goto fail0; }
+    // [VK-DRV] D24 stand-ins (stock Xclipse; vkn_tex.h): any class, by the features that class needs; DM_VK_NATIVE_D24 0 / 1 / 2
+    uint8_t d24f = 0;
+    if (fmt_is_d24(fmt)) {
+        const int mode = d24_mode();
+        const VkFormatFeatureFlags need = d->cls == VKN_TC_DEPTH ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : want_s;
+        if (mode == 2 || (mode == 1 && (ff & need) != need)) {
+            const VkFormat was = fmt;
+            fmt = fmt == VK_FORMAT_X8_D24_UNORM_PACK32 ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D32_SFLOAT_S8_UINT;
+            ff = fmt_feat(fmt); d24f = 1;
+            d24_note(was, fmt, ff, mode);
+        }
     }
+    if (d->cls == VKN_TC_DEPTH && !(ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) { *why = "depth format not renderable"; goto fail0; }
+    // [VK-DRV] depth data goes as the depth plane (NVN Z24 bits 8..31 -> Vulkan bits 0..23 / float); DM_VK_NATIVE_DEPTH_UP=0: raw bytes
+    if (fmt_is_depth(fmt) && fmt != VK_FORMAT_S8_UINT && depth_up_on() && p.mode == 0) { p.mode = 3; p.d24f = d24f; p.dbpb = fmt == VK_FORMAT_D16_UNORM || fmt == VK_FORMAT_D16_UNORM_S8_UINT ? 2u : 4u; }
     if ((d->cls == VKN_TC_COLOR || d->cls == VKN_TC_WINDOW) && !(ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) { *why = "colour format not renderable"; goto fail0; }
     if (!rt && (ff & want_s) != want_s) { *why = "format not sampled by the device"; goto fail0; }
     p.align = lcm16(p.mode ? p.dbpb : (uint32_t)p.bpb);   // bufferOffset: a multiple of 4 and of the texel block (12-byte texels -> 48)
@@ -628,7 +693,7 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     t->usage = usage; t->cflags = ci.flags; t->swz = sw;
     t->cookie = d->cookie; t->format = fmt; t->aspect = fmt_aspect(fmt); t->w = w; t->h = h; t->depth = dep; t->mips = mips; t->layers = layers;
     t->samples = (uint32_t)samples; t->efmt = d->efmt; t->nvn_fmt = nvn; t->nvn_target = tg; t->cls = d->cls < VKN_TC_N ? d->cls : VKN_TC_SAMPLED; t->cube = (uint8_t)cube;
-    t->decoded = decoded; t->widened = widened; t->astc = astc; t->bcgpu = bcg; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
+    t->decoded = decoded; t->widened = widened; t->d24f = d24f; t->astc = astc; t->bcgpu = bcg; t->pool_id = d->pool_id; t->sampler_id = d->sampler_id; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->refs = 1;
     memcpy(t->layer_ids, d->layer_ids, sizeof t->layer_ids);
     p.t = t;
     if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; *why = "vkCreateImage failed"; goto fail1; }
@@ -1296,6 +1361,8 @@ int vkn_tex_update(vkn_tex *t, uint32_t level, uint32_t layer, int32_t x, int32_
         VkFormat to;
         if (!widen_of(p.nvn, &to, &p.cs, &p.one)) { ust_count(&g_ust.dropped_fmt); return -1; }
         p.mode = 2; p.dbpb = 4 * p.cs;
+    } else if (fmt_is_depth(t->format) && t->format != VK_FORMAT_S8_UINT && depth_up_on()) {   // [VK-DRV] the depth plane, as at creation
+        p.mode = 3; p.d24f = t->d24f; p.dbpb = t->format == VK_FORMAT_D16_UNORM || t->format == VK_FORMAT_D16_UNORM_S8_UINT ? 2u : 4u;
     }
     p.align = lcm16(p.mode ? p.dbpb : (uint32_t)p.bpb);
     // clip to the level (block formats: whole blocks; a clipped origin moves the source pointer)

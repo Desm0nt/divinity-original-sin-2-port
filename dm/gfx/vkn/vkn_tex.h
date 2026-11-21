@@ -14,6 +14,14 @@
 // BC1 / BC2 / BC3 / BC7 take the GPU at upload: exact GPU decode + GPU ASTC 4x4 encode (bc-astc-gpu, self-tested per device), else GPU
 // decode to RGBA8; anything else is decoded on the CPU at creation (nvn_bcdec.h: BC1..BC7 incl. BC6H -> RGBA16F); 3-component formats the device cannot
 // sample are widened to 4 components; D24 formats without depth-attachment support become D32F (+S8).
+// [VK-DRV] D24 stand-ins (docs/dos2/nr/VK-DRIVERS.md; KB XCL-02): an X8_D24 / D24S8 texture of ANY class whose device lacks the features
+// its class needs (stock Xclipse: no D24 at all; DM_GFX_SIM_GPU=xclipse / nod24 model it) is stored as D32_SFLOAT / D32_SFLOAT_S8_UINT
+// (t->d24f = 1), every texture of that format alike (copies stay format-equal). Depth data uploaded into a depth texture goes as the depth
+// plane: NVN Z24S8 / X8Z24 keep depth in bits 8..31 (xbg_depth.h), Vulkan's D24 plane wants bits 0..23 and the D32F plane a float
+// (vkn_tex_depth_plane; the stencil byte is not uploaded, as before). The backend reads no depth back to the CPU (vkn_read.c refuses depth
+// / stencil), so nothing converts back. Switches: DM_VK_NATIVE_D24 = 1 (default) stand-in only where the device lacks D24, 0 never (the
+// texture then fails as an unsupported format), 2 always (test of the stand-in on a device with D24); DM_VK_NATIVE_DEPTH_UP = 1
+// (default) the depth plane converted at upload, 0 the raw bytes (the backend before VK-DRV).
 // Data: staging block (VKN_ARENA_STAGING) -> vkn_upload_push (copies + UNDEFINED -> TRANSFER_DST -> SHADER_READ_ONLY) -> staging retired.
 // All data is copied (and deswizzled / decoded) inside vkn_tex_create: the caller's pointers need to live only for the call.
 // Thread safety: one mutex over the tables; creation may run on any thread.
@@ -61,6 +69,7 @@ typedef struct vkn_tex {
     VkFormat format; VkImageAspectFlags aspect;
     uint32_t w, h, depth, mips, layers, samples, efmt, nvn_fmt, nvn_target, cls;
     uint8_t cube, decoded, widened;           // decoded: BC decoded on the CPU; widened: RGB stored as RGBA
+    uint8_t d24f;                             // [VK-DRV] an NVN D24 format stored as D32_SFLOAT(_S8_UINT) (the device lacks D24)
     uint8_t astc;                             // stage 4: ASTC block size (4 / 5 / 6) of a BC texture stored as ASTC (pack or GPU encode), 0 = not
     uint8_t bcgpu;                            // stage 4: VKN_BCG_ASTC / VKN_BCG_RGBA8 = written by the GPU BC route (vkn_bcgpu.h), 0 = not
     VkImageView view;                          // the whole texture (type of the engine's target; depth formats: depth aspect)
@@ -149,6 +158,12 @@ typedef struct vkn_tex_stats {
     uint64_t sh_made, sh_attached, sh_kept[VKN_AL_N], sh_detached, sh_handover;
 } vkn_tex_stats;
 void vkn_tex_get_stats(vkn_tex_stats *s);
+// [VK-DRV] D24 stand-ins: textures made as D32F (+S8) for an NVN D24 format, depth uploads converted; *on = a stand-in was ever made
+void vkn_tex_depth_stats(uint64_t *standins, uint64_t *converted, int *on);
+// [VK-DRV] the depth plane of n texels of NVN depth format nvn (0x32 D16, 0x33 X8Z24, 0x34 D32F, 0x35 Z24S8, 0x36 Z32F_X24S8) in the
+// layout of the Vulkan image's depth aspect: D16 2 bytes, D24 4 bytes depth in bits 0..23, D32F 4 bytes float; d24f = 1: an NVN D24
+// format into a D32F stand-in (depth / 16777215). Returns the destination bytes per texel, 0 = not a depth format with a depth plane.
+uint32_t vkn_tex_depth_plane(uint32_t nvn, int d24f, const uint8_t *src, uint64_t n, uint8_t *dst);
 
 
 // ==== added by the UI piece (stage 3, vkn_tex.c): texture updates after creation, view swizzles ====

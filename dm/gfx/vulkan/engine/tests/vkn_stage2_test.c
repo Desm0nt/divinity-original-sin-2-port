@@ -61,6 +61,7 @@
 #include "../../../vkn/vkn.h"
 #include "../../../vkn/vkn_buf.h"
 #include "../../../vkn/vkn_tex.h"
+#include "../../../vkn/vkn_policy.h"   // [VK-DRV] vkn_policy_sim_nod24
 #include "../../../vkn/vkn_astc.h"
 #include "../../../vkn/vkn_bcgpu.h"
 #include "../../../vkn/vkn_shader.h"
@@ -1266,6 +1267,46 @@ static void test_tex_targets(void) {
     flush_logged(); frames(3);
 }
 
+// [VK-DRV] D24 stand-ins of any class and the depth plane of uploads (vkn_tex.h; docs/dos2/nr/VK-DRIVERS.md)
+static void test_tex_depth_standin(void) {
+    // the plane: NVN Z24S8 / X8Z24 depth in bits 8..31 -> Vulkan D24 bits 0..23 / a float for the D32F stand-in; D16 / D32F as is
+    {const uint32_t src[3] = {0x80000012u, 0xFFFFFF00u, 0x000000ABu}; uint32_t o[3]; float f[3];
+     CHECK_EQ(vkn_tex_depth_plane(0x35, 0, (const uint8_t *)src, 3, (uint8_t *)o), 4); CHECK(o[0] == 0x800000u && o[1] == 0xFFFFFFu && o[2] == 0);
+     CHECK_EQ(vkn_tex_depth_plane(0x33, 1, (const uint8_t *)src, 3, (uint8_t *)f), 4);
+     CHECK(fabsf(f[0] - 8388608.0f / 16777215.0f) < 1e-7f && f[1] == 1.0f && f[2] == 0.0f);
+     const uint16_t d16[2] = {7, 65535}; uint16_t o16[2]; CHECK_EQ(vkn_tex_depth_plane(0x32, 0, (const uint8_t *)d16, 2, (uint8_t *)o16), 2); CHECK(o16[0] == 7 && o16[1] == 65535);
+     const uint32_t z32s8[4] = {0x3f000000u, 0x55u, 0x3f800000u, 0x66u}; uint32_t o32[2];
+     CHECK_EQ(vkn_tex_depth_plane(0x36, 0, (const uint8_t *)z32s8, 2, (uint8_t *)o32), 4); CHECK(o32[0] == 0x3f000000u && o32[1] == 0x3f800000u);
+     CHECK_EQ(vkn_tex_depth_plane(0x31, 0, (const uint8_t *)src, 1, (uint8_t *)o), 0); CHECK_EQ(vkn_tex_depth_plane(4, 0, (const uint8_t *)src, 1, (uint8_t *)o), 0);}
+    // the SIM tokens of the no-D24 model (xbg_sim_parse XBG_SIM_NOD24: the xclipse profile, nod24)
+    CHECK(vkn_policy_sim_nod24("xclipse") && vkn_policy_sim_nod24("mali,nod24") && !vkn_policy_sim_nod24("mali") && !vkn_policy_sim_nod24(NULL) && !vkn_policy_sim_nod24("xclipsex"));
+    // a sampled Z24S8 texture with data: on a device with D24 the depth plane is staged (bits 0..23), without D24 a D32F + S8 stand-in
+    // with the depth as floats (before VK-DRV: the raw words / "format not sampled by the device")
+    uint32_t px[4 * 4]; for (unsigned i = 0; i < 16; i++) px[i] = ((i * 0x111111u) & 0xFFFFFFu) << 8 | 0x5Au;
+    for (int d24 = 1; d24 >= 0; d24--) {
+        mk_d24 = d24;
+        vkn_tex_region rg = {0, 0, 0, 4, 4, 1, px}; vkn_tex_src src = {VKN_SRC_REGIONS, &rg, 1, NULL, 0, 0, 0};
+        vkn_tex_desc d = tdesc(51, 1, 4, 4, 1, 1, VKN_TC_SAMPLED, 0xD24 + d24, ~0u);
+        const char *why = NULL;
+        vkn_tex *t = vkn_tex_create(H(90 + d24, 1), &d, &src, &why);
+        CHECK(t != NULL); if (!t) { printf("  (why: %s)\n", why ? why : "-"); continue; }
+        CHECK_EQ(t->format, d24 ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT); CHECK_EQ(t->d24f, d24 ? 0 : 1);
+        flush_logged();
+        const mk_copy_t *c = copy_of(t->image, 0, 0, 0);
+        CHECK(c && c->src && c->c.imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT);
+        if (c && c->src) for (unsigned i = 0; i < 16; i++) {
+            uint32_t w; memcpy(&w, c->src + 4 * i, 4); float f; memcpy(&f, &w, 4);
+            const uint32_t dep = px[i] >> 8;
+            if (d24) CHECK_EQ(w, dep); else CHECK(fabsf(f - (float)dep / 16777215.0f) < 1e-7f);
+        }
+        vkn_tex_destroy_cookie(0xD24 + d24);
+    }
+    mk_d24 = 1;
+    uint64_t made = 0, conv = 0; int on = 0; vkn_tex_depth_stats(&made, &conv, &on);
+    CHECK(made >= 1 && conv >= 16 && on == 1);
+    flush_logged(); frames(3);
+}
+
 static void test_tex_lifetime(void) {
     // a destroy before the upload ran: the upload records nothing, the image lives until the upload dropped its reference
     uint8_t px[4 * 4 * 4]; memset(px, 7, sizeof px);
@@ -1864,6 +1905,7 @@ static void test_textures(void) {
     test_tex_astc_pack();
     test_tex_bcgpu();
     test_tex_targets();
+    test_tex_depth_standin();   // [VK-DRV]
     test_tex_lifetime();
     test_tex_shared();
     test_samplers();
@@ -2190,6 +2232,14 @@ static void test_passes(void) {
     CHECK(!mk_is_live((uint64_t)(uintptr_t)f1, MK_FB)); CHECK(!mk_is_live((uint64_t)(uintptr_t)f2, MK_FB)); CHECK(!mk_is_live((uint64_t)(uintptr_t)f3, MK_FB));
     CHECK(mk_is_live((uint64_t)(uintptr_t)f4, MK_FB));
     const VkFramebuffer f5 = vkn_fb_get(c1, v3, 3, 64, 32, 1); CHECK(f5 && f5 != f1); CHECK_EQ(mk_created[MK_FB], fb0 + 5);
+    // [VK-DRV] DM_VK_NATIVE_FB_EXACT (PowerVR stock): a framebuffer made with the exact pass - another pass of the class has its own
+    {vkn_rp_key kx = k; kx.load[0] = k.load[0] == VK_ATTACHMENT_LOAD_OP_LOAD ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD;
+     VkRenderPass px = VK_NULL_HANDLE; uint16_t cx = 0; vkn_rp_get(&kx, &px, &cx); CHECK(cx == c1 && px && px != p1);
+     const VkFramebuffer fx = vkn_fb_get_rp(c1, px, v3, 3, 64, 32, 1); CHECK(fx && fx != f5);
+     o = mk_obj_of((uint64_t)(uintptr_t)fx); if (o) CHECK(o->fb_pass == px);
+     CHECK(vkn_fb_get_rp(c1, px, v3, 3, 64, 32, 1) == fx); CHECK(vkn_fb_get_rp(c1, VK_NULL_HANDLE, v3, 3, 64, 32, 1) == f5);
+     vkn_fb_forget_view(t0->att); frames(3); CHECK(!mk_is_live((uint64_t)(uintptr_t)fx, MK_FB));
+     const VkFramebuffer f5b = vkn_fb_get(c1, v3, 3, 64, 32, 1); CHECK(f5b != VK_NULL_HANDLE);}
     // the texture piece forgets the framebuffers of a texture's views when the engine destroys it (vkn_state.h: before the view dies)
     vkn_tex_destroy_cookie(0xFB2);
     vkn_state_stats_get(&ss); CHECK_EQ(ss.framebuffers, 0);

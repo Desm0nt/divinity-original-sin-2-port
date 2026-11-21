@@ -5,6 +5,8 @@
 #include "vkn.h"
 #include "vkn_state.h"
 #include "vkn_drv.h"   // [stage 5.3 V2] driver corrections at pipeline build (colour mask, depth bias x2, creation lock)
+#include "vkn_policy.h"   // [VK-DRV] the DM_GFX_SIM_GPU tokens of the capability models
+#include "vkn_tex.h"   // [VK-DRV] vkn_tex_depth_stats: a D24 stand-in exists (DM_VK_NATIVE_D24_BIAS)
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -217,6 +219,9 @@ static const uint8_t k_vtx_cls[12] = {VKN_CLS_FLOAT, VKN_CLS_UINT, VKN_CLS_SINT,
 static int vtx_format_ok(VkFormat f) {   // vertex-buffer support (3-component 8 / 16-bit formats are optional in Vulkan)
     const vkn_dev *d = vkn_device();
     if (!d) return 1;
+    // [VK-DRV] DM_GFX_SIM_GPU=xclipse / novertex3: the model of RDNA (stock Xclipse, RADV) - only 3-component formats are asked here
+    static int sim = -1; if (sim < 0) sim = vkn_policy_sim_novertex3(getenv("DM_GFX_SIM_GPU"));
+    if (sim) return 0;
     VkFormatProperties p; memset(&p, 0, sizeof p);
     vkGetPhysicalDeviceFormatProperties(d->phys, f, &p);
     return (p.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0;
@@ -374,7 +379,7 @@ static VkRenderPass g_rp[VKN_RP_MAX]; static uint16_t g_rp_compat[VKN_RP_MAX]; s
 static compat_e g_compat[VKN_COMPAT_MAX]; static uint32_t g_ncompat;
 static int g_rp_ok;
 // Framebuffer key: views in attachment order (VkImageView as u64), extent, layers, compatibility class.
-typedef struct { uint64_t view[9]; uint32_t w, h, layers; uint16_t compat; uint8_t nviews, pad; } fb_k;
+typedef struct { uint64_t view[9]; uint32_t w, h, layers; uint16_t compat; uint8_t nviews, pad; uint64_t pass; } fb_k;   // pass: [VK-DRV] vkn_fb_get_rp (0 = the class's)
 static otab g_fb_tab;            // fb_k -> VkFramebuffer
 static uint64_t g_fb_retired;
 
@@ -495,11 +500,14 @@ VkRenderPass vkn_rp_compat_pass(uint16_t compat) { const compat_e *c = compat_ge
 
 static void fb_destroy(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroyFramebuffer(d->dev, (VkFramebuffer)ctx, NULL); }
 VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers) {
+    return vkn_fb_get_rp(compat, VK_NULL_HANDLE, views, nviews, width, height, layers);
+}
+VkFramebuffer vkn_fb_get_rp(uint16_t compat, VkRenderPass rp, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers) {
     const compat_e *c = compat_get(compat); const vkn_dev *d = vkn_device();
     if (!c || !d || nviews > 9 || (nviews && !views) || !width || !height) return VK_NULL_HANDLE;
     fb_k k; memset(&k, 0, sizeof k);
     for (uint32_t i = 0; i < nviews; i++) k.view[i] = (uint64_t)(uintptr_t)views[i];
-    k.w = width; k.h = height; k.layers = layers ? layers : 1; k.compat = compat; k.nviews = (uint8_t)nviews;
+    k.w = width; k.h = height; k.layers = layers ? layers : 1; k.compat = compat; k.nviews = (uint8_t)nviews; k.pass = (uint64_t)(uintptr_t)rp;
     VkFramebuffer fb = VK_NULL_HANDLE;
     pthread_mutex_lock(&g_rp_mu);
     if (rp_ready()) {
@@ -507,7 +515,7 @@ VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nvi
         if (h) fb = (VkFramebuffer)(uintptr_t)h->val;
         else {
             VkFramebufferCreateInfo ci; memset(&ci, 0, sizeof ci);
-            ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; ci.renderPass = c->pass;
+            ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; ci.renderPass = rp ? rp : c->pass;
             ci.attachmentCount = nviews; ci.pAttachments = views; ci.width = width; ci.height = height; ci.layers = k.layers;
             const VkResult r = vkCreateFramebuffer(d->dev, &ci, NULL, &fb);
             if (r != VK_SUCCESS) { fb = VK_NULL_HANDLE; static int noted; if (noted++ < 8) vkn_logf(VKN_RED "framebuffer: vkCreateFramebuffer %d (%u views, %ux%u x%u)", (int)r, nviews, width, height, k.layers); }
@@ -662,7 +670,19 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     if (k->fx & VKN_PIPE_FX_DISCARD) rs.rasterizerDiscardEnable = VK_TRUE;   // [stage 5] nothing reaches the targets (vkn_fx.h)
     // [stage 5.3 V2] DM_GFX_DEPTH_BIAS_X2 (vkn_drv.h): PanVK / RADV halve depthBiasConstantFactor (xbg_game.cpp draw: rs.depthBiasConstantFactor x2)
     if (rs.depthBiasEnable) { const float bx = vkn_drv_bias_scale(); if (bx != 1.0f) { rs.depthBiasConstantFactor *= bx; vkn_drv_bias_note(); } }
-    if (rs.polygonMode != VK_POLYGON_MODE_FILL && !dv->feat.fillModeNonSolid) {
+    // [VK-DRV] DM_VK_NATIVE_D24_BIAS (a float, default 1): the constant bias of a pass whose depth is a D24 stand-in (D32F, vkn_tex.h). For a
+    // float depth buffer r = 2^(e - 23), e the exponent of the primitive's largest z; for z in [0.5, 1) that is 2^-24 = D24's r, and DOS2's
+    // standard depth (LESS / LEQUAL, [0, 1]) puts every surface beyond twice the near plane there: 1 is D24's bias. A knob for tests only.
+    if (rs.depthBiasEnable && (c->k.depth == VK_FORMAT_D32_SFLOAT || c->k.depth == VK_FORMAT_D32_SFLOAT_S8_UINT)) {
+        static float m = -1.0f; if (m < 0.0f) { const char *e = getenv("DM_VK_NATIVE_D24_BIAS"); const float v = e && *e ? (float)atof(e) : 1.0f; m = v > 0.0f && v < 1e6f ? v : 1.0f; }
+        int on = 0; vkn_tex_depth_stats(NULL, NULL, &on);
+        if (on && m != 1.0f) {
+            rs.depthBiasConstantFactor *= m;
+            static int told; if (!__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: depth bias of D24 stand-in passes x%g (DM_VK_NATIVE_D24_BIAS)", (double)m);
+        }
+    }
+    static int sim_nofill = -1; if (sim_nofill < 0) sim_nofill = vkn_policy_sim_nofillmode(getenv("DM_GFX_SIM_GPU"));   // [VK-DRV] the Mali / PowerVR model
+    if (rs.polygonMode != VK_POLYGON_MODE_FILL && (!dv->feat.fillModeNonSolid || sim_nofill)) {
         static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
         rs.polygonMode = VK_POLYGON_MODE_FILL;
     }
@@ -688,6 +708,25 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     // Mali writes 0 there (d2r #179): every colour write masked off (xbg_game.cpp draw, noout_mask_on). The key is unchanged (a decision
     // of the shader the key names).
     if (vkn_drv_noout(k, src)) for (uint32_t i = 0; i < c->k.ncolor; i++) cb[i].colorWriteMask = 0;
+    // [VK-DRV] docs/dos2/nr/VK-DRIVERS.md: different states per attachment need the independentBlend feature (absent on some old PowerVR /
+    // Mali-4xx-class drivers). Without it every slot takes the first used slot's state (blend of slot 0, the union of the write masks of
+    // the used slots: nothing the engine writes is dropped; a non-blendable slot then blends off for all) - valid Vulkan instead of an
+    // invalid pipeline. With the feature (every Adreno / Mali Bifrost+ / Xclipse / PowerVR Rogue report seen): nothing changes.
+    if (c->k.ncolor > 1 && !dv->feat.independentBlend) {
+        int first = -1, differ = 0; VkColorComponentFlags all = 0; VkBool32 blend_ok = VK_TRUE;
+        for (uint32_t i = 0; i < c->k.ncolor; i++) {
+            if (!c->k.color[i]) continue;
+            all |= cb[i].colorWriteMask; if (!fmt_blendable((VkFormat)c->k.color[i])) blend_ok = VK_FALSE;
+            if (first < 0) first = (int)i;
+        }
+        for (uint32_t i = 0; first >= 0 && i < c->k.ncolor; i++) if (memcmp(&cb[i], &cb[first], sizeof cb[i])) differ = 1;   // (unused slots count: all must be equal)
+        if (first >= 0 && differ) {
+            VkPipelineColorBlendAttachmentState one = cb[first]; one.colorWriteMask = all; if (!blend_ok) one.blendEnable = VK_FALSE;
+            for (uint32_t i = 0; i < c->k.ncolor; i++) cb[i] = one;
+            static int told; if (differ && !__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED))
+                vkn_logf(VKN_RED "pipelines: the device lacks independentBlend: attachments of a pass share one blend state (masks united)");
+        }
+    }
     VkPipelineColorBlendStateCreateInfo cbs; memset(&cbs, 0, sizeof cbs);
     cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = c->k.ncolor; cbs.pAttachments = c->k.ncolor ? cb : NULL;
     static const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};

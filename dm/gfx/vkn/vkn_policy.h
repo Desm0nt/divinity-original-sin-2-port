@@ -150,6 +150,21 @@ static inline int vkn_policy_sim_noaniso(const char *sim) {   // XBG_SIM_NOANISO
 }
 // ==== [/stage 5.3 V2]
 
+// ==== [VK-DRV] driver compatibility (docs/dos2/nr/VK-DRIVERS.md): the DM_GFX_SIM_GPU tokens of the capability models the backend
+// applies itself, token for token xbg_sim_parse's bits (XBG_SIM_NOD24: the xclipse profile and nod24).
+static inline int vkn_policy_sim_nod24(const char *sim) { return vkn_policy_sim_token(sim, "xclipse") || vkn_policy_sim_token(sim, "nod24"); }
+// DM_VK_NATIVE_FB_EXACT: a framebuffer made with the very render pass it is begun with (not the pass of its compatibility class).
+// Vulkan allows any compatible pass; PowerVR stock 1.7-1.10 rejects a framebuffer whose pass had other load / store ops (Dolphin
+// BUG_BROKEN_CLEAR_LOADOP_RENDERPASS, KB PVR-03) - and the backend's pass policy makes such twins on tilers. Default: Imagination stock.
+static inline int vkn_policy_fb_exact_default(uint32_t driver_id) { return driver_id == VKN_DRVID_IMAGINATION_PROPRIETARY; }
+// XBG_SIM_NOVERTEX3 (the xclipse profile, novertex3): no VERTEX_BUFFER on 3-component 8 / 16-bit formats (AMD-style hardware)
+static inline int vkn_policy_sim_novertex3(const char *sim) { return vkn_policy_sim_token(sim, "xclipse") || vkn_policy_sim_token(sim, "novertex3"); }
+// XBG_SIM_NOFILLMODE (the mali and powervr profiles, nofillmode): fillModeNonSolid = 0
+static inline int vkn_policy_sim_nofillmode(const char *sim) {
+    return vkn_policy_sim_token(sim, "mali") || vkn_policy_sim_token(sim, "powervr") || vkn_policy_sim_token(sim, "pvr") || vkn_policy_sim_token(sim, "nofillmode");
+}
+// ==== [/VK-DRV]
+
 #ifdef __cplusplus
 }
 #endif

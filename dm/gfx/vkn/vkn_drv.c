@@ -53,6 +53,7 @@ void vkn_drv_decide(int family, uint32_t driver_id, const char *sim, vkn_drv_cfg
     o->ubodyn = (int8_t)mode;
     o->ubo_dyn = (uint8_t)vkn_policy_env_or("DM_GFX_UBO_DYNAMIC", fam_on, &from); if (from) o->from_env |= VKN_DRV_E_UBO;
     if (o->ubo_ro) o->ubo_dyn = 1;   // (nrubd::init: ubo_dynamic_on = true under the rule)
+    o->fb_exact = (uint8_t)vkn_policy_env_or("DM_VK_NATIVE_FB_EXACT", vkn_policy_fb_exact_default(driver_id), &from); if (from) o->from_env |= VKN_DRV_E_FBX;   // [VK-DRV]
     o->sim_noaniso = (uint8_t)vkn_policy_sim_noaniso(sim);
     o->sim_ubdyn8 = (uint8_t)vkn_policy_sim_ubdyn8(sim);
 }
@@ -62,11 +63,11 @@ static void install_line(const vkn_drv_cfg *c) {
 #define SRC(bit) ((c->from_env & (bit)) ? "env" : "default")
     vkn_logf("driver corrections (family %s, driverID %u%s): DM_GFX_NOOUT_MASK=%d (%s), DM_GFX_DEPTH_BIAS_X2=%d (%s), DM_GFX_CLEAR_REBIND=%d (%s), "
              "DM_GFX_PIPE_SERIAL=%d (%s; lock of the %s), DM_GFX_UBO_DYNAMIC=%d (%s), DM_NR_UBODYN=%d (%s; read-only rule %s); SIM ubdyn8 %d noaniso %d; "
-             "reversed depth range %s (not emulated); census line \"driver corrections:\"",
+             "reversed depth range %s (not emulated); DM_VK_NATIVE_FB_EXACT=%d (%s); census line \"driver corrections:\"",
              fam, c->driver_id, c->driver_id ? "" : " = unknown: no driver correction", c->noout, SRC(VKN_DRV_E_NOOUT), c->bias_x2, SRC(VKN_DRV_E_BIAS),
              c->rebind, SRC(VKN_DRV_E_REBIND), c->serial, SRC(VKN_DRV_E_SERIAL), c->lock_lib ? "shader library (modules + pipelines)" : "backend (pipelines only)",
              c->ubo_dyn, SRC(VKN_DRV_E_UBO), c->ubodyn, SRC(VKN_DRV_E_UBODYN), c->ubo_ro ? "in force: per-draw blocks dynamic only where read" : "off",
-             c->sim_ubdyn8, c->sim_noaniso, vkn_policy_reversed_depth_broken(c->driver_id) ? "drawn wrong by this driver" : "fine");
+             c->sim_ubdyn8, c->sim_noaniso, vkn_policy_reversed_depth_broken(c->driver_id) ? "drawn wrong by this driver" : "fine", c->fb_exact, SRC(VKN_DRV_E_FBX));
 #undef SRC
 }
 

@@ -282,7 +282,7 @@ void vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice p, uint32_t *n, V
 }
 void vkGetPhysicalDeviceFeatures(VkPhysicalDevice p, VkPhysicalDeviceFeatures *f) {
     (void)p; memset(f, 0, sizeof *f);
-    f->samplerAnisotropy = VK_TRUE; f->depthBiasClamp = VK_TRUE; f->fillModeNonSolid = VK_TRUE; f->textureCompressionASTC_LDR = VK_TRUE;
+    f->samplerAnisotropy = VK_TRUE; f->independentBlend = VK_TRUE; /* [VK-DRV] as every real device here */ f->depthBiasClamp = VK_TRUE; f->fillModeNonSolid = VK_TRUE; f->textureCompressionASTC_LDR = VK_TRUE;
 }
 void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice p, VkFormat f, VkFormatProperties *o) {
     if (p != MK_PHYS) mk_err("format properties of %p", (void *)p);

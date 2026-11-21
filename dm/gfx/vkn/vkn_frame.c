@@ -30,7 +30,7 @@ extern void xbg_safe_mode_vkn_tick(int where) __attribute__((weak));
 static void safe_count(const char *what, VkResult r) {
     if (!xbg_safe_mode_record || (r != VK_ERROR_DEVICE_LOST && r != VK_TIMEOUT)) return;
     char w[160]; snprintf(w, sizeof w, "%s %s in the native backend (vkn_frame)", r == VK_ERROR_DEVICE_LOST ? "VK_ERROR_DEVICE_LOST in" : "GPU hang: fence wait timed out in", what);
-    if (xbg_safe_mode_record(w) > 0) vkn_logf(FR_RED "frame: %s: counted for the safe-mode ladder (gfx-safe-mode)", w);
+    if (xbg_safe_mode_record(w) > 0) vkn_logf("\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91" "frame: %s: counted for the safe-mode ladder (gfx-safe-mode)", w);
 }
 
 #define FR_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)

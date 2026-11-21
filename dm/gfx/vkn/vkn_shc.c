@@ -240,12 +240,12 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
 }
 
 // ---- mode 2: the would-be hit compared with the truth (at retire: the GPU is done) ----
-typedef struct vjob { vkn_block a, b; uint64_t n; uint32_t w, bpp; int k; uint64_t frame; } vjob;
+typedef struct vjob { vkn_block a, b; uint64_t n; uint32_t w, bpp; int k; uint64_t frame; uint8_t x8; } vjob;   // x8: an X8_D24 atlas ([VK-DRV])
 static void verify_done(void *ctx) {
     vjob *j = (vjob *)ctx;
     const uint8_t *x = (const uint8_t *)j->a.cpu, *y = (const uint8_t *)j->b.cpu;
     // X8_D24: the top byte of each 32-bit texel of a buffer copy is not defined by Vulkan - compared without it
-    if (x && y && j->bpp == 4) for (uint64_t q = 0; q + 4 <= j->n; q += 4) { ((uint8_t *)j->a.cpu)[q + 3] = 0; ((uint8_t *)j->b.cpu)[q + 3] = 0; }
+    if (x && y && j->x8) for (uint64_t q = 0; q + 4 <= j->n; q += 4) { ((uint8_t *)j->a.cpu)[q + 3] = 0; ((uint8_t *)j->b.cpu)[q + 3] = 0; }
     if (x && y && !memcmp(x, y, j->n)) g.s.verify_eq++;
     else if (x && y) {
         g.s.verify_ne++;
@@ -267,7 +267,7 @@ static void verify_run(int k, const int32_t r[4]) {
     if (read_tile(g.X, r, &j->b)) { vkn_retire_block(&j->a); free(j); g.s.verify_skip++; return; }
     const VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(vkn_cb(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    j->bpp = depth_bpp(g.atlas->format); j->n = (uint64_t)r[2] * (uint64_t)r[3] * j->bpp; j->w = (uint32_t)r[2]; j->k = k; j->frame = g.frame;
+    j->bpp = depth_bpp(g.atlas->format); j->x8 = g.atlas->format == VK_FORMAT_X8_D24_UNORM_PACK32; j->n = (uint64_t)r[2] * (uint64_t)r[3] * j->bpp; j->w = (uint32_t)r[2]; j->k = k; j->frame = g.frame;
     vkn_retire(verify_done, j);
 }
 

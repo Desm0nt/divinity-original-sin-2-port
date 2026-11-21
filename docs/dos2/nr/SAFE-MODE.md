@@ -43,6 +43,8 @@ switches, the jni default table), so a shared patch would be a rewrite per port 
 Not ported (no DOS2 counterpart): `DM_GFX_ZC3_SELFTEST`, `DM_GFX_FENCE_TRYLOCK` / `FENCE_GUARD` live fallback, zero-copy self-test
 fallback, DOOM's `crash pass:` lines (no dm-record packet table).
 
+**[VK-DRV 21.11] Mode 1 (`DM_VK_NATIVE=1`, the default build): every family.** Steps 1-2 = the backend rows, step 3 = `DM_VK_NATIVE=0`; the old path's rows stay Mali / PowerVR only (Adreno / Xclipse / others: step 3 = the old path with its own defaults). Decided early (`xbg_safe_mode_pre`, jni `nativeStart`), counted step 3 only after the backend crashed at its step 2 (marker key `native=`). Details, log lines and the phone run list: `VK-DRIVERS.md` section 6 / 8. The paragraph below is the mode-0 rule.
+
 **Adreno:** logs only (`NVN safe mode: not used on adreno ...`), as DOOM. The NB / NR defaults also run on Adreno, but no Adreno crash class
 applies to the ladder today (the Mi 14 ran them, NB checks bad 0); an Adreno ladder would need its own evidence - a risk, below.
 

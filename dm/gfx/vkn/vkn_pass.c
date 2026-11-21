@@ -977,7 +977,7 @@ static int begin_set(const tset *s) {
     nv = 0;
     for (uint32_t i = 0; i < s->n; i++) if (s->c[i]) views[nv++] = vkn_tex_att_view(s->c[i], s->mip[i], s->layer[i]);
     if (s->d) views[nv++] = vkn_tex_att_view(s->d, 0, 0);
-    VkFramebuffer fb = vkn_fb_get(compat, views, nv, W, H, 1);
+    VkFramebuffer fb = vkn_drv()->fb_exact ? vkn_fb_get_rp(compat, rp, views, nv, W, H, 1) : vkn_fb_get(compat, views, nv, W, H, 1);   // [VK-DRV] PowerVR stock
     if (!fb) { g_st2.fb_fail++; return -1; }
     const VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
                                       .renderArea = area, .clearValueCount = nv, .pClearValues = cv};

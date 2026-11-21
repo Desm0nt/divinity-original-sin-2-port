@@ -23,6 +23,7 @@ char path[512]="";bool booted=false,eligible=false;int step=0,how=XBG_SAFE_NOT_E
 bool decided=false,native_ladder=false;int counted_step=0;std::atomic<int> native_run{0};XbgSafeMarker marker;char pre_line[1024]="";
 std::atomic<int> recorded{0};
 int fake_kind=0,fake_s=0;std::atomic<uint64_t> fake_rec_at{0};uint64_t fake_at_ns=0;   // DM_GFX_FAKE_GPU_CRASH (armed at engine init)
+std::atomic<int> fake_fired{0};   // [VK-DRV] the rec test raised its SIGBUS (xbg_crash_classify)
 int fb_pipe_s=-1;uint64_t fb_pipe_at=0;   // DM_GFX_FAKE_FALLBACK=pipe:<s>
 char status[1024]="";std::mutex ev_mu;std::deque<std::string> events;
 std::atomic<bool> pipe_done{false};
@@ -36,6 +37,7 @@ void fake_rec_fire(){
     uint64_t at=fake_rec_at.load(std::memory_order_relaxed);if(!at || timing_clock()<at || !fake_rec_at.compare_exchange_strong(at,0))return;
     char tn[32]="?";pthread_getname_np(pthread_self(),tn,sizeof tn);
     xbg_logf("NVN safe mode test: DM_GFX_FAKE_GPU_CRASH=rec: SIGBUS inside vkCmdEndRenderPass on thread %s",tn);
+    fake_fired.store(1);   // [VK-DRV] in mode 1 the pass may end on the engine's own thread (DM_VK_NATIVE_RT=0): the classifier counts the test anyway
     raise(SIGBUS);}
 // [VK-DRV] the step, once per process: the marker, DM_SAFE_MODE, the counted gate (owner: the old path only after the backend's own crash).
 // native: DM_VK_NATIVE=1 at this moment, the start's mode (early: before the ladder may set 0).
@@ -196,6 +198,7 @@ extern "C" void xbg_crash_classify(int sig,const char *thread,const char *rec,ui
         n=cat(why,n,sizeof why," on thread ");n=cat(why,n,sizeof why,thread);}
     else if(sig==SIGABRT && failed && xbg_safe_text_device_lost(error_text))n=cat(why,n,sizeof why,"VK_ERROR_DEVICE_LOST fatal");
     else if(sig==SIGABRT && failed && xbg_safe_text_gpu_hang(error_text))n=cat(why,n,sizeof why,"GPU hang fatal");
+    else if(sig==SIGBUS && fake_fired.load(std::memory_order_relaxed)){n=cat(why,n,sizeof why,"test DM_GFX_FAKE_GPU_CRASH=rec on thread ");n=cat(why,n,sizeof why,thread);}   // [VK-DRV]
     if(!why[0]){fprintf(stderr,"[dm] safe mode: crash (signal %d, thread %s) not counted as a graphics failure: not a graphics thread, pc / lr not in a GPU driver, not zero-copy memory, no device-lost / hang fatal\n",sig,thread?thread:"?");return;}
     n=cat(why,n,sizeof why,", signal ");n=dec(why,n,sizeof why,sig);
     if(!xbg_safe_mode_record(why))fprintf(stderr,"[dm] safe mode: %s (this run's failure is already counted)\n",why);

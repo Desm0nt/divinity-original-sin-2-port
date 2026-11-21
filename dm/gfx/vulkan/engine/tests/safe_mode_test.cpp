@@ -33,9 +33,10 @@ static void test_v3_ladder(){
         for(int m=-1;m<=3;m++)for(int u=-1;u<=2;u++)for(int on=0;on<=1;on++)CHECK(vkn_policy_ubodyn_active(m,u,on,f)==int(xbg_nr_ubodyn_active(m,u,on!=0,xf)));}
     for(uint32_t d=0;d<=30;d++){CHECK(vkn_policy_depth_bias_x2_default(d)==int(xbg_depth_bias_x2_default(d)));CHECK(vkn_policy_clear_rebind_default(d)==int(xbg_clear_rebind_default(d)));
         CHECK(vkn_policy_reversed_depth_broken(d)==int(xbg_reversed_depth_broken(d)));}
-    for(const char *sim:{"mali","powervr","pvr","xclipse","mali,ubdyn8","powervr nogs","family-mali","nobc","noaniso","ubdyn8","0","",(const char*)nullptr,"malix","mali;noaniso"}){
+    for(const char *sim:{"mali","powervr","pvr","xclipse","mali,ubdyn8","powervr nogs","family-mali","nobc","noaniso","ubdyn8","0","",(const char*)nullptr,"malix","mali;noaniso","nod24","novertex3","nofillmode","xclipse,ubdyn8","pvr nod24"}){
         const uint32_t b=xbg_sim_parse(sim);
         CHECK(vkn_policy_sim_nobc(sim)==((b&XBG_SIM_NOBC)!=0));CHECK(vkn_policy_sim_noaniso(sim)==((b&XBG_SIM_NOANISO)!=0));CHECK(vkn_policy_sim_ubdyn8(sim)==((b&XBG_SIM_UBDYN8)!=0));
+        CHECK(vkn_policy_sim_nod24(sim)==((b&XBG_SIM_NOD24)!=0));CHECK(vkn_policy_sim_novertex3(sim)==((b&XBG_SIM_NOVERTEX3)!=0));CHECK(vkn_policy_sim_nofillmode(sim)==((b&XBG_SIM_NOFILLMODE)!=0));   // [VK-DRV]
         CHECK(vkn_policy_family_from(0x5143,"Adreno (TM) 750",sim)==int(xbg_effective_family(XBG_GPU_ADRENO,b)));}
     CHECK(vkn_policy_env_or("DM_SAFE_TEST_UNSET_KEY",1,nullptr)==1);
     // no step: the family defaults (Mali: the tile pass policy on, PowerVR: UBO rule 2 = NR-08b read-only, serial on)

@@ -119,6 +119,8 @@ uint16_t vkn_rp_get(const vkn_rp_key *k, VkRenderPass *pass, uint16_t *compat);
 VkRenderPass vkn_rp_compat_pass(uint16_t compat);   // the first pass of that compatibility class (what pipelines are built against)
 // Framebuffer of (compatibility class, views in attachment order: bound colour slots then depth, extent, layers); created on a miss.
 VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers);
+// [VK-DRV] the same, made with render pass rp itself (DM_VK_NATIVE_FB_EXACT, vkn_drv.h: PowerVR stock); rp NULL = vkn_fb_get.
+VkFramebuffer vkn_fb_get_rp(uint16_t compat, VkRenderPass rp, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers);
 // The texture piece calls this BEFORE it destroys an image view: every framebuffer using the view is retired (destroyed after the
 // frame delay of vkn_retire) and leaves the cache. Thread safe.
 void vkn_fb_forget_view(VkImageView v);

@@ -35,7 +35,7 @@
 extern "C" {
 #endif
 
-enum { VKN_DRV_E_NOOUT = 1, VKN_DRV_E_BIAS = 2, VKN_DRV_E_REBIND = 4, VKN_DRV_E_SERIAL = 8, VKN_DRV_E_UBO = 16, VKN_DRV_E_UBODYN = 32 };
+enum { VKN_DRV_E_NOOUT = 1, VKN_DRV_E_BIAS = 2, VKN_DRV_E_REBIND = 4, VKN_DRV_E_SERIAL = 8, VKN_DRV_E_UBO = 16, VKN_DRV_E_UBODYN = 32, VKN_DRV_E_FBX = 64 };
 typedef struct vkn_drv_cfg {
     int resolved;            // 1 = decided from a device (else the "nothing changes" answer before the device: not latched)
     int family;              // VKN_FAM_* (vkn_policy.h)
@@ -51,6 +51,7 @@ typedef struct vkn_drv_cfg {
     uint8_t sim_ubdyn8;      // DM_GFX_SIM_GPU ubdyn8: the layouts see maxDescriptorSetUniformBuffersDynamic at most 8
     uint8_t lock_lib;        // the creation lock is the shader library's (else this module's own)
     uint16_t from_env;       // VKN_DRV_E_*: the environment decided that switch (else the family / driver default)
+    uint8_t fb_exact;        // [VK-DRV] DM_VK_NATIVE_FB_EXACT: framebuffers made with the exact pass begun (vkn_policy_fb_exact_default)
 } vkn_drv_cfg;
 // The rules over explicit facts (reads the switches from the environment; pure otherwise): what the backend resolves at its first use.
 void vkn_drv_decide(int family, uint32_t driver_id, const char *sim, vkn_drv_cfg *out);
