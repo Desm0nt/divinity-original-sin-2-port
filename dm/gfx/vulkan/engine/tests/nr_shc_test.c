@@ -98,7 +98,7 @@ static void scenario(const Scn *s, nrshc_par p, Tally *out) {
 static void test_tab(void) {
     nrshc_cas *c = nrshc_cas_new(); nrshc_tab *t = &c->mem;
     nrshc_tab_clear(t);
-    for (uint64_t k = 1; k <= 3000; k++) { int i = nrshc_tab_at(t, k * 0x10001, 1); CHECK(i >= 0, "insert %llu", (unsigned long long)k); t->val[i] += (uint32_t)(k % 3 + 1); }
+    for (uint64_t k = 1; k <= 3000; k++) { int i = nrshc_tab_at(t, k * 0x10001, 1); CHECK(i >= 0, "insert %llu", (unsigned long long)k); t->e[i].val += (uint32_t)(k % 3 + 1); }
     CHECK(t->n == 3000, "n %u", t->n);
     CHECK(nrshc_tab_get(t, 5 * 0x10001) == 5 % 3 + 1, "get");
     CHECK(nrshc_tab_get(t, 77) == 0, "missing");

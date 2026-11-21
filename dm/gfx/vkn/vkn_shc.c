@@ -565,6 +565,8 @@ static uint64_t ubo_hash(int st, uint32_t slot, uint32_t off, uint32_t n, uint32
     if (slot < VKN_UBO_SLOTS) { g.um[st][slot].frame = g.frame + 1; g.um[st][slot].off = off; g.um[st][slot].n = n; g.um[st][slot].h = h; g.um[st][slot].mk = NULL; }
     return h;
 }
+extern const vkn_draw_in *vkn_draw_rt_in;   // [rt2 F1] vkn_draw.c (the draw the record executes now)
+static struct { uint64_t used, checked, moved; } g_vs;   // [rt2 F1] versions from the record: used / checked (EHASH=2) / the table had moved on
 static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
     const vkn_shader *sh = ctx->shader; nrshc_range *r = g.rg; const int k = g.R.k;
     int tw = NRSHC_T_OK, nw = NRS_OK, salt = 0;
@@ -578,15 +580,28 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     h = nrshc_mix(h, (uint64_t)in->prim | (uint64_t)in->stencil_ref << 8 | (uint64_t)ctx->indexed << 16 | (uint64_t)ar << 32);
     h = nrshc_mix(h, (uint64_t)ctx->first | (uint64_t)ctx->count << 32); h = nrshc_mix(h, ctx->instances);
     h = nrshc_bytes(h, in->viewport, sizeof in->viewport); h = nrshc_bytes(h, in->scissor, sizeof in->scissor);
-    // the vertex streams the format reads, the index buffer: handles, offsets and content versions
+    // the vertex streams the format reads, the index buffer: handles, offsets and content versions. [rt2 F1] The versions the engine thread
+    // read at encode when the record carries them (vkn_rt.h vkn_draw_ver: the numbers of the bytes this draw reads); else the table
+    const vkn_draw_ver *pv = vkn_draw_rt_ver && vkn_draw_rt_in == in && vkn_draw_rt_ver->ok ? vkn_draw_rt_ver : NULL;
     const vkn_vfmt *vf = ctx->vfmt ? vkn_vfmt_info(ctx->vfmt) : NULL;
     for (uint32_t i = 0; vf && i < vf->nbind; i++) {
         const uint32_t st = vf->bind[i].binding; if (st >= 3) continue;
-        int none = 1; const uint64_t v = vkn_buf_version(VKN_BUF_VB, in->vb[st], &none);
+        int none = 1; uint64_t v;
+        if (pv) {
+            v = pv->vb[st]; none = pv->vnone >> st & 1; g_vs.used++;
+            if (vkn_rt_ehash() == 2 || vkn_rt_res() == 2) { int n2 = 1; const uint64_t v2 = vkn_buf_version(VKN_BUF_VB, in->vb[st], &n2); g_vs.checked++; if (v2 != v || n2 != none) g_vs.moved++; }
+        } else v = vkn_buf_version(VKN_BUF_VB, in->vb[st], &none);
         h = nrshc_mix(h, in->vb[st]); h = nrshc_mix(h, (uint64_t)in->vb_off[st] | (uint64_t)st << 32);
         vj = nrshc_mix(vj, v); salt |= none; t.vread |= (uint8_t)(1u << st); t.vver[st] = v;
     }
-    if (ctx->indexed) { int none = 1; t.iver = vkn_buf_version(VKN_BUF_IB, in->ib, &none); h = nrshc_mix(h, in->ib); vj = nrshc_mix(vj, t.iver); salt |= none; }
+    if (ctx->indexed) {
+        int none = 1;
+        if (pv) {
+            t.iver = pv->ib; none = pv->inone; g_vs.used++;
+            if (vkn_rt_ehash() == 2 || vkn_rt_res() == 2) { int n2 = 1; const uint64_t v2 = vkn_buf_version(VKN_BUF_IB, in->ib, &n2); g_vs.checked++; if (v2 != t.iver || n2 != none) g_vs.moved++; }
+        } else t.iver = vkn_buf_version(VKN_BUF_IB, in->ib, &none);
+        h = nrshc_mix(h, in->ib); vj = nrshc_mix(vj, t.iver); salt |= none;
+    }
     if (in->prim == 2 || in->prim == 4 || in->prim == 7) t.ok = 0;   // fan / quads / loop: the draw path rewrites its indices (not replayed)
     // what the shader reads: constant blocks by content, textures by pool id + object + upload number, samplers by object
     int feedback = 0;
@@ -783,6 +798,7 @@ void vkn_shc_install(void) {
     g.par.stable = num("DM_VK_NATIVE_SHCACHE_STABLE", 3, 1, 60); g.par.min_static = num("DM_VK_NATIVE_SHCACHE_MIN", 64, 1, NRSHC_DRAWS);
     g.par.max_age = num("DM_VK_NATIVE_SHCACHE_AGE", 120, 1, 100000); g.par.probe = num("DM_VK_NATIVE_SHCACHE_PROBE", 8, 0, 1000);
     g.verify_every = num("DM_VK_NATIVE_SHCACHE_VERIFY", 30, 0, 100000);
+    g.par.diag = num("DM_VK_NATIVE_SHC_DIAG", 0, 0, 1);   // [rt2 F1] the diagnostics-only tables (nr_shc.h nrshc_par.diag): off by default
     char from = 0; const char *f = getenv("DM_VK_NATIVE_SHFAR");
     int fr = f && *f ? atoi(f) : nrh_value(NRH_SHFAR, &from);
     if (f && *f) from = 'v';
@@ -800,9 +816,9 @@ void vkn_shc_install(void) {
     }
     { const char *k = getenv("DM_VK_NATIVE_SHC_MASK"); vkn_shc_mask_set(k && *k ? atoi(k) : 0);   // [rt P3-GPU] (default 0 until the phone's verify run)
       vkn_logf("shcache: DM_VK_NATIVE_SHC_MASK=%d (%s)", g_shm, g_shm == 1 ? "constant blocks hashed only over the rows the shader reads" : g_shm == 2 ? "whole blocks hashed, the masked hash counted" : "whole blocks"); }
-    vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u; DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
+    vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u diag=%u (DM_VK_NATIVE_SHC_DIAG); DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
              m == 0 ? "off" : m == 1 ? "on" : m == 2 ? "verify - decided and counted, drawn as the engine asks, would-be hits compared" : "poison - a hit keeps the cleared tile",
-             g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
+             g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, g.par.diag, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
              from == 'v' ? "env" : from == 'e' ? "DM_HACK_SHFAR" : from == 't' ? "DM_HACK_TIER" : "default");
     if (!g.inst) return;
     if (vkn_fx_register("shcache", shc_fx, NULL, 100)) { vkn_logf(RED "shcache: the draw-effect chain refused the function: off"); g.inst = 0; return; }
@@ -855,12 +871,12 @@ void vkn_shc_census(void) {
         }
         put(&w, "]; not replayable draws %llu; draws without a content version (never members) %llu; constant blocks hashed %.1f KB a frame (memo %llu), unrestored %llu; "
             "engine-thread hashes (DM_VK_NATIVE_SHC_EHASH=%d) used %llu, verified %llu, differ %llu, not given %llu; read masks (DM_VK_NATIVE_SHC_MASK=%d): blocks %llu, "
-            "narrowed %llu, %.1f of %.1f KB a frame; per armed cascade known / new by constants / new other / new by content / not compared:",
+            "narrowed %llu, %.1f of %.1f KB a frame; content versions from the record (rt2 F1) %llu, checked %llu, the table had moved on %llu; per armed cascade known / new by constants / new other / new by content / not compared%s:",
             (ull)s->unrep, (ull)s->salted, s->ubo_bytes / fr / 1024.0, (ull)s->ubo_memo, (ull)s->ubo_unrestored, vkn_rt_ehash(), (ull)g_eh.used, (ull)g_eh.verified, (ull)g_eh.differ, (ull)g_eh.na,
             g_shm, (ull)(g_shms.blocks - g_shmo.blocks), (ull)(g_shms.narrowed - g_shmo.narrowed), (g_shms.bytes_masked - g_shmo.bytes_masked) / fr / 1024.0,
-            (g_shms.bytes_whole - g_shmo.bytes_whole) / fr / 1024.0);
+            (g_shms.bytes_whole - g_shmo.bytes_whole) / fr / 1024.0, (ull)g_vs.used, (ull)g_vs.checked, (ull)g_vs.moved, g.par.diag ? "" : " (DM_VK_NATIVE_SHC_DIAG=0: every new draw counted as new other)");
         g_shmo = g_shms;
-        memset(&g_eh, 0, sizeof g_eh);
+        memset(&g_eh, 0, sizeof g_eh); memset(&g_vs, 0, sizeof g_vs);
         for (int i = 0; i < NRSHC_CAS; i++) if (s->cranges[i]) {
             const double rr = (double)s->cranges[i];
             put(&w, " c%d (%llu) %.0f/%.0f/%.0f/%.0f/%.0f", i, (ull)s->cranges[i], s->known[i] / rr, s->newu[i] / rr, s->newo[i] / rr, s->ncont[i] / rr, s->unc[i] / rr);

@@ -60,6 +60,7 @@ static uint64_t draws_now(void) {   // draws recorded so far (engine draws + UI 
     return d.draws + u.draws;
 }
 
+double vkn_prof_timer_ns(void) { return g.timer_ns; }   // [rt2 F1] (vkn_fx.c: subtracted from the per-function times)
 void vkn_prof_init(int level) {
     g.level = level < 0 ? 0 : level > 3 ? 3 : level;
     vkn_prof_lvl3 = g.level == 3;   // [rt P0]

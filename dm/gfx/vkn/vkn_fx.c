@@ -6,10 +6,11 @@
 #include <string.h>
 #include "vkn_fx.h"
 #include "vkn_state.h"
+double vkn_prof_timer_ns(void) __attribute__((weak));   // [rt2 F1] vkn_prof.c (absent in some host builds)
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 
-typedef struct fx_fn { vkn_fx_fn fn; void *user; int order; char name[24]; uint32_t when; int (*still)(void); uint64_t ns, nt; } fx_fn;   // [rt P4] when / still; [rt P0] ns / nt
+typedef struct fx_fn { vkn_fx_fn fn; void *user; int order; char name[24]; uint32_t when; int (*still)(void); uint64_t ns, nt, cns[2], cnt[2]; } fx_fn;   // [rt P4] when / still; [rt P0] ns / nt; [rt2 F1] cns / cnt: by set class (0 no colour target, 1 colour)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 // The chain is replaced as a whole (copy, edit, publish the count last): the recording thread reads it without the lock. Entries
 // are only ever inserted, and an insert shifts entries upwards starting from the end, so a reader that took the old count still
@@ -49,7 +50,7 @@ int vkn_fx_register(const char *name, vkn_fx_fn fn, void *user, int order) {
         while (at > 0 && g_fn[at - 1].order > order) { g_fn[at] = g_fn[at - 1]; at--; }
         g_fn[at].fn = fn; g_fn[at].user = user; g_fn[at].order = order;
         snprintf(g_fn[at].name, sizeof g_fn[at].name, "%s", name ? name : "?");
-        g_fn[at].ns = g_fn[at].nt = 0; gate_apply_locked(&g_fn[at]);   // [rt P4]
+        g_fn[at].ns = g_fn[at].nt = 0; memset(g_fn[at].cns, 0, sizeof g_fn[at].cns); memset(g_fn[at].cnt, 0, sizeof g_fn[at].cnt); gate_apply_locked(&g_fn[at]);   // [rt P4]
         __atomic_store_n(&g_nfn, n + 1, __ATOMIC_RELEASE); rc = 0;
     }
     pthread_mutex_unlock(&g_mu);
@@ -114,7 +115,11 @@ void vkn_fx_run(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
             if (out->skip) { g_st.skipped++; g_st.by_fn_skip[i]++; return; }
             continue;
         }
-        if (__builtin_expect(tm, 0)) { const uint64_t t0 = vkn_now_ns(); g_fn[i].fn(in, &c, out, g_fn[i].user); g_fn[i].ns += vkn_now_ns() - t0; g_fn[i].nt++; }
+        if (__builtin_expect(tm, 0)) {
+            int cc = 0; for (uint32_t q = 0; q < VKN_PASS_COLORS; q++) cc |= c.color[q] != NULL;   // [rt2 F1] the set's class
+            const uint64_t t0 = vkn_now_ns(); g_fn[i].fn(in, &c, out, g_fn[i].user); const uint64_t dt = vkn_now_ns() - t0;
+            g_fn[i].ns += dt; g_fn[i].nt++; g_fn[i].cns[cc] += dt; g_fn[i].cnt[cc]++;
+        }
         else g_fn[i].fn(in, &c, out, g_fn[i].user);
         if (out->skip) { g_st.skipped++; g_st.by_fn_skip[i]++; return; }
     }
@@ -256,13 +261,20 @@ void vkn_fx_census(void) {
         if (g_gate) vkn_logf("fx gate: DM_VK_NATIVE_FXGATE=%d: calls left out %llu, verified %llu, differ %llu, target-set edges %llu (since the last line)", g_gate,
                              (unsigned long long)(g_gs.gated - go.gated), (unsigned long long)(g_gs.verified - go.verified), (unsigned long long)(g_gs.differ - go.differ), (unsigned long long)(g_gs.edges - go.edges));
         go = g_gs;
-        static uint64_t ons[VKN_FX_CHAIN], ont[VKN_FX_CHAIN];
-        char fl[640]; int k = 0; fl[0] = 0; uint64_t any = 0;
-        for (uint32_t i = 0; i < s.nfn && k < (int)sizeof fl - 48; i++) {
+        // [rt2 F1] one timer read subtracted per timed call (the interval holds one read: the draw-part rule); split by the set's class:
+        // no colour target (the shadow atlas, depth-only passes) / colour targets, each with its share of the sampled calls
+        static uint64_t ons[VKN_FX_CHAIN], ont[VKN_FX_CHAIN], ocns[VKN_FX_CHAIN][2], ocnt[VKN_FX_CHAIN][2];
+        const double tns = vkn_prof_timer_ns ? vkn_prof_timer_ns() : 0.0;
+        char fl[1400]; int k = 0; fl[0] = 0; uint64_t any = 0;
+        for (uint32_t i = 0; i < s.nfn && k < (int)sizeof fl - 120; i++) {
             const uint64_t nt = g_fn[i].nt - ont[i], ns = g_fn[i].ns - ons[i]; any |= nt;
-            k += snprintf(fl + k, sizeof fl - (size_t)k, "%s%s %.3f", i ? ", " : "", g_fn[i].name, nt ? (double)ns / (double)nt / 1000.0 : 0.0);
+            double cu[2]; uint64_t cn[2];
+            for (int q = 0; q < 2; q++) { cn[q] = g_fn[i].cnt[q] - ocnt[i][q]; const double v = cn[q] ? ((double)(g_fn[i].cns[q] - ocns[i][q]) / (double)cn[q] - tns) / 1000.0 : 0.0; cu[q] = v > 0 ? v : 0; ocnt[i][q] = g_fn[i].cnt[q]; ocns[i][q] = g_fn[i].cns[q]; }
+            const double all = nt ? ((double)ns / (double)nt - tns) / 1000.0 : 0.0;
+            k += snprintf(fl + k, sizeof fl - (size_t)k, "%s%s %.3f (no colour %.3f x %.0f %%, colour %.3f)", i ? ", " : "", g_fn[i].name, all > 0 ? all : 0.0, cu[0],
+                          nt ? 100.0 * (double)cn[0] / (double)nt : 0.0, cu[1]);
             ont[i] = g_fn[i].nt; ons[i] = g_fn[i].ns;
         }
-        if (any) vkn_logf("fx by function (us a sampled chain call, DM_VK_NATIVE_PROF=3; x chain calls a frame = ms): %s", fl);
+        if (any) vkn_logf("fx by function (us a sampled chain call, timer %.0f ns subtracted, DM_VK_NATIVE_PROF=3; x chain calls a frame = ms): %s", tns, fl);
     }
 }

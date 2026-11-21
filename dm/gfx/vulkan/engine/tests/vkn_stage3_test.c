@@ -3608,6 +3608,10 @@ static void rtx_setup(void) {
     g_rx_atlas = mktex(342, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 512, 512, 1, 1, 342, 0);
     CHECK(g_rx_ui_c && g_rx_ui_d && g_rx_atlas);
     CHECK(mktex(346, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 346, 0) != NULL);   // the casters' texture: never written (earlier tests destroy 305)
+    {   // [rt2 F1] one caster's own vertex buffer, updated right after the casters every 6th frame (a rename: the frame's draw read the old bytes)
+        vkn_block b; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(58, 1), 4096, 0, 0, NULL, &b), 0);
+        uint8_t *v = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(58, 1))->cpu; for (int i = 0; i < 4096; i++) v[i] = (uint8_t)(i * 11 + 3);
+    }
     CHECK(vkn_ds_put(H(76, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // LESS with writes: the casters
     CHECK(mkshader(H(82, 1), "v300000000000001", "f300000000000001", NULL) != NULL);   // the casters' shader (test_a5_shc's H(80, 1))
     // MAT: fragment block slot 0 (bank 3) word 1 == 1.0f gates the kill (test_b5_mat's gate); variant B's cut-down vertex module
@@ -3701,8 +3705,13 @@ static void rtx_frame(uint32_t f) {
                 u[0] = (uint32_t)k; u[1] = (uint32_t)i; u[2] = i >= 12 ? f + 1 : 0; u[3] = 0x53484331u;
                 vkn_rt_ubo(0, 2, off, 64);
                 in.vb_off[0] = 16u * (uint32_t)(k * 20 + i);
+                in.vb[0] = k == 1 && i == 3 ? H(58, 1) : H(54, 1);   // [rt2 F1]
                 vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 3u * (uint32_t)(k * 20 + i), 3, 1);
             }
+        }
+        if (f % 6 == 2) {   // [rt2 F1] the caster's buffer gets new bytes after its draw (the engine thread, possibly frames ahead of the recording)
+            uint8_t data[64]; void *cpu = NULL; uint64_t va = 0; for (int i = 0; i < 64; i++) data[i] = (uint8_t)(f * 5 + i);
+            CHECK(vkn_buf_update(VKN_BUF_VB, H(58, 1), 64, data, 64, &cpu, &va) >= 0);
         }
         rt_targets(g_a2, g_d3);
         vkn_draw_in l = g_in; l.tex[0] = NULL; l.smp[0] = NULL; l.tex[1] = g_rx_atex; l.smp[1] = rt_fsmp; l.tex[2] = NULL; l.smp[2] = NULL; l.ib = H(52, 1);

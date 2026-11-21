@@ -201,30 +201,35 @@ static inline int nrshc_same_delta(uint64_t m, const float d[64], uint64_t rm, c
 }
 
 // ---- a multiset / map of hashes (generation stamped: clear is O(1)) ----
+// [rt2 F1] key / value / generation of a slot in one 16-byte entry (was three arrays: a probe touched three cache lines in tables of
+// 192 KB each - the shadow cache's cost per caster on the phone was mostly these misses); use / ugen (only the member multiset's take)
+// stay apart. The contents, the probe order and every answer are the old ones.
+typedef struct { uint64_t key; uint32_t val, gen; } nrshc_te;
 typedef struct {
-    uint64_t key[NRSHC_TAB]; uint32_t val[NRSHC_TAB], gen[NRSHC_TAB], use[NRSHC_TAB], ugen[NRSHC_TAB];
+    nrshc_te e[NRSHC_TAB]; uint32_t use[NRSHC_TAB], ugen[NRSHC_TAB];
     uint32_t g, ug, n;
 } nrshc_tab;
-static inline void nrshc_tab_clear(nrshc_tab *t) { if (++t->g == 0) { memset(t->gen, 0, sizeof t->gen); t->g = 1; } t->n = 0; if (++t->ug == 0) { memset(t->ugen, 0, sizeof t->ugen); t->ug = 1; } }
+static inline void nrshc_tab_clear(nrshc_tab *t) { if (++t->g == 0) { for (uint32_t i = 0; i < NRSHC_TAB; i++) t->e[i].gen = 0; t->g = 1; } t->n = 0; if (++t->ug == 0) { memset(t->ugen, 0, sizeof t->ugen); t->ug = 1; } }
 static inline void nrshc_tab_unuse(nrshc_tab *t) { if (++t->ug == 0) { memset(t->ugen, 0, sizeof t->ugen); t->ug = 1; } }
 // index of k (insert: created with val 0 when missing and room is left; -1 = missing / full)
 static inline int nrshc_tab_at(nrshc_tab *t, uint64_t k, int insert) {
     uint32_t i = (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 51) & (NRSHC_TAB - 1);
     for (uint32_t probe = 0; probe < NRSHC_TAB; probe++, i = (i + 1) & (NRSHC_TAB - 1)) {
-        if (t->gen[i] != t->g) {
+        nrshc_te *e = &t->e[i];
+        if (e->gen != t->g) {
             if (!insert || t->n >= NRSHC_TAB / 2) return -1;
-            t->gen[i] = t->g; t->key[i] = k; t->val[i] = 0; ++t->n; return (int)i;
+            e->gen = t->g; e->key = k; e->val = 0; ++t->n; return (int)i;
         }
-        if (t->key[i] == k) return (int)i;
+        if (e->key == k) return (int)i;
     }
     return -1;
 }
-static inline uint32_t nrshc_tab_get(const nrshc_tab *t, uint64_t k) { int i = nrshc_tab_at((nrshc_tab *)t, k, 0); return i < 0 ? 0 : t->val[i]; }
+static inline uint32_t nrshc_tab_get(const nrshc_tab *t, uint64_t k) { int i = nrshc_tab_at((nrshc_tab *)t, k, 0); return i < 0 ? 0 : t->e[i].val; }
 // consume one unit of k (multiset member): 1 = there was one left
 static inline int nrshc_tab_take(nrshc_tab *t, uint64_t k) {
     int i = nrshc_tab_at(t, k, 0); if (i < 0) return 0;
     if (t->ugen[i] != t->ug) { t->ugen[i] = t->ug; t->use[i] = 0; }
-    if (t->use[i] >= t->val[i]) return 0;
+    if (t->use[i] >= t->e[i].val) return 0;
     ++t->use[i]; return 1;
 }
 
@@ -234,8 +239,10 @@ typedef struct {
     uint32_t max_age;     // ranges a layer lives at most (default 120)
     uint32_t probe;       // a quiet cascade (moving camera: no static set for 4 ranges) is hashed in 2 ranges of every `probe` (default 8;
                           // 0 = always): the hashing cost of a moving scene drops to 2 / probe, a still scene is seen again within probe ranges
+    uint32_t diag;        // [rt2 F1] 1 = keep the diagnostics-only tables (shist / uhist: "new by constants / other / by content"); 0 = not
+                          // touched (no decision reads them: the new draws are counted as new_other, unsplit). Default 1 (the old path's)
 } nrshc_par;
-static inline nrshc_par nrshc_par_default(void) { nrshc_par p; p.stable = 3; p.min_static = 64; p.max_age = 120; p.probe = 8; return p; }
+static inline nrshc_par nrshc_par_default(void) { nrshc_par p; p.stable = 3; p.min_static = 64; p.max_age = 120; p.probe = 8; p.diag = 1; return p; }
 enum { NRSHC_QUIET = 4 };   // ranges without a static set before the cascade is only probed
 
 // one cascade slot
@@ -313,14 +320,17 @@ static inline int nrshc_draw(nrshc_cas *c, const nrshc_par *p, nrshc_range *r, u
     const uint32_t streak = nrshc_tab_get(&c->hist[c->hc], h);
     if (!c->prev_hashed) ++r->unc;
     else if (streak) ++r->known;
+    else if (!p->diag) ++r->new_other;   // [rt2 F1] (unsplit)
     else { const int u = nrshc_tab_at(&c->uhist[c->hc], hn, 0);
-        if (u >= 0) { ++r->new_content; const uint32_t o = c->uhist[c->hc].val[u];
+        if (u >= 0) { ++r->new_content; const uint32_t o = c->uhist[c->hc].e[u].val;
             for (int k = 0; k < NRSHC_VC_N; k++) if (((o ^ vtag) >> (10 * k)) & 1023) ++r->nc[k]; }
         else if (nrshc_tab_get(&c->shist[c->hc], hs)) ++r->new_ubo;
         else ++r->new_other; }
-    { const int j = nrshc_tab_at(&c->shist[c->hc ^ 1], hs, 1); if (j >= 0) c->shist[c->hc ^ 1].val[j] = 1; }
-    { const int j = nrshc_tab_at(&c->uhist[c->hc ^ 1], hn, 1); if (j >= 0) c->uhist[c->hc ^ 1].val[j] = vtag; }
-    { const int i = nrshc_tab_at(&c->hist[c->hc ^ 1], h, 1); if (i >= 0 && c->hist[c->hc ^ 1].val[i] == 0) c->hist[c->hc ^ 1].val[i] = streak + 1; }
+    if (p->diag) {   // [rt2 F1] the diagnostics-only tables
+        { const int j = nrshc_tab_at(&c->shist[c->hc ^ 1], hs, 1); if (j >= 0) c->shist[c->hc ^ 1].e[j].val = 1; }
+        { const int j = nrshc_tab_at(&c->uhist[c->hc ^ 1], hn, 1); if (j >= 0) c->uhist[c->hc ^ 1].e[j].val = vtag; }
+    }
+    { const int i = nrshc_tab_at(&c->hist[c->hc ^ 1], h, 1); if (i >= 0 && c->hist[c->hc ^ 1].e[i].val == 0) c->hist[c->hc ^ 1].e[i].val = streak + 1; }
     if (streak + 2 >= p->stable) ++r->cand_next;   // a member of the next range if it comes again (streak after it >= stable)
     if (r->ndraw >= NRSHC_DRAWS) { r->overflow = 1; ++r->ndraw; return 0; }
     const uint32_t o = r->ndraw++;
@@ -348,7 +358,7 @@ static inline int nrshc_end(nrshc_cas *c, const nrshc_par *p, nrshc_range *r, ui
         if (broken) { c->layer = 0; e = NRSHC_E_RECOVER; }
         else if (r->nmem_drawn >= p->min_static) {
             nrshc_tab_clear(&c->mem); c->nmem = 0;
-            for (uint32_t i = 0; i < r->ndraw; i++) if (r->f[i] == NRSHC_F_DRAWN) { const int j = nrshc_tab_at(&c->mem, r->h[i], 1); if (j >= 0) { ++c->mem.val[j]; ++c->nmem; } }
+            for (uint32_t i = 0; i < r->ndraw; i++) if (r->f[i] == NRSHC_F_DRAWN) { const int j = nrshc_tab_at(&c->mem, r->h[i], 1); if (j >= 0) { ++c->mem.e[j].val; ++c->nmem; } }
             if (c->nmem != r->nmem_drawn) { c->layer = 0; e = r->nskip ? NRSHC_E_REST : NRSHC_E_NONE; }   // the table was full: no layer
             else { c->layer = 1; c->layer_ranges = 0; c->atlas = atlas; memcpy(c->rect, rect, sizeof c->rect); c->clear_bits = clear_bits; e = NRSHC_E_BUILD; }
         } else { c->layer = 0; e = r->nskip ? NRSHC_E_REST : NRSHC_E_NONE; }

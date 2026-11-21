@@ -59,6 +59,14 @@ void vkn_rt_install(int mode, int slots);
 // both, compared, counted ("shcache ... engine hashes ... differ N", must be 0). The bytes of an announced block never change in its
 // frame (the ring is handed out linearly and guarded against overwriting frames in flight), so the hash at encode is the hash at use;
 // a hash is used only in the frame it was made for (vkn_draw_ubo_hash).
+// [rt2 F1] in the threaded modes a draw record of a depth-only set also carries the content versions (vkn_buf_version) of the vertex
+// streams its format reads and of its index buffer, read at encode: the versions of the bytes the draw reads (an update after the encode
+// renames the buffer or lands in a block no draw named - vkn_buf.h). The recording thread's table may already hold a later number (the
+// engine thread runs up to 2 frames ahead): the shadow cache keyed a draw of the old bytes by the new number, so the next frame's draw of
+// the new bytes looked known - a false-hit window the mode 0 never had. The cache takes these (vkn_draw_rt_ver while vkn_draw_rt_in is the
+// chain's draw); with SHC_EHASH=2 or RT_RES=2 it also counts how often the table had moved on ("versions moved": information, not an error).
+typedef struct vkn_draw_ver { uint64_t vb[3], ib; uint8_t vnone, inone, ok, pad[5]; } vkn_draw_ver;   // vnone bit st / inone: *none of vkn_buf_version
+extern const vkn_draw_ver *vkn_draw_rt_ver;
 void vkn_rt_ehash_set(int mode);
 int vkn_rt_ehash(void);
 void vkn_rt_lean_set(int lean);
@@ -134,6 +142,7 @@ typedef struct vkn_rt_stats {
     uint64_t ops[8], bytes, frames, syncs, sync_wait_ns, bp_wait_ns, idle_ns, busy_ns, ahead[4];
     uint64_t guard_ring, mispredict, foreign, slot_copies, slot_gen_miss, oom, inline_ops, guard_cpu;
     uint64_t lean_ubo_skip, lean_q_skip, lean_slot_arrays, res_draws;   // [rt P1] announces / query records not written, arrays sent; [rt P2] draws resolved
+    uint64_t ver_draws;                                                  // [rt2 F1] draw records with the content versions
 } vkn_rt_stats;
 enum { VKN_RT_OP_DRAW, VKN_RT_OP_DISPATCH, VKN_RT_OP_UBO, VKN_RT_OP_SLOTS, VKN_RT_OP_CALL, VKN_RT_OP_FRAME, VKN_RT_OP_SNAP, VKN_RT_OP_NEXT };
 void vkn_rt_stats_get(vkn_rt_stats *s);

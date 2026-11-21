@@ -106,6 +106,7 @@ enum {
     VKN_PROF_F_DRAW_CMD,   // draw-cmd: vkCmdDraw* (driver)
     VKN_PROF_FINE
 };
+double vkn_prof_timer_ns(void);           // [rt2 F1] the calibrated cost of one timer read (ns)
 extern int vkn_prof_lvl3;                // 1 = DM_VK_NATIVE_PROF=3 (read anywhere; set once at init)
 void vkn_prof_mark_f_slow(int fine);
 static inline void vkn_prof_mark_f(int fine) { if (__builtin_expect(vkn_prof_h.on3 != 0, 0)) vkn_prof_mark_f_slow(fine); }

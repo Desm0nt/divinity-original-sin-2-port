@@ -524,12 +524,16 @@ static int slots_enc(const vkn_draw_in *in) {
 }
 
 // ---- draws ----
-typedef struct op_draw { rt_hdr h; uint8_t indexed, cond_on, has_pre, pad; uint32_t first, count, instances, snap; uint32_t pad2[3]; uint64_t cond; vkn_draw_in in; } op_draw;
-// [rt P2] RES: the resolution (vkn_draw_pre) after the fixed part, then the index snapshot
+typedef struct op_draw { rt_hdr h; uint8_t indexed, cond_on, has_pre, has_ver; uint32_t first, count, instances, snap; uint32_t pad2[3]; uint64_t cond; vkn_draw_in in; } op_draw;
+// [rt P2] RES: the resolution (vkn_draw_pre) after the fixed part, [rt2 F1] the versions (vkn_draw_ver: depth-only sets with EHASH),
+// then the index snapshot
 #define DRAW_FIX ((sizeof(op_draw) + 15u) & ~15u)
 #define PRE_BYTES ((sizeof(vkn_draw_pre) + 15u) & ~15u)
+#define VER_BYTES ((sizeof(vkn_draw_ver) + 15u) & ~15u)
 #define DRAW_PRE(d) ((vkn_draw_pre *)((uint8_t *)(d) + DRAW_FIX))
-#define DRAW_SNAP(d) ((uint8_t *)(d) + DRAW_FIX + ((d)->has_pre ? PRE_BYTES : 0))
+#define DRAW_VER(d) ((vkn_draw_ver *)((uint8_t *)(d) + DRAW_FIX + ((d)->has_pre ? PRE_BYTES : 0)))
+#define DRAW_SNAP(d) ((uint8_t *)(d) + DRAW_FIX + ((d)->has_pre ? PRE_BYTES : 0) + ((d)->has_ver ? VER_BYTES : 0))
+const vkn_draw_ver *vkn_draw_rt_ver;   // [rt2 F1] (vkn_rt.h)
 static const vkn_vfmt *vf_of(uint64_t h) {
     if (!h) return NULL;
     if (h == g_vf_h && g_vf) return g_vf;
@@ -546,6 +550,15 @@ static void mark(const vkn_draw_in *in, int indexed, vkn_buf_info *ib, int *ib_r
     if (indexed) *ib_rc = in->ib ? vkn_buf_lookup(VKN_BUF_IB, in->ib, ib) : -1;   // (marks it)
 }
 static int rw_prim(uint8_t p) { return p == 2 || p == 4 || p == 7; }
+static void ver_enc(const vkn_draw_in *in, int indexed, vkn_draw_ver *v) {   // [rt2 F1] the encoder's view at this draw
+    memset(v, 0, sizeof *v); v->ok = 1;
+    const vkn_vfmt *vf = vf_of(in->vfmt);
+    for (uint32_t i = 0; vf && i < vf->nbind; i++) {
+        const uint32_t st = vf->bind[i].binding; if (st >= 3) continue;
+        int none = 1; v->vb[st] = vkn_buf_version(VKN_BUF_VB, in->vb[st], &none); if (none) v->vnone |= (uint8_t)(1u << st);
+    }
+    if (indexed) { int none = 1; v->ib = vkn_buf_version(VKN_BUF_IB, in->ib, &none); v->inone = (uint8_t)none; }
+}
 static int draw_enc(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t count, uint32_t instances) {
     vkn_buf_info ib; int ib_rc = -1; memset(&ib, 0, sizeof ib);
     vkn_draw_pre pre; const int res = g_res != 0;
@@ -557,10 +570,12 @@ static int draw_enc(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t
         if (((uint64_t)first + count) * isz <= ib.size && (uint64_t)count * isz < (64u << 20)) { snap = count * isz; src = (const uint8_t *)ib.blk.cpu + (uint64_t)first * isz; }
     }
     if (slots_enc(in)) return -1;
-    int inl; op_draw *d = (op_draw *)rec_new(K_DRAW, (uint32_t)DRAW_FIX + (res ? (uint32_t)PRE_BYTES : 0u) + snap, &inl);
+    const int ver = g_threaded && g_enc_donly;   // [rt2 F1] always when threaded (an exactness fix; inline execution reads the table at the draw itself: the same view)
+    int inl; op_draw *d = (op_draw *)rec_new(K_DRAW, (uint32_t)DRAW_FIX + (res ? (uint32_t)PRE_BYTES : 0u) + (ver ? (uint32_t)VER_BYTES : 0u) + snap, &inl);
     if (!d) return -1;
     d->indexed = (uint8_t)indexed; d->first = first; d->count = count; d->instances = instances; d->snap = snap;
     d->has_pre = (uint8_t)res; if (res) *DRAW_PRE(d) = pre;
+    d->has_ver = (uint8_t)ver; if (ver) { ver_enc(in, indexed, DRAW_VER(d)); ST_ADD(ver_draws, 1); }
     d->cond_on = (uint8_t)g_cond_on; d->cond = g_cond; g_cond_on = 0;
     d->in = *in; for (int k = 0; k < VKN_STAGE_SLOTS; k++) { d->in.tex[k] = NULL; d->in.smp[k] = NULL; }
     if (snap) { memcpy(DRAW_SNAP(d), src, snap); ST_ADD(ops[VKN_RT_OP_SNAP], 1); }
@@ -855,8 +870,9 @@ static void exec_one(rt_hdr *h) {
         if (prof) vkn_prof_draw_begin();
         if (d->snap) { vkn_draw_rt_snap = DRAW_SNAP(d); vkn_draw_rt_in = &in; }
         if (d->has_pre) { vkn_draw_rt_pre = DRAW_PRE(d); vkn_draw_rt_res_verify = g_res == 2; vkn_draw_rt_in = &in; }   // [rt P2]
+        if (d->has_ver) { vkn_draw_rt_ver = DRAW_VER(d); vkn_draw_rt_in = &in; }   // [rt2 F1]
         if (d->indexed) (void)vkn_draw_indexed(&in, d->first, d->count, d->instances); else (void)vkn_draw_arrays(&in, d->first, d->count);
-        vkn_draw_rt_snap = NULL; vkn_draw_rt_in = NULL; vkn_draw_rt_pre = NULL;
+        vkn_draw_rt_snap = NULL; vkn_draw_rt_in = NULL; vkn_draw_rt_pre = NULL; vkn_draw_rt_ver = NULL;
         if (prof) vkn_prof_draw_end();
         break;
     }
