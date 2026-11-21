@@ -11,6 +11,7 @@
 #include "../nr/nr_occ.h"
 #include "vkn_occ.h"   // [stage 5 technique A] modes 5 / 6
 #include "vkn_occb.h"  // [stage 5 technique B] modes 7 / 8
+#include "vkn_occz.h"  // [stage 5 technique Z] modes 10 .. 13
 
 #define Q_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark
 // The front end (android/vulkan_present.cpp) enabled VK_EXT_conditional_rendering on the device (asked for with DM_VK_NATIVE_COND 1 / 3).
@@ -117,6 +118,10 @@ static const char *mode_text(int m) {
          : m == VKN_COND_A_VERIFY ? "technique A VERIFY: a query on every pair, nothing skipped, A's decisions checked against them"
          : m == VKN_COND_B ? "technique B: group queries and group conditions (vkn_occb.h)"   // [stage 5 technique B]
          : m == VKN_COND_B_VERIFY ? "technique B VERIFY: per-member queries, captured G-buffer draws queried and drawn, B's group decisions checked"
+         : m == VKN_COND_Z ? "technique Z count only: depth snapshot + engine boxes decided on the engine thread, everything drawn (vkn_occz.h)"   // [stage 5 technique Z]
+         : m == VKN_COND_Z_VERIFY ? "technique Z VERIFY: queries on every pair + Z's self-check, nothing skipped"
+         : m == VKN_COND_Z_ON ? "technique Z: the worker skips the pairs the engine thread decided hidden"
+         : m == VKN_COND_Z_POISON ? "technique Z POISON: trusted VISIBLE objects skipped (they vanish)"
          : m == VKN_COND_AB ? "techniques A + B: A's CPU skips first, B's group queries and conditions for the rest"
          : m == VKN_COND_ORACLE ? "ORACLE: INEXACT, for measurements while standing only, never for players (a query on every pair once in 64 frames, "
                                   "the draws of objects last seen hidden skipped on the CPU in between)" : "off";
@@ -192,6 +197,7 @@ static void readback(q_slot *s, int si) {   // the slot's last recording finishe
     s->ncond = 0;
     if (vkn_cond_is_a(g_mode)) for (uint32_t q = 0; q < s->copied; q++) vkn_occ_q_result(si, q, g_pred[(uint32_t)si * VKN_Q_CAP + q]);   // [stage 5 technique A]
     if (vkn_cond_is_b(g_mode)) for (uint32_t q = 0; q < s->copied; q++) vkn_occb_q_result(si, q, g_pred[(uint32_t)si * VKN_Q_CAP + q]);   // [stage 5 technique B]
+    if (g_mode == VKN_COND_Z_VERIFY) for (uint32_t q = 0; q < s->copied; q++) vkn_occz_q_result(si, q, g_pred[(uint32_t)si * VKN_Q_CAP + q]);   // [stage 5 technique Z]
     // object verdicts (modes 2 / 4): one serial of the history per read recording
     uint32_t keyed = 0;
     for (uint32_t q = 0; q < s->nq; q++) keyed += s->qkey[q] != 0;
@@ -217,6 +223,7 @@ static void on_begin(void) {
     g_rec_noq = !g_mode; g_count_now = 0; g_o1_skip = 0; g_dcond = -1;
     if (++g_gen == 0) { memset(g_map, 0, sizeof g_map); memset(g_mm, 0, sizeof g_mm); g_gen = 1; }
     if (!g_mode || g_broken || !vkn_rec_presented()) return;
+    if (vkn_cond_is_z(g_mode) && g_mode != VKN_COND_Z_VERIFY) { g_rec_noq = 1; return; }   // [stage 5 technique Z] pairs tracked, no query
     if (!g_setup && setup()) return;
     if (g_broken) return;
     if (!g_mode) { g_rec_noq = 1; return; }   // [stage 5 technique B] mode 7 fell back to 0 at setup
@@ -238,7 +245,7 @@ static void on_begin(void) {
     if (s->dirty) vkCmdResetQueryPool(cb, s->pool, 0, s->dirty);
     s->nq = s->copied = s->dirty = 0; s->ncond = 0; s->used = 1; s->read = 0; s->frame = vkn_frame();
     if (g_mode == VKN_COND_ORACLE) { g_opend = g_next; g_os.oracle_frames++; }
-    g_count_now = g_mode == VKN_COND_COUNT || g_mode == VKN_COND_ORACLE || g_mode >= VKN_COND_A;   // [stage 5 technique A / B] 5 .. 8 count
+    g_count_now = g_mode == VKN_COND_COUNT || g_mode == VKN_COND_ORACLE || g_mode >= VKN_COND_A;   // [stage 5 technique A / B] 5 .. 8 count; [Z] 11
     if (vkn_cond_is_a(g_mode)) vkn_occ_q_slot_taken(g_next);
     if (vkn_cond_is_b(g_mode)) vkn_occb_q_slot_taken(g_next);   // [stage 5 technique B]
     g_cur = g_next; g_next = (g_next + 1) % VKN_Q_SLOTS; g_st.slots_taken++;
@@ -259,6 +266,7 @@ static void on_close(void) {
 static void occ_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
 // [stage 5 technique A] after this module's own listeners: the slot this recording took (g_cur), the recording's end
 static void occ_begin(void) {
+    if (vkn_cond_is_z(g_mode)) vkn_occz_q_rec_begin();   // [stage 5 technique Z]
     if (vkn_cond_is_a(g_mode)) vkn_occ_q_rec_begin(!g_broken && vkn_rec_presented(), g_cur);
     if (vkn_cond_is_b(g_mode)) vkn_occb_q_rec_begin(!g_broken && vkn_rec_presented(), g_cur);   // [stage 5 technique B]
 }
@@ -271,7 +279,7 @@ static void listeners(void) {
     if (!done) { done = 1; vkn_rec_on_begin(on_begin); vkn_rec_on_close(on_close); vkn_rec_on_begin(occ_begin); vkn_rec_on_close(occ_close); }   // [stage 5 technique A] occ_*
 }
 void vkn_query_init(int mode) {
-    g_mode = mode < 0 || mode >= VKN_COND_MODES_B ? VKN_COND_OFF : mode;   // [stage 5 technique A / B] 5 .. 8 too
+    g_mode = mode < 0 || mode >= VKN_COND_MODES_Z ? VKN_COND_OFF : mode;   // [stage 5 technique A / B] 5 .. 9 too; [Z] 10 .. 13
     if (g_setup > 1 && !g_broken && vkn_device()) probe(vkn_device());   // (a second call: the host test switches modes / the extension)
     if (g_mode) listeners();
     if (g_mode == VKN_COND_COUNT || g_mode == VKN_COND_ORACLE) {   // O1: object keys, census bins, mode 4's skips
@@ -286,6 +294,7 @@ void vkn_query_init(int mode) {
         vkn_occb_init(vkn_cond_is_b(g_mode) ? (g_mode == VKN_COND_AB ? VKN_COND_B : g_mode) : 0, b && *b ? atoi(b) : -1);   // [stage 5 technique B] (9: A as 5, B as 7)
         if (g_mode >= VKN_COND_A) vkn_logf("query: DM_VK_NATIVE_COND=%d = %s", g_mode, mode_text(g_mode));
     }
+    vkn_occz_init(vkn_cond_is_z(g_mode) ? g_mode : 0);   // [stage 5 technique Z]
     const char *le = getenv("DM_VK_NATIVE_GBUF_LE");
     vkn_query_le_init(le && *le ? atoi(le) : 0);
     g_track = g_mode || vkn_query_le_asked();
@@ -457,6 +466,7 @@ void vkn_query_pass_closed(VkCommandBuffer cb) {
         s->qkey[q] = r->st == Q_COPIED && r->q == (int32_t)q ? r->okey : 0;   // a verdict of the whole pair, or none
         if (vkn_cond_is_a(g_mode)) vkn_occ_q_copied(g_cur, q, s->qrec[q], r->st == Q_COPIED && r->q == (int32_t)q);   // [stage 5 technique A]
         if (vkn_cond_is_b(g_mode)) vkn_occb_q_copied(g_cur, q, s->qrec[q], r->st == Q_COPIED && r->q == (int32_t)q);   // [stage 5 technique B]
+        if (g_mode == VKN_COND_Z_VERIFY) vkn_occz_q_copied(g_cur, q, r->key, r->st == Q_COPIED && r->q == (int32_t)q);   // [stage 5 technique Z]
     }
     s->copied = s->nq; g_st.copies++; g_st.copied += n;
     T_END;
@@ -586,7 +596,7 @@ static void le_pre_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *
     const vkn_shader *s = ctx->shader;
     if (!d) why = VKN_LE_TARGET;
     else if (!(ds_class(ds) & DSC_PRE)) why = VKN_LE_PRE_DS;
-    else if (out->discard || out->shader) why = VKN_LE_PRE_FS;   // primitives discarded / a piece's shader: not the engine's fragments
+    else if (out->discard || out->shader || out->vin.vs) why = VKN_LE_PRE_FS;   // primitives discarded / a piece's shader or vertex module (MAT B / XLQ / PRESKIN, as before [stage 5 rest])
     else if (!out->no_fs && s && (s->stages & (1u << VKN_SRC_FS))) {
         if (in->alpha_ref >= 0.0f) why = VKN_LE_PRE_ALPHA;   // the "#at" variant discards
         else { const int f = fs_facts(s); if (f != 0) why = VKN_LE_PRE_FS; }   // -1 unknown, or kill / depth / mask
@@ -702,6 +712,7 @@ void vkn_query_b_end_active(VkCommandBuffer cb) {
 }
 // [stage 5 technique A] what vkn_occ.c reads of the pairs (recording thread)
 int vkn_query_occ_open(void) { return g_open; }
+uint64_t vkn_query_occ_key(uint32_t rec) { return rec < g_nrec && rec < VKN_Q_RECS ? g_rec[rec].key : 0; }   // [stage 5 technique Z]
 int vkn_query_occ_cond(void) { return g_dcond; }
 void vkn_query_occ_nrec(uint32_t *n) { *n = g_nrec; }
 void vkn_query_occ_skipped(void) { if (g_open >= 0) g_rec[g_open].done++; }
@@ -712,6 +723,7 @@ int vkn_query_occ_rec(uint32_t rec, uint32_t *seen, uint32_t *done, int *closed,
     return 0;
 }
 void vkn_query_census_occ(void) {
+    if (vkn_cond_is_z(g_mode)) vkn_occz_census();   // [stage 5 technique Z]
     if (vkn_cond_is_a(g_mode)) vkn_occ_census();   // [stage 5 technique A]
     if (vkn_cond_is_b(g_mode)) vkn_occb_census();  // [stage 5 technique B]
     const uint64_t f = vkn_frame(), df = f > g_os_frame ? f - g_os_frame : 1;

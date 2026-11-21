@@ -22,11 +22,13 @@
 //   every instruction gl_Position depends on is the same instruction - bit-equal position; the pack-wide proof of this trim at mask 0
 //   is tools/dos2_nr_mat_proof.py / tools/dos2_xlq_check.py, NR-32.md section 5). The twin is a piece's shader (vkn_fx_shader_create):
 //   the engine's vertex-stage bindings, C1 fed as an effect block (vkn_fx_out.ubo[0]) from the engine object's static block.
+//   [stage 5 rest] Now the twin is NOT an object: the trimmed module rides on the engine shader object as vkn_fx_out.vin (vs + vs_id,
+//   vfmt 0; vkn_fx.h stage 5.3 V1 block): the same binding table, layout and C1 feed as the engine draw (the trim only removes output
+//   stores, so the module reads a subset of the engine vertex stage's bindings). No effect-shader table limit (was 896 objects).
 // XLQ (DM_VK_NATIVE_XLQ, every vertex + fragment draw on a depth target that MAT did not change): the vertex shader without the stores to
 //   output components the fragment shader never reads (xbg_spirv_fs_input_mask / _vs_output_mask, the same trim and check, keep = the
-//   read mask, the declared inputs stay on the interface). Its shader object carries the fragment module the draw path would take (the
-//   base one, or the library's "#at" alpha variant for the draw's reference: one object per (shader, retype, reference)) and the whole
-//   table (C1 of both stages as effect blocks 0 / 1). Refused (counted): NR-04 named entries (their fragment module depends on the pass),
+//   read mask, the declared inputs stay on the interface). [stage 5 rest] Drawn as vkn_fx_out.vin on the engine object, like variant B:
+//   the fragment module is the draw path's own (base / "#at" for the draw's reference), one module per (shader, retype code). Refused (counted): NR-04 named entries (their fragment module depends on the pass),
 //   passes without a depth target (full-screen passes: lighting / post pieces own those shaders), shaders past this piece's table.
 //
 // Interplay. The shadow cache (order 100) replays stored casters through vkn_fx_bypass: they do not pass the chain. [fixpp] vkn_shc.c
@@ -66,9 +68,9 @@ int vkn_mat_mode(void), vkn_mat_xlq(void);  // in effect (0 = off / not installe
 int vkn_mat_apply(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out);
 
 enum { VKN_MAT_W_FACTS, VKN_MAT_W_NOLIB, VKN_MAT_W_GATE, VKN_MAT_W_ALPHA, VKN_MAT_W_KILL, VKN_MAT_W_PENDING, VKN_MAT_W_NOTENG, VKN_MAT_W_N };
-enum { VKN_MAT_V_NOTHING, VKN_MAT_V_CHECK, VKN_MAT_V_TABLE, VKN_MAT_V_MODULE, VKN_MAT_V_CODES, VKN_MAT_V_WORDS, VKN_MAT_V_KIND, VKN_MAT_V_N };
+enum { VKN_MAT_V_NOTHING, VKN_MAT_V_CHECK, VKN_MAT_V_TABLE, VKN_MAT_V_MODULE, VKN_MAT_V_CODES, VKN_MAT_V_WORDS, VKN_MAT_V_KIND, VKN_MAT_V_VIN, VKN_MAT_V_N };
 enum { VKN_MAT_X_FS, VKN_MAT_X_NAMED, VKN_MAT_X_NODEPTH, VKN_MAT_X_NOTHING, VKN_MAT_X_CHECK, VKN_MAT_X_TABLE, VKN_MAT_X_MODULE, VKN_MAT_X_VARIANTS,
-       VKN_MAT_X_WORDS, VKN_MAT_X_KIND, VKN_MAT_X_N };
+       VKN_MAT_X_WORDS, VKN_MAT_X_KIND, VKN_MAT_X_VIN, VKN_MAT_X_N };
 typedef struct vkn_mat_stats {
     uint64_t seen, no_fs, would, pure, gate_off, gate_alpha, alpha_na, refused[VKN_MAT_W_N];   // depth-only draws
     uint64_t vs_swaps, vs_refused[VKN_MAT_V_N];                                               // variant B

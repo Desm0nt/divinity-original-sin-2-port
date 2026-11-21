@@ -73,6 +73,9 @@ enum { VKN_LF_W_SKY_SHAPE, VKN_LF_W_SKY_STASH, VKN_LF_W_NO_STASH, VKN_LF_W_LIGHT
 enum { VKN_LF_F_NOLIGHT, VKN_LF_F_STAGES, VKN_LF_F_RT, VKN_LF_F_BLEND, VKN_LF_F_MASK, VKN_LF_F_BIND, VKN_LF_F_TARGET, VKN_LF_F_SCENE,
        VKN_LF_F_DEPTH, VKN_LF_F_CONST, VKN_LF_F_VS, VKN_LF_F_DRAW, VKN_LF_F_COVER, VKN_LF_F_SPCLEAR, VKN_LF_F_TWIN, VKN_LF_F_N };
 const char *vkn_lf_reason_name(int fog, int i);
+// [stage 5 rest] why Sp was copied into the skipped Fog's target C (vkn_lf_stats.copy_by): C is a target of the next draw, an earlier
+// effect binds C, a reader of C that cannot take a shader object of its own. vkn_lf_reason_name(2, i).
+enum { VKN_LF_CP_TARGET, VKN_LF_CP_EFFECT, VKN_LF_CP_READER, VKN_LF_CP_N };
 
 typedef struct vkn_lf_stats {
     uint64_t frames, sky, light, fog;              // frames with a Sky draw; draws seen by role
@@ -82,6 +85,10 @@ typedef struct vkn_lf_stats {
     uint64_t fog_ok, fog_fused, fog_skipped, fog_back, fog_why[VKN_LF_F_N];   // Fog draws passing every check, fused Light draws with Fog, Fog draws skipped, drawn after a 'g' Light
     uint64_t redir_draws, redir_windows, redir_copies, redir_lost, redir_open_end, twins;   // draws reading Sp for C, windows, Sp -> C copies, non-draw reads, windows open at a frame change, reader shaders made
     uint64_t reds;
+    // [stage 5 rest] Sp -> C copies by reason (VKN_LF_CP_*): the designed way to end a window exactly, not an error (counted, the first
+    // few logged as plain lines). Phone 21.11 (series U, 13 runs): 45..58 copies once a run, all in the 10 s of the main menu -> world
+    // transition (the menu's fade draws into C), 0 in every gameplay window - no copy a frame to avoid.
+    uint64_t copy_by[3];
 } vkn_lf_stats;
 
 // Install (mode 1, hle_dos2_vkn.c): reads the switches, registers the function (order 300). Idempotent.

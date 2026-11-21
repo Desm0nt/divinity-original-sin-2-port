@@ -59,6 +59,11 @@ double vkn_hacks_gpu_ms(void) {
     if (!vkn_frame_gpu_ns(&b, &e) || e <= b) return -1.0;
     return (double)(e - b) / 1e6;
 }
+int vkn_hacks_recent_gpu_ms(double *ms) {
+    if (vkn_mode() != VKN_NATIVE) return 0;
+    if (ms) *ms = vkn_hacks_gpu_ms();
+    return 1;
+}
 static double g_draws_last = -1.0;   // the last answer of vkn_hacks_draws (the census reads it without moving the window)
 double vkn_hacks_draws(void) {
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;

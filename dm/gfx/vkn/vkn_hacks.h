@@ -50,6 +50,11 @@ void vkn_hacks_census(void);
 // the previous call that saw a frame pass (-1: not known yet; the previous value while no frame passed).
 double vkn_hacks_gpu_ms(void);
 double vkn_hacks_draws(void);
+// [stage 5 rest] xbg_game.cpp's xbg_recent_gpu_ms in mode 1 (the translator is not initialised there, its own value stays -1): 1 = the
+// backend owns the frame (DM_VK_NATIVE=1) and *ms = vkn_hacks_gpu_ms() (-1: no finished presented frame yet); 0 = not mode 1 (the
+// translator's value stands). Readers: perf_android.c (ADPF reportActualWorkDuration2 GPU time), hle_nvn.c DM_PACE_ADAPT, hle_oe.c
+// DM_3D_SCALE controller, hle_dos2_quality.c. Any thread.
+int vkn_hacks_recent_gpu_ms(double *ms);
 // The values in effect (nr_hacks.h nrh_value, read once): v[NRH_N], from[NRH_N] ('e' explicit, 't' tier, 0 none). Any thread.
 void vkn_hacks_values(int *v, char *from);
 

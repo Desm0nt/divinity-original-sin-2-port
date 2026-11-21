@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_hacks.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_occz.c dm/gfx/vkn/vkn_occz_model.c dm/gfx/vkn/vkn_hacks.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -2802,6 +2802,7 @@ static void test_occ_a(void);     // [stage 5] technique A (end of file)
 static void test_v2_drv(void);    // [stage 5.3 V2] driver corrections (end of file)
 static void test_v1_preskin(void);   // [stage 5.3 V1] PRESKIN (end of file)
 static void test_occ_b(void);     // [stage 5] technique B (end of file)
+static void test_occ_z(void);     // [stage 5] technique Z (end of file)
 static void test_g_hacks(void);   // [stage 5.4] the DM_HACK_* settings in mode 1 (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
@@ -3017,15 +3018,17 @@ static void test_b5_mat(void) {
     // ---- verify mode: decided and counted, the engine's shaders drawn
     vkn_mat_test_setup(3, 0, b5_facts); vkn_mat_stats_get(&s0);
     CHECK_EQ(B5_NST(), 2u); vkn_mat_stats_get(&s1); CHECK_EQ(s1.would - s0.would, 1); CHECK_EQ(s1.no_fs, s0.no_fs);
-    // ---- variant B: the cut-down vertex module (trim keep 0), the vertex-stage table with C1 as effect block 0 (binding 18)
+    // ---- variant B: the cut-down vertex module (trim keep 0) on the engine object ([stage 5 rest] vkn_fx_out.vin: the engine's table,
+    // its C1 at binding 18 from the object's own block; no effect-shader object)
     vkn_mat_test_setup(2, 0, b5_facts); g_b5.vsm = cutm; vkn_mat_stats_get(&s0);
     {
         const uint64_t m = mark(); const mk_gp *p = B5_DRAW();
         CHECK(p && p->nst == 1 && p->module[0] == cutm); CHECK_EQ(g_b5.last_keep, 0);
-        const mk_dw *w3 = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 18), *w1 = dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 6);
-        CHECK(w3 && w3->buf == g_s1->c1[VKN_SRC_VS].buf && w3->range == g_s1->c1[VKN_SRC_VS].size); CHECK(w1 != NULL);
-        CHECK(dw_of(nth(m, cb, MK_E_BIND_SETS, 0), 22) == NULL);   // (the fragment stage's texture binding is not in the table)
+        // [stage 5 rest] the engine object's set (same layout as variant A's draws: rebound only when it changed); when bound, C1 is its own
+        const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, 0); const mk_dw *w3 = bs ? dw_of(bs, 18) : NULL;
+        CHECK(!bs || (w3 && w3->buf == g_s1->c1[VKN_SRC_VS].buf && w3->range == g_s1->c1[VKN_SRC_VS].size));
         p = B5_DRAW(); CHECK(p && p->module[0] == cutm); CHECK_EQ(g_b5.vsm_calls, 1);   // made once
+        vkn_fx_stats fs; vkn_fx_stats_get(&fs); CHECK_EQ(fs.nshaders, f0.nshaders);       // [stage 5 rest] no object of the piece
     }
     vkn_mat_stats_get(&s1); CHECK_EQ(s1.vs_swaps - s0.vs_swaps, 2); CHECK_EQ(s1.twins - s0.twins, 1);
     vkn_mat_test_setup(2, 0, b5_facts); g_b5.vsm = VK_NULL_HANDLE; vkn_mat_stats_get(&s0);   // the trim has nothing to drop: variant A
@@ -3036,8 +3039,12 @@ static void test_b5_mat(void) {
         vkn_mat_test_setup(2, 0, b5_facts); g_b5.vsm = cutm;
         vkn_fx_ctx c; memset(&c, 0, sizeof c); c.shader = g_s1; c.depth = g_d3; c.vfmt = vkn_vfmt_id(g_in.vfmt);
         vkn_fx_out o; memset(&o, 0, sizeof o);
-        CHECK_EQ(vkn_mat_apply(&in, &c, &o), 1); CHECK(o.no_fs == 1 && o.shader && vkn_fx_shader_is(o.shader) && o.ubo[0].size == g_s1->c1[VKN_SRC_VS].size);
-        memset(&o, 0, sizeof o); c.color[0] = g_a2; CHECK_EQ(vkn_mat_apply(&in, &c, &o), 0); CHECK(!o.no_fs && !o.shader);
+        CHECK_EQ(vkn_mat_apply(&in, &c, &o), 1); CHECK(o.no_fs == 1 && !o.shader && o.vin.vs == cutm && o.vin.vs_id != 0 && !o.vin.vfmt);
+        memset(&o, 0, sizeof o); c.color[0] = g_a2; CHECK_EQ(vkn_mat_apply(&in, &c, &o), 0); CHECK(!o.no_fs && !o.shader && !o.vin.vs);
+        // [stage 5 rest] a vertex module of an earlier function (PRESKIN) stays: variant A only, counted
+        memset(&o, 0, sizeof o); c.color[0] = NULL; o.vin.vs = g_vs1_mod; o.vin.vs_id = 7; vkn_mat_stats_get(&s0);
+        CHECK_EQ(vkn_mat_apply(&in, &c, &o), 1); CHECK(o.no_fs == 1 && o.vin.vs == g_vs1_mod && o.vin.vs_id == 7);
+        vkn_mat_stats_get(&s1); CHECK_EQ(s1.vs_refused[VKN_MAT_V_VIN] - s0.vs_refused[VKN_MAT_V_VIN], 1);
     }
     // ---- XLQ: a colour draw on a depth target: the trimmed vertex module (keep = what the fragment shader reads) + the engine's fragment module
     targets(g_a2, NULL, g_d3);
@@ -3190,6 +3197,7 @@ int main(void) {
     test_b4_prepass();   // [stage 5.2 B4] the pre-pass hybrid (vkn_prepass.c)
     test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
     test_v1_preskin();   // [stage 5.3 V1] PRESKIN (vkn_preskin.c)
+    test_occ_z();  // [stage 5] technique Z (vkn_occz.c, DM_VK_NATIVE_COND 10 / 12 / 13 through the vkn_rt.c taps in RT=0; forked children)
     test_occ_b();  // [stage 5] technique B (vkn_occb.c, DM_VK_NATIVE_COND 7 / 8; forked children, the chain cleared of the earlier tests' functions)
     test_g_hacks();   // [stage 5.4] sampler hack twins (live), the DRS signals, the hacks lines, targets re-made at another size (forked)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
@@ -4144,7 +4152,7 @@ static void test_v1_preskin(void) {
     p = b5_pipe(cb);
     CHECK(p && v1_attr(p, 0) && v1_attr(p, 0)->format == VK_FORMAT_R32G32B32A32_UINT && v1_attr(p, 0)->binding == 2 && v1_attr(p, 0)->offset == 0);
     CHECK(p && v1_attr(p, 2) && v1_attr(p, 2)->format == VK_FORMAT_R32G32_UINT && v1_attr(p, 2)->offset == 16); CHECK_EQ(v1_stride(p, 2), 24);
-    // MAT variant B in the same depth-only set: its cut-down object, the consumer as its vertex module (composed)
+    // MAT variant B in the same depth-only set: [stage 5 rest] MAT leaves PRESKIN's module (vin) alone - variant A only, nothing composed
     vkn_preskin_stats_get(&s0);
     memset(&g_b5, 0, sizeof g_b5); g_b5.applied = 1; g_b5.vsm = g_fs1_mod;   // (any module of the mock: MAT's would-be cut-down vertex shader)
     vkn_mat_test_setup(2, 0, b5_facts);
@@ -4166,7 +4174,7 @@ static void test_v1_preskin(void) {
     fsubmit(0);
     vkn_preskin_stats_get(&s1);
     CHECK_EQ(s1.why[VKN_PSK_W_PLAN] - s0.why[VKN_PSK_W_PLAN], 2); CHECK_EQ(s1.why[VKN_PSK_W_PRIM] - s0.why[VKN_PSK_W_PRIM], 1);
-    CHECK_EQ(s1.composed - s0.composed, 1); CHECK_EQ(s1.plans_refused - s0.plans_refused, 1);
+    CHECK_EQ(s1.composed - s0.composed, 0); CHECK_EQ(s1.plans_refused - s0.plans_refused, 1);
     // ---- off-frame recording: refused
     vkn_preskin_stats_get(&s0);
     cb = fbegin(0); targets(NULL, NULL, g_d3); vkn_draw_indexed(&in, 0, 3, 1); p = b5_pipe(cb); CHECK(p && p->module[0] == g_vs1_mod); fsubmit(1);
@@ -4711,4 +4719,117 @@ static void test_g_hacks(void) {
     static const char *const e_rs[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_HACK_TIER", NULL}, {"DM_HACK_SHFAR", NULL}, {NULL, NULL}};
     a5_child(e_rs, hk_resize_child, &R);
     CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+
+// ================================================================================================================ [stage 5] technique Z
+// vkn_occz.c (DM_VK_NATIVE_COND 10 / 12 / 13, docs/dos2/nr/VK-OCCLUSION-CHEAP.md) end to end through the vkn_rt.c taps with DM_VK_NATIVE_RT=0
+// (the encoder, the decision and the worker on this thread): 3 objects a frame, each a report pair around its pre-pass draw on the
+// depth-only set, the engine's gather of its box (identity camera: the box is its NDC), then the G-buffer set (the snapshot point:
+// the decision + one dispatch) and one conditional draw per object. The mock runs no compute shader: the test sets the snapshot cells.
+//   mode 10: everything drawn, one dispatch a frame, validator clean;
+//   mode 12: cells 0 (an occluder everywhere): once a snapshot is finished the conditional draws are skipped (the pre-pass draws come
+//            before the decision in RT=0 and stay); then cells 1 (as if the depth had opened): the self-check of a frame decided on the
+//            old cells finds the violation and the skips stop for the session (auto-fallback);
+//   mode 13: cells 1: the trusted visible objects' conditional draws are skipped (poison); cells 0: nothing is.
+#include "../../../vkn/vkn_occz.h"
+enum { OZ_F = 14 };
+typedef struct oz_res { int checks, fails, ran; int pre[OZ_F], cond[OZ_F], disp[OZ_F]; int off, val; } oz_res;
+static void oz_frame(int f, int *pre, int *cond, int *disp) {
+    vkn_rt_rec_begin(1);
+    VkCommandBuffer cb = vkn_cb();
+    const uint64_t m = mark();
+    vkn_tex *c[VKN_PASS_COLORS] = {0}; uint32_t l[VKN_PASS_COLORS] = {0}, mm[VKN_PASS_COLORS] = {0};
+    vkn_rt_pass_targets(0, c, l, mm, g_d3);
+    vkn_draw_in in = g_in; in.ds = H(97, 1);
+    const uint64_t base[2] = {0x7000000, 0x8000000}, b = base[f & 1];
+    vkn_occz_gather_bases(base[0], base[1]);
+    static const float vp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    for (int i = 0; i < 3; i++) {
+        const float box[6] = {-0.9f + 0.6f * (float)i, -0.5f, 0.5f, -0.5f + 0.6f * (float)i, 0.5f, 0.6f};
+        vkn_occz_gather(b + 16u * (uint32_t)i, 100u + (uint64_t)f, 0x9100 + (uint64_t)i, box, vp);
+    }
+    for (int i = 0; i < 3; i++) {
+        vkn_rt_query_begin(b + 16u * (uint32_t)i);
+        in.vb_off[0] = 16u * (uint32_t)i; CHECK_EQ(vkn_rt_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0);
+        vkn_rt_query_end(b + 16u * (uint32_t)i);
+    }
+    const uint64_t m2 = mark();
+    c[0] = g_b2; vkn_rt_pass_targets(1, c, l, mm, g_d3);   // the snapshot point
+    in.ds = H(98, 1);
+    for (int i = 0; i < 3; i++) { vkn_rt_query_cond(b + 16u * (uint32_t)i); in.vb_off[0] = 16u * (uint32_t)i; CHECK_EQ(vkn_rt_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0); }
+    *pre = cnt(m, cb, MK_E_DRAW_IDX) - cnt(m2, cb, MK_E_DRAW_IDX); *cond = cnt(m2, cb, MK_E_DRAW_IDX); *disp = cnt(m, cb, MK_E_DISPATCH);
+    vkn_rt_rec_end(1, NULL, NULL, 0);
+}
+static void oz_run(int mode, oz_res *r) {
+    const int v0 = mk_val_errors;
+    vkn_rt_install(0, 1);
+    vkn_query_init(mode); vkn_occz_test_reset();
+    for (int f = 0; f < OZ_F; f++) {
+        if (f == 1) vkn_occz_test_fill(mode == VKN_COND_Z_POISON ? 1.0f : 0.0f);   // (the slots exist after the first dispatch)
+        if (f == 9) vkn_occz_test_fill(mode == VKN_COND_Z_POISON ? 0.0f : 1.0f);
+        oz_frame(f, &r->pre[f], &r->cond[f], &r->disp[f]);
+    }
+    vkn_query_census_occ();
+    r->off = vkn_occz_test_off(); r->val = mk_val_errors - v0;
+    vkn_query_init(VKN_COND_OFF);
+}
+static int oz_child(int mode, oz_res *out) {
+    memset(out, 0, sizeof *out);
+    int pfd[2]; if (pipe(pfd)) return -1;
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]); alarm(300);
+        oz_res *r = (oz_res *)calloc(1, sizeof *r);
+        const int c0 = g_checks, f0 = g_fails;
+        oz_run(mode, r);
+        r->checks = g_checks - c0; r->fails = g_fails - f0; r->ran = 1;
+        const uint8_t *p = (const uint8_t *)r; size_t left = sizeof *r;
+        while (left) { const ssize_t w = write(pfd[1], p, left); if (w <= 0) break; p += w; left -= (size_t)w; }
+        close(pfd[1]); _exit(0);
+    }
+    close(pfd[1]);
+    uint8_t *p = (uint8_t *)out; size_t got = 0;
+    while (got < sizeof *out) { const ssize_t n = read(pfd[0], p + got, sizeof *out - got); if (n <= 0) break; got += (size_t)n; }
+    close(pfd[0]);
+    int status = 0; waitpid(pid, &status, 0);
+    const int ok = got == sizeof *out && WIFEXITED(status) && WEXITSTATUS(status) == 0 && out->ran;
+    g_checks += out->checks + 1; g_fails += out->fails;
+    if (!ok) { g_fails++; printf("FAIL %s:%d: occ-z child mode %d (status %#x)\n", __FILE__, __LINE__, mode, status); }
+    return ok ? 0 : -1;
+}
+static void oz_print(const char *t, const oz_res *r) {
+    printf("  occ-z %s (pre-pass / conditional / dispatch):", t);
+    for (int f = 0; f < OZ_F; f++) printf(" %d:%d/%d/%d", f, r->pre[f], r->cond[f], r->disp[f]);
+    printf("; fallback %d, validator %d\n", r->off, r->val);
+}
+static void test_occ_z(void) {
+    if (!g_s1 || !g_b2 || !g_d3) { CHECK(0); return; }
+    CHECK(vkn_ds_put(H(97, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // pre-pass: LESS with writes
+    CHECK(vkn_ds_put(H(98, 1), 1, 0, 2, 0, 0, 0, 0, 0) != 0);   // G-buffer: EQUAL, no writes
+    { int a, b, c; vkn_rt_install(0, 1); oz_frame(0, &a, &b, &c); CHECK_EQ(a, 3); CHECK_EQ(b, 3); CHECK_EQ(c, 0); }   // mode 0: nothing of Z
+    static oz_res R;
+    if (!oz_child(VKN_COND_Z, &R)) {
+        oz_print("mode 10", &R);
+        CHECK_EQ(R.val, 0); CHECK_EQ(R.off, 0);
+        for (int f = 0; f < OZ_F; f++) { CHECK_EQ(R.pre[f], 3); CHECK_EQ(R.cond[f], 3); CHECK_EQ(R.disp[f], 1); }
+    }
+    if (!oz_child(VKN_COND_Z_ON, &R)) {
+        oz_print("mode 12", &R);
+        CHECK_EQ(R.val, 0);
+        int first = -1;
+        for (int f = 0; f < 9; f++) { CHECK_EQ(R.pre[f], 3); CHECK_EQ(R.disp[f], 1); if (R.cond[f] == 0 && first < 0) first = f; }
+        CHECK(first >= 2 && first <= 7);   // a snapshot finished (the mock's fences) -> the conditional draws go
+        if (first >= 0) for (int f = first; f < 9; f++) CHECK_EQ(R.cond[f], 0);
+        CHECK_EQ(R.off, 1);                // the opened depth: the self-check of an old decision -> off for the session
+        CHECK_EQ(R.cond[OZ_F - 1], 3);
+    }
+    if (!oz_child(VKN_COND_Z_POISON, &R)) {
+        oz_print("mode 13", &R);
+        CHECK_EQ(R.val, 0);
+        int any = 0; for (int f = 0; f < 9; f++) any |= R.cond[f] == 0;
+        CHECK(any);                        // far cells: the trusted objects are visible -> poison skips them
+        CHECK_EQ(R.cond[OZ_F - 1], 3);     // near cells: hidden, poison leaves them
+    }
 }

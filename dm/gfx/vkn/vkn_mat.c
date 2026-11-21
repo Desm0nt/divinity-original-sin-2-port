@@ -34,12 +34,15 @@ extern int vkn_mat_vsout(const uint32_t *w, size_t n, uint64_t keep, uint64_t de
                          const char **why) __attribute__((weak));
 
 enum { C_NONE = 0, C_PURE = 1, C_KILL = 2 };
-// [fixpp] the effect-shader table is 1024 now (vkn_fx.h): this piece may take 896 (about 1.5 KB of host memory each + two driver
-// layouts and a module), 64 stay for the other pieces (LIGHTFUSE <= 48, post)
-enum { IDS = 16384, CODES = 4, XVARS = 6, OWN_SHADERS = 896, FX_RESERVE = 64 };
+// [stage 5 rest] variant B and XLQ no longer make effect-shader objects (896 of the 1024 at most, [fixpp]): their trimmed vertex
+// modules ride on the engine shader object through vkn_fx_out.vin (vs + vs_id, vfmt 0: the PRESKIN door, vkn_fx.h), so the whole pack
+// fits. One module per (vertex key, retype code, keep, declared) in a process-wide table (vin_module: the warm-up worker asks it too,
+// vkn_mat_warm_module), at most MODULES of them.
+enum { IDS = 16384, CODES = 4, XVARS = 6, MODULES = 8192 };
 enum { R_CFG, R_GATE, R_TRIM, R_MODULE, R_TABLE, R_FACTS, R_N };
-typedef struct vs_var { uint64_t code; const vkn_shader *fx; uint8_t done; vkn_fx_ubo c1; } vs_var;                 // variant B per retype code
-typedef struct x_var { uint64_t code; uint32_t ref; uint8_t alpha, done; const vkn_shader *fx; vkn_fx_ubo c1[2]; } x_var;   // XLQ per (code, reference)
+typedef struct vs_var { uint64_t code; VkShaderModule m; uint16_t vs_id; uint8_t done; } vs_var;   // variant B per retype code
+typedef struct x_var { uint64_t code; VkShaderModule m; uint16_t vs_id; uint8_t done; } x_var;      // XLQ per retype code (the draw path picks
+                                                                                                  // the fragment module, alpha variants included)
 typedef struct mcls {
     const vkn_shader *s; uint64_t handle;
     uint8_t cls, why_none;                 // C_*; why_none: VKN_MAT_W_FACTS / _NOLIB when cls is C_NONE
@@ -56,7 +59,7 @@ static struct {
     int mode, xlq, inst, reg, retype;      // retype: the draw path's DM_GFX_VTX_RETYPE (-1 not read)
     vkn_mat_stats s, last;
     uint32_t reds[R_N];
-    uint32_t own;                          // shader objects made by this piece
+    uint32_t own;                          // trimmed vertex modules made by this piece (vin_module)
     uint64_t next_ns;
     vkn_mat_test_fn test;
 } g = {.retype = -1};
@@ -72,11 +75,11 @@ static void mred(int kind, const char *fmt, ...) {
 const char *vkn_mat_reason_name(int kind, int i) {
     static const char *const w[VKN_MAT_W_N] = {"fragment output / side effect / interface", "no shader library", "gate fails", "alpha test fails .w",
                                                "kill without a gate record", "alpha verdict pending", "not an engine vertex + fragment shader"};
-    static const char *const v[VKN_MAT_V_N] = {"nothing to drop", "trim check refused", "shader table full", "module / object failed", "retype codes past 4",
-                                               "words not loaded", "a binding a piece's shader cannot have"};
+    static const char *const v[VKN_MAT_V_N] = {"nothing to drop", "trim check refused", "module table full", "module failed", "retype codes past 4",
+                                               "words not loaded", "a binding a piece's shader cannot have", "the draw has a vertex module of its own (PRESKIN)"};
     static const char *const x[VKN_MAT_X_N] = {"fragment inputs not analysable", "NR-04 named fragment shader", "no depth target", "nothing to drop",
-                                               "trim check refused", "shader table full", "module / object failed", "variants past 6", "words not loaded",
-                                               "a binding a piece's shader cannot have"};
+                                               "trim check refused", "module table full", "module failed", "retype codes past 6", "words not loaded",
+                                               "a binding a piece's shader cannot have", "the draw has a vertex module of its own (PRESKIN)"};
     if (kind == 0) return i >= 0 && i < VKN_MAT_W_N ? w[i] : "?";
     if (kind == 1) return i >= 0 && i < VKN_MAT_V_N ? v[i] : "?";
     return i >= 0 && i < VKN_MAT_X_N ? x[i] : "?";
@@ -218,29 +221,7 @@ static int rd(void *ctx, uint32_t bw, uint32_t *out) {
     return 1;
 }
 
-// ---------------------------------------------------------------- shader objects of this piece
-static int room(void) {
-    vkn_fx_stats fs; vkn_fx_stats_get(&fs);
-    return g.own < OWN_SHADERS && fs.nshaders + FX_RESERVE < VKN_FX_SHADERS;
-}
-// The engine shader's bindings for a piece's object: vertex stage only (fs 0) or both; C1 of stage k fed as effect block k.
-static const char *table_of(const vkn_shader *s, int with_fs, vkn_bind *tab, uint32_t *n, vkn_fx_ubo c1[2]) {
-    uint32_t k = 0;
-    for (uint32_t i = 0; i < s->nbind; i++) {
-        vkn_bind b = s->bind[i];
-        if (b.bundle_stage != 0 && !(with_fs && b.bundle_stage == 4)) continue;
-        if (b.count != 1) return "a binding with more than one descriptor";
-        if (b.kind == VKN_BK_C1) {
-            const int st = b.bundle_stage == 0 ? VKN_SRC_VS : VKN_SRC_FS;
-            if (!s->c1[st].size) return "C1 constants without their static block";
-            c1[st].buf = s->c1[st].buf; c1[st].off = s->c1[st].off; c1[st].size = (uint32_t)s->c1[st].size;
-            b.kind = VKN_BK_FX_UBO; b.slot = (uint8_t)st;
-        } else if (b.kind != VKN_BK_UNIFORM && b.kind != VKN_BK_SUPPORT && b.kind != VKN_BK_TEXTURE) return "a binding of a kind a piece's shader cannot have";
-        tab[k++] = b;
-    }
-    *n = k;
-    return NULL;
-}
+// ---------------------------------------------------------------- trimmed vertex modules of this piece
 // The trimmed vertex module of s for (retype code, keep, declared) as vsout_module made it; 0 ok, else a VKN_MAT_V_* reason + 1.
 typedef struct trim_job { const vkn_shader *s; uint64_t code, keep, decl; VkShaderModule m; int why, make; uint32_t stores, vars; char bad[96]; } trim_job;
 static void trim_lib(void *a) {
@@ -276,66 +257,92 @@ static VkShaderModule trimmed(const vkn_shader *s, uint64_t code, uint64_t keep,
     *why = j.why;
     return j.m;
 }
-static const vkn_shader *make_fx(const char *tag, const vkn_shader *s, VkShaderModule vs, VkShaderModule fs, const vkn_bind *tab, uint32_t n) {
-    char name[24]; snprintf(name, sizeof name, "%s%.12s", tag, s->key[VKN_SRC_VS]);
-    vkn_fx_shader_src src; memset(&src, 0, sizeof src);
-    src.name = name; src.vs = vs; src.fs = fs; src.bind = tab; src.nbind = n;
-    src.ninputs = s->ninputs; memcpy(src.inputs, s->inputs, sizeof src.inputs); memcpy(src.input_classes, s->input_classes, sizeof src.input_classes);
-    const vkn_shader *o = vkn_fx_shader_create(&src);
-    if (o) g.own++;
-    return o;
+// [stage 5 rest] The process-wide module table: one trimmed module (and its vin id) per (vertex key, retype code, keep, declared). The
+// recording thread (cut_vs / xlq_var, once per shader and code) and the warm-up worker (vkn_mat_warm_module) both come here, so a
+// replayed pipeline has exactly the module and id the draw will ask for. The lock is held across a build (a few ms, once per module).
+typedef struct vmod { char key[17]; uint64_t code, keep, decl; VkShaderModule m; uint16_t vs_id; uint8_t why; } vmod;
+static pthread_mutex_t g_vm_mu = PTHREAD_MUTEX_INITIALIZER;
+static vmod *g_vm; static uint32_t g_nvm, g_cvm;
+extern void vkn_warm_recipe_vs(uint16_t vs_id, const char *piece, const void *eng_shader, const void *arg, uint32_t n) __attribute__((weak));
+// 0 = *m / *vs_id set; else a VKN_MAT_V_* reason + 1 (kept: asked again, the same answer). make 0 (XLQ count mode): checked, no module.
+static int vin_module(const vkn_shader *s, uint64_t code, uint64_t keep, uint64_t decl, int make, VkShaderModule *m, uint16_t *vs_id) {
+    *m = VK_NULL_HANDLE; *vs_id = 0;
+    if (!make) { int w = 0; *m = trimmed(s, code, keep, decl, 0, &w); return w; }
+    pthread_mutex_lock(&g_vm_mu);
+    for (uint32_t i = 0; i < g_nvm; i++) {
+        const vmod *e = &g_vm[i];
+        if (e->code == code && e->keep == keep && e->decl == decl && !strncmp(e->key, s->key[VKN_SRC_VS], 16)) {
+            const int w = e->why; *m = e->m; *vs_id = e->vs_id; pthread_mutex_unlock(&g_vm_mu); return w;
+        }
+    }
+    int w = 0;
+    if (g_nvm >= MODULES) w = VKN_MAT_V_TABLE + 1;
+    else if (g_nvm == g_cvm) {
+        const uint32_t c = g_cvm ? g_cvm * 2 : 256; vmod *x = (vmod *)realloc(g_vm, c * sizeof *x);
+        if (x) { g_vm = x; g_cvm = c; } else w = VKN_MAT_V_TABLE + 1;
+    }
+    if (w) { pthread_mutex_unlock(&g_vm_mu); return w; }
+    vmod e; memset(&e, 0, sizeof e); snprintf(e.key, sizeof e.key, "%.16s", s->key[VKN_SRC_VS]); e.code = code; e.keep = keep; e.decl = decl;
+    e.m = trimmed(s, code, keep, decl, 1, &w);
+    if (!e.m && !w) w = VKN_MAT_V_MODULE + 1;
+    if (e.m && !w && !(e.vs_id = vkn_fx_vs_id())) w = VKN_MAT_V_TABLE + 1;   // (65535 vertex-module ids used up)
+    if (w) e.m = VK_NULL_HANDLE;
+    e.why = (uint8_t)w;
+    g_vm[g_nvm++] = e;
+    if (!w) g.own++;
+    pthread_mutex_unlock(&g_vm_mu);
+    if (!w && vkn_warm_recipe_vs && !g.test) {   // the warm-up lists pipelines with this module by recipe (vkn_warm.h)
+        const uint64_t a[3] = {code, keep, decl};
+        vkn_warm_recipe_vs(e.vs_id, "mat", s, a, sizeof a);
+    }
+    *m = e.m; *vs_id = e.vs_id;
+    return w;
 }
-// variant B: the cut-down vertex shader of c for retype code `code` (made once; a failure is kept and counted at every draw)
+// The warm-up worker's door (vkn_warm.c, recipe "mat": the three words code / keep / declared of vin_module): the module and vin id a
+// draw of engine shader s with that recipe gets. 0 = ok. Any thread.
+int vkn_mat_warm_module(const void *eng, const void *arg, uint32_t n, VkShaderModule *m, uint16_t *vs_id);
+int vkn_mat_warm_module(const void *eng, const void *arg, uint32_t n, VkShaderModule *m, uint16_t *vs_id) {
+    const vkn_shader *s = (const vkn_shader *)eng;
+    if (!s || !arg || n != 3 * sizeof(uint64_t) || !m || !vs_id || !g.inst) return -1;
+    uint64_t a[3]; memcpy(a, arg, sizeof a);
+    return vin_module(s, a[0], a[1], a[2], 1, m, vs_id) ? -1 : 0;
+}
+// variant B: the cut-down vertex module of c for retype code `code` (made once; a failure is kept and counted at every draw)
 static const vs_var *cut_vs(mcls *c, uint64_t code) {
     for (uint32_t i = 0; i < c->nvs; i++) if (c->vs[i].code == code) return &c->vs[i];
     if (c->nvs >= CODES) { g.s.vs_refused[VKN_MAT_V_CODES]++; return NULL; }
     vs_var *v = &c->vs[c->nvs++]; memset(v, 0, sizeof *v); v->code = code; v->done = 1;
     const vkn_shader *s = c->s;
-    vkn_bind *tab = (vkn_bind *)calloc(s->nbind ? s->nbind : 1, sizeof *tab); uint32_t n = 0; vkn_fx_ubo c1[2]; memset(c1, 0, sizeof c1);
-    const char *why = tab ? table_of(s, 0, tab, &n, c1) : "out of memory";
-    if (why) { mred(R_TABLE, "vs %.16s: %s: no cut-down vertex shader", s->key[VKN_SRC_VS], why); v->done = 2 + VKN_MAT_V_KIND; free(tab); return v; }
-    if (!room()) { v->done = 2 + VKN_MAT_V_TABLE; free(tab); return v; }
-    int w = 0; const VkShaderModule m = trimmed(s, code, 0, 0, 1, &w);
-    if (!m) { v->done = (uint8_t)(1 + w); free(tab); return v; }
-    v->fx = make_fx("mv.", s, m, VK_NULL_HANDLE, tab, n);
-    v->c1 = c1[VKN_SRC_VS];
-    free(tab);
-    if (!v->fx) { v->done = 2 + VKN_MAT_V_MODULE; mred(R_MODULE, "vs %.16s: vkn_fx_shader_create refused the cut-down vertex shader", s->key[VKN_SRC_VS]); }
-    else { g.s.twins++; if (g.s.twins <= 4) vkn_logf("mat: vs %.16s code %#llx -> cut-down vertex shader (no Location output; depth-only pipelines without a fragment stage)", s->key[VKN_SRC_VS], (unsigned long long)code); }
+    const int w = vin_module(s, code, 0, 0, 1, &v->m, &v->vs_id);
+    if (w) { v->done = (uint8_t)(1 + w); v->m = VK_NULL_HANDLE; return v; }
+    g.s.twins++;
+    if (g.s.twins <= 4) vkn_logf("mat: vs %.16s code %#llx -> cut-down vertex module (no Location output; depth-only pipelines without a fragment stage, vin id %u)", s->key[VKN_SRC_VS], (unsigned long long)code, v->vs_id);
     return v;
-}
-// XLQ: the trimmed vertex shader of c for (code, alpha reference) with the fragment module the draw path would take
-typedef struct fsm_job { const vkn_shader *s; float ref; int alpha; VkShaderModule m; } fsm_job;
-static void fsm_lib(void *a) {   // what vkn_shader_module gives the draw path in mode 1 (named entries, whose module depends on the pass, are refused before)
-    fsm_job *j = (fsm_job *)a;
-    j->m = !j->alpha ? j->s->module[VKN_SRC_FS] : vkn_shlib_alpha_module ? vkn_shlib_alpha_module(j->s->xs[VKN_SRC_FS], 5u, j->ref) : VK_NULL_HANDLE;
 }
 static uint64_t xlq_keep(uint64_t read, int mode) {   // xbg_game.cpp xlq_keep: mode 3 drops the lowest read location too
     if (mode != 3 || !read) return read;
     uint32_t l = 0; while (!((read >> (4 * l)) & 0xF)) l++;
     return read & ~((uint64_t)0xF << (4 * l));
 }
-static const x_var *xlq_var(mcls *c, uint64_t code, int alpha, float ref) {
-    uint32_t bits = 0; if (alpha) memcpy(&bits, &ref, 4);
-    for (uint32_t i = 0; i < c->nxv; i++) if (c->xv[i].code == code && c->xv[i].alpha == alpha && c->xv[i].ref == bits) return &c->xv[i];
+// XLQ: the trimmed vertex module of c for retype code `code`; the fragment module is the draw path's own (base / "#at" for the draw's
+// reference: the engine object keeps its variants; the old effect object per (code, reference) is gone)
+static const x_var *xlq_var(mcls *c, uint64_t code) {
+    for (uint32_t i = 0; i < c->nxv; i++) if (c->xv[i].code == code) return &c->xv[i];
     if (c->nxv >= XVARS) { g.s.xlq_refused[VKN_MAT_X_VARIANTS]++; return NULL; }
-    x_var *v = &c->xv[c->nxv++]; memset(v, 0, sizeof *v); v->code = code; v->alpha = (uint8_t)alpha; v->ref = bits; v->done = 1;
+    x_var *v = &c->xv[c->nxv++]; memset(v, 0, sizeof *v); v->code = code; v->done = 1;
     const vkn_shader *s = c->s;
-    vkn_bind *tab = (vkn_bind *)calloc(s->nbind ? s->nbind : 1, sizeof *tab); uint32_t n = 0;
-    const char *why = tab ? table_of(s, 1, tab, &n, v->c1) : "out of memory";
-    if (why) { v->done = 2 + VKN_MAT_X_KIND; free(tab); return v; }
-    if (g.xlq != 2 && !room()) { v->done = 2 + VKN_MAT_X_TABLE; free(tab); return v; }
     const uint64_t keep = xlq_keep(c->fs_read, g.xlq);
-    int w = 0; const VkShaderModule m = trimmed(s, code, keep, c->fs_decl, g.xlq != 2, &w);
-    if (!m) { v->done = (uint8_t)(2 + (w == VKN_MAT_V_NOTHING + 1 ? VKN_MAT_X_NOTHING : w == VKN_MAT_V_CHECK + 1 ? VKN_MAT_X_CHECK : w == VKN_MAT_V_WORDS + 1 ? VKN_MAT_X_WORDS : VKN_MAT_X_MODULE)); free(tab); return v; }
-    if (g.xlq == 2) { free(tab); v->done = 1; g.s.xlq_shaders++; return v; }   // count: made and checked, not drawn (fx stays NULL)
-    fsm_job fj = {s, ref, alpha, VK_NULL_HANDLE};
-    if (g.test) fj.m = s->module[VKN_SRC_FS]; else run_big(fsm_lib, &fj);
-    if (!fj.m) { v->done = 2 + VKN_MAT_X_MODULE; free(tab); return v; }
-    v->fx = make_fx("xq.", s, m, fj.m, tab, n);
-    free(tab);
-    if (!v->fx) { v->done = 2 + VKN_MAT_X_MODULE; mred(R_MODULE, "xlq vs %.16s / fs %.16s: vkn_fx_shader_create refused the object", s->key[VKN_SRC_VS], s->key[VKN_SRC_FS]); }
-    else { g.s.xlq_shaders++; if (g.s.xlq_shaders <= 8) vkn_logf("mat: xlq vs %.16s / fs %.16s code %#llx%s: vertex outputs %016llx, the fragment shader reads %016llx", s->key[VKN_SRC_VS], s->key[VKN_SRC_FS], (unsigned long long)code, alpha ? " (alpha variant)" : "", (unsigned long long)c->vs_written, (unsigned long long)keep); }
+    const int w = vin_module(s, code, keep, c->fs_decl, g.xlq != 2, &v->m, &v->vs_id);
+    if (w) {
+        v->m = VK_NULL_HANDLE;
+        v->done = (uint8_t)(2 + (w == VKN_MAT_V_NOTHING + 1 ? VKN_MAT_X_NOTHING : w == VKN_MAT_V_CHECK + 1 ? VKN_MAT_X_CHECK : w == VKN_MAT_V_WORDS + 1 ? VKN_MAT_X_WORDS :
+                                 w == VKN_MAT_V_TABLE + 1 ? VKN_MAT_X_TABLE : VKN_MAT_X_MODULE));
+        return v;
+    }
+    g.s.xlq_shaders++;
+    if (g.xlq == 2) { v->m = VK_NULL_HANDLE; return v; }   // count: made and checked, not drawn
+    if (g.s.xlq_shaders <= 8) vkn_logf("mat: xlq vs %.16s / fs %.16s code %#llx: vertex outputs %016llx, the fragment shader reads %016llx (vin id %u)", s->key[VKN_SRC_VS], s->key[VKN_SRC_FS],
+                                       (unsigned long long)code, (unsigned long long)c->vs_written, (unsigned long long)keep, v->vs_id);
     return v;
 }
 
@@ -368,9 +375,14 @@ static int mat_depth(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (g.mode == 3) { g.s.would++; return 1; }
     out->no_fs = 1; g.s.no_fs++;
     if (g.mode == 2) {
-        const vs_var *v = cut_vs(c, retype_code(c, ctx->vfmt));
-        if (v && v->fx) { out->shader = v->fx; out->ubo[0] = v->c1; g.s.vs_swaps++; }
-        else if (v && v->done >= 2) g.s.vs_refused[v->done - 2]++;
+        // [stage 5 rest] the cut-down module rides on the engine object (vkn_fx_out.vin); a vertex module of an earlier function
+        // (PRESKIN, order 150) stays: it is the draw's vertex stage, variant A only
+        if (out->vin.vs) g.s.vs_refused[VKN_MAT_V_VIN]++;
+        else {
+            const vs_var *v = cut_vs(c, retype_code(c, ctx->vfmt));
+            if (v && v->m) { out->vin.vs = v->m; out->vin.vs_id = v->vs_id; g.s.vs_swaps++; }
+            else if (v && v->done >= 2) g.s.vs_refused[v->done - 2]++;
+        }
     }
     return 1;
 }
@@ -384,20 +396,20 @@ static void xlq_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (!c->xlq_ok) { g.s.xlq_refused[c->why_none == VKN_MAT_W_NOLIB ? VKN_MAT_X_WORDS : VKN_MAT_X_FS]++; return; }
     if (!(c->vs_written & ~xlq_keep(c->fs_read, g.xlq))) { g.s.xlq_refused[VKN_MAT_X_NOTHING]++; return; }
     if (vkn_shlib_named_entry && vkn_shlib_named_entry(s->key[VKN_SRC_FS], NULL) >= 0) { g.s.xlq_refused[VKN_MAT_X_NAMED]++; return; }
-    const int alpha = in->alpha_ref >= 0.0f;
-    const x_var *v = xlq_var(c, retype_code(c, ctx->vfmt), alpha, in->alpha_ref);
+    if (out->vin.vs) { g.s.xlq_refused[VKN_MAT_X_VIN]++; return; }   // [stage 5 rest] an earlier function's vertex module (PRESKIN) is the stage
+    const x_var *v = xlq_var(c, retype_code(c, ctx->vfmt));
     if (!v) return;
     if (v->done >= 2) { g.s.xlq_refused[v->done - 2]++; return; }
     if (g.xlq == 2) { g.s.xlq_would++; return; }
-    if (!v->fx) return;
-    out->shader = v->fx; out->ubo[0] = v->c1[0]; out->ubo[1] = v->c1[1]; g.s.xlq_swaps++;
+    if (!v->m) return;
+    out->vin.vs = v->m; out->vin.vs_id = v->vs_id; g.s.xlq_swaps++;   // [stage 5 rest] (the engine's fragment module and variants stay)
 }
 static int decide(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
     if (out->shader || out->discard || out->no_fs) return 0;   // an earlier technique changed the draw
     int nocolor = !ctx->color[0];
     for (uint32_t i = 1; nocolor && i < VKN_PASS_COLORS; i++) if (ctx->color[i]) nocolor = 0;
     if (nocolor && ctx->depth && g.mode && mat_depth(in, ctx, out)) return 1;
-    if (g.xlq) { const vkn_shader *was = out->shader; xlq_draw(in, ctx, out); return out->shader != was; }
+    if (g.xlq) { const VkShaderModule was = out->vin.vs; xlq_draw(in, ctx, out); return out->vin.vs != was; }
     return 0;
 }
 static void census_maybe(void);
@@ -446,6 +458,7 @@ void vkn_b5_install(uint32_t vendor, const char *device_name);   // vkn_shlib.cp
 void vkn_b5_install(uint32_t vendor, const char *device_name) { vkn_mat_install(vendor, device_name); if (vkn_prepass_install) vkn_prepass_install(vendor, device_name); }
 void vkn_mat_test_setup(int mode, int xlq, vkn_mat_test_fn fn) {
     for (uint32_t i = 0; i < IDS; i++) if (g_tab[i]) { free(g_tab[i]->gate); free(g_tab[i]); g_tab[i] = NULL; }
+    pthread_mutex_lock(&g_vm_mu); g_nvm = 0; pthread_mutex_unlock(&g_vm_mu);   // [stage 5 rest] (a test's modules are its own)
     const int reg = g.reg; const vkn_mat_stats keep = g.s, last = g.last;   // (the counters run on: the test reads differences)
     memset(&g, 0, sizeof g); g.reg = reg; g.retype = -1; g.s = keep; g.last = last;
     g.mode = mode; g.xlq = xlq; g.test = fn;
@@ -485,7 +498,7 @@ void vkn_mat_census(void) {
         put(&a, "%s", any ? "" : " none");
     }
     put(&a, "; totals: shaders looked at %llu, gate records loaded %llu (stale %llu, bad %llu; pack %s), cut-down vertex shaders %llu, xlq objects %llu, stores dropped %llu, "
-        "outputs dropped %llu, own shader objects %u; red lines %llu", (ull)s->learned, (ull)s->gates_loaded, (ull)s->gates_stale, (ull)s->gates_bad,
+        "outputs dropped %llu, own vertex modules %u (vin); red lines %llu", (ull)s->learned, (ull)s->gates_loaded, (ull)s->gates_stale, (ull)s->gates_bad,
         s->pack == 1 ? "open" : s->pack == 0 ? "none" : s->pack == -1 ? "DAMAGED" : "not asked", (ull)s->twins, (ull)s->xlq_shaders, (ull)s->stores, (ull)s->outputs, g.own, D(reds));
 #undef D
     vkn_logf("%s", a.b);

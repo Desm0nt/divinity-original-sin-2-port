@@ -622,8 +622,9 @@ static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, 
     if (why < 0 && !f) why = R_BUNDLE;
     if (why < 0 && f->base_slot != base) why = R_BASE;
     if (why < 0 && strncmp(c->shader->key[VKN_SRC_FS], f->fx.host_key, 16)) why = R_HKEY;
+    int first_build = 0;
     if (why < 0 && s->first_tex < 0) {   // the bundle was built only now (first host): the stash has no extras yet - the next frame
-        why = R_BUNDLE;
+        why = R_BUNDLE; first_build = 1;   // [stage 5 rest] by design once per bundle: counted, not a red line
     }
     int32_t hr[4] = {0, 0, 0, 0};
     if (why < 0) {
@@ -641,7 +642,7 @@ static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, 
     }
     if (why >= 0) {
         count(why);
-        if (why != R_BUNDLE || f) red(why, "%s host %s: viewport %g %g %g %g, skipped target %ux%u", k_fz_name[kind], c->shader->key[VKN_SRC_FS], in->viewport[0], in->viewport[1], in->viewport[2], in->viewport[3], O->w, O->h);
+        if ((why != R_BUNDLE || f) && !first_build) red(why, "%s host %s: viewport %g %g %g %g, skipped target %ux%u", k_fz_name[kind], c->shader->key[VKN_SRC_FS], in->viewport[0], in->viewport[1], in->viewport[2], in->viewport[3], O->w, O->h);
         disarm_on(p, O, c->frame);
         if (s->skipped) {   // the skipped draw is drawn now (recovery), then the host as recorded
             const int w = watch_find(O); if (w >= 0) watch_end((uint32_t)w);

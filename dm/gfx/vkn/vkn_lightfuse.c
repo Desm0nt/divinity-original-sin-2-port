@@ -91,6 +91,8 @@ const char *vkn_lf_reason_name(int fog, int i) {
         "Fog's target not like Sp (format / size / one level and layer)", "Fog does not read Light's Df", "Fog's depth is not Light's", "Fog's c16[4..6] / c15[12] differ from Light's",
         "another vertex shader / constants / streams than Sky's", "draw range / viewport / scissor differ from Sky's", "the Fog draw does not cover its target",
         "Sp's pending clear is not zero (the fused output 1 is blended)", "fused Fog shader ('g') not available"};
+    static const char *c[VKN_LF_CP_N] = {"C is a target of the next draw", "an earlier effect binds C", "a reader of C that cannot take a shader object of its own"};
+    if (fog == 2) return i >= 0 && i < VKN_LF_CP_N ? c[i] : "?";
     if (fog) return i >= 0 && i < VKN_LF_F_N ? f[i] : "?";
     return i >= 0 && i < VKN_LF_W_N ? w[i] : "?";
 }
@@ -550,10 +552,21 @@ static void rd_close(void) {
     vkn_tex_unref(g.rd.c); vkn_tex_unref(g.rd.sp);
     memset(&g.rd, 0, sizeof g.rd);
 }
-static void rd_copy(const char *why) {   // C as the skipped Fog would have left it (exact: it covered C; same format, one level / layer)
+// C as the skipped Fog would have left it (exact: the Fog covered C; same format, one level / layer). [stage 5 rest] Not an error: the
+// designed end of a window whose C is needed as C (a draw renders onto it, or a reader the twin path cannot serve). Counted by reason
+// (census "Sp -> C copies"); the first 4 of a run logged as plain lines with the draw that asked for C. Was a red line every run (16 of
+// ~58 at the main menu -> world transition, phone 21.11): the copy is a full-screen copy, but only in the frames of that fade.
+static void rd_copy(int why, const vkn_fx_ctx *ctx) {
     vkn_pass_copy(g.rd.c, g.rd.sp);
     g.s.redir_copies++;
-    lf_red(R_WINDOW, "Sp copied into the skipped Fog's target: %s", why);   // (not an error: counted, the first ones shown)
+    if (why >= 0 && why < VKN_LF_CP_N) g.s.copy_by[why]++;
+    static unsigned told;
+    if (told < 4) {
+        told++;
+        vkn_logf("lightfuse fog: Sp copied into the skipped Fog's target %ux%u (%s; draw %u of frame %llu, shader %.16s / %.16s) - exact, counted from now on",
+                 g.rd.c->w, g.rd.c->h, vkn_lf_reason_name(2, why), ctx->draw_no, (unsigned long long)ctx->frame,
+                 ctx->shader ? ctx->shader->key[VKN_SRC_VS] : "?", ctx->shader ? ctx->shader->key[VKN_SRC_FS] : "?");
+    }
     rd_close();
 }
 static void fog_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
@@ -622,9 +635,9 @@ static void redirect(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
         rd_close(); return;
     }
     if (ctx->frame != g.frame) { g.s.redir_open_end++; lf_red(R_WINDOW, "the window on the skipped Fog's target was still open at a frame change (C was not written since)"); rd_close(); return; }
-    for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) if (ctx->color[i] == c) { rd_copy("it is a target of the next draw"); return; }
-    if (ctx->depth == c) { rd_copy("it is a target of the next draw"); return; }
-    for (int k = 0; k < VKN_FX_TEX; k++) if (out->tex[k].tex == c) { rd_copy("an earlier effect binds it"); return; }
+    for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) if (ctx->color[i] == c) { rd_copy(VKN_LF_CP_TARGET, ctx); return; }
+    if (ctx->depth == c) { rd_copy(VKN_LF_CP_TARGET, ctx); return; }
+    for (int k = 0; k < VKN_FX_TEX; k++) if (out->tex[k].tex == c) { rd_copy(VKN_LF_CP_EFFECT, ctx); return; }
     const vkn_shader *s = out->shader ? out->shader : ctx->shader;
     uint64_t cmask = 0;
     for (uint32_t i = 0; s && i < s->nbind; i++) {
@@ -636,7 +649,7 @@ static void redirect(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (!out->shader && !out->discard && !out->no_fs && in->alpha_ref < 0.0f && !retype_code(s, ctx->vfmt) && (s->stages & 7u) == ((1u << VKN_SRC_VS) | (1u << VKN_SRC_FS)) &&
         !s->missing && !s->unusable)
         x = twin_for(s, cmask);
-    if (!x) { rd_copy("a reader that cannot take a shader object of its own (alpha test / retype / effect / kinds / cache full)"); return; }
+    if (!x) { rd_copy(VKN_LF_CP_READER, ctx); return; }   // (alpha test / retype / effect / kinds / cache full)
     out->shader = x->fx;
     for (uint32_t k = 0; k < x->nt; k++) {
         const int32_t sid = in->smp[x->tst[k]] ? in->smp[x->tst[k]][x->tslot[k]] : -1;
@@ -736,6 +749,11 @@ void vkn_lf_census(void) {
         put(&b, "lightfuse fog (DM_VK_NATIVE_LIGHTFUSE_FOG=%d): Fog draws %llu, passed every check %llu, fused into the Light %llu, skipped %llu, drawn as recorded after a fused Light %llu; "
             "learned %d; draws reading Sp for C %llu (windows %llu, Sp -> C copies %llu, reader shaders %llu so far), C read by a non-draw inside a window %llu, windows open at a frame change %llu; refused:",
             g.fog, D(fog), D(fog_ok), D(fog_fused), D(fog_skipped), D(fog_back), g.fog_learned, D(redir_draws), D(redir_windows), D(redir_copies), (ull)s->twins, D(redir_lost), D(redir_open_end));
+        if (D(redir_copies)) {   // [stage 5 rest] the copies by reason (the designed end of a window, not an error)
+            put(&b, " [copies:");
+            for (int i = 0; i < VKN_LF_CP_N; i++) if (s->copy_by[i] != o->copy_by[i]) put(&b, " %s %llu", vkn_lf_reason_name(2, i), (ull)(s->copy_by[i] - o->copy_by[i]));
+            put(&b, "]");
+        }
         any = 0;
         for (int i = 0; i < VKN_LF_F_N; i++) if (s->fog_why[i] != o->fog_why[i]) { put(&b, "%s %s %llu", any ? "," : "", vkn_lf_reason_name(1, i), (ull)(s->fog_why[i] - o->fog_why[i])); any = 1; }
         put(&b, "%s", any ? "" : " none");

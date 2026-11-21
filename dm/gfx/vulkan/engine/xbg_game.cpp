@@ -533,7 +533,10 @@ void timing_boundary(){
 }
 // 最近一个统计窗的每帧 GPU / 翻译 CPU 毫秒（宿主 hle_oe.c 的 GPU 时间 3D 比例控制器、hle_nvn.c 的自适应出图档读）| per-frame GPU / translation CPU ms of the last
 std::atomic<double> perf_gpu_ms{-1},perf_cpu_ms{-1},perf_draws{-1};
-extern "C" double xbg_recent_gpu_ms(void){return perf_gpu_ms.load();}
+// [DOS2] VK-NATIVE stage 5 rest: in mode 1 this file is not initialised (perf_gpu_ms stays -1); the backend's own measured GPU ms
+// (vkn_hacks.h vkn_hacks_recent_gpu_ms; weak: other games / host tests) feeds the ADPF GPU time and the other readers instead.
+extern "C" int vkn_hacks_recent_gpu_ms(double *ms) __attribute__((weak));
+extern "C" double xbg_recent_gpu_ms(void){double v=-1;if(vkn_hacks_recent_gpu_ms && vkn_hacks_recent_gpu_ms(&v))return v;return perf_gpu_ms.load();}
 extern "C" double xbg_recent_draws(void){return perf_draws.load();}   // [DOS2] NR-DRIFT: draws a frame of the last window (hle_dos2_quality.c DM_DOS2_DRS_SETTLE: < 64 = a load screen)
 extern "C" double xbg_recent_cpu_ms(void){return perf_cpu_ms.load();}
 bool sync_mode=false; // diagnostic: marker files/gfx-sync-mode resolves all GPU results at each submit end
