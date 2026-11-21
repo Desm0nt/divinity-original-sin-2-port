@@ -636,19 +636,38 @@ static void ring_of(VkBuffer *b, uint64_t *base) {
     }
     *b = vkn_ring_buffer(); *base = vkn_ring_base();
 }
-// SUPPORT blocks: vkn_shader_support keeps one block per (w, h) in a list it only appends to and never frees; the first match wins
-// there, so the block of a size is the same at every call.
+// SUPPORT blocks: vkn_shader_support keeps one block per (w, h); [DRS 21.11] once its 256 sizes are taken it rewrites the least
+// recently used idle one, so an entry here is good for the frame it was looked up in: a hit of another frame asks again (that also
+// marks the size used there - a size drawn every frame is never rewritten under the GPU).
 enum { SUP_C = 4 };
-static struct { float w, h; vkn_block b; } g_supc[SUP_C]; static uint32_t g_nsupc, g_supc_next;
+static struct { float w, h; vkn_block b; uint64_t frame; } g_supc[SUP_C]; static uint32_t g_nsupc, g_supc_next;
 static int support_of(float w, float h, vkn_block *out) {
+    const uint64_t now = vkn_frame();
     if (g_cost & VKN_COST_LOOKUP)
-        for (uint32_t i = 0; i < g_nsupc; i++) if (g_supc[i].w == w && g_supc[i].h == h) { *out = g_supc[i].b; g_cs.support_hits++; return 0; }
+        for (uint32_t i = 0; i < g_nsupc; i++)
+            if (g_supc[i].w == w && g_supc[i].h == h) {
+                if (g_supc[i].frame == now) { *out = g_supc[i].b; g_cs.support_hits++; return 0; }
+                if (vkn_shader_support(w, h, out)) return -1;
+                g_supc[i].b = *out; g_supc[i].frame = now; return 0;
+            }
     const int r = vkn_shader_support(w, h, out);
     if (!r && (g_cost & VKN_COST_LOOKUP)) {
         const uint32_t i = g_nsupc < SUP_C ? g_nsupc++ : g_supc_next++ % SUP_C;
-        g_supc[i].w = w; g_supc[i].h = h; g_supc[i].b = *out;
+        g_supc[i].w = w; g_supc[i].h = h; g_supc[i].b = *out; g_supc[i].frame = now;
     }
     return r;
+}
+// [DRS 21.11] safety net: no SUPPORT block for this size -> a frame-local copy in the recording ring (vkn_ring2: copies made where the
+// recording is, as vkn_ui.c's) - never the zero block (1/w, 1/h = 0 would make every full-screen pass sample one texel).
+// 0 = ok: *buf / *off = the descriptor's buffer and the offset inside it.
+static int support_ring(float w, float h, VkBuffer *buf, uint64_t *off) {
+    uint8_t tmp[1392]; uint32_t ro = 0;
+    if (vkn_shader_support_fill(w, h, tmp, sizeof tmp)) return -1;
+    uint8_t *cpu = (uint8_t *)vkn_ring2_cpu();
+    if (!cpu || vkn_ring2_alloc(sizeof tmp, &ro)) return -1;
+    memcpy(cpu + ro, tmp, sizeof tmp);
+    *buf = vkn_ring2_buffer(); *off = vkn_ring2_base() + ro;
+    return *buf ? 0 : -1;
 }
 // Shader objects: vkn_shader_get(h) changes its answer only when the record of h leaves the table (destroy / replace), and every such
 // record goes through vkn_shader_set_dead_fn -> vkn_pipe_forget_shader (hle_dos2_vkn_shader.c, both modes: the pipeline cache needs
@@ -753,6 +772,8 @@ static int build_set(const vkn_shader *s, const vkn_draw_in *in, VkDescriptorSet
                 } else if (b->kind == VKN_BK_SUPPORT) {
                     vkn_block sb;
                     if (!support_of(in->viewport[2], in->viewport[3], &sb)) { buf = sb.buf; off = sb.off; size = sb.size; }
+                    else if (!support_ring(in->viewport[2], in->viewport[3], &buf, &off)) size = 1392;   // [DRS 21.11] (counted by vkn_shader)
+                    else buf = VK_NULL_HANDLE;
                 } else if (st >= 0 && s->c1[st].size) { buf = s->c1[st].buf; off = s->c1[st].off; size = s->c1[st].size; }
                 if (!buf || !size) {
                     const vkn_block *z = zero_block();

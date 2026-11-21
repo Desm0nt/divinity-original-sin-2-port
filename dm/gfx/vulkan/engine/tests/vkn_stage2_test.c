@@ -448,6 +448,7 @@ static void test_mirror(void) {
 static void test_textures(void);
 static void test_state(void);
 static void test_shaders(void);
+static void test_support_drs(void);
 static void test_leaks(void);
 
 int main(void) {
@@ -465,6 +466,7 @@ int main(void) {
     test_textures();
     test_state();
     test_shaders();
+    test_support_drs();
     test_leaks();
     CHECK_EQ(mk_errors, 0);
     if (g_fails) { printf("vkn_stage2_test: %d of %d checks FAILED\n", g_fails, g_checks); return 1; }
@@ -2614,6 +2616,54 @@ static void test_shaders(void) {
     CHECK_EQ(ss.dyn_policy[0] + ss.dyn_policy[1] + ss.dyn_policy[2], 0);
     CHECK_EQ(used_of(VKN_ARENA_STATIC), st0 + 2 * 1392);   // only the two SUPPORT blocks (kept for the process)
     CHECK_EQ(mk_live(MK_PIPE), 0);
+}
+
+// [DRS 21.11] dynamic resolution changes the 3D size mid-run (phone run S08, 1485x668 = 68.7 % .. 100 % of 2160x972): every step brings
+// new viewport sizes (the 3D part and its half / quarter / eighth chain). The SUPPORT cache held 32 sizes for the process: after a few
+// steps vkn_shader_support failed for every new size and the draw path bound the zero block (1/w, 1/h = 0 -> each full-screen pass
+// sampled one texel: a flat screen under the HUD, the UI dropped its draws). Now: no failure over hundreds of sizes, every block holds
+// its size, a size looked up every frame is never rewritten, and when every size was used within the last 16 frames the caller gets
+// -1 and the bytes for a frame-local copy (vkn_shader_support_fill).
+static int sup_is(const vkn_block *b, float w, float h) {
+    const float *f = (const float *)b->cpu;
+    return f[144 / 4] == 1.0f / w && f[148 / 4] == 1.0f / h && f[160 / 4] == w && f[164 / 4] == h && f[192 / 4] == 1.0f && f[192 / 4 + 72] == 1.0f;
+}
+static void test_support_drs(void) {
+    vkn_block win, b;
+    CHECK_EQ(vkn_shader_support(2400.0f, 1080.0f, &win), 0);   // the window: the UI and the present pass, every frame
+    uint64_t rec0 = 0, full0 = 0, fills0 = 0; vkn_shader_support_stats(NULL, &rec0, &full0, &fills0);
+    int fails = 0, wrong = 0, win_moved = 0;
+    for (int step = 0; step < 200; step++) {   // 200 DRS steps of 2 frames: 800 sizes of the 3D chain
+        const float w = 1485.0f + 3.0f * (float)step, h = 668.0f + 1.5f * (float)step;
+        for (int fr = 0; fr < 2; fr++) {
+            vkn_block wb;
+            if (vkn_shader_support(2400.0f, 1080.0f, &wb)) fails++;
+            else if (wb.off != win.off || wb.buf != win.buf || !sup_is(&wb, 2400.0f, 1080.0f)) win_moved++;
+            for (int k = 0; k < 4; k++) {
+                const float cw = w / (float)(1 << k), ch = h / (float)(1 << k);
+                if (vkn_shader_support(cw, ch, &b)) fails++;
+                else if (!sup_is(&b, cw, ch)) wrong++;
+            }
+            frames(1);
+        }
+    }
+    CHECK_EQ(fails, 0); CHECK_EQ(wrong, 0); CHECK_EQ(win_moved, 0);
+    uint32_t n = 0; uint64_t rec = 0, full = 0, fills = 0; vkn_shader_support_stats(&n, &rec, &full, &fills);
+    CHECK_EQ(n, 256); CHECK(rec > rec0 + 400); CHECK_EQ(full, full0);
+    // back to a size of an early step (rewritten long ago): a fresh block with that size's bytes
+    CHECK_EQ(vkn_shader_support(1485.0f, 668.0f, &b), 0); CHECK(sup_is(&b, 1485.0f, 668.0f));
+    // a frame that uses more sizes than the cache can give without touching a block the GPU may still read: -1, then the copy's bytes
+    int got = 0, refused = 0;
+    for (int i = 0; i < 300; i++) { if (vkn_shader_support(100.0f + (float)i, 50.0f, &b)) refused++; else got++; }
+    CHECK(refused > 0); CHECK(got > 0); CHECK(got <= 256);
+    vkn_shader_support_stats(NULL, NULL, &full, NULL); CHECK_EQ(full, full0 + (uint64_t)refused);
+    uint8_t copy[1392]; vkn_block cb = {0}; cb.cpu = copy;
+    CHECK_EQ(vkn_shader_support_fill(399.0f, 50.0f, copy, sizeof copy), 0); CHECK(sup_is(&cb, 399.0f, 50.0f));
+    CHECK_EQ(vkn_shader_support_fill(399.0f, 50.0f, copy, 16), -1); CHECK_EQ(vkn_shader_support_fill(0.0f, 50.0f, copy, sizeof copy), -1);
+    vkn_shader_support_stats(NULL, NULL, NULL, &fills); CHECK_EQ(fills, fills0 + 1);
+    frames(20);   // idle again: the sizes come back
+    CHECK_EQ(vkn_shader_support(2160.0f, 972.0f, &b), 0); CHECK(sup_is(&b, 2160.0f, 972.0f));
+    vkn_shader_census();
 }
 
 static void test_leaks(void) {

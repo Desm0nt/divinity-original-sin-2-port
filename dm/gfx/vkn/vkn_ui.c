@@ -590,8 +590,13 @@ int vkn_ui_draw(const vkn_ui_draw_in *in) {
                 if (ring_put(src, n, want, &o->buffer, &o->offset, &o->range)) { g_st.drop_ring++; UI_RED(RR_RING, "no ring space for a uniform block: draw dropped"); return 1; }
             } else if (b->kind == VKN_BK_SUPPORT) {
                 vkn_block sb;
-                if (vkn_shader_support(vw > 0 ? vw : 1.0f, vh > 0 ? vh : 1.0f, &sb)) { g_st.drop_bind++; UI_RED(RR_BIND, "no SUPPORT block: draw dropped"); return 1; }
-                o->buffer = sb.buf; o->offset = sb.off; o->range = sb.size;
+                const float sw = vw > 0 ? vw : 1.0f, sh = vh > 0 ? vh : 1.0f;
+                if (!vkn_shader_support(sw, sh, &sb)) { o->buffer = sb.buf; o->offset = sb.off; o->range = sb.size; }
+                else {   // [DRS 21.11] no block for this size: a frame-local copy (vkn_shader.h vkn_shader_support_fill)
+                    uint8_t tmp[1392];
+                    if (vkn_shader_support_fill(sw, sh, tmp, sizeof tmp) || ring_put(tmp, sizeof tmp, 0, &o->buffer, &o->offset, &o->range)) {
+                        g_st.drop_bind++; UI_RED(RR_BIND, "no SUPPORT block: draw dropped"); return 1; }
+                }
             } else {
                 const vkn_block *c1 = &s->c1[b->stage == VKN_STAGE_VS ? VKN_SRC_VS : VKN_SRC_FS];
                 if (!c1->size) { g_st.drop_bind++; UI_RED(RR_BIND, "pair %u: C1 binding without data: draw dropped", pair); return 1; }

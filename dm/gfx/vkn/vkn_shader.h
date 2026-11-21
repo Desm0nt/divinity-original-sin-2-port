@@ -82,6 +82,9 @@ int vkn_shader_create(uint64_t handle, const vkn_stage_src src[VKN_SRCS]);
 // least 3 frames after its destroy (vkn_retire).
 const vkn_shader *vkn_shader_get(uint64_t handle);
 void vkn_shader_sync(void);   // waits until every queued creation is done
+// [stage 5 technique Z] vkn_shader_get without the wait: NULL also while the creation is still queued (the engine thread's encoder taps,
+// vkn_occz.c: a shader not made yet makes that draw's signature "new", never a wait).
+const vkn_shader *vkn_shader_peek(uint64_t handle);
 // The module for a pipeline: stage VKN_STAGE_VS / FS / CS. alpha_func: NVN compare func 1 NEVER .. 8 ALWAYS (0 or 8 = no test) with
 // alpha_ref: the fragment variant with the alpha test ("#at"); retype: the vertex variant for this retype code ("#vi": low 32 bits
 // 2 bits per input location, 0 keep / 1 float / 2 sint / 3 uint; high 32 bits 1 = SSCALED fed as SINT, 2 = USCALED fed as UINT; 0 = none).
@@ -92,8 +95,14 @@ void vkn_shader_destroy(uint64_t handle);
 // Called (any thread, outside every lock of this module) for each destroyed or replaced record, before it is retired: the pipeline cache
 // drops what it built with this id. One listener.
 void vkn_shader_set_dead_fn(void (*fn)(uint32_t id, uint64_t handle));
-// The SUPPORT block for a viewport size (1392 bytes, uniform buffer, static, cached per size). 0 = ok.
+// The SUPPORT block for a viewport size (1392 bytes, uniform buffer, static, cached per size). 0 = ok. [DRS 21.11] Up to 256 sizes;
+// then the least recently used size idle for 16 frames is rewritten in place (dynamic resolution makes new sizes at every step). A
+// caller that keeps a block for later frames must look it up again in each frame it binds it (that marks it used).
 int vkn_shader_support(float width, float height, vkn_block *out);
+// [DRS 21.11] safety net: the 1392 bytes of the size into dst (a frame-local copy, e.g. the constant ring) when vkn_shader_support
+// failed; never bind the zero block for SUPPORT (1/w, 1/h = 0: every full-screen pass samples one texel). 0 = ok.
+int vkn_shader_support_fill(float width, float height, void *dst, uint32_t bytes);
+void vkn_shader_support_stats(uint32_t *sizes, uint64_t *recycled, uint64_t *full, uint64_t *fills);
 
 typedef struct vkn_shader_stats {
     uint64_t alive, created, replaced, destroyed, failed, cancelled, queued;

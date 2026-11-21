@@ -63,7 +63,12 @@ extern vkn_tex *vkn_pass_color(uint32_t i) __attribute__((weak));
 extern vkn_tex *vkn_pass_depth(void) __attribute__((weak));
 
 #define RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
-enum { SH_TAB = 1 << 16, LAYOUT_CAP = 4096, SUPPORT_CAP = 32, SUPPORT_BYTES = 1392, MISS_REDS = 16, BLOCK_REDS = 8 };
+// [DRS 21.11] SUPPORT_CAP was 32 for the whole process: dynamic resolution makes new viewport sizes at every step (the 3D part and
+// its half / quarter / eighth chain), so after a few steps every new size got no block, the draw path bound the zero block (1/w, 1/h, w,
+// h = 0: every full-screen pass sampled one texel -> a flat grey-green screen under the HUD, the UI dropped its draws: S08). Now 256
+// sizes, and when they are all taken the least recently used size idle for SUPPORT_IDLE frames is rewritten in place (the GPU is
+// done with it: 3 frames in flight at most); vkn_shader_support_fill gives the bytes for a frame-local copy when even that fails.
+enum { SH_TAB = 1 << 16, LAYOUT_CAP = 4096, SUPPORT_CAP = 256, SUPPORT_IDLE = 16, SUPPORT_BYTES = 1392, MISS_REDS = 16, BLOCK_REDS = 8 };
 
 // nr_entry: [stage 5 A1] NR-04 table entry + 1 of a fragment stage the library replaced by name (0 = none); nr_alt: the translated
 // module for a pass outside the verified one (vkn_shlib_named_alt, made on first need; state 0 not tried, 1 made, -1 refused), under g_mu.
@@ -75,7 +80,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static vkn_tab g_tab; static int g_tab_ok;          // index -> sh_rec *
 static uint32_t *g_free_id, g_nfree, g_capfree, g_next_id = 1;
 static sh_layout g_lay[LAYOUT_CAP]; static uint32_t g_nlay;
-static struct { float w, h; vkn_block b; } g_sup[SUPPORT_CAP]; static uint32_t g_nsup;
+static struct { float w, h; vkn_block b; uint64_t used; } g_sup[SUPPORT_CAP]; static uint32_t g_nsup;   // used: vkn_frame() of the last lookup
+static uint64_t g_sup_recycled, g_sup_full, g_sup_fills; static int g_sup_reds;
 static vkn_shader_stats g_st;
 static void (*g_dead)(uint32_t, uint64_t);
 static int g_miss_reds, g_block_reds, g_odd_reds;
@@ -462,6 +468,7 @@ const vkn_shader *vkn_shader_get(uint64_t handle) {
     if (!s && handle) { q_settle(handle, 0); s = tab_find(handle); }   // still queued: wait for its creation
     return s;
 }
+const vkn_shader *vkn_shader_peek(uint64_t handle) { return tab_find(handle); }   // [stage 5 technique Z] never waits
 void vkn_shader_sync(void) { run_big(NULL, NULL); }
 
 void vkn_shader_destroy(uint64_t handle) {
@@ -559,20 +566,49 @@ VkShaderModule vkn_shader_module(const vkn_shader *s, int stage, uint32_t alpha_
 int vkn_shader_support(float width, float height, vkn_block *out) {
     const vkn_dev *d = vkn_device();
     if (!out || !d || !xbg_support_defaults || !(width > 0) || !(height > 0)) return -1;
-    int rc = -1;
+    int rc = -1, note = 0; const uint64_t now = vkn_frame();
     pthread_mutex_lock(&g_mu);
-    for (uint32_t i = 0; i < g_nsup; i++) if (g_sup[i].w == width && g_sup[i].h == height) { *out = g_sup[i].b; rc = 0; break; }
+    for (uint32_t i = 0; i < g_nsup; i++) if (g_sup[i].w == width && g_sup[i].h == height) { g_sup[i].used = now; *out = g_sup[i].b; rc = 0; break; }
     if (rc && g_nsup < SUPPORT_CAP) {
         uint32_t al = (uint32_t)d->props.limits.minUniformBufferOffsetAlignment; if (al < 16) al = 16;
         vkn_block b;
         if (!vkn_block_alloc(VKN_ARENA_STATIC, SUPPORT_BYTES, al, &b)) {
             xbg_support_defaults(b.cpu, width, height);
-            g_sup[g_nsup].w = width; g_sup[g_nsup].h = height; g_sup[g_nsup].b = b; g_nsup++;
+            g_sup[g_nsup].w = width; g_sup[g_nsup].h = height; g_sup[g_nsup].b = b; g_sup[g_nsup].used = now; g_nsup++;
             *out = b; rc = 0;
         }
     }
+    if (rc && g_nsup) {   // [DRS 21.11] every size taken (or no arena memory): rewrite the least recently used idle one in place
+        uint32_t k = UINT32_MAX;
+        for (uint32_t i = 0; i < g_nsup; i++)
+            if (g_sup[i].used + SUPPORT_IDLE <= now && (k == UINT32_MAX || g_sup[i].used < g_sup[k].used)) k = i;
+        if (k != UINT32_MAX) {
+            xbg_support_defaults(g_sup[k].b.cpu, width, height);   // (static arena: host-coherent, persistently mapped)
+            g_sup[k].w = width; g_sup[k].h = height; g_sup[k].used = now;
+            *out = g_sup[k].b; rc = 0; note = ++g_sup_recycled == 1;
+        } else { g_sup_full++; note = g_sup_reds < BLOCK_REDS ? (g_sup_reds++, 2) : 0; }
+    }
+    const uint32_t n = g_nsup;
     pthread_mutex_unlock(&g_mu);
+    if (note == 1) vkn_logf("shaders: SUPPORT blocks: all %u viewport sizes taken (dynamic resolution steps): the least recently used idle size is rewritten "
+                            "in place from now on (%ux%u)", n, (unsigned)width, (unsigned)height);
+    else if (note == 2) vkn_logf(RED "shaders: SUPPORT block for %gx%g: all %u sizes used in the last %d frames: a frame-local copy is bound", (double)width, (double)height, n, SUPPORT_IDLE);
     return rc;
+}
+// [DRS 21.11] the safety net: the block's bytes for a frame-local copy (the constant ring) when vkn_shader_support has none. 0 = ok.
+int vkn_shader_support_fill(float width, float height, void *dst, uint32_t bytes) {
+    if (!dst || bytes < SUPPORT_BYTES || !xbg_support_defaults || !(width > 0) || !(height > 0)) return -1;
+    xbg_support_defaults(dst, width, height);
+    pthread_mutex_lock(&g_mu); g_sup_fills++; pthread_mutex_unlock(&g_mu);
+    return 0;
+}
+void vkn_shader_support_stats(uint32_t *sizes, uint64_t *recycled, uint64_t *full, uint64_t *fills) {
+    pthread_mutex_lock(&g_mu);
+    if (sizes) *sizes = g_nsup;
+    if (recycled) *recycled = g_sup_recycled;
+    if (full) *full = g_sup_full;
+    if (fills) *fills = g_sup_fills;
+    pthread_mutex_unlock(&g_mu);
 }
 
 void vkn_shader_stats_get(vkn_shader_stats *out) {
@@ -597,6 +633,11 @@ void vkn_shader_census(void) {
                       (unsigned long long)s.bind_kind[VKN_BK_STORAGE], (unsigned long long)s.bind_kind[VKN_BK_DRIVER0], (unsigned long long)s.bind_kind[VKN_BK_DRIVER2],
                       (unsigned long long)(s.bind_kind[VKN_BK_OTHER] + s.bind_kind[0]));
     if (s.stage_mismatch || s.ubo_no_block) vkn_logf(RED "shaders: %llu stages whose bundle is of another stage, %llu uniform bindings without an engine block", (unsigned long long)s.stage_mismatch, (unsigned long long)s.ubo_no_block);
+    {   // [DRS 21.11] SUPPORT blocks by viewport size (one line while dynamic resolution has made more than the first sizes)
+        uint32_t n = 0; uint64_t rec = 0, full = 0, fills = 0; vkn_shader_support_stats(&n, &rec, &full, &fills);
+        if (rec || full || fills) vkn_logf("shaders: SUPPORT blocks: %u viewport sizes (cap %d), rewritten in place %llu, none idle %llu, frame-local copies %llu",
+                                           n, SUPPORT_CAP, (unsigned long long)rec, (unsigned long long)full, (unsigned long long)fills);
+    }
     if (vkn_shlib_named_census) vkn_shlib_named_census();   // [stage 5 A1] engine shaders by name + Dref (one line)
 }
 // ==== [DOS2] VK-NATIVE stage 4 (pipeline warm-up, vkn_warm.c): lookups the replay of the pipeline list needs ====
