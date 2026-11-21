@@ -21,6 +21,7 @@
 //     rules (xbg_bc_astc_shape: not storage, single-sampled, 2D-like, no VT-cache shape / BC3 array unless DM_GFX_BC_ASTC_VT=1) and the
 //     image format properties.
 //   - DM_GFX_BC_DECODE=cpu turns routes 2 and 3 off (the translator's switch); DM_GFX_BC_BATCH_MB (32) sizes the scratch.
+//     [stage 5.3 V3] DM_VK_NATIVE_BCGPU=0 does the same for the backend only (GPU safe mode step 2: xbg_safe_mode.h).
 //
 // Upload model (vkn.h): the creating thread (an engine loader thread) builds a job - the BC blocks of every (level, layer) as tight block
 // rows, cut into batches that fit the scratch (a level bigger than a batch is cut into bands of block rows) - in one staging block

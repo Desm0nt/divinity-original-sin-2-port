@@ -20,6 +20,7 @@
 #include "../nr/nr_sort.h"
 #include "../nr/nr_hacks.h"
 #include "vkn_mat.h"   // [stage 5.2 B5 fixpp] vkn_mat_apply: the MAT decision for a replayed caster
+#include "vkn_drv.h"   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,7 +87,8 @@ static struct {
 // do not enter the query module (vkn_draw.c g_fx_nest: a piece's nested draw), so they leave the brackets, the predicates and the
 // counts alone. Modes 1 / 3 (GPU predicates) stay refused as before (a predicated caster would not be a pure function of its inputs;
 // none is expected, but the phone has not shown it): counted by cond_ref, named in the census.
-static int cond_ok(void) { const int m = vkn_query_mode(); return m == VKN_COND_OFF || m == VKN_COND_COUNT || m == VKN_COND_ORACLE; }
+// [stage 5 technique A] modes 5 / 6 as 4: their CPU skips (vkn_occ.c, fx order 45) are pair draws and conditional draws only.
+static int cond_ok(void) { const int m = vkn_query_mode(); return m == VKN_COND_OFF || m == VKN_COND_COUNT || m == VKN_COND_ORACLE || m == VKN_COND_A || m == VKN_COND_A_VERIFY; }
 static int stage_src(uint8_t st) { return st == 0 ? 0 : st == 1 ? 1 : -1; }   // engine stage (vkn_bind.stage) -> draw-path stage (graphics only)
 static int fixed_depth(VkFormat f) { return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32; }
 static uint32_t depth_bpp(VkFormat f) { return f == VK_FORMAT_D16_UNORM ? 2u : 4u; }
@@ -199,6 +201,7 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
             const VkClearAttachment ca = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .clearValue.depthStencil = {d, 0}};
             const VkClearRect cr = {{{clear_rect[0], clear_rect[1]}, {(uint32_t)clear_rect[2], (uint32_t)clear_rect[3]}}, 0, 1};
             vkCmdClearAttachments(vkn_cb(), 1, &ca, 1, &cr);
+            vkn_drv_cleared();   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND
             g.s.tile_clears++;
         }
     }
@@ -343,6 +346,7 @@ static void clear_in_pass(const int32_t r[4]) {
     const VkClearAttachment ca = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .clearValue.depthStencil = {d, 0}};
     const VkClearRect cr = {{{r[0], r[1]}, {(uint32_t)r[2], (uint32_t)r[3]}}, 0, 1};
     vkCmdClearAttachments(vkn_cb(), 1, &ca, 1, &cr);
+    vkn_drv_cleared();   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND
     g.s.tile_clears++;
 }
 static void precopy(void) {

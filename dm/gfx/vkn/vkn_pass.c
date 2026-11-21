@@ -26,6 +26,7 @@
 #include "vkn_draw.h"
 #include "vkn_buf.h"
 #include "vkn_shader.h"
+#include "vkn_drv.h"    // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments
 #include "../nr/nr_cover.h"   // [stage 5.2 B1] NR-10b: position programs, nr_cv_cover
 #include "../nr/nr_frame.h"   // [stage 5.2 B1] NR-FRAME: write mask full for the format
 #include "../nb/nb_uiarea.h"  // [stage 5.2 B1] draw rect of a later draw of an area pass
@@ -683,6 +684,7 @@ static void poison_now(uint32_t mask, int dmask, const tset *s, VkRect2D r, uint
     if (!n || !r.extent.width || !r.extent.height) return;
     const VkClearRect cr = {r, 0, 1};
     vkCmdClearAttachments(g_open_cb, n, ca, 1, &cr);
+    vkn_drv_cleared();   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND
     *ctr += n;
 }
 // end_open, the pass still open in its recording: the store poison (mode 3), the check that a rule's first draw was recorded
@@ -1163,6 +1165,7 @@ void vkn_pass_clear_color(vkn_tex *t, uint32_t layer, const float rgba[4], const
     if (x1 > x0 && y1 > y0) {
         const VkClearRect cr = {{{x0, y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}, 0, 1};
         vkCmdClearAttachments(g_open_cb, 1, &ca, 1, &cr);
+        vkn_drv_cleared();   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND: the bound vertex / index buffers may be disturbed on this driver
         g_st.clears_att++;
     }
     written(t);
@@ -1187,6 +1190,7 @@ void vkn_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
         const VkClearAttachment ca = {.aspectMask = a, .clearValue.depthStencil = {depth, stencil}};
         const VkClearRect cr = {g_area, 0, 1};
         vkCmdClearAttachments(g_open_cb, 1, &ca, 1, &cr);
+        vkn_drv_cleared();   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND: the bound vertex / index buffers may be disturbed on this driver
         g_st.clears_att++;
         written(t);
         return;

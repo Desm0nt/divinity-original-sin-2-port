@@ -34,6 +34,7 @@
 #include "../gfx/vkn/vkn_pass.h"
 #include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the backend calls of this part are records (vkn_rt_pass_*)
 #include "../gfx/vkn/vkn_policy.h"   // [stage 5.2 B1] the load / store policy switches
+#include "../gfx/vkn/vkn_drv.h"      // [stage 5.3 V2] the driver corrections' census line
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_pass.h"
@@ -288,5 +289,6 @@ void dm_vkn_pass_register(void) {
         vkn_pass_policy_request(&rq);
     }
     dm_vkn_census(vkn_pass_census);
+    dm_vkn_census(vkn_drv_census);   // [stage 5.3 V2] the driver corrections (vkn_drv.h: resolved at the first build, their own install line)
 }
 #endif

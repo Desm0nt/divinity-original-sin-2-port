@@ -54,6 +54,7 @@
 #include "../vulkan/engine/xbg_spirv_pos.h"      // [stage 5.2 B1] position programs (vkn_shlib_vs_pos)
 #include "../vulkan/engine/xbg_spirv_raster.h"   // [stage 5.2 B1] fragment output locations (vkn_shlib_fs_outputs)
 #include "vkn_policy.h"                          // [stage 5.2 B1] DM_VK_NATIVE_LOAD by family
+#include "vkn_occ.h"                             // [stage 5 technique A] read masks of constant blocks (vkn_shlib_read_mask)
 
 extern "C" const char *dm_vk_driver_status(void) __attribute__((weak));   // vk_driver.c: the running driver (pipeguard list suffix)
 extern "C" int xbg_sha256_hex16(const void *data, size_t n, char out_hex17[17]);   // xbg_shader_key.c (pure)
@@ -76,6 +77,7 @@ struct Cfg {
     int ubovec = 0, idvs = 0, early_z = 1, invariant = 0, gscull = 0x61, gather_snap = 1, spv_opt = 0, warp_mode = 1;
     int ubd_mode = 0; bool ubd_ro = false, ubd_scan = false;   // NR-08b (nrubd::init)
     bool pos_on = false;   // [stage 5.2 B1] DM_VK_NATIVE_LOAD != 0 for the policy family: position programs / output masks built at load
+    bool noout = false;    // [stage 5.3 V2] DM_GFX_NOOUT_MASK for the policy family (vkn_drv.c): the "no colour output" fact built at load
 };
 Cfg g;
 std::mutex g_mu;          // the shader map and every load
@@ -569,7 +571,13 @@ struct Sh {
     std::vector<uint32_t> words;   // vertex: the final words while DM_GFX_VTX_RETYPE is on (the "#vi" variants start from them)
     std::unique_ptr<nr_cv_prog> pos;   // [stage 5.2 B1] vertex, g.pos_on: the position program of the final words (only when ok)
     int64_t fs_out = -1;               // [stage 5.2 B1] fragment, g.pos_on: Output locations of the final words (bit = location), -1 = not built
+    int8_t fs_noout = -1;              // [stage 5.3 V2] fragment, g.noout: 1 = no colour output and no sample-mask write (xbg_game.cpp draw's
+                                       // !fs->raster.outputs && !fs->raster.sample_mask), 0 = writes colour, -1 = not built
     std::map<uint64_t, VkShaderModule> retyped, alpha;
+    // [stage 5 technique A] DM_VK_NATIVE_COND 5 / 6: per Uniform block (Binding), the 16-byte elements the final words read
+    // (vkn_occ_spv_read_mask); kind 1 = bits, 0 = the whole block, set once at load
+    struct Rm { uint32_t binding; int kind; std::vector<uint64_t> bits; };
+    std::vector<Rm> rmask;
 };
 std::unordered_map<std::string, std::unique_ptr<Sh>> g_sh;
 std::set<std::string> g_missing_told;
@@ -640,7 +648,21 @@ Sh *load(const std::string &key, const void *control, const void *code) {
     // [stage 5.2 B1] DM_VK_NATIVE_LOAD (vkn_pass.c, the cover proof of a pass's first draw): the position program of the final words
     // (xbg_spirv_pos_prog, NR-10b: 117 of DOS2's vertex shaders have one) and the fragment output locations (xbg_spirv_raster_facts)
     if (g.pos_on && h.stage == 0) { nr_cv_prog pr; xbg_spirv_pos_prog(words.data(), words.size(), &pr); if (pr.ok) p->pos.reset(new nr_cv_prog(pr)); }
-    if (g.pos_on && h.stage == 4) p->fs_out = int64_t(xbg_spirv_raster_facts(words.data(), words.size(), 4).outputs);
+    if ((g.pos_on || g.noout) && h.stage == 4) {   // [stage 5.3 V2] one scan for both facts (built only where a switch asks: never on Adreno)
+        const XbgRasterFacts rf = xbg_spirv_raster_facts(words.data(), words.size(), 4);
+        if (g.pos_on) p->fs_out = int64_t(rf.outputs);
+        if (g.noout) p->fs_noout = int8_t(!rf.outputs && !rf.sample_mask ? 1 : 0);
+    }
+    {   // [stage 5 technique A] the read masks (only when technique A is asked for: DM_VK_NATIVE_COND 5 / 6)
+        static const bool occ_on = [] { const char *e = getenv("DM_VK_NATIVE_COND"); return e && (atoi(e) == 5 || atoi(e) == 6); }();
+        if (occ_on && (h.stage == 0 || h.stage == 4))
+            for (auto &b : p->bindings) if (b.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b.source == XBG_SOURCE_UNIFORM) {
+                Sh::Rm m; m.binding = b.binding; m.bits.assign(((b.bytes ? b.bytes : 65536u) / 16u + 63u) / 64u, 0);
+                m.kind = vkn_occ_spv_read_mask(words.data(), words.size(), b.binding, m.bits.data(), uint32_t(m.bits.size())) == 1 ? 1 : 0;
+                if (!m.kind) m.bits.clear();
+                p->rmask.push_back(std::move(m));
+            }
+    }
     if (p->unusable.empty() && make_module(words, &p->module, key) != VK_SUCCESS) p->unusable = "vkCreateShaderModule failed";
     if (!p->unusable.empty()) ++st_unusable;
     Sh *out = p.get(); g_sh.emplace(key, std::move(p)); ++st_loads; st_ns += now_ns() - t0;
@@ -779,6 +801,7 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
     { const char *e = getenv("DM_GFX_VTX_RETYPE"); g.retype_keep = e && *e ? atoi(e) != 0 : g.props.vendorID != 0x5143; }
     { const char *e = getenv("DM_GFX_SPV_OPT"); g.spv_opt = e && *e ? atoi(e) : 0; if (g.spv_opt > 0) xbg_spvopt_init((g.base + "/spvopt").c_str(), g.spv_opt); }
     g.pos_on = vkn_policy_load(int(g.policy)) != 0;   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with)
+    g.noout = vkn_policy_env_or("DM_GFX_NOOUT_MASK", vkn_policy_noout_mask_default(int(g.policy)), nullptr) != 0;   // [stage 5.3 V2] (vkn_drv.c reads it the same way)
     g.ready = true;
     L("initialised (DM_VK_NATIVE_SHLIB: the translator is not initialised): gpu \"%s\" vendor %#x family %s policy %s sim %#x; subgroup %u stages %#x ops %#x; "
       "rewrites: quad %d warp32 %d ldc_fold %d forward_temps %d nan_minmax %d nan_sat %d ldc_canon %d f2i_notrunc %d texcoord_unguard %d ubovec %d idvs %d early_z %d "
@@ -831,6 +854,21 @@ extern "C" int64_t vkn_shlib_fs_outputs(const void *shader) {
     return s && s->stage == 4 ? s->fs_out : -1;
 }
 extern "C" int vkn_shlib_policy(void) { return g.ready ? int(g.policy) : -1; }
+// ==== [DOS2] VK-NATIVE stage 5.3 V2 (vkn_drv.c): the no-colour-output fact (immutable after load, as fs_facts: no lock) and the module
+// lock's switch (set once at init).
+extern "C" int vkn_shlib_fs_noout(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 4 ? s->fs_noout : -1;
+}
+extern "C" int vkn_shlib_serial(void) { return g.ready && g.serial ? 1 : 0; }
+// ==== [/stage 5.3 V2]
+// [stage 5 technique A] immutable after load (as fs_facts): no lock.
+extern "C" int vkn_shlib_read_mask(const void *shader, uint32_t binding, const uint64_t **bits, uint32_t *nwords) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    if (!s) return -1;
+    for (const auto &m : s->rmask) if (m.binding == binding) { if (m.kind == 1) { *bits = m.bits.data(); *nwords = uint32_t(m.bits.size()); } return m.kind; }
+    return -1;
+}
 // ==== [/stage 5.2 B1]
 extern "C" VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!shader) return VK_NULL_HANDLE;

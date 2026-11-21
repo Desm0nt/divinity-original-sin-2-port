@@ -92,6 +92,64 @@ static inline int vkn_policy_store(int f) { return vkn_policy_env("DM_VK_NATIVE_
 static inline int vkn_policy_fresh(int f) { return vkn_policy_env("DM_VK_NATIVE_FRESH", vkn_policy_fresh_default(f), 0, 3, NULL); }
 static inline int vkn_policy_tilebar(int f) { return vkn_policy_env("DM_VK_NATIVE_TILEBAR", vkn_policy_tilebar_default(f), 0, 1, NULL); }
 
+// ==== [DOS2] VK-NATIVE stage 5.3 V2: the driver corrections' rules (vkn_drv.c applies them), token for token the old path's
+// (xbg_vendor_policy.h; the same switch names, so dm/env, the gear and the safe-mode ladder reach both paths). By policy family:
+//   DM_GFX_NOOUT_MASK    colour writes masked off for a fragment shader without colour outputs (Mali writes 0: d2r #179). Not Adreno.
+//   DM_GFX_PIPE_SERIAL   one shader-module / pipeline creation at a time (PowerVR's compiler is not thread-safe, PVR-02 / PVR-05). PowerVR.
+//   DM_GFX_UBO_DYNAMIC   dynamic uniform buffers (PowerVR: off, the unused-dynamic-UBO overrun of PPSSPP, PVR-06). Not PowerVR. 2 = the
+//                        read-only rule anywhere (DOOM's PVR-06 spelling).
+//   DM_NR_UBODYN         NR-08b: where dynamic buffers are off, the per-draw blocks a stage reads are dynamic again (support / c1 /
+//                        unread ones static). 1 on PowerVR (17.11), 0 elsewhere; 2 = dry run (no effect here), 3 = 0.
+// By driverID (VkPhysicalDeviceDriverProperties, Vulkan 1.2; 0 = unknown: nothing applies):
+//   DM_GFX_DEPTH_BIAS_X2 depthBiasConstantFactor doubled where the driver halves it: PanVK, RADV (ANGLE doubleDepthBiasConstantFactor).
+//   DM_GFX_CLEAR_REBIND  everything bound forgotten after vkCmdClearAttachments: Qualcomm stock, AMD stock, Imagination stock (Skia
+//                        mustInvalidatePrimaryCmdBufferStateAfterClearAttachments). Not Turnip.
+// DM_GFX_SIM_GPU tokens the backend needs besides the family (xbg_sim_parse names): NOBC (mali, powervr / pvr, nobc), UBDYN8 (ubdyn8),
+// NOANISO (powervr / pvr, noaniso).
+enum { VKN_DRVID_AMD_PROPRIETARY = 1, VKN_DRVID_MESA_RADV = 3, VKN_DRVID_IMAGINATION_PROPRIETARY = 7, VKN_DRVID_QUALCOMM_PROPRIETARY = 8,
+       VKN_DRVID_MESA_TURNIP = 18, VKN_DRVID_MESA_PANVK = 20 };   // = VkDriverId
+static inline int vkn_policy_noout_mask_default(int f) { return f != VKN_FAM_ADRENO; }        // xbg_noout_mask_default
+static inline int vkn_policy_pipe_serial_default(int f) { return f == VKN_FAM_POWERVR; }      // xbg_pipe_serial_default
+static inline int vkn_policy_ubo_dynamic_default(int f) { return f != VKN_FAM_POWERVR; }      // xbg_ubo_dynamic_default
+static inline int vkn_policy_ubodyn_default(int f) { return f == VKN_FAM_POWERVR ? 1 : 0; }   // xbg_nr_ubodyn_default
+// xbg_nr_ubodyn_active: (DM_NR_UBODYN value or -1 unset, DM_GFX_UBO_DYNAMIC value or -1 unset, the family default on / off, family)
+static inline int vkn_policy_ubodyn_active(int nr_ubodyn, int ubo_dynamic_env, int family_default_on, int f) {
+    if (ubo_dynamic_env == 2) return 1;
+    const int on = ubo_dynamic_env < 0 ? family_default_on : ubo_dynamic_env != 0;
+    const int m = nr_ubodyn < 0 ? vkn_policy_ubodyn_default(f) : nr_ubodyn;
+    return m == 1 && !on;
+}
+static inline int vkn_policy_depth_bias_x2_default(uint32_t driver_id) { return driver_id == VKN_DRVID_MESA_PANVK || driver_id == VKN_DRVID_MESA_RADV; }
+static inline int vkn_policy_clear_rebind_default(uint32_t driver_id) {
+    return driver_id == VKN_DRVID_QUALCOMM_PROPRIETARY || driver_id == VKN_DRVID_AMD_PROPRIETARY || driver_id == VKN_DRVID_IMAGINATION_PROPRIETARY;
+}
+static inline int vkn_policy_reversed_depth_broken(uint32_t driver_id) { return driver_id == VKN_DRVID_QUALCOMM_PROPRIETARY; }   // (a fact: not emulated)
+// xbg_env_or: a set value wins ("0" off, any other number on), else the default. *from (non-NULL) = 1 when the environment decided.
+static inline int vkn_policy_env_or(const char *name, int def, int *from) {
+    const char *e = getenv(name);
+    if (from) *from = e && *e;
+    return e && *e ? atoi(e) != 0 : def;
+}
+// One DM_GFX_SIM_GPU token present (the separators of xbg_sim_parse).
+static inline int vkn_policy_sim_token(const char *sim, const char *tok) {
+    const size_t tn = strlen(tok);
+    for (const char *p = sim; p && *p;) {
+        while (*p == ',' || *p == ' ' || *p == ';' || *p == '+' || *p == '"' || *p == '\'') p++;
+        const char *e = p; while (*e && *e != ',' && *e != ' ' && *e != ';' && *e != '+' && *e != '"' && *e != '\'') e++;
+        if ((size_t)(e - p) == tn && tn && !strncmp(p, tok, tn)) return 1;
+        p = e;
+    }
+    return 0;
+}
+static inline int vkn_policy_sim_nobc(const char *sim) {   // XBG_SIM_NOBC: the mali / powervr profiles and the nobc token
+    return vkn_policy_sim_token(sim, "mali") || vkn_policy_sim_token(sim, "powervr") || vkn_policy_sim_token(sim, "pvr") || vkn_policy_sim_token(sim, "nobc");
+}
+static inline int vkn_policy_sim_ubdyn8(const char *sim) { return vkn_policy_sim_token(sim, "ubdyn8"); }   // XBG_SIM_UBDYN8 (by name only)
+static inline int vkn_policy_sim_noaniso(const char *sim) {   // XBG_SIM_NOANISO: the powervr profile and the noaniso token
+    return vkn_policy_sim_token(sim, "powervr") || vkn_policy_sim_token(sim, "pvr") || vkn_policy_sim_token(sim, "noaniso");
+}
+// ==== [/stage 5.3 V2]
+
 #ifdef __cplusplus
 }
 #endif

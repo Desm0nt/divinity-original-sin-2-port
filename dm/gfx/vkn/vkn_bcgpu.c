@@ -6,6 +6,7 @@
 #ifdef DM_GAME_DOS2
 #define VKN_BCG_DOOR __attribute__((weak))
 #include "vkn_bcgpu.h"
+#include "vkn_drv.h"   // [stage 5.3 V2] DM_GFX_PIPE_SERIAL: the creation lock (PowerVR)
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,7 +100,8 @@ static VkShaderModule make_module(const vkn_dev *d, int which) {
     if (!code || !bytes) return VK_NULL_HANDLE;
     const VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code};
     VkShaderModule m = VK_NULL_HANDLE;
-    return vkCreateShaderModule(d->dev, &ci, NULL, &m) == VK_SUCCESS ? m : VK_NULL_HANDLE;
+    const int lk = vkn_drv_lock(); const VkResult r = vkCreateShaderModule(d->dev, &ci, NULL, &m); vkn_drv_unlock(lk);   // [stage 5.3 V2]
+    return r == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
 static VkPipeline make_pipe(const vkn_dev *d, VkShaderModule m, VkPipelineLayout pl, const uint32_t *spec, uint32_t nspec) {
     const VkSpecializationMapEntry map[2] = {{0, 0, 4}, {1, 4, 4}};
@@ -107,7 +109,8 @@ static VkPipeline make_pipe(const vkn_dev *d, VkShaderModule m, VkPipelineLayout
     const VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main", .pSpecializationInfo = &si}};
     VkPipeline p = VK_NULL_HANDLE;
-    return vkCreateComputePipelines(d->dev, VK_NULL_HANDLE, 1, &ci, NULL, &p) == VK_SUCCESS ? p : VK_NULL_HANDLE;
+    const int lk = vkn_drv_lock(); const VkResult r = vkCreateComputePipelines(d->dev, VK_NULL_HANDLE, 1, &ci, NULL, &p); vkn_drv_unlock(lk);   // [stage 5.3 V2]
+    return r == VK_SUCCESS ? p : VK_NULL_HANDLE;
 }
 
 static void destroy_locked(void) {
@@ -135,7 +138,9 @@ static int prepare_locked(void) {
     g_tried = 1;
     const uint64_t t0 = vkn_now_ns();
     const char *e = getenv("DM_GFX_BC_DECODE");
-    const int cpu = e && !strcmp(e, "cpu");
+    const char *nb = getenv("DM_VK_NATIVE_BCGPU");   // [stage 5.3 V3] the backend's own off switch (safe-mode step 2; the old path keeps DM_GFX_BC_DECODE)
+    const int off = nb && *nb == '0';
+    const int cpu = (e && !strcmp(e, "cpu")) || off;
     e = getenv("DM_GFX_BC_SELFTEST"); g_selftest = e ? atoi(e) : 1; if (g_selftest < 0 || g_selftest > 2) g_selftest = 1;
     e = getenv("DM_GFX_BC_ASTC"); g_astc_mode = !e || !*e || !strcmp(e, "auto") ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "1") ? 2 : 1;
     e = getenv("DM_GFX_BC_ASTC_CANDS"); g_cands = e && atoi(e) == 1 ? 1 : 3;
@@ -144,7 +149,7 @@ static int prepare_locked(void) {
     g_out_bytes = (uint64_t)mb << 20; g_in_bytes = g_out_bytes / 2 + (uint64_t)MAXR * 32; g_astc_bytes = g_out_bytes / 4;
     const vkn_dev *d = vkn_device();
     const char *why = NULL;
-    if (cpu) { g_why_dev = VKN_BCGW_OFF; why = "DM_GFX_BC_DECODE=cpu"; }
+    if (cpu) { g_why_dev = VKN_BCGW_OFF; why = off ? "DM_VK_NATIVE_BCGPU=0" : "DM_GFX_BC_DECODE=cpu"; }
     else if (!vkn_shlib_bc_blob || !vkn_shlib_bc_kat_input || !vkn_shlib_bc_kat_check || !vkn_shlib_bc_blob(0, NULL)) { g_why_dev = VKN_BCGW_DOOR; why = "no data doors (vkn_shlib_bc.cpp) in this build"; }
     else if (!d) { g_why_dev = VKN_BCGW_DEV; why = "no device"; }
     else {

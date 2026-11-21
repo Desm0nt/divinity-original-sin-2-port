@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -2706,6 +2706,8 @@ static void test_post(void) {
 }
 
 static void test_b1_pass(void);   // [stage 5.2 B1] (end of file)
+static void test_occ_a(void);     // [stage 5] technique A (end of file)
+static void test_v2_drv(void);    // [stage 5.3 V2] driver corrections (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
 // without it (render pass of one attachment), re-attaches it for the first draw that tests depth (LOAD of the colour drawn so far), keeps
@@ -3082,6 +3084,7 @@ int main(void) {
     test_thumbnail();
     test_ui();
     test_query();
+    test_occ_a();   // [stage 5] technique A (vkn_occ.c, DM_VK_NATIVE_COND 5 / 6; forked children: here, while the effect chain has room)
     test_a5_shc();      // [stage 5.1 A5] (forked children: the cache's switches are read once per process)
     test_a5_fx();
     test_a5_oracle();
@@ -3090,6 +3093,7 @@ int main(void) {
     test_b2_uipass();   // [stage 5.2 B2] DM_VK_NATIVE_UIPASS
     test_b5_mat();   // [stage 5.2 B5] MAT + XLQ (vkn_mat.c)
     test_b4_prepass();   // [stage 5.2 B4] the pre-pass hybrid (vkn_prepass.c)
+    test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
@@ -3582,4 +3586,343 @@ static void rtx_frame(uint32_t f) {
         vkn_draw_in lt = sky; lt.shader = H(74, 1); lt.blend = H(41, 1); lt.tex[1] = g_rx_ltex; lt.smp[1] = g_rx_lsmp;
         vkn_rt_query_cond(0); vkn_rt_draw_arrays(&lt, 0, 3);
     }
+}
+
+// ================================================================================================================ [stage 5] technique A
+// vkn_occ.c (DM_VK_NATIVE_COND 5 / 6, docs/dos2/nr/VK-OCCLUSION-ALT.md section 4). Pure parts: the box projection and the rect with its
+// margin, the read-mask scan of hand-made SPIR-V (constant elements / a dynamic index / a whole-block load / no such binding), the dirt
+// model over scripted sequences (unchanged, changed content, swapped order, a gone draw, a moving occluder sweeping cells, a draw
+// without rect, a frame not hashed). Mock scenarios (forked children): a plain pre-pass draw + 5 objects (wall W, right occluder P,
+// moving door M, hidden O1 behind W, hidden O2 behind P) with their gathers (identity camera), queries scripted by visibility,
+// conditional draws in a G-buffer pass:
+//   mode 5 with B = 2: at most 2 learning queries a frame, none once every object has a verdict; O1 / O2 skipped in the pre-pass and
+//     in the G-buffer (4 + 3 draws instead of 6 + 5); the door moves over O2 and reveals it (frame 40): O2 drawn in that frame and
+//     after; a camera change (frame 60): nothing carried, O1 learned again, skips back;
+//   mode 6, true boxes: every pair queried, nothing skipped, A's would-skips agree with the queries, violations 0;
+//   mode 6, a broken premise (the door's box stays where it was while its draw moves): the reveal of O2 is caught as a violation.
+#include "../../../vkn/vkn_occ.h"
+enum { OA_F = 90, OA_OBJ = 5 };
+static int oa_facts(const vkn_shader *s) { (void)s; return 0; }
+static const float k_oa_id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+typedef struct oa_out { int q, pre, gb; } oa_out;
+// one frame: f = frame of the scenario, broken = the door's gather keeps its first box, cam = the camera's x scale
+static void oa_frame(int f, int broken, float cam, oa_out *o) {
+    const int door_moved = f >= 40;   // objects in draw order: W, P, M, O1, O2 (occluders first); x ranges in NDC, y [-0.2, 0.2]
+    const float bx[OA_OBJ][2] = {{-1.0f, -0.4f}, {0.4f, 1.0f}, {door_moved && !broken ? 0.5f : -0.05f, door_moved && !broken ? 0.6f : 0.05f}, {-0.9f, -0.7f}, {0.7f, 0.9f}};
+    const int vis[OA_OBJ] = {1, 1, 1, 0, door_moved ? 1 : 0};
+    const uint64_t ef = (uint64_t)f + 100, B0 = 0x70000000ull, B1 = 0x70100000ull, base = (ef & 1) ? B1 : B0;
+    vkn_occ_gather_bases(B0, B1);
+    float vp[16]; memcpy(vp, k_oa_id, sizeof vp); vp[0] = cam;
+    for (int i = 0; i < OA_OBJ; i++) { const float box[6] = {bx[i][0], -0.2f, 0.5f, bx[i][1], 0.2f, 0.6f}; CHECK_EQ(vkn_occ_gather(base + 16u * i, ef, 0x9000 + (uint64_t)i, box, vp), 0); }
+    VkCommandBuffer cb = fbegin(1); targets(g_a2, NULL, g_d3); vkn_pass_clear_depth(g_d3, 3, 1.0f, 0);
+    vkn_draw_in in = g_in; const uint64_t m = mark();
+    mk_draw_samples = 1; in.vb_off[0] = 0; CHECK_EQ(vkn_draw_indexed(&in, 30, 3, 1), 0);   // a plain pre-pass draw (terrain): no pair, unchanged
+    for (int i = 0; i < OA_OBJ; i++) {
+        vkn_query_begin(base + 16u * i); mk_draw_samples = vis[i] ? 5 : 0;
+        in.vb_off[0] = 16u * (uint32_t)(i + 1) + (i == 2 && door_moved ? 256u : 0u);   // the door's draw changes when it moves
+        CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0);
+        vkn_query_end(base + 16u * i);
+    }
+    const int pre = cnt(m, cb, MK_E_DRAW_IDX);
+    mk_draw_samples = 1; in.vb_off[0] = 16; targets(g_b2, NULL, g_d3);
+    const uint64_t m2 = mark();
+    for (int i = 0; i < OA_OBJ; i++) { vkn_query_cond(base + 16u * i); CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)(10 + i), 3, 1), 0); }
+    o->q = cnt(m, cb, MK_E_BEGIN_Q); o->pre = pre; o->gb = cnt(m2, cb, MK_E_DRAW_IDX);
+    fsubmit(0);
+}
+static int g_oa_mode, g_oa_broken;
+static void oa_child(a5_res *R) {
+    vkn_occ_test_reset(); vkn_occ_test_fns(NULL, oa_facts);
+    vkn_query_init(g_oa_mode); CHECK_EQ(vkn_query_mode(), g_oa_mode); CHECK_EQ(vkn_occ_mode(), g_oa_mode);
+    static oa_out o[OA_F]; vkn_occ_stats s0, s1; vkn_occ_stats_get(&s0);
+    for (int f = 0; f < OA_F; f++) oa_frame(f, g_oa_broken, f >= 60 ? 1.02f : 1.0f, &o[f]);
+    vkn_occ_stats_get(&s1);
+    printf("  occ-a mode %d%s (queries / pre-pass / G-buffer draws):", g_oa_mode, g_oa_broken ? " broken box" : "");
+    for (int f = 0; f < OA_F; f++) if (f < 14 || (f >= 38 && f <= 46) || (f >= 58 && f <= 72) || f >= 86) printf(" %d:%d/%d/%d", f, o[f].q, o[f].pre, o[f].gb);
+    printf("\n");
+    vkn_occ_census();
+    vkn_occ_census_v v; vkn_occ_objects(&v);
+    if (g_oa_mode == VKN_COND_A) {
+        CHECK_EQ(vkn_occ_budget(), 2);
+        for (int f = 0; f < OA_F; f++) CHECK(o[f].q <= 2);                                                          // the budget
+        for (int f = 30; f < 40; f++) { CHECK_EQ(o[f].q, 0); CHECK_EQ(o[f].pre, 4); CHECK_EQ(o[f].gb, 3); }       // O1, O2 skipped twice
+        CHECK_EQ(o[40].pre, 5); CHECK_EQ(o[40].gb, 4);                                       // the door revealed O2: drawn at once
+        for (int f = 41; f < 60; f++) { CHECK_EQ(o[f].pre, 5); CHECK_EQ(o[f].gb, 4); }      // O2 visible from then on, O1 still skipped
+        for (int f = 50; f < 60; f++) CHECK_EQ(o[f].q, 0);                                  // ... and no more queries
+        CHECK_EQ(o[60].pre, 6); CHECK_EQ(o[60].gb, 5);                                       // the camera changed: nothing carried
+        for (int f = 80; f < OA_F; f++) { CHECK_EQ(o[f].pre, 5); CHECK_EQ(o[f].gb, 4); CHECK_EQ(o[f].q, 0); }   // O1 learned again
+        CHECK(s1.skip_pre - s0.skip_pre > 40); CHECK_EQ(s1.violations, 0);
+        CHECK(s1.whole[VKN_OCC_W_CAMERA] - s0.whole[VKN_OCC_W_CAMERA] >= 1);
+        CHECK(v.hidden >= 1 && v.visible >= 3);
+    } else {
+        for (int f = 0; f < OA_F; f++) { CHECK_EQ(o[f].q, 5); CHECK_EQ(o[f].pre, 6); CHECK_EQ(o[f].gb, 5); }       // all queried, all drawn
+        CHECK_EQ(s1.skip_pre - s0.skip_pre, 0); CHECK_EQ(s1.skip_cond - s0.skip_cond, 0);
+        CHECK(s1.verify_agree - s0.verify_agree > 20);                                       // O1 / O2 judged, and right
+        if (!g_oa_broken) CHECK_EQ(s1.violations - s0.violations, 0);
+        else CHECK(s1.violations - s0.violations >= 1);                                      // the broken box is caught
+    }
+    R->model_draws = s1.violations - s0.violations;
+    vkn_query_init(VKN_COND_OFF); mk_draw_samples = 1;
+}
+static void test_occ_a(void) {
+    {   // ---- projection and rect
+        const float box[6] = {-0.5f, -0.25f, 0.5f, 0.5f, 0.25f, 0.6f}; float n[4];
+        CHECK_EQ(vkn_occ_project(box, k_oa_id, n), 0); CHECK_F(n[0], -0.5); CHECK_F(n[1], -0.25); CHECK_F(n[2], 0.5); CHECK_F(n[3], 0.25);
+        float vp[16]; memcpy(vp, k_oa_id, sizeof vp); vp[15] = 0.0f;                         // w = 0 at every corner
+        CHECK_EQ(vkn_occ_project(box, vp, n), -1);
+        const float bad[6] = {1, 0, 0, 0, 1, 1}; CHECK_EQ(vkn_occ_project(bad, k_oa_id, n), -2);
+        const float nd[4] = {-0.5f, -0.25f, 0.5f, 0.25f};
+        const vkn_occ_rect r = vkn_occ_cells(nd, 1280, 720);                                 // + 10 % + 8 px: x [-0.6125, 0.6125], y [-0.3222, 0.3222]
+        CHECK_EQ(r.kind, 1); CHECK_EQ(r.x0, 12); CHECK_EQ(r.x1, 51); CHECK_EQ(r.y0, 12); CHECK_EQ(r.y1, 23);
+        const float off[4] = {1.5f, 0, 2.0f, 0.1f}; CHECK_EQ(vkn_occ_cells(off, 1280, 720).kind, 2);
+        const float nan4[4] = {NAN, 0, 1, 1}; CHECK_EQ(vkn_occ_cells(nan4, 1280, 720).kind, 0);
+    }
+    {   // ---- read mask: %var (Binding 3) = Uniform { vec4 a[8] } (stride 16); access chains with constant elements 2 and 5
+        enum { T_U = 1, C0 = 2, C2 = 3, C5 = 4, ARR = 5, ST = 6, PTR = 7, VAR = 8, PT = 9, R1 = 10, R2 = 11, DYN = 12, R3 = 13, BOUND = 14 };
+        uint32_t w[80];
+        const uint32_t head[] = {0x07230203u, 0x10000, 0, BOUND, 0,
+            4u << 16 | 71, VAR, 33, 3,  4u << 16 | 71, ARR, 6, 16,
+            4u << 16 | 43, T_U, C0, 0,  4u << 16 | 43, T_U, C2, 2,  4u << 16 | 43, T_U, C5, 5,
+            3u << 16 | 30, ST, ARR,  4u << 16 | 32, PTR, 2, ST,  4u << 16 | 59, PTR, VAR, 2,
+            6u << 16 | 65, PT, R1, VAR, C0, C2,  6u << 16 | 66, PT, R2, VAR, C0, C5};
+        const size_t n = sizeof head / 4; memcpy(w, head, sizeof head);
+        uint64_t bits[2] = {~0ull, ~0ull};
+        CHECK_EQ(vkn_occ_spv_read_mask(w, n, 3, bits, 2), 1); CHECK_EQ(bits[0], (1ull << 2) | (1ull << 5)); CHECK_EQ(bits[1], 0);
+        CHECK_EQ(vkn_occ_spv_read_mask(w, n, 4, bits, 2), -1);                              // no such binding
+        const uint32_t dyn[] = {6u << 16 | 65, PT, R3, VAR, C0, DYN};
+        memcpy(w + n, dyn, sizeof dyn); CHECK_EQ(vkn_occ_spv_read_mask(w, n + 6, 3, bits, 2), 0);   // a dynamic element: the whole block
+        const uint32_t load[] = {4u << 16 | 61, ST, R3, VAR};
+        memcpy(w + n, load, sizeof load); CHECK_EQ(vkn_occ_spv_read_mask(w, n + 4, 3, bits, 2), 0); // OpLoad of the whole block
+        w[0] = 0; CHECK_EQ(vkn_occ_spv_read_mask(w, n, 3, bits, 2), -1);
+    }
+    {   // ---- the dirt model
+        vkn_occ_test_reset();
+        const vkn_occ_rect rA = {1, 0, 0, 9, 9}, rB = {1, 30, 0, 39, 9}, rO = {1, 50, 20, 55, 25}, unk = {0, 0, 0, 0, 0};
+        vkn_occm_frame_begin(); vkn_occm_fin(11, 100, rA); vkn_occm_fin(12, 200, rB); vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);   // 1: all new
+        CHECK_EQ(vkn_occm_maxdirt(rA), 1); CHECK_EQ(vkn_occm_maxdirt(rO), 1);
+        vkn_occm_frame_begin(); vkn_occm_fin(11, 100, rA); vkn_occm_fin(12, 200, rB); vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);   // 2: same
+        CHECK_EQ(vkn_occm_maxdirt(rA), 1); CHECK_EQ(vkn_occm_maxdirt(rB), 1); CHECK_EQ(vkn_occm_maxdirt(rO), 1);
+        vkn_occm_frame_begin(); vkn_occm_fin(11, 100, rA); vkn_occm_fin(12, 201, rB); vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);   // 3: B changed
+        CHECK_EQ(vkn_occm_maxdirt(rB), 3); CHECK_EQ(vkn_occm_maxdirt(rA), 1); CHECK_EQ(vkn_occm_maxdirt(rO), 1);
+        vkn_occm_frame_begin();                                                                // 4: A after B (swapped)
+        vkn_occm_old e; int mv = 0;
+        CHECK_EQ(vkn_occm_pre(12, &e, &mv), 1); CHECK_EQ(mv, 0); CHECK_EQ(e.content, 201);
+        CHECK_EQ(vkn_occm_maxdirt(rA), 4);                                                     // A passed over: dirty at once
+        vkn_occm_fin(12, 201, rB);
+        CHECK_EQ(vkn_occm_pre(11, &e, &mv), 1); CHECK_EQ(mv, 1); vkn_occm_fin(11, 100, rA);
+        vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);
+        CHECK_EQ(vkn_occm_maxdirt(rB), 3); CHECK_EQ(vkn_occm_maxdirt(rO), 1);                // B in order, unchanged: not dirtied again
+        vkn_occm_frame_begin(); vkn_occm_fin(12, 201, rB); vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);   // 5: A gone
+        CHECK_EQ(vkn_occm_maxdirt(rA), 5); CHECK_EQ(vkn_occm_maxdirt(rO), 1);
+        uint32_t first_o = 0;   // a moving occluder (4 cells a frame from x 30): O at x 50..55 dirty only once the rect reaches it
+        for (int k = 0; k < 8; k++) {
+            const vkn_occ_rect rm = {1, (uint8_t)(30 + 4 * k), 20, (uint8_t)(33 + 4 * k), 25};
+            vkn_occm_frame_begin(); vkn_occm_fin(12, 201, rB); vkn_occm_fin(14, 400 + (uint64_t)k, rm); vkn_occm_fin(13, 300, rO); vkn_occm_frame_end(1);
+            if (!first_o && vkn_occm_maxdirt(rO) > 1) first_o = vkn_occm_frame();
+            if (rm.x1 < 50) CHECK_EQ(vkn_occm_maxdirt(rO), 1);
+        }
+        CHECK_EQ(first_o, 11);                                                                 // k = 5: x 50..53
+        const uint32_t mf = vkn_occm_frame();
+        vkn_occm_frame_begin(); vkn_occm_fin(12, 201, rB); vkn_occm_fin(13, 300, rO); vkn_occm_fin(15, 1, unk); vkn_occm_frame_end(1);   // a new draw, no rect
+        CHECK_EQ(vkn_occm_maxdirt(rA), mf + 1);                                                // the whole screen
+        vkn_occm_frame_begin(); vkn_occm_fin(12, 201, rB); vkn_occm_frame_end(0);             // not hashed: the next frame starts dirty
+        vkn_occm_frame_begin(); CHECK_EQ(vkn_occm_maxdirt(rB), vkn_occm_frame()); vkn_occm_frame_end(1);
+        vkn_occ_stats st; vkn_occ_stats_get(&st); CHECK(st.whole[VKN_OCC_W_UNHASHED] >= 1); CHECK(st.whole[VKN_OCC_W_UNKNOWN_RECT] >= 1);
+        vkn_occ_test_reset();
+    }
+    // ---- mock scenarios (forked: the budget is read at install)
+    if (!g_s1 || !g_a2 || !g_b2 || !g_d3) { CHECK(0); return; }
+    static const char *const env5[][2] = {{"DM_VK_NATIVE_COND_B", "2"}, {"DM_GFX_SIM_GPU", NULL}, {NULL, NULL}};
+    static a5_res R;
+    g_oa_mode = VKN_COND_A; g_oa_broken = 0; a5_child(env5, oa_child, &R);
+    g_oa_mode = VKN_COND_A_VERIFY; g_oa_broken = 0; a5_child(env5, oa_child, &R); CHECK_EQ(R.model_draws, 0);
+    g_oa_mode = VKN_COND_A_VERIFY; g_oa_broken = 1; a5_child(env5, oa_child, &R); CHECK(R.model_draws >= 1);
+}
+
+// ================================================================================================================ [stage 5.3 V2] driver corrections
+// vkn_drv.h (the old path's xbg_vendor_policy.h rules in the backend): the rules per family / driverID / switch (vkn_drv_decide over the
+// vendor ids of ARM 0x13b5 / Imagination 0x1010 and the driverIDs of PanVK / RADV / the stock drivers; the SIM tokens), then each correction
+// live on the mock with its configuration put in effect (vkn_drv_test_set): colour write mask 0 of a fragment stage without outputs (the
+// fact from a stand-in of the shader library's), depth bias constant x2, binds forgotten after an in-pass vkCmdClearAttachments, the
+// creation lock, PowerVR's static uniform buffers and the NR-08b read-only rule (layouts, dynamic offsets, set keys with static offsets,
+// draws still exact), the SIM model's anisotropy; the Adreno answer (the mock's device) leaves pipelines as they were.
+#include "../../../vkn/vkn_drv.h"
+static const vkn_shader *g_v2_out0;   // the shader the stand-in calls "writes colour"
+static int v2_facts(const vkn_shader *s) { return s == g_s1 ? 1 : s && s == g_v2_out0 ? 0 : -1; }
+static const mk_ev *v2_last_pipe(uint64_t from, VkCommandBuffer cb) {
+    const mk_ev *bp = NULL;
+    for (int k = 0; nth(from, cb, MK_E_BIND_PIPE, k); k++) bp = nth(from, cb, MK_E_BIND_PIPE, k);
+    return bp;
+}
+static void test_v2_drv(void) {
+    static const char *const keys[] = {"DM_GFX_NOOUT_MASK", "DM_GFX_DEPTH_BIAS_X2", "DM_GFX_CLEAR_REBIND", "DM_GFX_PIPE_SERIAL", "DM_GFX_UBO_DYNAMIC", "DM_NR_UBODYN", "DM_GFX_SIM_GPU"};
+    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) unsetenv(keys[i]);
+    // ---- the rules (vendor ids -> family as the shader library decides it, driverIDs, switches)
+    const int fm = vkn_policy_family_from(0x13B5, "Mali-G57 MC2", NULL), fp = vkn_policy_family_from(0x1010, "PowerVR B-Series BXM-8-256", NULL);
+    const int fa = vkn_policy_family_from(0x5143, "Adreno (TM) 750", NULL);
+    CHECK_EQ(fm, VKN_FAM_MALI); CHECK_EQ(fp, VKN_FAM_POWERVR); CHECK_EQ(fa, VKN_FAM_ADRENO);
+    CHECK_EQ(vkn_policy_family_from(0x5143, "Adreno (TM) 750", "mali,ubdyn8"), VKN_FAM_MALI);
+    vkn_drv_cfg c;
+    vkn_drv_decide(fa, VKN_DRVID_MESA_TURNIP, NULL, &c);   // the Mi 14: nothing
+    CHECK(c.resolved && !c.noout && !c.bias_x2 && !c.rebind && !c.serial && c.ubo_dyn && !c.ubo_ro && c.ubodyn == 0 && !c.sim_noaniso && !c.sim_ubdyn8 && !c.from_env);
+    vkn_drv_decide(fa, VKN_DRVID_QUALCOMM_PROPRIETARY, NULL, &c); CHECK(c.rebind && !c.noout && !c.bias_x2);   // stock Adreno: rebind only
+    vkn_drv_decide(fm, 9 /* ARM proprietary */, NULL, &c); CHECK(c.noout && !c.bias_x2 && !c.rebind && !c.serial && c.ubo_dyn && !c.ubo_ro);
+    vkn_drv_decide(fm, VKN_DRVID_MESA_PANVK, NULL, &c); CHECK(c.noout && c.bias_x2 && !c.rebind);
+    vkn_drv_decide(VKN_FAM_XCLIPSE, VKN_DRVID_MESA_RADV, NULL, &c); CHECK(c.noout && c.bias_x2 && !c.serial);
+    vkn_drv_decide(fp, VKN_DRVID_IMAGINATION_PROPRIETARY, NULL, &c);   // PowerVR: mask, rebind, serial, NR-08b read-only rule in force
+    CHECK(c.noout && c.rebind && c.serial && c.ubo_dyn && c.ubo_ro && c.ubodyn == 1 && !c.bias_x2);
+    vkn_drv_decide(fp, 0, NULL, &c); CHECK(!c.rebind && !c.bias_x2);   // driverID unknown: no driver correction
+    setenv("DM_GFX_UBO_DYNAMIC", "0", 1); setenv("DM_NR_UBODYN", "0", 1);   // safe-mode step 1 on PowerVR: everything static
+    vkn_drv_decide(fp, 7, NULL, &c); CHECK(!c.ubo_dyn && !c.ubo_ro && c.ubodyn == 0 && (c.from_env & (VKN_DRV_E_UBO | VKN_DRV_E_UBODYN)) == (VKN_DRV_E_UBO | VKN_DRV_E_UBODYN));
+    setenv("DM_GFX_UBO_DYNAMIC", "2", 1); unsetenv("DM_NR_UBODYN");         // DOOM's spelling: the rule anywhere
+    vkn_drv_decide(fa, 0, NULL, &c); CHECK(c.ubo_dyn && c.ubo_ro && c.ubodyn == 1);
+    unsetenv("DM_GFX_UBO_DYNAMIC"); setenv("DM_NR_UBODYN", "3", 1);          // 3 does not exist: 0
+    vkn_drv_decide(fp, 7, NULL, &c); CHECK(!c.ubo_ro && !c.ubo_dyn && c.ubodyn == 0);
+    unsetenv("DM_NR_UBODYN");
+    setenv("DM_GFX_NOOUT_MASK", "0", 1); setenv("DM_GFX_DEPTH_BIAS_X2", "1", 1); setenv("DM_GFX_CLEAR_REBIND", "0", 1); setenv("DM_GFX_PIPE_SERIAL", "1", 1);
+    vkn_drv_decide(fp, 7, NULL, &c);
+    CHECK(!c.noout && c.bias_x2 && !c.rebind && c.serial && (c.from_env & 15) == 15);
+    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++) unsetenv(keys[i]);
+    vkn_drv_decide(fp, 7, "powervr", &c); CHECK(c.sim_noaniso && !c.sim_ubdyn8);
+    vkn_drv_decide(fm, 9, "mali,ubdyn8", &c); CHECK(!c.sim_noaniso && c.sim_ubdyn8);
+    // ---- resolved from the device: the mock (Qualcomm vendor, Vulkan 1.1: driverID 0) = Adreno, nothing; DM_GFX_SIM_GPU=powervr = PowerVR
+    vkn_drv_test_set(NULL);
+    { const vkn_drv_cfg *r = vkn_drv(); CHECK(r->resolved && r->family == VKN_FAM_ADRENO && r->driver_id == 0 && !r->noout && !r->serial && r->ubo_dyn && !r->ubo_ro && !r->lock_lib); }
+    setenv("DM_GFX_SIM_GPU", "powervr", 1); vkn_drv_test_set(NULL);
+    { const vkn_drv_cfg *r = vkn_drv(); CHECK(r->family == VKN_FAM_POWERVR && r->noout && r->serial && r->ubo_ro && r->sim_noaniso && !r->rebind); }
+    unsetenv("DM_GFX_SIM_GPU");
+    // the creation lock: taken only with DM_GFX_PIPE_SERIAL (this module's own mutex without the shader library)
+    vkn_drv_cfg off; vkn_drv_decide(fa, 0, NULL, &off);
+    vkn_drv_test_set(&off); CHECK_EQ(vkn_drv_lock(), 0); vkn_drv_unlock(0);
+    vkn_drv_cfg ser = off; ser.serial = 1; vkn_drv_test_set(&ser);
+    { const int lk = vkn_drv_lock(); CHECK_EQ(lk, 1); vkn_drv_unlock(lk); vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.locked, 1); }
+    // the colour-mask decision alone (no fragment stage / discard / no colour written / a piece's shader)
+    vkn_drv_cfg mali; vkn_drv_decide(fm, 9, NULL, &mali); vkn_drv_test_set(&mali); vkn_drv_test_facts(v2_facts);
+    {
+        vkn_pipe_desc k; memset(&k, 0, sizeof k); vkn_pipe_src s; memset(&s, 0, sizeof s);
+        s.vs = g_vs1_mod; s.fs = VK_NULL_HANDLE; k.write_mask[0] = 0xf;
+        CHECK_EQ(vkn_drv_noout(&k, &s), 1);                                   // no fragment stage: masked
+        s.fs = g_fs1_mod; k.fx = VKN_PIPE_FX_NO_FS; CHECK_EQ(vkn_drv_noout(&k, &s), 1); k.fx = 0;
+        k.fx = VKN_PIPE_FX_DISCARD; CHECK_EQ(vkn_drv_noout(&k, &s), 0); k.fx = 0;   // nothing reaches the targets
+        CHECK_EQ(vkn_drv_noout(&k, &s), 0);                                   // a piece's shader (src->shader NULL): unknown, kept
+        s.shader = g_s1; CHECK_EQ(vkn_drv_noout(&k, &s), 1);
+        k.write_mask[0] = 0; CHECK_EQ(vkn_drv_noout(&k, &s), 0);              // nothing written anyway
+        vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.noout_nofs, 2); CHECK_EQ(st.noout_unknown, 1); CHECK_EQ(st.noout_masked, 1);
+    }
+    if (!g_s1 || !g_a2 || !g_d3) { CHECK(0); vkn_drv_test_facts(NULL); vkn_drv_test_set(NULL); return; }
+    const uint32_t val0 = mk_val_errors, err0 = mk_errors;
+    vkn_tex *A = mktex(760, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 760, 0), *D = mktex(761, EF_D32F, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 761, 0);
+    const vkn_shader *s31 = vkn_shader_get(H(31, 1)); g_v2_out0 = s31;
+    CHECK(A && D && s31);
+    if (!A || !D || !s31) { vkn_drv_test_facts(NULL); vkn_drv_test_set(NULL); return; }
+    VkCommandBuffer cb = fbegin(1);
+    vkn_draw_in in = g_in;
+    // ---- DM_GFX_NOOUT_MASK on (Mali): new pipelines (a new pass class) of a shader without outputs get mask 0, the others keep theirs
+    vkn_drv_test_set(&mali);
+    targets(A, NULL, D);
+    uint64_t m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    mk_obj *po = pipe_of(v2_last_pipe(m, cb)); CHECK(po && po->gp.natt == 1 && po->gp.att[0].colorWriteMask == 0);
+    in.shader = H(31, 1); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    po = pipe_of(v2_last_pipe(m, cb)); CHECK(po && po->gp.natt == 1 && po->gp.att[0].colorWriteMask == 0xf);
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.noout_masked, 1); CHECK_EQ(st.noout_kept, 1); }
+    // the Adreno answer: another pass class, the same no-output shader keeps the target's mask (the stage-5.2 pipeline)
+    vkn_drv_test_set(&off);
+    targets(A, NULL, NULL); in.shader = H(30, 1);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    po = pipe_of(v2_last_pipe(m, cb)); CHECK(po && po->gp.att[0].colorWriteMask == 0xf);
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.noout_masked + st.noout_kept + st.noout_unknown + st.noout_nofs, 0); }
+    // ---- DM_GFX_DEPTH_BIAS_X2: a raster state with polygon offset, built once with x1 and once (another pass class) with x2
+    CHECK(vkn_raster_put(H(96, 1), 1, 0, 0, 0, 1) != 0); in.raster = H(96, 1);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    mk_obj *p1 = pipe_of(v2_last_pipe(m, cb));
+    vkn_drv_cfg bias = off; bias.bias_x2 = 1; vkn_drv_test_set(&bias);
+    targets(A, NULL, D); m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    mk_obj *p2 = pipe_of(v2_last_pipe(m, cb));
+    CHECK(p1 && p2 && p1 != p2);
+    if (p1 && p2) {
+        CHECK(p1->gp.rs.depthBiasEnable && p2->gp.rs.depthBiasEnable);
+        CHECK(p1->gp.rs.depthBiasConstantFactor != 0.0f);
+        CHECK_F(p2->gp.rs.depthBiasConstantFactor, 2.0 * p1->gp.rs.depthBiasConstantFactor);
+        CHECK_F(p2->gp.rs.depthBiasSlopeFactor, p1->gp.rs.depthBiasSlopeFactor);   // only the constant factor
+    }
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.bias_x2, 1); }
+    in.raster = g_in.raster;
+    // ---- DM_GFX_CLEAR_REBIND: after an in-pass clear the next (identical) draw binds pipeline, set, streams, viewport, scissor again
+    static const float grey[4] = {0.5f, 0.5f, 0.5f, 1.0f};
+    for (int on = 0; on <= 1; on++) {
+        vkn_drv_cfg rb = off; rb.rebind = (uint8_t)on; vkn_drv_test_set(&rb);
+        CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+        m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); OPS(m, cb, MK_E_DRAW_IDX);   // nothing rebound
+        m = mark(); vkn_pass_clear_color(A, 0, grey, NULL); CHECK_EQ(cnt(m, cb, MK_E_CLEAR_ATT), 1);
+        m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+        if (on) { CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_SETS), 1); CHECK(cnt(m, cb, MK_E_BIND_VB) >= 1); CHECK_EQ(cnt(m, cb, MK_E_BIND_IB), 1);
+                  CHECK_EQ(cnt(m, cb, MK_E_VIEWPORT), 1); CHECK_EQ(cnt(m, cb, MK_E_SCISSOR), 1); CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 1); }
+        else OPS(m, cb, MK_E_DRAW_IDX);
+        vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.rebinds, on ? 1 : 0);
+    }
+    // ---- DM_GFX_PIPE_SERIAL: a build (new key: another pass class) is made under the lock
+    vkn_drv_test_set(&ser); targets(A, NULL, g_d3);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); CHECK_EQ(cnt(m, cb, MK_E_BIND_PIPE), 1);
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.locked, 1); }
+    // ---- DM_GFX_UBO_DYNAMIC=0 (PowerVR at safe-mode step 1): every block static; the set key holds the offsets, the draws read the right block
+    vkn_drv_cfg pv0; vkn_drv_decide(fp, 7, NULL, &pv0); pv0.ubo_dyn = 0; pv0.ubo_ro = 0; pv0.ubodyn = 0; pv0.serial = 0; pv0.noout = 0; pv0.rebind = 0;
+    vkn_drv_test_set(&pv0);
+    const vkn_shader *s87 = mkshader(H(87, 1), "v300000000000001", "f300000000000001", NULL);
+    CHECK(s87 && s87->dyn_policy == 0 && s87->ndyn == 0);
+    if (s87) for (uint32_t i = 0; i < s87->nbind; i++) CHECK(s87->bind[i].type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC && s87->bind[i].dyn == VKN_NO_DYN);
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.ubo_static_shaders, 1); }
+    const VkBuffer ring = vkn_ring_buffer(); const uint64_t rb = vkn_ring_base();
+    uint32_t o2 = 0, o9 = 0, of0 = 0;   // this test's own blocks (other tests announce theirs)
+    CHECK_EQ(vkn_ring_alloc(512, &o2), 0); CHECK_EQ(vkn_ring_alloc(128, &o9), 0); CHECK_EQ(vkn_ring_alloc(64, &of0), 0);
+    vkn_draw_ubo(0, 2, o2, 512); vkn_draw_ubo(0, 9, o9, 128); vkn_draw_ubo(1, 0, of0, 64);
+    in.shader = H(87, 1);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, 0); CHECK(bs && bs->n == 0);
+    const mk_dw *w6 = dw_of(bs, 6), *w12 = dw_of(bs, 12), *w10 = dw_of(bs, 10);
+    CHECK(w6 && w6->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && w6->buf == ring && w6->off == rb + o2 && w6->range == 256);
+    CHECK(w12 && w12->off == rb + o9 && w10 && w10->off == rb + of0);
+    const uint64_t set_a = bs ? bs->a[1] : 0;
+    uint32_t o2b = 0; CHECK_EQ(vkn_ring_alloc(512, &o2b), 0); vkn_draw_ubo(0, 2, o2b, 512);   // the engine moves slot 2: a new set with the new offset
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    bs = nth(m, cb, MK_E_BIND_SETS, 0); CHECK(bs && bs->a[1] != set_a && bs->n == 0);
+    w6 = dw_of(bs, 6); CHECK(w6 && w6->off == rb + o2b);
+    vkn_draw_ubo(0, 2, o2, 512);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);   // back: the first set again (its key: the same offsets)
+    bs = nth(m, cb, MK_E_BIND_SETS, 0); CHECK(bs && bs->a[1] == set_a);
+    // ---- the NR-08b read-only rule (PowerVR default): per-draw blocks dynamic only when scanned and read; support / c1 static
+    const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    xbg_vkn_stage *vs = mk_bundle_add("v3000000000000e1", 0);
+    mk_bind(vs, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(vs, 1, UB, XBG_SOURCE_UNIFORM, 2, 256); mk_bind(vs, 2, UB, XBG_SOURCE_UNIFORM, 9, 0);
+    mk_bind(vs, 3, UB, XBG_SOURCE_C1, 0, 32);
+    vs->bindings[0].flags = 1u << 28; vs->bindings[1].flags = 1u << 28; vs->bindings[2].flags = (1u << 28) | (1u << 29); vs->bindings[3].flags = 1u << 28;   // b6 read, b12 NOT read
+    vs->c1 = k_c1; vs->c1_bytes = 32; vs->input_count = 3; vs->inputs[0] = 0; vs->inputs[1] = 1; vs->inputs[2] = 4;
+    vkn_drv_cfg pvr; vkn_drv_decide(fp, 7, NULL, &pvr); pvr.serial = 0; pvr.noout = 0; pvr.rebind = 0;
+    vkn_drv_test_set(&pvr);
+    const vkn_shader *s88 = mkshader(H(88, 1), "v3000000000000e1", "f300000000000001", NULL);   // the fragment block (b10) was never scanned
+    CHECK(s88 && s88->dyn_policy == 2 && s88->ndyn == 1);
+    if (s88) for (uint32_t i = 0; i < s88->nbind; i++) {
+        const vkn_bind *b = &s88->bind[i];
+        if (b->binding == 6) CHECK(b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC && b->dyn == 0);
+        else CHECK(b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+    }
+    { vkn_drv_stats st; vkn_drv_stats_get(&st); CHECK_EQ(st.ubo_ro_dynamic, 1); CHECK_EQ(st.ubo_ro_static, 2); }
+    in.shader = H(88, 1);
+    m = mark(); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    bs = nth(m, cb, MK_E_BIND_SETS, 0); CHECK(bs && bs->n == 1 && bs->dyn[0] == o2);
+    w6 = dw_of(bs, 6); w12 = dw_of(bs, 12); w10 = dw_of(bs, 10);
+    CHECK(w6 && w6->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC && w6->off == rb);
+    CHECK(w12 && w12->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && w12->off == rb + o9 && w10 && w10->off == rb + of0);
+    vkn_draw_ubo(0, 2, g_off2, 512); vkn_draw_ubo(0, 9, g_off9, 128); vkn_draw_ubo(1, 0, g_offf0, 32);   // draw_setup's announcements again
+    fsubmit(0);
+    // ---- the SIM model's sampler anisotropy (xbg_sim_features NOANISO): anisotropy off, as the old path under DM_GFX_SIM_GPU=powervr
+    vkn_drv_cfg na = off; na.sim_noaniso = 1; vkn_drv_test_set(&na);
+    CHECK_EQ(vkn_sampler_create(H(64, 1), 40, 3, 0, 0, 0, 8, 0), 0);
+    vkn_drv_test_set(&off);
+    CHECK_EQ(vkn_sampler_create(H(65, 1), 41, 3, 0, 0, 0, 8, 0), 0);
+    { mk_obj *o40 = mk_obj_of(VH(vkn_sampler_by_id(40))), *o41 = mk_obj_of(VH(vkn_sampler_by_id(41)));
+      CHECK(o40 && !o40->sci.anisotropyEnable && o40->sci.maxAnisotropy == 1.0f); CHECK(o41 && o41->sci.anisotropyEnable && o41->sci.maxAnisotropy == 8.0f); }
+    vkn_drv_census();
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    vkn_drv_test_facts(NULL); vkn_drv_test_set(NULL);   // the next use resolves from the mock again (Adreno: nothing)
+    CHECK(!vkn_drv()->noout && !vkn_drv()->serial);
 }

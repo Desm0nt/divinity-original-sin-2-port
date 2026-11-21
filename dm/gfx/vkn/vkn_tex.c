@@ -19,6 +19,8 @@
 #include "vkn_astc.h"    // stage 4: the setup ASTC pack
 #include "vkn_bcgpu.h"   // stage 4: GPU BC decode (-> ASTC 4x4) at upload
 #include "vkn_fx.h"      // [stage 5 A1] vkn_sampler_cmp_by_id (the comparison twin of a sampler)
+#include "vkn_drv.h"     // [stage 5.3 V2] the SIM model's sampler anisotropy
+#include "vkn_policy.h"  // [stage 5.3 V2] DM_GFX_SIM_GPU tokens
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,10 +145,11 @@ static VkFormatFeatureFlags fmt_feat(VkFormat f) {
     return v;
 }
 // DM_GFX_SIM_GPU=mali / powervr (the port's capability model of a GPU without BC, xbg_vendor_policy.h): the real device here samples
-// BC, so the model must force the decision a real Mali gets from its format properties.
+// BC, so the model must force the decision a real Mali gets from its format properties. [stage 5.3 V2] by token, as xbg_sim_parse's
+// XBG_SIM_NOBC (mali, powervr / pvr, nobc; combined profiles such as "mali,ubdyn8" included: the whole string compare missed them).
 static int sim_no_bc(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_GFX_SIM_GPU"); v = e && (!strcmp(e, "mali") || !strcmp(e, "powervr")); }
+    if (v < 0) v = vkn_policy_sim_nobc(getenv("DM_GFX_SIM_GPU"));
     return v;
 }
 static VkComponentMapping fmt_swizzle(uint32_t nvn, int x) {
@@ -974,7 +977,9 @@ static VkSamplerCreateInfo samp_info(const vkn_dev *d, uint32_t filter, uint32_t
     const VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .minFilter = lin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
         .mipmapMode = mipl ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST, .addressModeU = k_wrap[wrap_u < 4 ? wrap_u : 0],
         .addressModeV = k_wrap[wrap_v < 4 ? wrap_v : 0], .addressModeW = k_wrap[wrap_w < 4 ? wrap_w : 0], .mipLodBias = 0.0f,
-        .anisotropyEnable = an > 1.0f && d->feat.samplerAnisotropy ? VK_TRUE : VK_FALSE, .maxAnisotropy = an > 1.0f ? an : 1.0f,
+        // [stage 5.3 V2] + the SIM model's samplerAnisotropy = 0 (xbg_sim_features NOANISO: the powervr profile, PVR-04; xbg_aniso_allowed)
+        .anisotropyEnable = an > 1.0f && d->feat.samplerAnisotropy && !vkn_drv()->sim_noaniso ? VK_TRUE : VK_FALSE,
+        .maxAnisotropy = an > 1.0f && !vkn_drv()->sim_noaniso ? an : 1.0f,
         // compare: engine n (1..7) = VkCompareOp n (less, equal, less-or-equal, greater, not-equal, greater-or-equal, always); 0 = off;
         // above 7 the engine enables the compare with "never"
         .compareEnable = twin || compare ? VK_TRUE : VK_FALSE, .compareOp = twin ? VK_COMPARE_OP_LESS : compare <= 7 ? (VkCompareOp)compare : VK_COMPARE_OP_NEVER,

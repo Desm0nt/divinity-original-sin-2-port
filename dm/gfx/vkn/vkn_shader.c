@@ -21,6 +21,7 @@
 #include "../vulkan/engine/xbg_game.h"   // xbg_vkn_stage, xbg_shader_binding, XBG_SOURCE_* (the door to the packs)
 #include "vkn_fx.h"            // [stage 5 A1] VKN_BF_CMP, VKN_FX_SHADER_ID0
 #include "vkn_shlib_named.h"   // [stage 5 A1] engine shaders by name (DM_VK_NATIVE_SH) + Dref
+#include "vkn_drv.h"           // [stage 5.3 V2] the family's dynamic-uniform-buffer rules
 
 // The translator and the key (weak: host tests link without them; then nothing is created).
 extern int xbg_shader_program_key(const void *control, const void *code, char out_hex17[17]) __attribute__((weak));
@@ -320,17 +321,25 @@ static void create_job(void *arg) {
     // the dynamic-offset policy (the translator's dyn_mode_for) and the dynamic indices in binding order
     uint32_t all = 0, vary = 0;
     for (uint32_t i = 0; i < nb; i++) if (tb[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) { all += tb[i].count; if (tb[i].kind == VKN_BK_UNIFORM || tb[i].kind == VKN_BK_DRIVER0 || tb[i].kind == VKN_BK_DRIVER2) vary += tb[i].count; }
-    const uint32_t lim = d->props.limits.maxDescriptorSetUniformBuffersDynamic;
-    s->dyn_policy = (uint8_t)(all && all <= lim ? 1 : vary && vary <= lim ? 2 : 0);
-    uint32_t dyn = 0;
+    // [stage 5.3 V2] the family's rules (vkn_drv.h, xbg_game.cpp dyn_mode_for / UBO_DYN): DM_GFX_UBO_DYNAMIC off (PowerVR) = every block
+    // static; the NR-08b read-only rule (DM_NR_UBODYN=1, PowerVR default) = per-draw blocks only (never mode 1), and a block is dynamic
+    // only when the shader library scanned it and the stage reads it (an unread dynamic block is PowerVR's overrun); SIM ubdyn8: limit 8.
+    const vkn_drv_cfg *dc = vkn_drv();
+    uint32_t lim = d->props.limits.maxDescriptorSetUniformBuffersDynamic;
+    if (dc->sim_ubdyn8 && lim > 8) lim = 8;
+    s->dyn_policy = (uint8_t)(!dc->ubo_dyn ? 0 : dc->ubo_ro ? (vary && vary <= lim ? 2 : 0) : all && all <= lim ? 1 : vary && vary <= lim ? 2 : 0);
+    uint32_t dyn = 0, ro_static = 0, ro_dyn = 0;
+    enum { BIND_UNREAD = 1u << 29, BIND_SCANNED = 1u << 28 };   // xbg_nr_ubodyn.inc XBG_BIND_UNREAD / _SCANNED (the library's ubd_mark)
     for (uint32_t i = 0; i < nb; i++) {
         vkn_bind *t = &tb[i];
         if (t->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && (s->dyn_policy == 1 || (s->dyn_policy == 2 && (t->kind == VKN_BK_UNIFORM || t->kind == VKN_BK_DRIVER0 || t->kind == VKN_BK_DRIVER2)))) {
-            t->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; t->dyn = (uint8_t)dyn; dyn += t->count;
+            if (dc->ubo_ro && (t->flags & (BIND_SCANNED | BIND_UNREAD)) != BIND_SCANNED) ro_static += t->count;   // [stage 5.3 V2] stays static
+            else { if (dc->ubo_ro) ro_dyn += t->count; t->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; t->dyn = (uint8_t)dyn; dyn += t->count; }
         }
         lb[i] = (VkDescriptorSetLayoutBinding){.binding = t->binding, .descriptorType = t->type, .descriptorCount = t->count, .stageFlags = bundle_stage_bit(t->bundle_stage)};
     }
     s->ndyn = (uint16_t)dyn;
+    if ((!dc->ubo_dyn && all) || ro_static || ro_dyn) vkn_drv_ubo_note(!dc->ubo_dyn && all, ro_static, ro_dyn);   // [stage 5.3 V2] census
     if (layouts_get(lb, nb, &s->set_layout, &s->layout, &r->own_layout)) {
         vkn_logf(RED "shaders: engine shader %#llx: vkCreateDescriptorSetLayout / vkCreatePipelineLayout failed (%u bindings, %u dynamic)", (unsigned long long)j->handle, nb, dyn);
         free(st); free(r); free(tb); free(lb); return;

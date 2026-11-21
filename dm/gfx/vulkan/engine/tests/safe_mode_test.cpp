@@ -7,6 +7,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include "../xbg_safe_mode.h"
+#include "../../../vkn/vkn_policy.h"   // [stage 5.3 V3] the backend's readers of the ladder's switches (pure C, header only)
 
 static int fails=0;
 #define CHECK(c) do{if(!(c)){printf("FAIL %s:%d %s\n",__FILE__,__LINE__,#c);++fails;}}while(0)
@@ -14,6 +15,62 @@ static int fails=0;
 static std::string sw(int step,XbgGpuFamily f){XbgSafeSwitch s[128];const int n=xbg_safe_switches(step,f,s,128);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
 static bool has(const std::string &s,const char *kv){return s.find(std::string(kv)+" ")!=std::string::npos;}
 static int count_key(const std::string &s,const char *k){int c=0;for(size_t p=s.find(k);p!=std::string::npos;p=s.find(k,p+1))if((p==0 || s[p-1]==' ') && s[p+strlen(k)]=='=')++c;return c;}
+
+// [stage 5.3 V3] the ladder in mode 1, applied: the switches of a step put into the environment as xbg_safe_mode_boot does (no player key),
+// then read by the backend's own readers (dm/gfx/vkn/vkn_policy.h: the pass policy, the driver corrections of V2) - each step changes what it
+// promises; and the C rules of vkn_policy.h block V2 equal xbg_vendor_policy.h's for every family / driverID / input.
+static const char *const k_v3_keys[]={"DM_VK_NATIVE_LOAD","DM_VK_NATIVE_STORE","DM_VK_NATIVE_FRESH","DM_VK_NATIVE_TILEBAR","DM_GFX_UBO_DYNAMIC","DM_NR_UBODYN",
+    "DM_GFX_PIPE_SERIAL","DM_GFX_NOOUT_MASK","DM_GFX_DEPTH_BIAS_X2","DM_GFX_CLEAR_REBIND","DM_VK_NATIVE","DM_VK_NATIVE_RT","DM_VK_NATIVE_WARM","DM_VK_NATIVE_BCGPU"};
+static void v3_clear(){for(const char *k:k_v3_keys)unsetenv(k);XbgSafeSwitch a[128];const int n=xbg_safe_switches(3,XBG_GPU_POWERVR,a,128);for(int i=0;i<n;i++)unsetenv(a[i].key);}
+static void v3_apply(int step,XbgGpuFamily f){v3_clear();XbgSafeSwitch a[128];const int n=xbg_safe_switches(step,f,a,128);for(int i=0;i<n;i++)if(xbg_safe_should_set(getenv(a[i].key),0))setenv(a[i].key,a[i].value,1);}
+static int v3_ubo_dyn(int f){const char *u=getenv("DM_GFX_UBO_DYNAMIC"),*e=getenv("DM_NR_UBODYN");const int uenv=u && *u?atoi(u):-1;int m=e && *e?atoi(e):-1;if(m==3)m=0;
+    const int ro=vkn_policy_ubodyn_active(m,uenv,vkn_policy_ubo_dynamic_default(f),f);return ro?2:vkn_policy_env_or("DM_GFX_UBO_DYNAMIC",vkn_policy_ubo_dynamic_default(f),nullptr);}   // 2 = read-only rule, 1 all dynamic, 0 none
+static void test_v3_ladder(){
+    // C rules = C++ rules (V2 ported them token for token)
+    for(int f=0;f<=5;f++){const XbgGpuFamily xf=XbgGpuFamily(f);
+        CHECK(vkn_policy_noout_mask_default(f)==int(xbg_noout_mask_default(xf)));CHECK(vkn_policy_pipe_serial_default(f)==int(xbg_pipe_serial_default(xf)));
+        CHECK(vkn_policy_ubo_dynamic_default(f)==int(xbg_ubo_dynamic_default(xf)));CHECK(vkn_policy_ubodyn_default(f)==xbg_nr_ubodyn_default(xf));
+        for(int m=-1;m<=3;m++)for(int u=-1;u<=2;u++)for(int on=0;on<=1;on++)CHECK(vkn_policy_ubodyn_active(m,u,on,f)==int(xbg_nr_ubodyn_active(m,u,on!=0,xf)));}
+    for(uint32_t d=0;d<=30;d++){CHECK(vkn_policy_depth_bias_x2_default(d)==int(xbg_depth_bias_x2_default(d)));CHECK(vkn_policy_clear_rebind_default(d)==int(xbg_clear_rebind_default(d)));
+        CHECK(vkn_policy_reversed_depth_broken(d)==int(xbg_reversed_depth_broken(d)));}
+    for(const char *sim:{"mali","powervr","pvr","xclipse","mali,ubdyn8","powervr nogs","family-mali","nobc","noaniso","ubdyn8","0","",(const char*)nullptr,"malix","mali;noaniso"}){
+        const uint32_t b=xbg_sim_parse(sim);
+        CHECK(vkn_policy_sim_nobc(sim)==((b&XBG_SIM_NOBC)!=0));CHECK(vkn_policy_sim_noaniso(sim)==((b&XBG_SIM_NOANISO)!=0));CHECK(vkn_policy_sim_ubdyn8(sim)==((b&XBG_SIM_UBDYN8)!=0));
+        CHECK(vkn_policy_family_from(0x5143,"Adreno (TM) 750",sim)==int(xbg_effective_family(XBG_GPU_ADRENO,b)));}
+    CHECK(vkn_policy_env_or("DM_SAFE_TEST_UNSET_KEY",1,nullptr)==1);
+    // no step: the family defaults (Mali: the tile pass policy on, PowerVR: UBO rule 2 = NR-08b read-only, serial on)
+    v3_clear();
+    CHECK(vkn_policy_load(VKN_FAM_MALI)==1 && vkn_policy_store(VKN_FAM_MALI)==1 && vkn_policy_fresh(VKN_FAM_MALI)==2 && vkn_policy_tilebar(VKN_FAM_MALI)==1);
+    CHECK(v3_ubo_dyn(VKN_FAM_POWERVR)==2 && v3_ubo_dyn(VKN_FAM_MALI)==1);
+    CHECK(vkn_policy_env_or("DM_GFX_PIPE_SERIAL",vkn_policy_pipe_serial_default(VKN_FAM_MALI),nullptr)==0);
+    CHECK(vkn_policy_env_or("DM_GFX_NOOUT_MASK",vkn_policy_noout_mask_default(VKN_FAM_POWERVR),nullptr)==1);
+    for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const int vf=int(f);
+        // step 1: the backend draws as stage 4: pass policy at LOAD / STORE / zero fill / full barriers, recording thread off; PowerVR no dynamic UBOs
+        v3_apply(1,f);
+        CHECK(vkn_policy_load(vf)==0 && vkn_policy_store(vf)==0 && vkn_policy_fresh(vf)==0 && vkn_policy_tilebar(vf)==0);
+        CHECK(getenv("DM_VK_NATIVE_RT") && !strcmp(getenv("DM_VK_NATIVE_RT"),"0") && !getenv("DM_VK_NATIVE"));
+        CHECK(v3_ubo_dyn(vf)==(f==XBG_GPU_POWERVR?0:1));
+        CHECK(vkn_policy_env_or("DM_GFX_PIPE_SERIAL",vkn_policy_pipe_serial_default(vf),nullptr)==(f==XBG_GPU_POWERVR));
+        // step 2: still the backend; + no warm-up, CPU BC decode, whole mirrors, serial creation, PowerVR no colour mask of output-less shaders
+        v3_apply(2,f);
+        CHECK(!getenv("DM_VK_NATIVE") && vkn_policy_load(vf)==0);
+        CHECK(!strcmp(getenv("DM_VK_NATIVE_WARM"),"0") && !strcmp(getenv("DM_VK_NATIVE_BCGPU"),"0") && !strcmp(getenv("DM_VK_NATIVE_MIRROR"),"0"));
+        CHECK(!getenv("DM_GFX_BC_DECODE"));   // the old path's own BC switch is not touched (step 3 draws with the old path's default)
+        CHECK(vkn_policy_env_or("DM_GFX_PIPE_SERIAL",0,nullptr)==1);
+        CHECK(vkn_policy_env_or("DM_GFX_NOOUT_MASK",vkn_policy_noout_mask_default(vf),nullptr)==(f==XBG_GPU_POWERVR?0:1));
+        // step 3: the old path
+        v3_apply(3,f);
+        CHECK(getenv("DM_VK_NATIVE") && !strcmp(getenv("DM_VK_NATIVE"),"0"));
+        // a player's dm/env key is kept at every step (xbg_safe_should_set with player 1)
+        CHECK(!xbg_safe_should_set("1",1));}
+    v3_clear();
+    // a saved count of 2 (a player of the build before V3: the old path then) starts on the backend at step 2 now; count 3 = the old path
+    {int how=-1;const int st=xbg_safe_step(nullptr,nullptr,false,2,&how);CHECK(st==2 && how==XBG_SAFE_COUNTED);CHECK(!has(sw(st,XBG_GPU_MALI),"DM_VK_NATIVE=0"));
+     CHECK(has(sw(xbg_safe_step(nullptr,nullptr,false,3,&how),XBG_GPU_MALI),"DM_VK_NATIVE=0"));}
+    // each step's own line says what it set (the texts differ and name their content)
+    CHECK(strstr(xbg_safe_step_text(1),"recording thread") && strstr(xbg_safe_step_text(2),"still on the backend") && strstr(xbg_safe_step_text(3),"old path"));
+    CHECK(strcmp(xbg_safe_step_text(1),xbg_safe_step_text(2)) && strcmp(xbg_safe_step_text(2),xbg_safe_step_text(3)));
+}
 
 int main(){
     // families: Mali / PowerVR (incl. the SIM models on an Adreno), never Adreno / Xclipse / others
@@ -45,29 +102,34 @@ int main(){
     for(XbgGpuFamily f:{XBG_GPU_ADRENO,XBG_GPU_XCLIPSE,XBG_GPU_MALEOON,XBG_GPU_OTHER})for(int st=0;st<=3;st++)CHECK(sw(st,f).empty());
     CHECK(sw(0,XBG_GPU_MALI).empty() && sw(0,XBG_GPU_POWERVR).empty() && sw(-1,XBG_GPU_MALI).empty());
     // step 1 exactly
-    CHECK(sw(1,XBG_GPU_MALI)=="DM_GFX_ZEROCOPY=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 ");
-    CHECK(sw(1,XBG_GPU_POWERVR)=="DM_GFX_ZEROCOPY=0 DM_GFX_UBO_DYNAMIC=0 DM_NR_UBODYN=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 ");
-    // [VK-NATIVE stage 5] step 1 turns the backend's techniques off (mode 1 stays on: a technique bug does not end on the old path); step 2
-    // is the old path; the far-cascade hack and the measurement stay the player's / the tier's
+    CHECK(sw(1,XBG_GPU_MALI)=="DM_GFX_ZEROCOPY=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 "
+          "DM_VK_NATIVE_RT=0 DM_VK_NATIVE_POST=0 DM_VK_NATIVE_UIPASS=0 DM_VK_NATIVE_MAT=0 DM_VK_NATIVE_XLQ=0 DM_VK_NATIVE_PREPASS=0 DM_VK_NATIVE_PRESKIN=0 DM_VK_NATIVE_LOAD=0 DM_VK_NATIVE_STORE=0 DM_VK_NATIVE_FRESH=0 DM_VK_NATIVE_TILEBAR=0 ");
+    CHECK(sw(1,XBG_GPU_POWERVR)=="DM_GFX_ZEROCOPY=0 DM_GFX_UBO_DYNAMIC=0 DM_NR_UBODYN=0 DM_NR_RP=0 DM_DOS2_PREPASS=0 DM_NR_UBOVEC=0 DM_NR_ONCHIP=0 DM_NR_LIGHTFUSE=0 DM_NR_SH_PCF=0 DM_NR_PRESKIN=0 DM_NR_IDVS=0 DM_NR_UIX_DS=0 DM_NR_UIX_AREA=0 DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 "
+          "DM_VK_NATIVE_RT=0 DM_VK_NATIVE_POST=0 DM_VK_NATIVE_UIPASS=0 DM_VK_NATIVE_MAT=0 DM_VK_NATIVE_XLQ=0 DM_VK_NATIVE_PREPASS=0 DM_VK_NATIVE_PRESKIN=0 DM_VK_NATIVE_LOAD=0 DM_VK_NATIVE_STORE=0 DM_VK_NATIVE_FRESH=0 DM_VK_NATIVE_TILEBAR=0 ");
+    // [VK-NATIVE stage 5] step 1 turns the backend's techniques off (mode 1 stays on: a technique bug does not end on the old path);
+    // [stage 5.3 V3] step 2 stays on the backend too, step 3 is the old path; the far-cascade hack and the measurement stay the player's / the tier's
     for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const std::string s1=sw(1,f),s2=sw(2,f);
         for(const char *kv:{"DM_VK_NATIVE_SH=0","DM_VK_NATIVE_SH_PCF=0","DM_VK_NATIVE_SHCACHE=0","DM_VK_NATIVE_LIGHTFUSE=0","DM_VK_NATIVE_LIGHTFUSE_FOG=0","DM_VK_NATIVE_COND=0",
             "DM_VK_NATIVE_GBUF_LE=0","DM_VK_NATIVE_COST=0"}){CHECK(has(s1,kv));CHECK(has(s2,kv));}
-        CHECK(!has(s1,"DM_VK_NATIVE=0") && has(s2,"DM_VK_NATIVE=0")); CHECK(s1.find("DM_VK_NATIVE_SHFAR")==std::string::npos && s1.find("DM_VK_NATIVE_PROF")==std::string::npos);}
+        const std::string s3=sw(3,f);
+        CHECK(!has(s1,"DM_VK_NATIVE=0") && !has(s2,"DM_VK_NATIVE=0") && has(s3,"DM_VK_NATIVE=0")); CHECK(s1.find("DM_VK_NATIVE_SHFAR")==std::string::npos && s1.find("DM_VK_NATIVE_PROF")==std::string::npos);}
     // step 2: step 1 + the tile pass policies (engine + NB) + the native recording paths; nothing of step 3
     for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR}){const std::string s1=sw(1,f),s2=sw(2,f),s3=sw(3,f);
         CHECK(s2.compare(0,s1.size(),s1)==0 && s3.compare(0,s2.size(),s2)==0);   // each step is the one before plus more, same order
         for(const char *kv:{"DM_GFX_NOLOAD=0","DM_GFX_STORE_HIST=0","DM_GFX_CLEAR_FOLD=0","DM_GFX_TILE_BARRIER=0","DM_GFX_LAZY_CLEAR=0","DM_NB_RP=0","DM_NB_OPBARRIER=0",
             "DM_NB_UIAREA=0","DM_NR_DIRECT=0","DM_NR_DRAW=0","DM_NR_ROTATE=0","DM_NR_SH=0","DM_NR_Z3=0","DM_NR_Z5=0","DM_NRN=0","DM_NRN_LIVE=0","DM_NRN_SHC=0","DM_NRN_EV=0","DM_NRN_LIST=0","DM_NRN_REC=0","DM_NRN_NOBODY=0","DM_NRN_PKT=0","DM_NRN_SHORT=0","DM_NRN_SHADOW=0","DM_NRN_PREPASS=0","DM_NRN_GBUF=0","DM_NRN_LIGHT=0","DM_NRN_POST=0","DM_NRN_OTHER=0","DM_NR_Z8=0","DM_NR_Z8_THREAD=0","DM_NR_Z8_IMG=0","DM_NR_Z8_VIEW=0","DM_NR_Z8_VAL=0","DM_NR_Z3B=0","DM_NR_Z3C=0","DM_NR_Z3D=0","DM_NR_Z3K=0",
             "DM_NR_SH_SURF=0","DM_NR_MAT=0","DM_NR_STATE=0","DM_NR_UBO=0","DM_NR_UBD=0","DM_NR_TRX_STICKY=0","DM_NR_TRX_ZC=0","DM_NR_TAPSET=0",
-            "DM_NR_TEX=0","DM_NR_TEXSTREAM=0","DM_NB_POST_AA_OUTLINE=0"}){CHECK(has(s2,kv));CHECK(!has(s1,kv));}
-        for(const char *kv:{"DM_GFX_PIPE_SERIAL=1","DM_NB_MT=0","DM_GFX_GS_PASSTHRU=0","DM_NR=0","DM_NR_BUF=0","DM_NR_DESC=0","DM_NR_HEAT=0","DM_NR_SEED=0","DM_NB=0",
+            "DM_NR_TEX=0","DM_NR_TEXSTREAM=0","DM_NB_POST_AA_OUTLINE=0",
+            "DM_VK_NATIVE_WARM=0","DM_VK_NATIVE_BCGPU=0","DM_VK_NATIVE_MIRROR=0","DM_GFX_PIPE_SERIAL=1"}){CHECK(has(s2,kv));CHECK(!has(s1,kv));}
+        for(const char *kv:{"DM_VK_NATIVE=0","DM_NB_MT=0","DM_GFX_GS_PASSTHRU=0","DM_NR=0","DM_NR_BUF=0","DM_NR_DESC=0","DM_NR_HEAT=0","DM_NR_SEED=0","DM_NB=0",
             "DM_NB_PIPE=0","DM_NB_DESC=0","DM_NB_UBO=0","DM_NB_OWN=0","DM_NB_POST=0","DM_NB_POST_AA=0","DM_GFX_PRESENT_THREAD=0"}){CHECK(has(s3,kv));CHECK(!has(s2,kv));}
         // every key once per step
         XbgSafeSwitch a[128];const int n=xbg_safe_switches(3,f,a,128);
         for(int i=0;i<n;i++){CHECK(count_key(s3,a[i].key)==1);CHECK(!strncmp(a[i].key,"DM_",3));CHECK(*a[i].value=='0' || *a[i].value=='1');}
         CHECK(n<128-16);}   // room in the engine's array (xbg_safe_mode.inc: 128) for the switches to come
-    // PowerVR-only items: the colour mask of output-less shaders (the d2r #179 fix stays on Mali), dynamic UBOs / NR-08b
+    // PowerVR-only items: the colour mask of output-less shaders (the d2r #179 fix stays on Mali; [stage 5.3 V3] from step 2), dynamic UBOs / NR-08b
     CHECK(has(sw(3,XBG_GPU_POWERVR),"DM_GFX_NOOUT_MASK=0") && sw(3,XBG_GPU_MALI).find("NOOUT_MASK")==std::string::npos);
+    CHECK(has(sw(2,XBG_GPU_POWERVR),"DM_GFX_NOOUT_MASK=0") && !has(sw(1,XBG_GPU_POWERVR),"DM_GFX_NOOUT_MASK=0"));
     CHECK(sw(3,XBG_GPU_MALI).find("UBO_DYNAMIC")==std::string::npos && sw(3,XBG_GPU_MALI).find("UBODYN")==std::string::npos);
     // no COMPILE_LOCK / FENCE_TRYLOCK / ZC3_SELFTEST / STORE_DEAD / STORE_NONE / LEAN_USAGE / TILE_AREA: DOOM switches DOS2 does not have
     for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR})for(const char *k:{"COMPILE_LOCK","FENCE_TRYLOCK","ZC3_SELFTEST","STORE_DEAD","STORE_NONE","LEAN_USAGE","TILE_AREA","PVR_LADDER"})
@@ -91,7 +153,8 @@ int main(){
      std::string longwhy="why="+std::string(400,'a');xbg_safe_parse(longwhy.c_str(),&m);CHECK(strlen(m.why)==sizeof m.why-1);}
 
     // classifiers: DOS2's recording threads count, the app / log / guest / CPU-decode threads do not
-    for(const char *t:{"dm-gfx","dm-present","dm-crumbs","nvn-translate","dm-nbmt","dm-nbx0","dm-nrp-park","dm-nrp-acquire","mali-cmar-backe","pvr_compiler","tu_queue"})CHECK(xbg_safe_gfx_thread(t));
+    for(const char *t:{"dm-gfx","dm-present","dm-crumbs","nvn-translate","dm-nbmt","dm-nbx0","dm-nrp-park","dm-nrp-acquire","mali-cmar-backe","pvr_compiler","tu_queue",
+                       "vkn-record"})CHECK(xbg_safe_gfx_thread(t));   // [stage 5.3 V3] the backend's recording thread
     for(const char *t:{"dm-android","dm-lifecycle","dm-log","dm-input","dm-audio-keep","xbg-bcdec","dm-nrmem","dm-nrheat","MainThread","RenderThread","dm-vma"})CHECK(!xbg_safe_gfx_thread(t));
     CHECK(!xbg_safe_gfx_thread(nullptr) && !xbg_safe_gfx_thread(""));
     CHECK(xbg_safe_gfx_lib("/vendor/lib64/hw/vulkan.mtk.so") && xbg_safe_gfx_lib("/vendor/lib64/egl/libGLES_mali.so") && xbg_safe_gfx_lib("/vendor/lib64/libsrv_um.so"));
@@ -116,6 +179,7 @@ int main(){
     CHECK(xbg_safe_fallback_fake("pipe:90","pipe")==90 && xbg_safe_fallback_fake("zc,fence:60,pipe:90","pipe")==90);
     CHECK(xbg_safe_fallback_fake("fence:60","pipe")==-1 && xbg_safe_fallback_fake("pipex","pipe")==-1 && xbg_safe_fallback_fake(nullptr,"pipe")==-1);
     CHECK(xbg_safe_fallback_fake(" pipe , fence:5","pipe")==0);
+    test_v3_ladder();   // [stage 5.3 V3]
     printf(fails?"safe_mode_test: %d FAILED\n":"safe_mode_test: all passed\n",fails);
     return fails?1:0;
 }

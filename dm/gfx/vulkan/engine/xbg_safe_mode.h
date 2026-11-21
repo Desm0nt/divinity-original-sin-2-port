@@ -15,17 +15,31 @@
 //           DM_NR_LIGHTFUSE=0 / DM_NR_SH_PCF=0 (the 19.11 defaults: fused Sky -> Light -> Fog draw, dref shadow resolve),
 //           DM_NR_UIX_DS=0 / DM_NR_UIX_AREA=0 (NR-UIX Iggy pass DS detach / render area, default on the tile families since tiler plan step 1;
 //           DM_NR_RP_FRESH, its other step-1 default, needs DM_NR_RP=1 and is off with it); [VK-NATIVE stage 5] the native backend's own
-//           techniques (DM_VK_NATIVE_SH / _SH_PCF / _SHCACHE / _LIGHTFUSE / _LIGHTFUSE_FOG / _COND / _GBUF_LE / _COST = 0): mode 1 stays on;
-//   step 2  + the tile pass policies (DOOM step 2): DM_GFX_NOLOAD, DM_GFX_STORE_HIST (DOS2's store-DONT_CARE heuristic; DOOM STORE_DEAD /
+//           techniques (DM_VK_NATIVE_SH / _SH_PCF / _SHCACHE / _LIGHTFUSE / _LIGHTFUSE_FOG / _COND / _GBUF_LE / _COST = 0), [stage 5.3 V3]
+//           its recording thread (DM_VK_NATIVE_RT=0) and its later techniques, each at its stage-4 value (DM_VK_NATIVE_POST=0: the
+//           Switch post shaders, not the mobile ones (1) nor the fused tail; _UIPASS / _MAT / _XLQ / _PREPASS / _PRESKIN = 0; the pass
+//           policy DM_VK_NATIVE_LOAD / _STORE / _FRESH / _TILEBAR = 0: LOAD + STORE everywhere, zero fill + LOAD for fresh targets, full
+//           barriers): mode 1 stays on, as stage 4 drew;
+//   step 2  [stage 5.3 V3] the native backend's conservative basics, still ON the backend: no pipeline warm-up (DM_VK_NATIVE_WARM=0:
+//           no worker, no pipeline-cache file), no GPU BC transcode (DM_VK_NATIVE_BCGPU=0: BC textures without the setup pack decoded
+//           on the CPU, no compute decode / ASTC encode), whole-texture mirrors (DM_VK_NATIVE_MIRROR=0, the stage-3 rule), one module /
+//           pipeline creation at a time (DM_GFX_PIPE_SERIAL=1; read by the backend too since V2), PowerVR DM_GFX_NOOUT_MASK=0 (DOOM's
+//           PVR-07 ladder step 2); the conditional draws are off from step 1 (DM_VK_NATIVE_COND=0). The old path's step-2 rows follow
+//           (they act only at step 3, when the old path draws; mode 1 forces those names off anyway):
+//           + the tile pass policies (DOOM step 2): DM_GFX_NOLOAD, DM_GFX_STORE_HIST (DOS2's store-DONT_CARE heuristic; DOOM STORE_DEAD /
 //           STORE_NONE), DM_GFX_CLEAR_FOLD, DM_GFX_TILE_BARRIER, DM_GFX_LAZY_CLEAR = 0, and their native-backend versions DM_NB_RP (the NB-06
 //           planner's load / store / clear folding + pre-pass barrier), DM_NB_OPBARRIER (narrow copy barriers), DM_NB_UIAREA (UI render
 //           area) = 0; + the native paths that change what is recorded: DM_NR_DIRECT, DM_NR_DRAW (NR-09 / NR-09R), DM_NR_ROTATE (NR-20:
 //           identity swapchain + blit), DM_NR_SH (NR-04 engine shaders by name) = 0;
-//   step 3  + DOOM's step 3 in DOS2's terms: DM_GFX_PIPE_SERIAL=1 (DOS2's compile lock: modules + pipelines one at a time; DOOM
-//           COMPILE_LOCK=2), DM_NB_MT=0 (no vkCmd* recording on the dm-nbmt worker: DOOM's COMPILE_LOCK=2 is about its record thread),
-//           PowerVR DM_GFX_NOOUT_MASK=0 (DOOM PVR-07 ladder; on Mali the mask is the d2r #179 picture fix, kept), DM_GFX_GS_PASSTHRU=0;
-//           + every NR and NB step off (DM_NR=0 with DM_NR_BUF / DESC / HEAT / SEED, DM_NB=0 with each NB step, DM_GFX_PRESENT_THREAD=0):
-//           the renderer of the released v0.1.1 (before 852c6ec turned NB on), the last version players ran.
+//   step 3  [stage 5.3 V3] the old path: DM_VK_NATIVE=0 (owner 20.11: only after the backend itself crashed again at step 2) + DOOM's
+//           step 3 in DOS2's terms: DM_GFX_PIPE_SERIAL=1 (already from step 2; DOS2's compile lock: modules + pipelines one at a time;
+//           DOOM COMPILE_LOCK=2), DM_NB_MT=0 (no vkCmd* recording on the dm-nbmt worker: DOOM's COMPILE_LOCK=2 is about its record thread),
+//           PowerVR DM_GFX_NOOUT_MASK=0 (from step 2; DOOM PVR-07 ladder; on Mali the mask is the d2r #179 picture fix, kept),
+//           DM_GFX_GS_PASSTHRU=0; + every NR and NB step off (DM_NR=0 with DM_NR_BUF / DESC / HEAT / SEED, DM_NB=0 with each NB step,
+//           DM_GFX_PRESENT_THREAD=0): the renderer of the released v0.1.1 (before 852c6ec turned NB on), the last version players ran.
+// [stage 5.3 V3] Before V3 step 2 was the old path; the stored state is the same file and the same count (the step is min(count, 3),
+// nothing else is read), so a player whose file says count=2 now starts on the backend at its step 2 instead of on the old path; the
+// next counted crash (count 3) puts them on the old path. A DM_VK_NATIVE the player set in dm/env is the player's: never replaced.
 // DM_SAFE_MODE: unset / auto = the counted step (min(count, 3)); 0 / off = none; on = at least step 1 (the gear's "On"); 1..3 = that step.
 // DOS2 never had DOOM's v0.5.0 PowerVR ladder, so there is no DM_PVR_LADDER alias (xbg_safe_step's pvr_ladder argument is passed null).
 #pragma once
@@ -79,13 +93,20 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
     // DM_VK_NATIVE_PROF (measurement). Without effect in modes 0 / 2 (only mode 1 reads them).
     add("DM_VK_NATIVE_SH","0");add("DM_VK_NATIVE_SH_PCF","0");add("DM_VK_NATIVE_SHCACHE","0");add("DM_VK_NATIVE_LIGHTFUSE","0");add("DM_VK_NATIVE_LIGHTFUSE_FOG","0");
     add("DM_VK_NATIVE_COND","0");add("DM_VK_NATIVE_GBUF_LE","0");add("DM_VK_NATIVE_COST","0");
+    // [stage 5.3 V3] the recording thread and the later stage-5 switches at their stage-4 values (see the head comment)
+    add("DM_VK_NATIVE_RT","0");add("DM_VK_NATIVE_POST","0");add("DM_VK_NATIVE_UIPASS","0");add("DM_VK_NATIVE_MAT","0");add("DM_VK_NATIVE_XLQ","0");
+    add("DM_VK_NATIVE_PREPASS","0");add("DM_VK_NATIVE_PRESKIN","0");
+    add("DM_VK_NATIVE_LOAD","0");add("DM_VK_NATIVE_STORE","0");add("DM_VK_NATIVE_FRESH","0");add("DM_VK_NATIVE_TILEBAR","0");
     if(step>=2){
+        // [stage 5.3 V3] the backend's conservative basics (still on the backend)
+        add("DM_VK_NATIVE_WARM","0");add("DM_VK_NATIVE_BCGPU","0");add("DM_VK_NATIVE_MIRROR","0");add("DM_GFX_PIPE_SERIAL","1");
+        if(pvr)add("DM_GFX_NOOUT_MASK","0");
         add("DM_GFX_NOLOAD","0");add("DM_GFX_STORE_HIST","0");add("DM_GFX_CLEAR_FOLD","0");add("DM_GFX_TILE_BARRIER","0");add("DM_GFX_LAZY_CLEAR","0");
         add("DM_NB_RP","0");add("DM_NB_OPBARRIER","0");add("DM_NB_UIAREA","0");
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
         add("DM_NR_Z3","0");add("DM_NR_Z5","0");   // NR-ZERO Z3 / Z5: resolved draws from a table / the packet from the game thread (they sit on NR-09)
         add("DM_NRN","0");add("DM_NRN_LIVE","0");add("DM_NRN_SHC","0");add("DM_NRN_EV","0");   /* [DOS2] NR-NATIVE step E */add("DM_NRN_LIST","0");add("DM_NRN_REC","0");/* [DOS2] NR-NATIVE step D */add("DM_NRN_NOBODY","0");/* [DOS2] NR-NATIVE step D half b */add("DM_NRN_PKT","0");/* [DOS2] NR-NATIVE step D half c */add("DM_NRN_SHORT","0");add("DM_NRN_SHADOW","0");add("DM_NRN_PREPASS","0");add("DM_NRN_GBUF","0");add("DM_NRN_LIGHT","0");add("DM_NRN_POST","0");add("DM_NRN_OTHER","0");   // NR-NATIVE: the card of an engine draw (sits on NR-09)
-        add("DM_NR_Z8","0");add("DM_VK_NATIVE","0");/* [DOS2] VK-NATIVE: the native backend (dm/gfx/vkn) */   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
+        add("DM_NR_Z8","0");   // NR-ZERO Z8: the submit walk (a copy of State on the submitting thread, answers and packets from it)
         add("DM_NR_Z8_THREAD","0");   // NR-ZERO Z8, section 28: the walk on its own thread
         add("DM_NR_Z8_IMG","0");      // section 29: the read word of an NR-08 entry
         add("DM_NR_Z8_VIEW","0");     // section 30: views by the range's number in its submission
@@ -97,8 +118,8 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         add("DM_NB_POST_AA_OUTLINE","0");
     }
     if(step>=3){
-        add("DM_GFX_PIPE_SERIAL","1");add("DM_NB_MT","0");
-        if(pvr)add("DM_GFX_NOOUT_MASK","0");
+        add("DM_VK_NATIVE","0");   // [stage 5.3 V3] the old path (dm/gfx/vkn off); DM_GFX_PIPE_SERIAL=1 / PowerVR NOOUT_MASK=0 are set from step 2
+        add("DM_NB_MT","0");
         add("DM_GFX_GS_PASSTHRU","0");
         add("DM_NR","0");add("DM_NR_BUF","0");add("DM_NR_DESC","0");add("DM_NR_HEAT","0");add("DM_NR_SEED","0");
         add("DM_NB","0");add("DM_NB_PIPE","0");add("DM_NB_DESC","0");add("DM_NB_UBO","0");add("DM_NB_OWN","0");add("DM_NB_POST","0");add("DM_NB_POST_AA","0");
@@ -108,9 +129,9 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
 }
 inline const char *xbg_safe_step_text(int step){
     switch(step){case 0:return "nothing changed";
-    case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass; native backend: its stage-5 techniques)";
-    case 2:return "step 1 + the tile pass policies off (noload / store-hist / clear fold / tile barrier / lazy clear, NB-06 planner, NB barriers, UI area) and the native recording paths (NR-09 direct / draw, NR-ZERO Z3 / Z3b / Z3c / Z3d / Z5 / Z8, NR-20 rotate, NR-04 shaders)";
-    default:return "step 2 + one pipeline build at a time, no worker recording, PowerVR colour mask of output-less shaders off, culling GS kept, every NR / NB step off (the v0.1.1 renderer)";}
+    case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass; native backend: its stage-5 techniques, its recording thread, its pass policy - the backend draws as stage 4 did)";
+    case 2:return "step 1 + the native backend's conservative basics (no pipeline warm-up, BC textures decoded on the CPU, whole-texture mirrors, one pipeline build at a time, PowerVR colour mask of output-less shaders off), still on the backend; the old path's tile pass policies and native recording paths off for step 3";
+    default:return "the old path (DM_VK_NATIVE=0) + step 2 + no worker recording, culling GS kept, every NR / NB step off (the v0.1.1 renderer)";}
 }
 
 // The marker file <files>/gfx-safe-mode: "key=value" lines (count, step, pid, time = wall clock ms, family, why). Unknown keys are
@@ -140,7 +161,8 @@ inline void xbg_safe_parse(const char *text,XbgSafeMarker *m){
 // dm-crumbs (as DOOM). Not: xbg-bcdec (CPU BC decode), dm-android / dm-lifecycle / dm-log / guest threads.
 inline bool xbg_safe_gfx_thread(const char *t){
     if(!t || !*t)return false;
-    static const char *const ours[]={"dm-gfx","dm-record","dm-present","dm-crumbs","dm-acquire","nvn-translate","dm-nbmt","dm-nbx","dm-nrp"};
+    static const char *const ours[]={"dm-gfx","dm-record","dm-present","dm-crumbs","dm-acquire","nvn-translate","dm-nbmt","dm-nbx","dm-nrp",
+                                     "vkn-"};   // [stage 5.3 V3] the native backend's threads (vkn-record: every vkCmd* of mode 1 with DM_VK_NATIVE_RT)
     for(const char *o:ours)if(!strncmp(t,o,strlen(o)))return true;
     static const char *const drv[]={"mali-","pvr","IMG","Vk","vk","tu_","pan","Mali"};
     for(const char *d:drv)if(!strncmp(t,d,strlen(d)))return true;

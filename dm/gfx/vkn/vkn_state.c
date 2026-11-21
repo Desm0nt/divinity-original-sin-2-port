@@ -4,6 +4,7 @@
 #ifdef DM_GAME_DOS2
 #include "vkn.h"
 #include "vkn_state.h"
+#include "vkn_drv.h"   // [stage 5.3 V2] driver corrections at pipeline build (colour mask, depth bias x2, creation lock)
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -659,6 +660,8 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     if (r0) rs = *r0;
     pthread_mutex_unlock(&g_st_mu);
     if (k->fx & VKN_PIPE_FX_DISCARD) rs.rasterizerDiscardEnable = VK_TRUE;   // [stage 5] nothing reaches the targets (vkn_fx.h)
+    // [stage 5.3 V2] DM_GFX_DEPTH_BIAS_X2 (vkn_drv.h): PanVK / RADV halve depthBiasConstantFactor (xbg_game.cpp draw: rs.depthBiasConstantFactor x2)
+    if (rs.depthBiasEnable) { const float bx = vkn_drv_bias_scale(); if (bx != 1.0f) { rs.depthBiasConstantFactor *= bx; vkn_drv_bias_note(); } }
     if (rs.polygonMode != VK_POLYGON_MODE_FILL && !dv->feat.fillModeNonSolid) {
         static int noted; if (!__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED)) vkn_logf("pipelines: polygon mode %d needs fillModeNonSolid, which the device lacks: drawn filled", (int)rs.polygonMode);
         rs.polygonMode = VK_POLYGON_MODE_FILL;
@@ -681,6 +684,10 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
         if (cb[i].blendEnable && !fmt_blendable((VkFormat)c->k.color[i])) cb[i].blendEnable = VK_FALSE;
         cb[i].colorWriteMask = k->write_mask[i] & 0xf;
     }
+    // [stage 5.3 V2] DM_GFX_NOOUT_MASK (vkn_drv.h): a fragment stage without colour outputs leaves the attachments undefined in Vulkan;
+    // Mali writes 0 there (d2r #179): every colour write masked off (xbg_game.cpp draw, noout_mask_on). The key is unchanged (a decision
+    // of the shader the key names).
+    if (vkn_drv_noout(k, src)) for (uint32_t i = 0; i < c->k.ncolor; i++) cb[i].colorWriteMask = 0;
     VkPipelineColorBlendStateCreateInfo cbs; memset(&cbs, 0, sizeof cbs);
     cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = c->k.ncolor; cbs.pAttachments = c->k.ncolor ? cb : NULL;
     static const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -693,7 +700,9 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     ci.pDynamicState = &dy; ci.layout = src->layout; ci.renderPass = src->pass ? src->pass : c->pass; ci.subpass = 0; ci.basePipelineIndex = -1;
     VkPipeline p = VK_NULL_HANDLE;
     // The default VkPipelineCache is internally synchronised (created without EXTERNALLY_SYNCHRONIZED): both builders share it.
+    const int lk = vkn_drv_lock();   // [stage 5.3 V2] DM_GFX_PIPE_SERIAL (PowerVR: render thread and warm-up worker build one at a time)
     const VkResult r = vkCreateGraphicsPipelines(dv->dev, vkn_pipe_cache_get(), 1, &ci, NULL, &p);
+    vkn_drv_unlock(lk);
     if (r != VK_SUCCESS) {
         static int noted;
         if (__atomic_fetch_add(&noted, 1, __ATOMIC_RELAXED) < 16)
@@ -771,7 +780,9 @@ VkPipeline vkn_pipe_compute(uint32_t shader, VkShaderModule module, VkPipelineLa
             VkComputePipelineCreateInfo ci; memset(&ci, 0, sizeof ci);
             ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; ci.layout = layout; ci.basePipelineIndex = -1;
             ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = module; ci.stage.pName = "main";
+            const int lk = vkn_drv_lock();   // [stage 5.3 V2] DM_GFX_PIPE_SERIAL
             const VkResult r = vkCreateComputePipelines(vkn_device()->dev, vkn_pipe_cache_get(), 1, &ci, NULL, &p);
+            vkn_drv_unlock(lk);
             g_build_ns += vkn_now_ns() - t0;
             if (r != VK_SUCCESS) { p = VK_NULL_HANDLE; g_fails++; static int noted; if (noted++ < 8) vkn_logf(VKN_RED "pipelines: vkCreateComputePipelines %d (shader %u)", (int)r, shader); }
             if (ot_insert(&g_pipe_tab, &k, (uint64_t)(uintptr_t)p)) g_ncompute++;

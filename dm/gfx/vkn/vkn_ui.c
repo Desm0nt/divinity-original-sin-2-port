@@ -19,6 +19,7 @@
 #include "vkn_shader.h"
 #include "vkn_state.h"
 #include "vkn_fx.h"            // [stage 5.2 B2] the fence before an engine draw
+#include "vkn_drv.h"           // [stage 5.3 V2] DM_GFX_PIPE_SERIAL: the creation lock (PowerVR)
 #include "../nr/nr_uix.h"     // [stage 5.2 B2] ordinal keys, DS decay (includes ../nb/nb_uiarea.h: rects, seed, history)
 #include <pthread.h>
 #include <stdlib.h>
@@ -155,7 +156,8 @@ static int statics(void) {
     const char *why = NULL;
     if (!(g_ph = vkn_tex_create(1ull << 32 | 0xffffffffull, &pd, &ps, &why))) { UI_RED(RR_STATIC, "placeholder texture failed (%s): the UI stays off", why ? why : "?"); return -1; }
     const VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_clr_vs, .pCode = k_clr_vs};
-    if (vkCreateShaderModule(d->dev, &mi, NULL, &g_clr_vs) != VK_SUCCESS) g_clr_vs = VK_NULL_HANDLE;   // masked stencil clears off (counted)
+    { const int lk = vkn_drv_lock(); const VkResult r = vkCreateShaderModule(d->dev, &mi, NULL, &g_clr_vs); vkn_drv_unlock(lk);   // [stage 5.3 V2] the creation lock
+      if (r != VK_SUCCESS) g_clr_vs = VK_NULL_HANDLE; }   // masked stencil clears off (counted)
     const VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     if (vkCreatePipelineLayout(d->dev, &li, NULL, &g_clr_layout) != VK_SUCCESS) g_clr_layout = VK_NULL_HANDLE;
     g_static_ok = 1;
@@ -476,7 +478,8 @@ static VkPipeline pipe_get(const pipe_k *k, const vkn_shader *s, const vkn_pass_
         .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &ms,
         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->clear ? g_clr_layout : s->layout, .renderPass = pi->pass, .subpass = 0};
     VkPipeline p = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(d->dev, VK_NULL_HANDLE, 1, &gi, NULL, &p) != VK_SUCCESS) {
+    const int lk = vkn_drv_lock(); const VkResult pr = vkCreateGraphicsPipelines(d->dev, VK_NULL_HANDLE, 1, &gi, NULL, &p); vkn_drv_unlock(lk);   // [stage 5.3 V2]
+    if (pr != VK_SUCCESS) {
         p = VK_NULL_HANDLE; g_st.pipe_fail++;
         UI_RED(RR_PIPE, "vkCreateGraphicsPipelines failed: pair %u, format %u, blend %u, depth-stencil %u, clear %u, samples %u", k->pair, k->vfmt, k->blend, k->ds, k->clear, k->samples);
     } else g_st.pipelines++;

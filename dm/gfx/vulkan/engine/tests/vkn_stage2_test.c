@@ -44,7 +44,7 @@
 // From the repository root (one command line; wrapped here):
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage2_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage2_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c
-//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
+//       dm/gfx/vkn/vkn_shader.c dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_mirror.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_drv.c dm/gfx/nvn/nvn_tex.c dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c
 //       dm/gfx/nr/nr_reg.c -lpthread -lm && wsl /tmp/vkn_stage2_test
 // (the game defines of the dos2 build, dm/android/CMakeLists.txt: nvn_tex.c's layout rules depend on DM_GAME_D3; -fsanitize=address,undefined
 // works the same way.)
