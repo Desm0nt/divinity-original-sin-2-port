@@ -1381,6 +1381,7 @@ static void test_e2e(void) {
 // re-created under the same pool id; every 10 frames a dispatch; the window with 2 draws, the UI (targets, viewport, scissor, a quad
 // draw and an indexed draw with their bytes copied); present; every 50 frames an off-frame recording (a sync at its end).
 static uint8_t g_rtctl[2][VKN_UI_CTL], g_rtcode[2][64];
+static uint32_t g_rt_defer_free;   // [rt2 R5] destroys of 331 without a sync
 enum { RT_DYN = 768 };   // [stage 5.2 audit] the CPU-written vertex ring's size (2 frames of the scenario's 2 draws a frame)
 static int32_t rt_ftex[VKN_TEX_SLOTS], rt_fsmp[VKN_TEX_SLOTS], rt_ctex[VKN_TEX_SLOTS], rt_csmp[VKN_TEX_SLOTS];
 static vkn_rt_site g_rts_upd = VKN_RT_SITE("test: texture update"), g_rts_tex = VKN_RT_SITE("test: texture re-created");
@@ -1396,6 +1397,7 @@ static void rt_setup(void) {
     CHECK_EQ(vkn_ui_program_put(0xB1, 0, g_rtctl[0], g_rtcode[0]), 0); CHECK_EQ(vkn_ui_program_put(0xB2, 1, g_rtctl[1], g_rtcode[1]), 0);
     vkn_block b; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(55, 1), 4096, 0, 0, NULL, &b), 0);   // never drawn: updated in place
     CHECK(mktex(330, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 330, 0) != NULL);           // destroyed and re-created by the scenario
+    CHECK(mktex(331, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 331, 0) != NULL);           // [rt2 R5] drawn once in 23 frames, destroyed 3 frames later
     CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(57, 1), RT_DYN, 0, 0, NULL, &b), 0);               // [stage 5.2 audit] the CPU-written vertex ring
     // deterministic buffer bytes: vertices (any), indices 0..15
     uint8_t *v0 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(50, 1))->cpu, *v1 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(51, 1))->cpu, *v2 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(54, 1))->cpu;
@@ -1483,6 +1485,12 @@ static void rt_frame(uint32_t f) {
             static uint32_t px2[8 * 8]; for (int i = 0; i < 64; i++) px2[i] = f * 0x00010203u ^ (uint32_t)(i * 77);
             CHECK_EQ(vkn_tex_update(g_t0, 0, 0, (int32_t)(f % 2) * 8, 4, 8, 8, px2, 32), 0);
         }
+        if (k == 20 && f % 23 == 3) {   // [rt2 R5] texture 331 drawn in this frame only (created at frame 0 or by the cycle below)
+            const int32_t was = rt_ftex[0]; rt_ftex[0] = 331; vkn_rt_slots_touch();   // (the slot policies 2 / 3 read the engine's dirty ranges)
+            vkn_draw_in t = g_in; t.tex[0] = NULL; t.smp[0] = NULL; t.tex[1] = rt_ftex; t.smp[1] = rt_fsmp; t.tex[2] = rt_ctex; t.smp[2] = rt_csmp; t.ib = H(52, 1);
+            vkn_rt_query_cond(0); vkn_rt_draw_indexed(&t, 0, 3, 1);
+            rt_ftex[0] = was; vkn_rt_slots_touch();
+        }
         if (k == 15 && f % 37 == 5) {   // a destroy and a create under the same pool id between draws (the destroy hook syncs)
             vkn_rt_own_begin(&g_rts_tex); CHECK_EQ(vkn_tex_destroy_handle(H(330, 1)), 1); CHECK(mktex(330, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 330, 0) != NULL); vkn_rt_own_end();
         }
@@ -1517,8 +1525,18 @@ static void rt_frame(uint32_t f) {
         vkn_rt_ui_draw(&d);
     }
     vkn_rt_rec_end(1, g_win, NULL, 1);
+    if (f % 23 == 6) {   // [rt2 R5] DM_VK_NATIVE_RT_DEFER's rule: 331 was last drawn 3 frames ago, destroyed without a sync once that frame is
+                         // recorded (the backpressure guarantees it here), then made again for the next cycle (a create: no sync)
+        const int rec = vkn_rt_frame_recorded(f - 3);
+        CHECK(rec);   // modes 1 / 2: at most 2 frames ahead
+        if (rec) CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 331), 1);
+        else { vkn_rt_own_begin(&g_rts_tex); CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 331), 1); vkn_rt_own_end(); }
+        g_rt_defer_free += rec;
+        CHECK(mktex(331, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 331, 0) != NULL);
+    }
     const uint64_t cpu3[3] = {0, 0, 0};
     vkn_rt_frame_tail(cpu3, NULL);
+    vkn_rt_frame_mark(f);   // [rt2 R5] (the host names the frame by the engine's counter right after the tail)
     if (f % 50 == 25) {   // an off-frame recording (the engine waits for its GPU work: a sync at its end)
         vkn_rt_rec_begin(0);
         rt_targets(g_b2, NULL);
@@ -1564,7 +1582,9 @@ static void rt_run(const rt_cfg *c, rt_res *r) {
     vkn_ui_set_cache(c->uiset); vkn_shc_mask_set(c->shmask); vkn_shc_test_mask(c->shmask ? rt_shmask : NULL);   // [rt P6] / [rt P3-GPU]
     vkn_rt_test_yield(c->yield ? rt_yield : NULL);
     vkn_rt_test_ring_limit(c->ring_limit);
+    g_rt_defer_free = 0;
     for (uint32_t f = 0; f < c->frames; f++) rt_frame(f);
+    if (c->frames >= 30) CHECK(g_rt_defer_free > 0);   // [rt2 R5] the destroys of 331 went without a sync
     vkn_rt_shutdown();
     pthread_mutex_lock(&mk_mu); mk_jr_on = 0; pthread_mutex_unlock(&mk_mu);
     r->n = mk_jr_n < 4600 ? mk_jr_n : 4600; if (mk_jr_n > 4600) g_fails++;

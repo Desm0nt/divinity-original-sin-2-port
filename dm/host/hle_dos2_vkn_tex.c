@@ -246,17 +246,51 @@ VKN_HOOK vkn_h_win(VKN_A) {
 }
 
 // ---- destroy: by the texture object of the record (live record or the pending copy) ----
+// [rt2 R5] DM_VK_NATIVE_RT_DEFER (default 1; 0 = always the sync; 2 = decided and counted, synced anyway). The engine finalizes a texture
+// only when its record's last-use stamp (+8, the engine frame counter [dev+0x51f0] at its last use) is older than frame - 2, or when
+// forced (0x91d630, VK-NATIVE-MAP-1 "DestroyTextureIfOld"): on the console that is what keeps the GPU, frames behind the CPU, from
+// reading a texture the CPU let go. The recording thread is one more stage behind the engine thread, so the same rule covers it once
+// every record of the stamp's frame has been executed - vkn_rt_frame_recorded(stamp) checks exactly that (the frame tails it has run),
+// not a guess. Then nothing the recording thread has still to execute names the texture (its pool ids, its object), and the destroy
+// goes without the sync: the pool-id cells and the cookie leave the tables now (as in mode 0 at this point), the Vulkan objects 3
+// presented frames later (vkn_retire). Synced as before: a forced destroy, a target (not a sampled texture: targets are named by
+// pointer in records and may be bound without a stamp), a stamp that is not old enough, a frame the recording thread has not finished,
+// a call from another thread than the engine's.
 void dm_vkn_glue_forget(uint64_t obj) __attribute__((weak));   // hle_dos2_vkn_glue.c
+static int g_defer = -1;
+static struct { uint64_t free, synced, forced, young, target, behind, other, would; } g_dts, g_dto;
 VKN_HOOK vkn_h_dt(VKN_A) {
     const uint64_t obj = a1 ? vkn_rd64(a1) : 0;   // before: the original clears the record
+    const uint64_t stamp = a1 ? vkn_rd64(a1 + 8) : 0, eframe = a0 ? vkn_rd64(a0 + 0x51f0) : 0;   // [rt2 R5] last use, the engine's frame (dev + 0x51f0)
+    const int force = (int)(a2 & 1);
     const uint64_t v = g_o_dt(VKN_F);
     if ((v & 1) && obj) {   // (audit U3: its storage note goes too)
         // [stage 5.5] the drain 0x91ad20 calls this for every pending texture, every frame: the sync only when one really goes
         static vkn_rt_site site = VKN_RT_SITE("DestroyTextureIfOld (destroyed)");
-        vkn_rt_own_begin(&site);
-        if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj);
-        vkn_tex_destroy_cookie(obj);
-        vkn_rt_own_end();
+        if (g_defer < 0) { const char *e = getenv("DM_VK_NATIVE_RT_DEFER"); g_defer = e && *e ? atoi(e) : 1; if (g_defer < 0 || g_defer > 2) g_defer = 0;
+                           vkn_logf("tex: DM_VK_NATIVE_RT_DEFER=%d (%s)", g_defer, g_defer == 1 ? "a destroy the engine's age rule covers goes without the sync" : g_defer == 2 ? "decided and counted, synced anyway" : "every destroy syncs"); }
+        int free_now = 0;
+        if (g_defer && vkn_rt_threaded() && !vkn_rt_rec_thread_is()) {   // (threaded, and the recording is the worker's now)
+            const vkn_tex *t = vkn_tex_by_cookie(obj);
+            if (force) g_dts.forced++;
+            else if (!(stamp + 2 < eframe)) g_dts.young++;
+            else if (!t || t->cls != VKN_TC_SAMPLED) g_dts.target++;
+            else if (!vkn_rt_encoder_here()) g_dts.other++;
+            else if (!vkn_rt_frame_recorded(stamp)) g_dts.behind++;
+            else if (g_defer == 1) free_now = 1;
+            else g_dts.would++;
+        }
+        if (free_now) {
+            g_dts.free++;
+            if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj);
+            vkn_tex_destroy_cookie(obj);
+        } else {
+            g_dts.synced++;
+            vkn_rt_own_begin(&site);
+            if (dm_vkn_glue_forget) dm_vkn_glue_forget(obj);
+            vkn_tex_destroy_cookie(obj);
+            vkn_rt_own_end();
+        }
     }
     return v;
 }
@@ -293,6 +327,14 @@ VKN_HOOK vkn_h_ds(VKN_A) {
 static void tex_census(void) {
     vkn_tex_stats s; vkn_tex_get_stats(&s);
     const double mb = 1048576.0;
+    if (g_dts.free + g_dts.synced != g_dto.free + g_dto.synced) {   // [rt2 R5]
+#define DT(x) (unsigned long long)(g_dts.x - g_dto.x)
+        vkn_logf("tex destroys (DM_VK_NATIVE_RT_DEFER=%d, since the last line): without a sync %llu, synced %llu (forced %llu, stamp not old enough %llu, a target %llu, "
+                 "the recording thread behind the stamp's frame %llu, another thread %llu, verify mode would have gone without %llu)", g_defer, DT(free), DT(synced), DT(forced),
+                 DT(young), DT(target), DT(behind), DT(other), DT(would));
+#undef DT
+        g_dto = g_dts;
+    }
     vkn_logf("tex: alive sampled %u / colour %u / depth %u / window %u (%u waiting for their destroy), images %.1f / %.1f / %.1f / %.1f MB, created %llu destroyed %llu, "
              "uploads %llu (%.1f MB, %.0f ms CPU), deswizzled %llu, BC decoded %llu, RGB widened %llu, mip swaps %llu; samplers %u (made %llu); failed: textures %llu, samplers %llu",
              s.alive[VKN_TC_SAMPLED], s.alive[VKN_TC_COLOR], s.alive[VKN_TC_DEPTH], s.alive[VKN_TC_WINDOW], s.pending, s.bytes[VKN_TC_SAMPLED] / mb, s.bytes[VKN_TC_COLOR] / mb,

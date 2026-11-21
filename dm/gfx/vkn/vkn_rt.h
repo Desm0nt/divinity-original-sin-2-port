@@ -136,6 +136,27 @@ void vkn_rt_ui_pass_fence(void);                          // [stage 5.2 audit] v
 enum { VKN_RT_CPU_RINGS = 4 };
 void vkn_rt_cpu_ring(int id, uint64_t advance, uint64_t size);
 
+// ---- [rt2 R5] which engine frames the recording thread has executed completely ----
+// The host names each presented frame by the engine's own frame counter right after its tail record (vkn_rt_frame_mark(f): the
+// tail just written closes frame f). vkn_rt_frame_recorded(f) = 1 when every record of engine frame f (and of every earlier one) has
+// been executed by the recording thread (always 1 when the stream is not threaded, or f is older than every frame named): the
+// recording thread can no longer read anything those frames named. The engine destroys a texture only when its last-use stamp is
+// at least 3 frames old (DestroyTextureIfOld: stamp + 2 < frame) - the rule that keeps the console's GPU, which runs frames behind
+// the CPU, from reading freed memory; with this check the same rule covers the recording thread, which runs behind the engine thread
+// the same way (dm/host/hle_dos2_vkn_tex.c: DM_VK_NATIVE_RT_DEFER). Encoder thread only.
+void vkn_rt_frame_mark(uint64_t engine_frame);
+int vkn_rt_frame_recorded(uint64_t engine_frame);
+// ---- [rt2 R8] DM_VK_NATIVE_RT_SPLIT: the governor of a second recording thread (docs/dos2/nr/VK-RT-ANALYSIS.md section 11.5) ----
+// 0 off; 1 auto (default): the rule is evaluated every frame and its decisions logged, the split itself is NOT built yet (no second
+// thread records: "would turn on / off" lines and the share of frames that met the rule) - so the mode cannot make anything worse;
+// the measured answer to "is there a spare core while the recording thread limits the frame" for the next stage.
+// Rule (on): for 120 frames in a row the recording thread was busy >= 90 % of the frame interval, the engine thread waited at the
+// frame end >= 15 % of it (it has slack: the recording thread is the limit), and a big core is free (CPUs with capacity >= half the
+// biggest, minus the 4 loaded threads: three of the game's, the recording thread). Off: for 60 frames the engine thread waited < 5 %,
+// or the frame interval grew > 3 % over the average at the switch-on. Encoder thread (vkn_rt_frame_tail).
+void vkn_rt_split_set(int mode);
+int vkn_rt_split(void);
+
 // ---- census ----
 void vkn_rt_census(void);                                 // the "[vkn] rt:" line (the 10 s census, recording thread)
 typedef struct vkn_rt_stats {

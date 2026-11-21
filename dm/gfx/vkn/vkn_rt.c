@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>   // [rt2 R8] sysconf
 #include "vkn_buf.h"
 #include "vkn_frame.h"
 #include "vkn_pass.h"
@@ -655,6 +656,73 @@ void vkn_rt_rec_end(int present, vkn_tex *win, const int32_t crop[4], int interv
     }
     if (!present) vkn_rt_sync(&g_site_off);   // the engine's FenceSync + SyncWait: the GPU work is finished when EndFrame returns
 }
+// [rt2 R5] engine frame -> the tail count that closes it (vkn_rt.h). A ring of 16: the backpressure keeps the recording thread at most
+// 2 tails behind, so any frame older than the ring is executed (checked anyway: the oldest entry's count).
+static struct { uint64_t frame, tails; } g_fmap[16]; static uint32_t g_nfmap;
+void vkn_rt_frame_mark(uint64_t engine_frame) {
+    if (!vkn_rt_live_ || !g_threaded) return;
+    g_fmap[g_nfmap % 16].frame = engine_frame; g_fmap[g_nfmap % 16].tails = g_enc_tails; g_nfmap++;
+}
+int vkn_rt_frame_recorded(uint64_t engine_frame) {
+    if (!vkn_rt_live_ || !g_threaded || inline_here()) return 1;   // (an owned section: everything written is executed)
+    if (!g_nfmap) return 0;
+    const uint64_t done = __atomic_load_n(&g_wk_tails, __ATOMIC_SEQ_CST);
+    const uint32_t n = g_nfmap < 16 ? g_nfmap : 16;
+    uint64_t need = 0; int found = 0;
+    for (uint32_t i = 0; i < n; i++) {   // the smallest named frame >= engine_frame: its tail count bounds the frame's records
+        const uint32_t k = (g_nfmap - 1 - i) % 16;
+        if (g_fmap[k].frame >= engine_frame) { need = g_fmap[k].tails; found = 1; }
+        else break;
+    }
+    if (!found) return 0;   // a frame not closed yet (the current one, or later)
+    return done >= need;
+}
+// ---- [rt2 R8] the split governor (vkn_rt.h) ----
+static struct {
+    int mode, on, cpus_big, cpus_read; uint32_t run_on, run_off; uint64_t last_t, last_busy, frames, met, ons, offs; double on_interval;
+} g_sp = {.mode = 1};
+void vkn_rt_split_set(int mode) { g_sp.mode = mode == 0 || mode == 1 ? mode : 0; }
+int vkn_rt_split(void) { return g_sp.mode; }
+static int sp_big_cpus(void) {   // CPUs whose capacity is >= half the biggest (sysfs; none readable: sysconf, all counted big)
+    int cap[32], n = 0, mx = 0;
+    for (int i = 0; i < 32; i++) {
+        char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpu_capacity", i);
+        FILE *f = fopen(p, "r"); if (!f) break;
+        int c = 0; if (fscanf(f, "%d", &c) != 1) c = 0; fclose(f);
+        cap[n++] = c; if (c > mx) mx = c;
+    }
+    if (!n || !mx) { const long c = sysconf(_SC_NPROCESSORS_ONLN); return c > 0 ? (int)c : 1; }
+    int big = 0; for (int i = 0; i < n; i++) big += cap[i] * 2 >= mx;
+    return big;
+}
+static void sp_frame(uint64_t bp_ns) {   // one presented frame's tail on the encoder (bp_ns: its wait at the frame end)
+    if (!g_sp.mode || !g_threaded) return;
+    if (!g_sp.cpus_read) { g_sp.cpus_read = 1; __atomic_store_n(&g_sp.cpus_big, sp_big_cpus(), __ATOMIC_RELAXED); }
+    const uint64_t now = vkn_now_ns(), busy = __atomic_load_n(&g_st.busy_ns, __ATOMIC_RELAXED);
+    if (!g_sp.last_t) { g_sp.last_t = now; g_sp.last_busy = busy; return; }
+    const double iv = (double)(now - g_sp.last_t), wb = (double)(busy - g_sp.last_busy);
+    g_sp.last_t = now; g_sp.last_busy = busy; __atomic_add_fetch(&g_sp.frames, 1, __ATOMIC_RELAXED);
+    if (iv <= 0) return;
+    const int spare = g_sp.cpus_big - 4 >= 1;
+    const int met = wb >= 0.90 * iv && (double)bp_ns >= 0.15 * iv && spare;
+    if (met) __atomic_add_fetch(&g_sp.met, 1, __ATOMIC_RELAXED);
+    if (!g_sp.on) {
+        g_sp.run_on = met ? g_sp.run_on + 1 : 0;
+        if (g_sp.run_on >= 120) {
+            __atomic_store_n(&g_sp.on, 1, __ATOMIC_RELAXED); __atomic_add_fetch(&g_sp.ons, 1, __ATOMIC_RELAXED); g_sp.run_on = 0; g_sp.run_off = 0; g_sp.on_interval = iv;
+            vkn_logf("rt split (DM_VK_NATIVE_RT_SPLIT=1): would turn ON - 120 frames with the recording thread busy %.0f %% of the frame, the engine thread waiting %.2f ms "
+                     "(%.0f %%) at the end, %d big CPUs (spare >= 1); the split is not built in this build: nothing changes", 100.0 * wb / iv, bp_ns / 1e6, 100.0 * (double)bp_ns / iv, g_sp.cpus_big);
+        }
+    } else {
+        const int low = (double)bp_ns < 0.05 * iv, slower = iv > 1.03 * g_sp.on_interval;
+        g_sp.run_off = low || !spare ? g_sp.run_off + 1 : 0;
+        if (g_sp.run_off >= 60 || (slower && g_sp.run_off >= 1)) {
+            __atomic_store_n(&g_sp.on, 0, __ATOMIC_RELAXED); __atomic_add_fetch(&g_sp.offs, 1, __ATOMIC_RELAXED); g_sp.run_off = 0;
+            vkn_logf("rt split (DM_VK_NATIVE_RT_SPLIT=1): would turn OFF - %s (engine wait %.2f ms of a %.2f ms frame)", slower ? "the frame got slower" : "the engine thread stopped waiting",
+                     bp_ns / 1e6, iv / 1e6);
+        }
+    }
+}
 void vkn_rt_frame_tail(const uint64_t cpu[3], void (*tick)(void)) {
     if (!vkn_rt_live_) { vkn_prof_frame_cpu(cpu[0], cpu[1], cpu[2]); if (tick) tick(); return; }
     int inl; op_tail *t = (op_tail *)rec_new(K_TAIL, sizeof(op_tail), &inl);
@@ -668,14 +736,16 @@ void vkn_rt_frame_tail(const uint64_t cpu[3], void (*tick)(void)) {
     const uint64_t wk = __atomic_load_n(&g_wk_tails, __ATOMIC_SEQ_CST), ahead = g_enc_tails - wk;
     ST_ADD(ahead[ahead > 3 ? 3 : ahead], 1);
     const uint64_t lead = g_mode == VKN_RT_AHEAD2 ? 2 : 1;
-    if (ahead <= lead) return;
+    if (ahead <= lead) { sp_frame(0); return; }   // [rt2 R8]
     const uint64_t target = g_enc_tails - lead, t0 = vkn_now_ns();
     pthread_mutex_lock(&g_mu);
     __atomic_store_n(&g_wait_tails, target, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&g_wk_tails, __ATOMIC_SEQ_CST) < target) pthread_cond_wait(&g_cv_done, &g_mu);
     __atomic_store_n(&g_wait_tails, 0, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&g_mu);
-    ST_ADD(bp_wait_ns, vkn_now_ns() - t0);
+    const uint64_t bw = vkn_now_ns() - t0;
+    ST_ADD(bp_wait_ns, bw);
+    sp_frame(bw);   // [rt2 R8]
 }
 
 // ---- the host's backend calls ----
@@ -981,6 +1051,13 @@ void vkn_rt_census(void) {
         rbo = g_rb;
     }
 #undef PF
+    if (g_sp.mode && g_threaded) {   // [rt2 R8]
+        static uint64_t of, om;
+        const uint64_t F = __atomic_load_n(&g_sp.frames, __ATOMIC_RELAXED), M = __atomic_load_n(&g_sp.met, __ATOMIC_RELAXED), fr = F - of, mt = M - om; of = F; om = M;
+        vkn_logf("rt split (DM_VK_NATIVE_RT_SPLIT=%d, governor only): frames meeting the on-rule %.1f %% (%llu of %llu), would be %s; would-turn-on %llu, would-turn-off %llu so far; big CPUs %d",
+                 g_sp.mode, fr ? 100.0 * (double)mt / (double)fr : 0.0, (unsigned long long)mt, (unsigned long long)fr, __atomic_load_n(&g_sp.on, __ATOMIC_RELAXED) ? "ON" : "off",
+                 (unsigned long long)__atomic_load_n(&g_sp.ons, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_sp.offs, __ATOMIC_RELAXED), __atomic_load_n(&g_sp.cpus_big, __ATOMIC_RELAXED));
+    }
     if (s.mispredict != o.mispredict || s.foreign != o.foreign || s.oom != o.oom)
         vkn_logf(RT_RED "rt: unexpected in this window: mispredicted frames %llu, foreign records %llu, stream full %llu", (unsigned long long)(s.mispredict - o.mispredict),
                  (unsigned long long)(s.foreign - o.foreign), (unsigned long long)(s.oom - o.oom));

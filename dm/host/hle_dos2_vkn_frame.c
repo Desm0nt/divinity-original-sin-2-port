@@ -385,6 +385,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
     if (present) { ((fn_2)eng(FN_DEFER_A))(r, 0); ((fn_2)eng(FN_DEFER_B))(r, 0); }
     if (vkn_rd8(gaddr(G_MU_ON)) & 1) { mu_unlock(); if (mu_on()) mu_lock(); }
     wr8(r + R_REC, 0);
+    const uint64_t eframe = vkn_rd64(dev + DEV_FRAME);   // [rt2 R5] the engine's number of this frame (the tail below closes it)
     if (present) {   // nvnQueuePresentTexture's pacing, then the frame counter
         pace_present();
         wr64(dev + DEV_FRAME, vkn_rd64(dev + DEV_FRAME) + 1);
@@ -399,6 +400,7 @@ VKN_HOOK fh_end(VKN_A) {   // 0x93ccd0 Window::EndFrame(win, bit0 present) = win
         g_ft.end = vkn_now_ns() - t0;
         const uint64_t cpu[3] = {g_ft.begin, g_ft.render, g_ft.end};
         vkn_rt_frame_tail(cpu, dm_vkn_tick);
+        vkn_rt_frame_mark(eframe);   // [rt2 R5] (vkn_rt.h)
     }
     return rc;
 }
@@ -455,6 +457,9 @@ void dm_vkn_frame_register(void) {
             const char *ln = getenv("DM_VK_NATIVE_RT_LEAN"), *rs = getenv("DM_VK_NATIVE_RT_RES");
             vkn_rt_lean_set(ln && *ln ? atoi(ln) : 1); vkn_rt_res_set(rs && *rs ? atoi(rs) : 1);
             vkn_logf("rt: DM_VK_NATIVE_RT_LEAN=%d%s, DM_VK_NATIVE_RT_RES=%d%s", vkn_rt_lean(), ln && *ln ? "" : " (default)", vkn_rt_res(), rs && *rs ? "" : " (default)");
+            const char *sp = getenv("DM_VK_NATIVE_RT_SPLIT");   // [rt2 R8] 0 off / 1 auto, the governor only (default 1)
+            vkn_rt_split_set(sp && *sp ? atoi(sp) : 1);
+            vkn_logf("rt: DM_VK_NATIVE_RT_SPLIT=%d%s (the second recording thread's governor: decisions logged, the split itself not built yet)", vkn_rt_split(), sp && *sp ? "" : " (default)");
         }
         vkn_logf("rt: DM_VK_NATIVE_RT=%d%s, DM_VK_NATIVE_RT_SLOTS=%s (the recording thread starts at the first BeginFrame)", vkn_rt_mode(), e && *e ? "" : " (default)", sl && *sl ? sl : "1 (default)");
         if (vkn_rt_mode()) dm_vkn_census(vkn_rt_census);

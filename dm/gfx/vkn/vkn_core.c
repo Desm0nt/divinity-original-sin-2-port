@@ -198,13 +198,13 @@ void vkn_upload_push(vkn_upload_fn fn, void *ctx, uint64_t bytes) {
     u->fn = fn; u->ctx = ctx; u->bytes = bytes; u->next = NULL;
     pthread_mutex_lock(&g_up_mu);
     if (g_up_tail) g_up_tail->next = u; else g_up_head = u;
-    g_up_tail = u; g_up_bytes += bytes;
+    g_up_tail = u; __atomic_store_n(&g_up_bytes, g_up_bytes + bytes, __ATOMIC_RELAXED);   // [rt2] read lock-free by vkn_upload_pending_bytes (a loader thread pushes while the recording thread reads)
     pthread_mutex_unlock(&g_up_mu);
 }
 uint64_t vkn_upload_pending_bytes(void) { return __atomic_load_n(&g_up_bytes, __ATOMIC_RELAXED); }
 int vkn_upload_run(VkCommandBuffer cb) {
     pthread_mutex_lock(&g_up_mu);
-    vkn_up *u = g_up_head; g_up_head = g_up_tail = NULL; g_up_bytes = 0;
+    vkn_up *u = g_up_head; g_up_head = g_up_tail = NULL; __atomic_store_n(&g_up_bytes, 0, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_up_mu);
     int n = 0;
     while (u) { vkn_up *nx = u->next; u->fn(cb, u->ctx); free(u); u = nx; n++; }
