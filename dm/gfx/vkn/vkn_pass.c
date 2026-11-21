@@ -114,10 +114,12 @@ static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout to) {
 void vkn_query_pass_closing(VkCommandBuffer cb) __attribute__((weak));
 void vkn_query_pass_closed(VkCommandBuffer cb) __attribute__((weak));
 // [/stage 4: queries]
+void xbg_safe_mode_vkn_tick(int where) __attribute__((weak));   // [VK-DRV] gfx/vulkan/engine/xbg_safe_mode.inc: DM_GFX_FAKE_GPU_CRASH=<s>:rec in mode 1
 static void end_open(void) {
     if (g_open && open_here()) {
         b1_pass_closing();   // [stage 5.2 B1] store poison, the first-draw check
         if (vkn_query_pass_closing) vkn_query_pass_closing(g_open_cb);   // [stage 4: queries]
+        if (xbg_safe_mode_vkn_tick) xbg_safe_mode_vkn_tick(0);           // [VK-DRV] (nothing unless the test armed it)
         vkCmdEndRenderPass(g_open_cb);
         vkn_prof_pass_end(g_open_cb);                                     // [stage 5 A0]
         if (vkn_query_pass_closed) vkn_query_pass_closed(g_open_cb);     // [stage 4: queries]

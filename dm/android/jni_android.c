@@ -597,6 +597,11 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     // Owner 21.11: the native backend is the default build (series U5: 74.5 against 61.8 fps of the old path, Mi 14 Ultra). dm/env /
     // the launch env still win (read above, overwrite 0 here); the safe-mode ladder's step 3 sets DM_VK_NATIVE=0 over it (overwrite 1).
     setenv("DM_VK_NATIVE", "1", 0);
+    // [VK-DRV 21.11] the safe-mode step is decided HERE, before anything reads the switches it sets: the NB / NR rows below (skipped in mode 1),
+    // the host thread's dm_dos2_vkn_pre and the translator / presenter init. In mode 1 the ladder acts on every family (step 3 puts
+    // DM_VK_NATIVE=0 in now, so the old path then gets this table's rows as it always had); the Vulkan start adds the family rows.
+    { extern const char *xbg_safe_mode_pre(void) __attribute__((weak));
+      if (xbg_safe_mode_pre) { const char *t = xbg_safe_mode_pre(); if (t && *t) LOG("boot: %s", t); } }
     const char *vkn = getenv("DM_VK_NATIVE"); const int vk_native = vkn && atoi(vkn) == 1;
     for (size_t i = 0; i < sizeof k_nb_on / sizeof k_nb_on[0]; i++) {
         if (vk_native && (!strncmp(k_nb_on[i][0], "DM_NB", 5) || !strncmp(k_nb_on[i][0], "DM_NR", 5))) continue;

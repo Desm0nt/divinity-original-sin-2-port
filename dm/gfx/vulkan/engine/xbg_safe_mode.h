@@ -42,6 +42,11 @@
 // next counted crash (count 3) puts them on the old path. A DM_VK_NATIVE the player set in dm/env is the player's: never replaced.
 // DM_SAFE_MODE: unset / auto = the counted step (min(count, 3)); 0 / off = none; on = at least step 1 (the gear's "On"); 1..3 = that step.
 // DOS2 never had DOOM's v0.5.0 PowerVR ladder, so there is no DM_PVR_LADDER alias (xbg_safe_step's pvr_ladder argument is passed null).
+// [VK-DRV 21.11, owner approved; docs/dos2/nr/VK-DRIVERS.md] A start in mode 1 (DM_VK_NATIVE=1, the default build) gets the ladder on EVERY
+// family: steps 1-2 (backend rows) and step 3 (DM_VK_NATIVE=0), counted crashes included; the old path's rows stay Mali / PowerVR only, so on
+// Adreno / Xclipse / Maleoon / others step 3 is the old path with its own defaults. The decision is made early (xbg_safe_mode_pre, jni
+// nativeStart, before DM_VK_NATIVE's default and the app table are applied and before dm_dos2_vkn_pre), the family-dependent rows at boot.
+// A counted step 3 needs the backend's own crash at its step 2 (xbg_safe_counted_gate; the marker's native= key).
 #pragma once
 #include "xbg_vendor_policy.h"
 #include <cstring>
@@ -49,8 +54,12 @@
 #include <cstdint>
 
 enum { XBG_SAFE_MAX_STEP = 3 };
-// The families safe mode acts on (the policy family: a simulated one included).
+// The families the OLD path's rows act on (the policy family: a simulated one included).
 inline bool xbg_safe_family(XbgGpuFamily f){return f==XBG_GPU_MALI || f==XBG_GPU_POWERVR;}
+// [VK-DRV 21.11, owner approved] With the native backend (DM_VK_NATIVE=1 when the start began, before the ladder's own step 3) the ladder acts
+// on EVERY family (Adreno stock / Turnip, Xclipse, Maleoon, others): its backend rows (step 1 techniques + recording thread off, step 2 the
+// conservative basics, step 3 DM_VK_NATIVE=0) and the counted crashes. The old path's rows stay Mali / PowerVR only (xbg_safe_switches_mode).
+inline bool xbg_safe_eligible(XbgGpuFamily f,bool native){return native || xbg_safe_family(f);}
 
 // How this boot's step was decided (the status string for the app says it in words: xbg_safe_how_name).
 enum XbgSafeHow { XBG_SAFE_COUNTED=0, XBG_SAFE_FORCED=1, XBG_SAFE_ON=2, XBG_SAFE_OFF=3, XBG_SAFE_ALIAS=4, XBG_SAFE_NOT_ELIGIBLE=5 };
@@ -75,18 +84,20 @@ inline int xbg_safe_step(const char *safe_mode,const char *pvr_ladder,bool power
 }
 
 // The switches of a step on a family, in the order they are set. Returns how many were written to out (at most max).
+// native: the start began in mode 1 (DM_VK_NATIVE=1). On Mali / PowerVR the list is the same either way (the backend rows are inert in mode
+// 0, the old-path rows inert in mode 1 until step 3 turns the old path on); on any other family it is the backend rows alone, and only in mode 1.
 struct XbgSafeSwitch { const char *key, *value; };
-inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max){
+inline int xbg_safe_switches_mode(int step,XbgGpuFamily f,bool native,XbgSafeSwitch *out,int max){
     int n=0;auto add=[&](const char *k,const char *v){if(n<max)out[n++]={k,v};};
-    if(!xbg_safe_family(f) || step<=0)return 0;
-    const bool pvr=f==XBG_GPU_POWERVR;
+    if(!xbg_safe_eligible(f,native) || step<=0)return 0;
+    const bool pvr=f==XBG_GPU_POWERVR,old=xbg_safe_family(f);   // old: the old path's rows (Mali / PowerVR only, owner 21.11)
     // step 1: zero-copy (DOOM: + ZC3_SELFTEST / FENCE_TRYLOCK, which DOS2 does not have), the dynamic-UBO class on PowerVR, the NR defaults
     // the tile families run since 17.11
-    add("DM_GFX_ZEROCOPY","0");
-    if(pvr){add("DM_GFX_UBO_DYNAMIC","0");add("DM_NR_UBODYN","0");}   // DOOM 0.4.22: no dynamic UBOs on PowerVR; NR-08b is their per-draw form
+    if(old){add("DM_GFX_ZEROCOPY","0");
+    if(pvr){add("DM_GFX_UBO_DYNAMIC","0");add("DM_NR_UBODYN","0");}   // DOOM 0.4.22: no dynamic UBOs on PowerVR (the backend reads both since V2); NR-08b is their per-draw form
     add("DM_NR_RP","0");add("DM_DOS2_PREPASS","0");add("DM_NR_UBOVEC","0");add("DM_NR_ONCHIP","0");   // NR-ONCHIP: the merged Sky -> Light pass
     add("DM_NR_LIGHTFUSE","0");add("DM_NR_SH_PCF","0");add("DM_NR_PRESKIN","0");add("DM_NR_IDVS","0");   // 19.11 defaults (fused Sky -> Light -> Fog draw, dref shadows), untried on tilers
-    add("DM_NR_UIX_DS","0");add("DM_NR_UIX_AREA","0");   // tiler plan step 1 (NR-UIX defaults on the tile families); DM_NR_RP=0 above also ends DM_NR_RP_FRESH
+    add("DM_NR_UIX_DS","0");add("DM_NR_UIX_AREA","0");}   // tiler plan step 1 (NR-UIX defaults on the tile families); DM_NR_RP=0 above also ends DM_NR_RP_FRESH
     // [DOS2] VK-NATIVE stage 5 (mode 1, docs/dos2/nr/VK-STAGE5-PLAN.md 1.e): the backend's techniques off - named shaders + Dref, shadow cache,
     // fused lighting, conditional rendering / its oracle, LEQUAL G-buffer, the draw-cost shortcuts - so a technique's fault keeps the player
     // on the backend (step 2 is the old path: DM_VK_NATIVE=0). Not here: DM_VK_NATIVE_SHFAR (a quality choice of DM_HACK_SHFAR / _TIER),
@@ -101,6 +112,7 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         // [stage 5.3 V3] the backend's conservative basics (still on the backend)
         add("DM_VK_NATIVE_WARM","0");add("DM_VK_NATIVE_BCGPU","0");add("DM_VK_NATIVE_MIRROR","0");add("DM_GFX_PIPE_SERIAL","1");
         if(pvr)add("DM_GFX_NOOUT_MASK","0");
+        if(old){   // the old path's step-2 rows (they act at step 3, when the old path draws)
         add("DM_GFX_NOLOAD","0");add("DM_GFX_STORE_HIST","0");add("DM_GFX_CLEAR_FOLD","0");add("DM_GFX_TILE_BARRIER","0");add("DM_GFX_LAZY_CLEAR","0");
         add("DM_NB_RP","0");add("DM_NB_OPBARRIER","0");add("DM_NB_UIAREA","0");
         add("DM_NR_DIRECT","0");add("DM_NR_DRAW","0");add("DM_NR_ROTATE","0");add("DM_NR_SH","0");
@@ -115,10 +127,14 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
         // batch C defaults (19.11): shader twins, native state / uniform / translator / texture paths, AA with the outline
         add("DM_NR_SH_SURF","0");add("DM_NR_MAT","0");add("DM_NR_STATE","0");add("DM_NR_UBO","0");add("DM_NR_UBD","0");
         add("DM_NR_TRX_STICKY","0");add("DM_NR_TRX_ZC","0");add("DM_NR_TAPSET","0");add("DM_NR_TEX","0");add("DM_NR_TEXSTREAM","0");
-        add("DM_NB_POST_AA_OUTLINE","0");
+        add("DM_NB_POST_AA_OUTLINE","0");}
     }
     if(step>=3){
         add("DM_VK_NATIVE","0");   // [stage 5.3 V3] the old path (dm/gfx/vkn off); DM_GFX_PIPE_SERIAL=1 / PowerVR NOOUT_MASK=0 are set from step 2
+        // [VK-DRV] on Adreno / Xclipse / others the old path draws with its own defaults (the jni table applies its NB / NR rows when the early
+        // decision put DM_VK_NATIVE=0 in first: xbg_safe_mode_pre): the renderer those players ran up to v0.2.1. The v0.1.1 rows below are the
+        // Mali / PowerVR ladder's.
+        if(!old)return n;
         add("DM_NB_MT","0");
         add("DM_GFX_GS_PASSTHRU","0");
         add("DM_NR","0");add("DM_NR_BUF","0");add("DM_NR_DESC","0");add("DM_NR_HEAT","0");add("DM_NR_SEED","0");
@@ -127,16 +143,26 @@ inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max)
     }
     return n;
 }
+// The list of the old-path ladder (a start in mode 0): Mali / PowerVR only, the same rows as before VK-DRV.
+inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max){return xbg_safe_switches_mode(step,f,false,out,max);}
 inline const char *xbg_safe_step_text(int step){
     switch(step){case 0:return "nothing changed";
     case 1:return "the risky tile-GPU defaults off (zero-copy, PowerVR dynamic UBOs / NR-08b, NR-10 barriers, NR-30 pre-pass skip, NR-27 uniform-load rewrite, NR-ONCHIP merged lighting pass; native backend: its stage-5 techniques, its recording thread, its pass policy - the backend draws as stage 4 did)";
     case 2:return "step 1 + the native backend's conservative basics (no pipeline warm-up, BC textures decoded on the CPU, whole-texture mirrors, one pipeline build at a time, PowerVR colour mask of output-less shaders off), still on the backend; the old path's tile pass policies and native recording paths off for step 3";
     default:return "the old path (DM_VK_NATIVE=0) + step 2 + no worker recording, culling GS kept, every NR / NB step off (the v0.1.1 renderer)";}
 }
+// [VK-DRV] the same for a mode-1 start on a family without the old path's rows (Adreno, Xclipse, Maleoon, others)
+inline const char *xbg_safe_step_text_native(int step){
+    switch(step){case 0:return "nothing changed";
+    case 1:return "native backend: its stage-5 techniques, its recording thread and its pass policy off - the backend draws as stage 4 did";
+    case 2:return "step 1 + the native backend's conservative basics (no pipeline warm-up, BC textures decoded on the CPU, whole-texture mirrors, one pipeline build at a time), still on the backend";
+    default:return "the old path (DM_VK_NATIVE=0) with this family's own defaults (the renderer of v0.2.1)";}
+}
 
 // The marker file <files>/gfx-safe-mode: "key=value" lines (count, step, pid, time = wall clock ms, family, why). Unknown keys are
 // skipped; a file without "count=" is count 0. DOOM's format (frontend-common SafeMode.Marker / DmGuard read the same file).
-struct XbgSafeMarker { int count=0, step=-1, pid=0; long long time_ms=0; char family[16]={}; char why[200]={}; };
+// [VK-DRV] native=: the renderer of the run that wrote it (1 = the native backend, 0 = the old path, -1 = a file of a build before VK-DRV).
+struct XbgSafeMarker { int count=0, step=-1, pid=0, native=-1; long long time_ms=0; char family[16]={}; char why[200]={}; };
 inline void xbg_safe_parse(const char *text,XbgSafeMarker *m){
     *m=XbgSafeMarker{};if(!text)return;
     for(const char *p=text;*p;){
@@ -146,12 +172,24 @@ inline void xbg_safe_parse(const char *text,XbgSafeMarker *m){
         if(const char *v=val("count"))m->count=atoi(v);
         else if(const char *v=val("step"))m->step=atoi(v);
         else if(const char *v=val("pid"))m->pid=atoi(v);
+        else if(const char *v=val("native"))m->native=atoi(v)?1:0;
         else if(const char *v=val("time"))m->time_ms=atoll(v);
         else if(const char *v=val("family"))copy(v,m->family,sizeof m->family);
         else if(const char *v=val("why"))copy(v,m->why,sizeof m->why);
         p=*e?e+1:e;
     }
     if(m->count<0)m->count=0;
+}
+
+// [VK-DRV] owner 21.11: the counted ladder puts a mode-1 start on the old path (step 3) only when the native backend itself crashed at its
+// step 2 (the marker's last failure: native=1, step>=2), or when the old path already ran (step>=3: nothing better to go back to). Otherwise
+// a counted step 3 stays at step 2, on the backend. A file of a build before VK-DRV (no native=) keeps the old rule on Mali / PowerVR (their
+// count reached 3 under it). DM_SAFE_MODE=3 / the gear decide by themselves (not counted). Returns the step to use.
+inline int xbg_safe_counted_gate(int step,int how,bool native,const XbgSafeMarker &m){
+    if(how!=XBG_SAFE_COUNTED || step<3 || !native)return step;
+    if(m.step>=3 || (m.native==1 && m.step>=2))return step;
+    if(m.native<0 && (!strcmp(m.family,"mali") || !strcmp(m.family,"powervr")))return step;
+    return 2;
 }
 
 // Crash classification (signal handler): a thread of the graphics engine / presenter or one a GPU driver names (Mali "mali-*", IMG

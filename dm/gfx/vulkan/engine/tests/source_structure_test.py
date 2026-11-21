@@ -2434,7 +2434,9 @@ def safemode_check():   # [DOS2][safe-mode] docs/dos2/nr/SAFE-MODE.md (xbg_safe_
         raise AssertionError('SAFE: unbalanced %s' % head)
     eng = root / 'gfx/vulkan/engine'
     hdr = (eng / 'xbg_safe_mode.h').read_text(encoding='utf-8')
-    sw = blk(hdr, 'inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max){')
+    sw = blk(hdr, 'inline int xbg_safe_switches_mode(int step,XbgGpuFamily f,bool native,XbgSafeSwitch *out,int max){')   # [VK-DRV] every family in mode 1
+    assert 'inline int xbg_safe_switches(int step,XbgGpuFamily f,XbgSafeSwitch *out,int max){return xbg_safe_switches_mode(step,f,false,out,max);}' in hdr, \
+        'SAFE: the old-path list (mode 0) is the mode list with native=false'
     keys = re.findall(r'add\("(DM_[A-Z0-9_]+)","([01])"\)', sw)
     assert len(keys) >= 30 and len({k for k, _ in keys}) == len(keys), 'SAFE: the step switches, each key once (%d)' % len(keys)
     # every key is a switch this tree reads (no dead names from DOOM's list)
@@ -2476,6 +2478,24 @@ def safemode_check():   # [DOS2][safe-mode] docs/dos2/nr/SAFE-MODE.md (xbg_safe_
     assert rec.count('live_pipe(combo,r);') == 1 and 'live_pipe' not in lock and rec.find('live_pipe(combo,r);') > rec.find(lock[-40:]), 'SAFE: gpguard::record calls live_pipe after its lock block'
     inc = code((eng / 'xbg_safe_mode.inc').read_text(encoding='utf-8'))
     assert 'setenv(sw[i].key,sw[i].value,1);' in inc and 'xbg_safe_should_set(have,pl)' in inc and 'dm_env_player?dm_env_player(sw[i].key):-1' in inc, 'SAFE: boot sets over the app table, keeps the player'
+    # [VK-DRV] one decision per process (early or at boot), the family rows at boot with the start's mode, eligibility by mode, the gate
+    bt = blk(inc, 'extern "C" void xbg_safe_mode_boot(uint32_t vendor,const char *name){')
+    pr = blk(inc, 'extern "C" const char *xbg_safe_mode_pre(void){')
+    assert 'decide();' in bt and 'decide();' in pr and 'eligible=xbg_safe_eligible(family,native_ladder);' in bt \
+        and 'xbg_safe_switches_mode(step,family,native_ladder,sw,128)' in bt and 'xbg_safe_switches_mode(step,XBG_GPU_OTHER,true,sw,128)' in pr, \
+        'SAFE: early decision + boot rows with the start mode (VK-DRV)'
+    de = blk(inc, 'void decide(){')
+    assert 'step=xbg_safe_counted_gate(step,how,native_ladder,marker);' in de and de.find('native_ladder=') < de.find('xbg_safe_counted_gate'), 'SAFE: the counted gate uses the start mode'
+    assert '"\\nnative="' in inc, 'SAFE: the marker records the renderer of the crashed run (native=)'
+    # jni: the early decision right after DM_VK_NATIVE's default, before the mode is read for the app table and before the host thread starts
+    st = jni[jni.find('JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart('):]
+    nd = st.find('setenv("DM_VK_NATIVE", "1", 0);'); pe = st.find('xbg_safe_mode_pre()'); vk = st.find('const char *vkn = getenv("DM_VK_NATIVE");')
+    assert 0 < nd < pe < vk < st.find('pthread_create(&th, &a, host_thread, NULL)'), 'SAFE: xbg_safe_mode_pre after the DM_VK_NATIVE default, before the table and the host thread (dm_dos2_vkn_pre)'
+    # the backend: the fake rec test before its vkCmdEndRenderPass, device lost / fence timeouts counted
+    vp_ = code((root / 'gfx/vkn/vkn_pass.c').read_text(encoding='utf-8')); eo = blk(vp_, 'static void end_open(void) {')
+    assert 0 < eo.find('xbg_safe_mode_vkn_tick(0);') < eo.find('vkCmdEndRenderPass(g_open_cb);'), 'SAFE: the mode-1 rec test sits before the backend pass end'
+    vf_ = code((root / 'gfx/vkn/vkn_frame.c').read_text(encoding='utf-8'))
+    assert vf_.count('safe_count("vkWaitForFences", r);') == 1 and vf_.count('safe_count("vkQueueSubmit", r);') == 1 and 'xbg_safe_mode_vkn_tick(1);' in vf_, 'SAFE: the backend counts lost / hung devices'
     assert inc.count('raise(SIGBUS);') == 1 and 'fake_rec_at.compare_exchange_strong(at,0)' in inc, 'SAFE: the rec test fires once'
     assert 'if(!eligible)return;' in blk(inc, 'extern "C" void xbg_crash_classify(int sig,const char *thread,const char *rec,uint64_t addr,const char *pc_lib,const char *lr_lib){'), 'SAFE: classify only on Mali / PowerVR'
     mt = (eng / 'xbg_nb_mt.inc').read_text(encoding='utf-8')

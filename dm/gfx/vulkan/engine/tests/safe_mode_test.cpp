@@ -72,6 +72,55 @@ static void test_v3_ladder(){
     CHECK(strcmp(xbg_safe_step_text(1),xbg_safe_step_text(2)) && strcmp(xbg_safe_step_text(2),xbg_safe_step_text(3)));
 }
 
+// [VK-DRV 21.11] the ladder of a mode-1 start on every family: the backend rows alone on Adreno / Xclipse / Maleoon / others (step 3 = only
+// DM_VK_NATIVE=0: the old path with its own defaults), the unchanged lists on Mali / PowerVR; the counted gate to step 3; the marker's native=.
+static std::string swm(int step,XbgGpuFamily f,bool native){XbgSafeSwitch s[128];const int n=xbg_safe_switches_mode(step,f,native,s,128);std::string o;for(int i=0;i<n;i++){o+=s[i].key;o+="=";o+=s[i].value;o+=" ";}return o;}
+static void v3_apply_mode(int step,XbgGpuFamily f,bool native){v3_clear();XbgSafeSwitch a[128];const int n=xbg_safe_switches_mode(step,f,native,a,128);for(int i=0;i<n;i++)if(xbg_safe_should_set(getenv(a[i].key),0))setenv(a[i].key,a[i].value,1);}
+static void test_vkdrv_ladder(){
+    for(int f=0;f<=5;f++){const XbgGpuFamily xf=XbgGpuFamily(f);
+        CHECK(xbg_safe_eligible(xf,true));CHECK(xbg_safe_eligible(xf,false)==xbg_safe_family(xf));
+        for(int st=0;st<=3;st++)CHECK(swm(st,xf,false)==sw(st,xf));}   // the old-path ladder (a mode-0 start) is unchanged
+    for(XbgGpuFamily f:{XBG_GPU_MALI,XBG_GPU_POWERVR})for(int st=0;st<=3;st++)CHECK(swm(st,f,true)==sw(st,f));   // Mali / PowerVR: the same list in both modes
+    const char *step1="DM_VK_NATIVE_SH=0 DM_VK_NATIVE_SH_PCF=0 DM_VK_NATIVE_SHCACHE=0 DM_VK_NATIVE_LIGHTFUSE=0 DM_VK_NATIVE_LIGHTFUSE_FOG=0 DM_VK_NATIVE_COND=0 DM_VK_NATIVE_GBUF_LE=0 DM_VK_NATIVE_COST=0 "
+        "DM_VK_NATIVE_RT=0 DM_VK_NATIVE_POST=0 DM_VK_NATIVE_UIPASS=0 DM_VK_NATIVE_MAT=0 DM_VK_NATIVE_XLQ=0 DM_VK_NATIVE_PREPASS=0 DM_VK_NATIVE_PRESKIN=0 DM_VK_NATIVE_LOAD=0 DM_VK_NATIVE_STORE=0 DM_VK_NATIVE_FRESH=0 DM_VK_NATIVE_TILEBAR=0 ";
+    for(XbgGpuFamily f:{XBG_GPU_ADRENO,XBG_GPU_XCLIPSE,XBG_GPU_MALEOON,XBG_GPU_OTHER}){
+        CHECK(swm(0,f,true).empty());
+        CHECK(swm(1,f,true)==step1);
+        CHECK(swm(2,f,true)==std::string(step1)+"DM_VK_NATIVE_WARM=0 DM_VK_NATIVE_BCGPU=0 DM_VK_NATIVE_MIRROR=0 DM_GFX_PIPE_SERIAL=1 ");
+        CHECK(swm(3,f,true)==swm(2,f,true)+"DM_VK_NATIVE=0 ");
+        // no old-path row on these families (owner 21.11: they stay Mali / PowerVR only)
+        for(const char *k:{"DM_GFX_ZEROCOPY","DM_NR_","DM_NB","DM_NRN","DM_GFX_NOLOAD","DM_GFX_NOOUT_MASK","DM_GFX_UBO_DYNAMIC","DM_DOS2_PREPASS","DM_GFX_PRESENT_THREAD","DM_GFX_GS_PASSTHRU"})CHECK(swm(3,f,true).find(k)==std::string::npos);
+        // applied and read by the backend's own readers: step 1 = stage-4 pass policy + no recording thread, step 2 still on the backend,
+        // step 3 the old path
+        const int vf=int(f);
+        v3_apply_mode(1,f,true);
+        CHECK(vkn_policy_load(vf)==0 && vkn_policy_store(vf)==0 && vkn_policy_fresh(vf)==0 && vkn_policy_tilebar(vf)==0);
+        CHECK(getenv("DM_VK_NATIVE_RT") && !strcmp(getenv("DM_VK_NATIVE_RT"),"0") && !getenv("DM_VK_NATIVE"));
+        v3_apply_mode(2,f,true);
+        CHECK(!getenv("DM_VK_NATIVE") && !strcmp(getenv("DM_VK_NATIVE_WARM"),"0") && vkn_policy_env_or("DM_GFX_PIPE_SERIAL",0,nullptr)==1);
+        v3_apply_mode(3,f,true);
+        CHECK(getenv("DM_VK_NATIVE") && !strcmp(getenv("DM_VK_NATIVE"),"0") && !getenv("DM_NB_MT") && !getenv("DM_NR"));}
+    v3_clear();
+    // the marker's native= key (the renderer of the run that crashed)
+    {XbgSafeMarker m;xbg_safe_parse("count=3\nstep=2\nnative=1\nfamily=adreno\n",&m);CHECK(m.native==1 && m.step==2 && m.count==3);
+     xbg_safe_parse("count=3\nstep=2\nnative=0\n",&m);CHECK(m.native==0);
+     xbg_safe_parse("count=3\nstep=2\n",&m);CHECK(m.native==-1);}
+    // the counted gate: step 3 only after the backend itself crashed at step 2 (or the old path already ran)
+    auto mk=[](const char *t){XbgSafeMarker m;xbg_safe_parse(t,&m);return m;};
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=2\nnative=1\nfamily=adreno\n"))==3);
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=1\nnative=1\nfamily=adreno\n"))==2);   // crashed at step 1: step 2 first
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=0\nnative=1\nfamily=adreno\n"))==2);   // safe mode was off when it crashed
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=4\nstep=3\nnative=0\nfamily=adreno\n"))==3);   // the old path crashed too: stays
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=2\nnative=0\nfamily=adreno\n"))==2);   // a crash of the old path at step 2 says nothing of the backend
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=1\nfamily=mali\n"))==3);    // a file of a build before VK-DRV, Mali: the old rule
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,true,mk("count=3\nstep=1\nfamily=adreno\n"))==2);  // ... on Adreno there was no count before
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_FORCED,true,mk("count=0\n"))==3 && xbg_safe_counted_gate(3,XBG_SAFE_ON,true,mk("count=3\nstep=0\nnative=1\n"))==3);   // the player's / gear's choice
+    CHECK(xbg_safe_counted_gate(3,XBG_SAFE_COUNTED,false,mk("count=3\nstep=0\nnative=0\nfamily=mali\n"))==3);   // a mode-0 start: the old ladder
+    for(int st=0;st<=2;st++)CHECK(xbg_safe_counted_gate(st,XBG_SAFE_COUNTED,true,mk("count=2\n"))==st);
+    CHECK(strstr(xbg_safe_step_text_native(1),"recording thread") && strstr(xbg_safe_step_text_native(2),"still on the backend") && strstr(xbg_safe_step_text_native(3),"old path"));
+    CHECK(!strstr(xbg_safe_step_text_native(1),"zero-copy"));
+}
+
 int main(){
     // families: Mali / PowerVR (incl. the SIM models on an Adreno), never Adreno / Xclipse / others
     CHECK(xbg_safe_family(XBG_GPU_MALI) && xbg_safe_family(XBG_GPU_POWERVR));
@@ -180,6 +229,7 @@ int main(){
     CHECK(xbg_safe_fallback_fake("fence:60","pipe")==-1 && xbg_safe_fallback_fake("pipex","pipe")==-1 && xbg_safe_fallback_fake(nullptr,"pipe")==-1);
     CHECK(xbg_safe_fallback_fake(" pipe , fence:5","pipe")==0);
     test_v3_ladder();   // [stage 5.3 V3]
+    test_vkdrv_ladder();   // [VK-DRV]
     printf(fails?"safe_mode_test: %d FAILED\n":"safe_mode_test: all passed\n",fails);
     return fails?1:0;
 }

@@ -15,12 +15,23 @@
 #include "vkn_frame.h"
 #include "vkn_pass.h"
 #include "vkn_prof.h"   // [stage 5 A0] GPU time by pass on a sampled frame (its query regions follow this ring)
+#include <stdio.h>
 #include <string.h>
 
 // The presenter (android/vulkan_present.cpp). Weak: host tests and other front ends link without them (then nothing is presented).
 extern int dm_present_async(VkImage source, VkFormat format, uint32_t width, uint32_t height, const int32_t crop[4], int32_t interval) __attribute__((weak));
 extern uint64_t dm_present_wait_submitted(void) __attribute__((weak));
 extern int dm_present_last_error(void) __attribute__((weak));
+// [VK-DRV] the safe-mode ladder (gfx/vulkan/engine/xbg_safe_mode.inc; weak: host tests). A lost device or a fence that never signals is a
+// graphics failure of the backend: counted once per process (the next start, counted, takes the next step; the old path stopped the game
+// with a fatal there, the backend keeps running as before). The tick runs the DM_GFX_FAKE_GPU_CRASH lost / hang test (nothing unless armed).
+extern int xbg_safe_mode_record(const char *why) __attribute__((weak));
+extern void xbg_safe_mode_vkn_tick(int where) __attribute__((weak));
+static void safe_count(const char *what, VkResult r) {
+    if (!xbg_safe_mode_record || (r != VK_ERROR_DEVICE_LOST && r != VK_TIMEOUT)) return;
+    char w[160]; snprintf(w, sizeof w, "%s %s in the native backend (vkn_frame)", r == VK_ERROR_DEVICE_LOST ? "VK_ERROR_DEVICE_LOST in" : "GPU hang: fence wait timed out in", what);
+    if (xbg_safe_mode_record(w) > 0) vkn_logf(FR_RED "frame: %s: counted for the safe-mode ladder (gfx-safe-mode)", w);
+}
 
 #define FR_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
 
@@ -133,6 +144,7 @@ static int slot_wait(int k) {
     }
     if (r != VK_SUCCESS) {
         g.xs.fence_timeouts++;
+        safe_count("vkWaitForFences", r);   // [VK-DRV]
         if (red_ok(RL_WAIT)) vkn_logf(FR_RED "frame: command buffer %d not finished by the GPU (VkResult %d after %.1f s): the recording is dropped", k, (int)r, FENCE_WAIT_NS / 1e9);
         return -1;
     }
@@ -278,11 +290,13 @@ int vkn_rec_submit(int wait) {
         if (red_ok(RL_END)) vkn_logf(FR_RED "frame: vkEndCommandBuffer of buffer %d failed (VkResult %d): the recording is lost", k, (int)r);
     } else {
         before_submit();
+        if (xbg_safe_mode_vkn_tick) xbg_safe_mode_vkn_tick(1);   // [VK-DRV] the lost / hang test, if armed
         const VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &s->cb};
         vkn_queue_lock(); r = vkQueueSubmit(g.queue, 1, &si, s->fence); vkn_queue_unlock();
         if (r == VK_SUCCESS) { s->pending = 1; g.st.submits++; }
         else {
             rc = -1; g.xs.submit_fail++; s->ts = 0;
+            safe_count("vkQueueSubmit", r);   // [VK-DRV]
             if (red_ok(RL_SUBMIT)) vkn_logf(FR_RED "frame: vkQueueSubmit of buffer %d failed (VkResult %d): the recording is lost", k, (int)r);
         }
     }
