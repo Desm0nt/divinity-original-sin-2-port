@@ -36,7 +36,7 @@
 //   wsl gcc -std=c11 -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -O1 -g -Wall -Wextra -Wno-unused-parameter -I<vk> -o /tmp/vkn_stage3_test
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
-//       dm/gfx/vkn/vkn_post.c dm/gfx/nb/nb_plan.c
+//       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/nb/nb_plan.c
 //       dm/gfx/nvn/nvn_tex.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
@@ -61,6 +61,11 @@
 #include "../../../vkn/vkn_query.h"
 #include "../../../vkn/vkn_lightfuse.h"   // [stage 5.1 A4]
 #include "../../../vkn/vkn_post.h"     // [stage 5.2 B3] test_post (end of file)
+#include "../../../vkn/vkn_rt.h"       // [stage 5.5] test_rt
+#include <sched.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 #include "../../../nb/nb_fused.h"
 
 static int g_checks, g_fails;
@@ -1361,6 +1366,277 @@ static void test_e2e(void) {
     CHECK_EQ(mk_val_errors, val0);
 }
 
+// ================================================================================================================ [stage 5.5] the recording thread
+// vkn_rt.h. One deterministic multi-frame scenario, driven only through the entry points the host hooks use (vkn_rt_* records, the
+// constant ring + vkn_rt_ubo as the flushes do, vkn_buf_update between draws as the staged copy does, owned sections where a hook
+// keeps the default sync: a texture update and a texture destroyed and re-created under the same pool id in the middle of a frame), run
+// in a forked child per mode: DM_VK_NATIVE_RT 0 (the reference), 9, 1, 2, the slot policies 0 / 2 / 3, a tight ring guard, and a stress
+// run with random yields at every encode / decode boundary. Every child records the mock's canonical journal (vkn_mock_vk.h mk_jr_on:
+// one hash per submission over its commands, buffer binds replaced by the bytes each draw reads) and the validator / mock errors; the
+// journals must equal the reference's submission by submission.
+// Per frame: targets A + D with clears, 24 engine draws (indexed u16 / u32, arrays, quads (index rewrite of the engine's indices), a
+// fan) with slot-array changes, viewport / scissor / vertex offset changes, constant announces, a VB rename and an IB rename between
+// draws, an in-place update of a buffer no draw names, a texture update in an owned section, every 37 frames a texture destroyed and
+// re-created under the same pool id; every 10 frames a dispatch; the window with 2 draws, the UI (targets, viewport, scissor, a quad
+// draw and an indexed draw with their bytes copied); present; every 50 frames an off-frame recording (a sync at its end).
+static uint8_t g_rtctl[2][VKN_UI_CTL], g_rtcode[2][64];
+static int32_t rt_ftex[VKN_TEX_SLOTS], rt_fsmp[VKN_TEX_SLOTS], rt_ctex[VKN_TEX_SLOTS], rt_csmp[VKN_TEX_SLOTS];
+static vkn_rt_site g_rts_upd = VKN_RT_SITE("test: texture update"), g_rts_tex = VKN_RT_SITE("test: texture re-created");
+static uint32_t rt_seed;
+static uint32_t rt_rand(void) { rt_seed = rt_seed * 1664525u + 1013904223u; return rt_seed >> 8; }
+static void rt_setup(void) {
+    const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    xbg_vkn_stage *vs = mk_bundle_add("u300000000000055", 0);
+    mk_bind(vs, 0, UB, XBG_SOURCE_UNIFORM, 0, 128); vs->input_count = 2; vs->inputs[0] = 0; vs->inputs[1] = 1;
+    xbg_vkn_stage *fs = mk_bundle_add("u300000000000056", 4);
+    mk_bind(fs, 0, UB, XBG_SOURCE_UNIFORM, 0, 48); mk_bind(fs, 1, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(fs, 2, CIS, XBG_SOURCE_TEXTURE, 7, 0);
+    memcpy(g_rtctl[0], "u300000000000055", 16); memcpy(g_rtctl[1], "u300000000000056", 16);
+    CHECK_EQ(vkn_ui_program_put(0xB1, 0, g_rtctl[0], g_rtcode[0]), 0); CHECK_EQ(vkn_ui_program_put(0xB2, 1, g_rtctl[1], g_rtcode[1]), 0);
+    vkn_block b; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(55, 1), 4096, 0, 0, NULL, &b), 0);   // never drawn: updated in place
+    CHECK(mktex(320, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 320, 0) != NULL);           // destroyed and re-created by the scenario
+    // deterministic buffer bytes: vertices (any), indices 0..15
+    uint8_t *v0 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(50, 1))->cpu, *v1 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(51, 1))->cpu, *v2 = (uint8_t *)vkn_buf_get(VKN_BUF_VB, H(54, 1))->cpu;
+    for (int i = 0; i < 4096; i++) { v0[i] = (uint8_t)(i * 7 + 1); v1[i] = (uint8_t)(i * 13 + 5); v2[i] = (uint8_t)(i * 3 + 9); }
+    uint16_t *i16 = (uint16_t *)vkn_buf_get(VKN_BUF_IB, H(52, 1))->cpu; uint32_t *i32 = (uint32_t *)vkn_buf_get(VKN_BUF_IB, H(53, 1))->cpu;
+    for (int i = 0; i < 512; i++) i16[i] = (uint16_t)(i * 5 % 16);
+    for (int i = 0; i < 256; i++) i32[i] = (uint32_t)(i * 3 % 16);
+    vkn_draw_cost_gens(NULL, NULL, NULL);   // the real texture / state generations (test_draw left stand-ins)
+}
+static void rt_announce(uint32_t f, uint32_t k) {   // what a constant flush does: copy into the ring, announce
+    uint8_t *ring = (uint8_t *)vkn_ring_cpu(); uint32_t off = 0;
+    if (!ring || vkn_ring_alloc(512, &off)) { CHECK(0); return; }
+    for (int i = 0; i < 512; i++) ring[off + i] = (uint8_t)(f * 31 + k * 7 + i);
+    vkn_rt_ubo(0, 2, off, 512);
+    if (k % 8 == 0) { if (vkn_ring_alloc(64, &off)) { CHECK(0); return; } for (int i = 0; i < 64; i++) ring[off + i] = (uint8_t)(f + i); vkn_rt_ubo(1, 0, off, 64); }
+    vkn_rt_ubo(0, 9, g_off9, 128);   // a re-announce of the same block (no generation change)
+}
+static void rt_targets(vkn_tex *c, vkn_tex *d) { vkn_tex *cc[VKN_PASS_COLORS] = {c}; const uint32_t z[VKN_PASS_COLORS] = {0}; vkn_rt_pass_targets(c ? 1 : 0, cc, z, z, d); }
+static void rt_frame(uint32_t f) {
+    vkn_rt_rec_begin(1);
+    rt_targets(g_a2, g_d3);
+    const float rgba[4] = {(float)(f % 7) / 7.0f, 0.25f, 0.5f, 1.0f};
+    vkn_rt_pass_clear_color(g_a2, 0, rgba, NULL); vkn_rt_pass_clear_depth(g_d3, 3, 1.0f, 0);
+    for (uint32_t k = 0; k < 24; k++) {
+        if (k % 4 == 0) rt_announce(f, k);
+        // slot changes; vkn_rt_slots_touch = what the texture flush reports for a dirty range (slot policies 2 / 3); k % 10 == 5: a
+        // flush with a dirty range and no change
+        if (k % 5 == 0) { rt_ftex[0] = (f + k) % 3 == 0 ? 300 : (f + k) % 3 == 1 ? 303 : 320; vkn_rt_slots_touch(); }
+        if (k == 7) { rt_ftex[3] = rt_ftex[3] == 303 ? 320 : 303; vkn_rt_slots_touch(); }
+        if (k == 19) { rt_fsmp[3] = rt_fsmp[3] == 13 ? 10 : 13; vkn_rt_slots_touch(); }
+        vkn_draw_in in = g_in;
+        in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = rt_ctex; in.smp[2] = rt_csmp;
+        in.viewport[2] = (float)(64 - (k % 3) * 8); in.scissor[2] = 64 - (int32_t)(k % 2) * 16; in.vb_off[0] = 16 * (k % 4);
+        vkn_rt_query_cond(0);   // what dm_vkn_draw_fill does before every draw
+        switch (k % 6) {
+        case 0: case 1: in.ib = H(52, 1); vkn_rt_draw_indexed(&in, k % 8, 3 + 3 * (k % 2), 1); break;
+        case 2: in.ib = H(53, 1); vkn_rt_draw_indexed(&in, 2, 6, 1 + (f % 2)); break;
+        case 3: vkn_rt_draw_arrays(&in, k % 5, 6); break;
+        case 4: in.prim = 4; in.ib = H(52, 1); vkn_rt_draw_indexed(&in, 4 + f % 4, 8, 1); break;   // quads: the rewrite reads the engine's indices
+        default: in.prim = 2; vkn_rt_draw_arrays(&in, 1, 5); break;                                   // fan
+        }
+        uint8_t data[64]; void *cpu = NULL; uint64_t va = 0;
+        if (k == 9) { for (int i = 0; i < 64; i++) data[i] = (uint8_t)(f * 3 + i); CHECK(vkn_buf_update(VKN_BUF_VB, H(50, 1), 64ull * (f % 8), data, 64, &cpu, &va) >= 0); }
+        if (k == 13) { uint16_t q[8]; for (int i = 0; i < 8; i++) q[i] = (uint16_t)((f + 3 * i) % 16); CHECK(vkn_buf_update(VKN_BUF_IB, H(52, 1), 16, q, sizeof q, &cpu, &va) >= 0); }
+        if (k == 17 && f % 7 == 0) { for (int i = 0; i < 64; i++) data[i] = (uint8_t)(f + i); CHECK(vkn_buf_update(VKN_BUF_VB, H(55, 1), 0, data, 64, &cpu, &va) >= 0); }
+        if (k == 11 && f % 4 == 0) {   // a hook with the default sync: a texture update recorded in order (the recording's owner records it); the
+                                       // other frames have no sync, so the engine can run a frame ahead
+            static uint32_t px[16 * 16]; for (int i = 0; i < 256; i++) px[i] = f * 0x01010101u + (uint32_t)i;
+            vkn_rt_own_begin(&g_rts_upd); CHECK_EQ(vkn_tex_update(g_t3, 0, 0, 0, 0, 16, 16, px, 64), 0); vkn_rt_own_end();
+        }
+        if (k == 21) {   // an encoded texture update (UpdateTextureRect & co. encode: the staging now, the copy where the recording is)
+            static uint32_t px2[8 * 8]; for (int i = 0; i < 64; i++) px2[i] = f * 0x00010203u ^ (uint32_t)(i * 77);
+            CHECK_EQ(vkn_tex_update(g_t0, 0, 0, (int32_t)(f % 2) * 8, 4, 8, 8, px2, 32), 0);
+        }
+        if (k == 15 && f % 37 == 5) {   // a destroy and a create under the same pool id between draws (the destroy hook syncs)
+            vkn_rt_own_begin(&g_rts_tex); CHECK_EQ(vkn_tex_destroy_handle(H(320, 1)), 1); CHECK(mktex(320, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 320, 0) != NULL); vkn_rt_own_end();
+        }
+    }
+    if (f % 10 == 3) {   // a dispatch (the pass ends; the storage image)
+        uint8_t *ring = (uint8_t *)vkn_ring_cpu(); uint32_t off = 0;
+        CHECK_EQ(vkn_ring_alloc(128, &off), 0); for (int i = 0; i < 128; i++) ring[off + i] = (uint8_t)(f ^ i);
+        vkn_rt_ubo(2, 1, off, 128);
+        vkn_draw_in ci = g_in; ci.tex[0] = NULL; ci.smp[0] = NULL; ci.tex[1] = rt_ftex; ci.smp[1] = rt_fsmp; ci.tex[2] = rt_ctex; ci.smp[2] = rt_csmp; ci.shader = H(33, 1);
+        const vkn_img_bind ib1 = {1, H(306, 1)};
+        vkn_rt_query_cond(0);
+        vkn_rt_dispatch(&ci, &ib1, 1, 4, 2, 1);
+    }
+    rt_targets(g_win, NULL);
+    for (uint32_t k = 0; k < 2; k++) { vkn_draw_in in = g_in; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = rt_ctex; in.smp[2] = rt_csmp;
+                                       rt_ftex[0] = 310; vkn_rt_slots_touch(); in.ib = H(52, 1); vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, k * 3, 3, 1); rt_ftex[0] = 300; vkn_rt_slots_touch(); }
+    {   // the UI
+        vkn_rt_ui_targets(g_win, NULL); vkn_rt_ui_viewport(0, 0, 64, 32); vkn_rt_ui_scissor(0, (int32_t)(f % 4), 64, 28);
+        float verts[16] = {0, 0, 0, 0,  64, 0, 1, 0,  64, 32, 1, 1,  0, 32, 0, 1}; verts[0] = (float)(f % 9);
+        float vsc[32], fsc[12]; for (int i = 0; i < 32; i++) vsc[i] = (float)(f + i); for (int i = 0; i < 12; i++) fsc[i] = (float)(i * f);
+        vkn_ui_draw_in d; memset(&d, 0, sizeof d);
+        d.vs = 0xB1; d.fs = 0xB2; d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.blend = 1; d.tex[0] = g_t0; d.vsc = vsc; d.vsc_bytes = sizeof vsc;
+        d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.verts = verts; d.nverts = 4;
+        vkn_rt_ui_draw(&d);
+        verts[0] = 7.0f;   // (the record holds its own copy: this write must not reach it)
+        static const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+        d.quads = 0; d.idx = idx; d.nidx = 6; d.tex[0] = (f & 1) ? g_t3 : NULL; d.blend = 0;
+        vkn_rt_ui_draw(&d);
+    }
+    vkn_rt_rec_end(1, g_win, NULL, 1);
+    const uint64_t cpu3[3] = {0, 0, 0};
+    vkn_rt_frame_tail(cpu3, NULL);
+    if (f % 50 == 25) {   // an off-frame recording (the engine waits for its GPU work: a sync at its end)
+        vkn_rt_rec_begin(0);
+        rt_targets(g_b2, NULL);
+        const float c2[4] = {0, 0, (float)f, 1};
+        vkn_rt_pass_clear_color(g_b2, 0, c2, NULL);
+        vkn_draw_in in = g_in; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = rt_ctex; in.smp[2] = rt_csmp;
+        vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 0, 3, 1);
+        vkn_rt_rec_end(0, NULL, NULL, 0);
+    }
+}
+static __thread uint32_t t_yseed;
+static void rt_yield(int where) {   // the stress run: random yields / short sleeps at every encode / decode boundary
+    if (!t_yseed) t_yseed = (uint32_t)(uintptr_t)&t_yseed | 1u;
+    t_yseed = t_yseed * 1103515245u + 12345u;
+    const uint32_t r = t_yseed >> 16;
+    if ((r & 15) == where) sched_yield();
+    if ((r & 1023) == 7) { const struct timespec ts = {0, 20000}; nanosleep(&ts, NULL); }
+    if (where == 1 && (r & 127) == 3) { const struct timespec ts = {0, 150000}; nanosleep(&ts, NULL); }   // a slow recording thread: the engine runs ahead
+}
+typedef struct rt_res {
+    int ran, checks, fails, val_errors, mk_errors; uint32_t n, frames, mode;
+    vkn_rt_stats st; uint64_t sync_upd, sync_tex;
+    mk_jr_rec rec[4600];
+} rt_res;
+typedef struct { int mode, slots, yield; uint32_t frames; uint64_t ring_limit; } rt_cfg;
+static void rt_run(const rt_cfg *c, rt_res *r) {
+    const int c0 = g_checks, f0 = g_fails, v0 = mk_val_errors, e0 = mk_errors;
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);
+    rt_seed = 12345;
+    alarm(600);   // (a hang fails the child instead of the run)
+    vkn_rt_install(c->mode, c->slots);
+    vkn_rt_test_yield(c->yield ? rt_yield : NULL);
+    vkn_rt_test_ring_limit(c->ring_limit);
+    for (uint32_t f = 0; f < c->frames; f++) rt_frame(f);
+    vkn_rt_shutdown();
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 0; pthread_mutex_unlock(&mk_mu);
+    r->n = mk_jr_n < 4600 ? mk_jr_n : 4600; if (mk_jr_n > 4600) g_fails++;
+    memcpy(r->rec, mk_jr, r->n * sizeof r->rec[0]);
+    vkn_rt_stats_get(&r->st); r->sync_upd = g_rts_upd.syncs; r->sync_tex = g_rts_tex.syncs;
+    r->frames = c->frames; r->mode = (uint32_t)c->mode;
+    r->checks = g_checks - c0; r->fails = g_fails - f0; r->val_errors = mk_val_errors - v0; r->mk_errors = mk_errors - e0;
+}
+static int rt_child(const rt_cfg *c, rt_res *out) {
+    memset(out, 0, sizeof *out);
+    int pfd[2]; if (pipe(pfd)) return -1;
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]);
+        rt_res *r = (rt_res *)calloc(1, sizeof *r);
+        rt_run(c, r); r->ran = 1;
+        const uint8_t *p = (const uint8_t *)r; size_t left = sizeof *r;
+        while (left) { const ssize_t w = write(pfd[1], p, left); if (w <= 0) break; p += w; left -= (size_t)w; }
+        close(pfd[1]);
+        _exit(0);
+    }
+    close(pfd[1]);
+    uint8_t *p = (uint8_t *)out; size_t got = 0;
+    while (got < sizeof *out) { const ssize_t n = read(pfd[0], p + got, sizeof *out - got); if (n <= 0) break; got += (size_t)n; }
+    close(pfd[0]);
+    int status = 0; waitpid(pid, &status, 0);
+    const int ok = got == sizeof *out && WIFEXITED(status) && WEXITSTATUS(status) == 0 && out->ran;
+    g_checks += out->checks + 1; g_fails += out->fails;
+    if (!ok) { g_fails++; printf("FAIL %s:%d: rt child mode %d (status %#x, %zu of %zu result bytes)\n", __FILE__, __LINE__, c->mode, status, got, sizeof *out); }
+    return ok ? 0 : -1;
+}
+// The journal of `r` equals the reference `ref` (same frames): submission by submission.
+static int rt_same(const char *what, const rt_res *ref, const rt_res *r) {
+    CHECK_EQ(r->val_errors, 0); CHECK_EQ(r->mk_errors, 0);
+    int bad = r->n != ref->n, first = -1;
+    for (uint32_t i = 0; i < r->n && i < ref->n; i++) if (memcmp(&r->rec[i], &ref->rec[i], sizeof r->rec[i])) { if (first < 0) first = (int)i; bad = 1; }
+    g_checks++;
+    if (bad) {
+        g_fails++;
+        printf("FAIL %s:%d: rt %s: journal differs from DM_VK_NATIVE_RT=0: %u vs %u submissions, first difference at %d", __FILE__, __LINE__, what, r->n, ref->n, first);
+        if (first >= 0) printf(" (events %u / %u, draws %u / %u)", r->rec[first].nev, ref->rec[first].nev, r->rec[first].ndraw, ref->rec[first].ndraw);
+        printf("\n");
+    }
+    uint64_t draws = 0; for (uint32_t i = 0; i < r->n; i++) draws += r->rec[i].ndraw;
+    const double f = r->frames ? (double)r->frames : 1.0;
+    printf("rt %-28s %s: %u submissions, %llu draws recorded; records/frame draw %.1f ubo %.1f slots %.1f call %.1f, syncs/frame %.2f (wait %.3f ms), "
+           "engine wait at the end %.3f ms/frame, ahead 0:%llu 1:%llu 2:%llu 3+:%llu, ring guards %llu, mispredicted %llu, at once %llu, slot-range misses %llu\n",
+           what, bad ? "DIFFERS" : "journal equal", r->n, (unsigned long long)draws, r->st.ops[VKN_RT_OP_DRAW] / f, r->st.ops[VKN_RT_OP_UBO] / f, r->st.ops[VKN_RT_OP_SLOTS] / f,
+           r->st.ops[VKN_RT_OP_CALL] / f, r->st.syncs / f, r->st.sync_wait_ns / 1e6 / f, r->st.bp_wait_ns / 1e6 / f, (unsigned long long)r->st.ahead[0], (unsigned long long)r->st.ahead[1],
+           (unsigned long long)r->st.ahead[2], (unsigned long long)r->st.ahead[3], (unsigned long long)r->st.guard_ring, (unsigned long long)r->st.mispredict,
+           (unsigned long long)r->st.inline_ops, (unsigned long long)r->st.slot_gen_miss);
+    return !bad;
+}
+static void rt_slots_init(void) {
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) rt_ftex[i] = rt_fsmp[i] = rt_ctex[i] = rt_csmp[i] = -1;
+    rt_ftex[0] = 300; rt_fsmp[0] = 10; rt_ftex[3] = 303; rt_fsmp[3] = 13; rt_ctex[0] = 300; rt_csmp[0] = 10;
+}
+static void test_rt(void) {
+    rt_setup();
+    // Warm-up in this process (mode 0): every shader pair, module variant and pipeline the scenario needs exists before the forks (a
+    // forked child has no vkn_shader worker thread: a module request there would wait for it forever), and every child starts from
+    // the same state.
+    vkn_rt_install(0, 1); rt_seed = 999;
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 1; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);   // (the log restarts after each submission; records not kept)
+    for (uint32_t f = 0; f < 60; f++) rt_frame(f);
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 0; mk_jr_n = 0; pthread_mutex_unlock(&mk_mu);
+    rt_slots_init();
+    static rt_res ref, x, ref2;
+    {   // VKN_RT_DIRECT=mode:slots:yield:frames:ring - one run in THIS process, its journal into the file VKN_RT_OUT (ThreadSanitizer
+        // refuses threads in a child forked from a process with threads: work/rt_test.sh compares the files of separate processes)
+        const char *d = getenv("VKN_RT_DIRECT");
+        if (d && *d) {
+            rt_cfg c = {0, 1, 0, 240, 0}; unsigned long long rl = 0;
+            sscanf(d, "%d:%d:%d:%u:%llu", &c.mode, &c.slots, &c.yield, &c.frames, &rl); c.ring_limit = rl;
+            rt_res *r = (rt_res *)calloc(1, sizeof *r);
+            rt_run(&c, r);
+            const char *o = getenv("VKN_RT_OUT");
+            FILE *fo = o ? fopen(o, "w") : NULL;
+            if (fo) { for (uint32_t i = 0; i < r->n; i++) fprintf(fo, "%016llx %u %u\n", (unsigned long long)r->rec[i].h, r->rec[i].nev, r->rec[i].ndraw); fclose(fo); }
+            CHECK_EQ(r->val_errors, 0); CHECK_EQ(r->mk_errors, 0);
+            if (c.mode == 1 || c.mode == 2) { CHECK(r->st.busy_ns > 0); CHECK_EQ(r->st.mispredict, 0); CHECK_EQ(r->st.foreign, 0); }
+            printf("rt direct %s: %u submissions, syncs %llu, ahead 0:%llu 1:%llu 2:%llu 3+:%llu, ring guards %llu\n", d, r->n, (unsigned long long)r->st.syncs,
+                   (unsigned long long)r->st.ahead[0], (unsigned long long)r->st.ahead[1], (unsigned long long)r->st.ahead[2], (unsigned long long)r->st.ahead[3], (unsigned long long)r->st.guard_ring);
+            free(r);
+            return;
+        }
+    }
+    const uint32_t F = 240;
+    const rt_cfg c0 = {0, 1, 0, F, 0};
+    if (rt_child(&c0, &ref)) return;
+    { uint64_t d = 0; for (uint32_t i = 0; i < ref.n; i++) d += ref.rec[i].ndraw; CHECK(ref.n >= F); CHECK(d >= (uint64_t)F * 8); printf("rt reference (DM_VK_NATIVE_RT=0): %u submissions, %llu draws, validator %d, mock %d\n", ref.n, (unsigned long long)d, ref.val_errors, ref.mk_errors); }
+    CHECK_EQ(ref.val_errors, 0); CHECK_EQ(ref.mk_errors, 0);
+    const struct { rt_cfg c; const char *what; } runs[] = {
+        {{9, 1, 0, F, 0}, "RT=9 (verify)"}, {{1, 1, 0, F, 0}, "RT=1"}, {{2, 1, 0, F, 0}, "RT=2"},
+        {{1, 0, 0, F, 0}, "RT=1 slots copied"}, {{1, 2, 0, F, 0}, "RT=1 slots by ranges"}, {{2, 3, 0, F, 0}, "RT=2 slots ranges verified"},
+        {{1, 1, 0, F, 12 * 1024}, "RT=1 ring guard 12 KB"}, {{2, 1, 0, F, 12 * 1024}, "RT=2 ring guard 12 KB"},
+        {{1, 1, 1, F, 0}, "RT=1 yields"}, {{2, 1, 1, F, 0}, "RT=2 yields"},
+    };
+    for (size_t i = 0; i < sizeof runs / sizeof runs[0]; i++) {
+        if (rt_child(&runs[i].c, &x)) continue;
+        rt_same(runs[i].what, &ref, &x);
+        if (runs[i].c.mode == 1 || runs[i].c.mode == 2) { CHECK(x.st.busy_ns > 0); CHECK(x.st.syncs > 0); CHECK_EQ(x.st.mispredict, 0); CHECK_EQ(x.st.foreign, 0); CHECK_EQ(x.st.oom, 0); }
+        if (runs[i].c.ring_limit) CHECK(x.st.guard_ring > 0);
+        if (runs[i].c.slots == 3) CHECK_EQ(x.st.slot_gen_miss, 0);
+    }
+    // the stress run: VKN_RT_STRESS=<repetitions>[:<frames>] (default 2 x 400; the night check ran 20 x 2000)
+    uint32_t reps = 2, sf = 400;
+    { const char *e = getenv("VKN_RT_STRESS"); if (e && *e) { reps = (uint32_t)atoi(e); const char *c = strchr(e, ':'); if (c) sf = (uint32_t)atoi(c + 1); } }
+    if (!reps || !sf) return;
+    if (sf > 4400) sf = 4400;
+    const rt_cfg cr = {0, 1, 0, sf, 0};
+    if (rt_child(&cr, &ref2)) return;
+    uint32_t same = 0;
+    for (uint32_t k = 0; k < reps; k++) for (int m = 1; m <= 2; m++) {
+        const rt_cfg cs = {m, k % 3 == 2 ? 3 : 1, 1, sf, k & 1 ? 12 * 1024 : 0};
+        if (rt_child(&cs, &x)) continue;
+        char w[64]; snprintf(w, sizeof w, "stress %u x %u RT=%d%s%s", k + 1, sf, m, k & 1 ? " guard" : "", k % 3 == 2 ? " slots 3" : "");
+        same += (uint32_t)rt_same(w, &ref2, &x);
+    }
+    printf("rt stress: %u of %u runs (%u frames each, random yields) with the journal of DM_VK_NATIVE_RT=0\n", same, 2 * reps, sf);
+}
+
 // ================================================================================================================ save-game thumbnail
 // Shared render-target storage (vkn_tex_create_shared): the frame function 0xa66bc0 makes "ScreenshotBackBuffer" the window's override
 // target, renders the scene off-frame and copies the override into a small read-back texture. With a render scale the scene's last
@@ -2368,6 +2644,7 @@ static void test_post(void) {
     CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
 }
 
+static void test_b1_pass(void);   // [stage 5.2 B1] (end of file)
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mk_main_thread = pthread_self();
@@ -2377,6 +2654,18 @@ int main(void) {
     vkn_pass_init(); vkn_draw_install(); vkn_tex_update_init();
     vkn_draw_cost_set(VKN_COST_ALL);   // [stage 5] the draw-cost shortcuts as the host sets them in mode 1 (DM_VK_NATIVE_COST default)
     vkn_rec_on_begin(lis_begin); vkn_rec_on_close(lis_close);
+    {   // [stage 5.5] VKN_TEST_ONLY=rt: the recording thread's test alone (the ThreadSanitizer build)
+        const char *only = getenv("VKN_TEST_ONLY");
+        if (only && !strcmp(only, "rt")) {
+            g_win = mktex(900, EF_RGBA8, VKN_TC_WINDOW, 1, 64, 32, 1, 1, ~0u, 0);
+            draw_setup(); frames_n(4);
+            test_rt();
+            CHECK_EQ(mk_val_errors, 0); CHECK_EQ(mk_errors, 0);
+            if (g_fails) { printf("vkn_stage3_test (rt only): %d of %d checks FAILED\n", g_fails, g_checks); return 1; }
+            printf("vkn_stage3_test (rt only): %d checks passed\n", g_checks);
+            return 0;
+        }
+    }
     test_no_device();
     test_frame_order();
     test_frame_ring();
@@ -2393,11 +2682,273 @@ int main(void) {
     test_a5_shc();      // [stage 5.1 A5] (forked children: the cache's switches are read once per process)
     test_a5_fx();
     test_a5_oracle();
-    test_post();   // [stage 5.2 B3] last: it installs the post effect for the rest of the process
+    test_post();   // [stage 5.2 B3] it installs the post effect for the rest of the process
+    test_b1_pass();   // [stage 5.2 B1] render-pass load / store policy (forked child)
+    test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
     CHECK_EQ(mk_qlock_depth, 0);
     if (g_fails) { printf("vkn_stage3_test: %d of %d checks FAILED\n", g_fails, g_checks); return 1; }
     printf("vkn_stage3_test: %d checks passed\n", g_checks);
     return 0;
+}
+
+// ================================================================================================================ [stage 5.2 B1]
+// The render-pass load / store policy (vkn_pass.c "stage 5.2 B1"), in a forked child (the policy and its effect function stay there):
+//   cover    the first draw's proof: whole target (triangle list, two-triangle quad, fan and quad lists of the arrays rewrite) ->
+//            loadOp DONT_CARE; each refusal reason (no facts, stale facts, effect, shader kill, no program, output, blend,
+//            mask, depth test, raster, primitive, input, buffer, uniform, w, empty, geometry, culled vs the other winding, part too
+//            small, part with a clear); positions from a uniform block (and refused with the sub-switch off); the area pass (render
+//            area = proven rect, a draw inside keeps it, a draw / clear outside / a draw the chain did not see restarts it full with
+//            LOAD); depth DONT_CARE (ALWAYS + write, no stencil) and not for D24S8; verify (=2: LOAD kept, counted); poison (=3:
+//            magenta after the begin);
+//   fresh    1: a never-written target begins with CLEAR to zeros (no clear command), several layers keep the zero fill; 0: the
+//            zero fill; 2: an alias of shared storage written by the other image begins DONT_CARE (and LOAD when it was not), 3 poisons;
+//   store    a target cleared every frame and never read: STORE for N frames, then DONT_CARE; a read of the discarded content is a
+//            violation (counted, banned: STORE again); verify (=2) counts the would-be violation; poison (=3) clears magenta before
+//            the pass ends; a shared-storage target is never discarded;
+//   tilebar  a fragment-only draw's read barrier waits in the fragment stages; a later compute read of the same texture gets a full
+//            barrier first.
+#include "../../../vkn/vkn_policy.h"
+#include "../../../nr/nr_cover.h"
+static nr_cv_prog g_b1_prog; static int g_b1_noprog; static uint32_t g_b1_out = 1, g_b1_ff;
+static int b1_facts(const struct vkn_shader *s, vkn_pass_cover_sh *o) { (void)s; o->pos = g_b1_noprog ? NULL : (const struct nr_cv_prog *)&g_b1_prog; o->fs_outputs = g_b1_out; o->fs_facts = g_b1_ff; return 0; }
+// position = (input 0 .x * [ubo] , input 0 .y, 0, w)
+static void b1_prog(float w, int ubo_binding) {
+    nr_cv_prog *p = &g_b1_prog; memset(p, 0, sizeof *p);
+    p->ok = 1; p->in_mask = 1;
+    p->ins[0] = (nr_cv_ins){NR_CV_INPUT, 0, 0, 0, 0, 0.0f}; p->ins[1] = (nr_cv_ins){NR_CV_INPUT, 0, 0, 1, 0, 0.0f};
+    p->ins[2] = (nr_cv_ins){NR_CV_CONST, 0, 0, 0, 0, 0.0f}; p->ins[3] = (nr_cv_ins){NR_CV_CONST, 0, 0, 0, 0, w};
+    p->n = 4; p->out[0] = 0; p->out[1] = 1; p->out[2] = 2; p->out[3] = 3; p->exact = 1;
+    if (ubo_binding >= 0) {
+        p->ins[4] = (nr_cv_ins){NR_CV_UBO, 0, (uint16_t)ubo_binding, 0, 0, 0.0f}; p->ins[5] = (nr_cv_ins){NR_CV_MUL, 0, 0, 4, 0, 0.0f};
+        p->n = 6; p->out[0] = 5; p->exact = 0; p->nubo = 1; p->ubo[0] = (uint32_t)ubo_binding; p->ubo_bytes[0] = 4;
+    }
+}
+static void b1_verts(const float *xy, int n) { float *v = (float *)((uint8_t *)g_vb0.cpu + 1024); memcpy(v, xy, sizeof(float) * 2 * (size_t)n); }
+static const float k_b1_full[6] = {-1, -1, 3, -1, -1, 3}, k_b1_rev[6] = {-1, -1, -1, 3, 3, -1}, k_b1_small[6] = {-0.5f, -0.5f, 0.5f, -0.5f, -0.5f, 0.5f};
+static const float k_b1_quad[12] = {-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1}, k_b1_q4[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+static vkn_draw_in g_b1;
+static vkn_draw_in b1_base(void) {
+    vkn_draw_in in = g_in; in.blend = 0; in.ds = 0; in.raster = 0; in.vfmt = H(90, 1); in.vb[0] = H(50, 1); in.vb_off[0] = 1024; in.prim = 1; in.alpha_ref = -1.0f;
+    in.viewport[0] = in.viewport[1] = 0; in.viewport[2] = 64; in.viewport[3] = 32; in.scissor[0] = in.scissor[1] = 0; in.scissor[2] = 64; in.scissor[3] = 32;
+    return in;
+}
+// A pass begun by one draw of `in` (count vertices, arrays): the proof's outcome (-1 = none counted), the begin event (NULL = none).
+static int b1_draw(vkn_draw_in *in, uint32_t count, const mk_ev **begin) {
+    vkn_pass_stats3 a, b; vkn_pass_stats3_get(&a);
+    const uint64_t m = mark();
+    vkn_draw_arrays(in, 0, count);
+    vkn_pass_stats3_get(&b);
+    if (begin) *begin = nth(m, VK_NULL_HANDLE, MK_E_BEGIN_RP, 0);
+    int why = -1;
+    for (int i = 0; i < VKN_PCV_N; i++) if (b.cover_why[i] != a.cover_why[i]) why = why < 0 ? i : 99;
+    return why;
+}
+static int b1_why(vkn_draw_in *in, uint32_t count) { vkn_pass_end(); return b1_draw(in, count, NULL); }
+static int b1_load0(const mk_ev *e) { const mk_rp *r = rp_of(e); return r && r->natt ? (int)r->att[0].loadOp : -1; }
+static int b1_store(const mk_ev *e, uint32_t k) { const mk_rp *r = rp_of(e); return r && r->natt > k ? (int)r->att[k].storeOp : -1; }
+static int b1_load(const mk_ev *e, uint32_t k) { const mk_rp *r = rp_of(e); return r && r->natt > k ? (int)r->att[k].loadOp : -1; }
+static void b1_pol(int load, int store, int fresh, int tilebar) {
+    const vkn_pass_policy p = {(int8_t)load, (int8_t)store, (int8_t)fresh, (int8_t)tilebar, 1, 1, 3};
+    vkn_pass_policy_set(&p);
+}
+static void b1_child(a5_res *r) {
+    (void)r;
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_pass_cover_facts_fn(b1_facts);
+    static const uint8_t vf2[6] = {0, 0, 0, 0, 0, 2}, vf8[6] = {0, 0, 0, 0, 8, 2}, vfs1[12] = {0, 0, 0, 0, 0, 2, 1, 3, 0, 0, 0, 2};
+    CHECK(vkn_vfmt_put(H(90, 1), vf2, 1) != 0); CHECK(vkn_vfmt_put(H(92, 1), vf8, 1) != 0); CHECK(vkn_vfmt_put(H(93, 1), vfs1, 2) != 0);
+    CHECK(vkn_raster_put(H(91, 1), 0, 1, 0, 0, 0) != 0);                       // lines
+    CHECK(vkn_ds_put(H(94, 1), 1, 1, 7, 0, 0, 0, 0, 0) != 0);                  // ALWAYS + write
+    vkn_tex *D32 = mktex(700, EF_D32F, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 700, 0), *SN = mktex(701, 9 /* R8SN: write mask 0 */, VKN_TC_COLOR, 1, 64, 32, 1, 1, 701, 0);
+    CHECK(D32 && SN); if (!D32 || !SN) return;
+    b1_pol(1, 0, 1, 0); b1_prog(1.0f, -1);
+    vkn_pass_policy pg; int fam = -1; vkn_pass_policy_get(&pg, &fam); CHECK_EQ(pg.load, 1); CHECK_EQ(pg.store_frames, 3);
+    VkCommandBuffer cb = fbegin(1);
+    // ---- the whole target
+    targets(g_a2, NULL, NULL); g_b1 = b1_base(); b1_verts(k_b1_full, 3);
+    { vkn_pass_end(); const mk_ev *b = NULL; vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+      CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_DONT_CARE); CHECK(b && b->rect.extent.width == 64 && b->rect.extent.height == 32);
+      vkn_pass_stats3_get(&c); CHECK_EQ(c.att_nload[VKN_PDC_COVER] - a.att_nload[VKN_PDC_COVER], 1); CHECK_EQ(c.cover_exact - a.cover_exact, 1);
+      const uint64_t m = mark(); vkn_draw_arrays(&g_b1, 0, 3); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 0); }   // the next draw: the same pass
+    b1_verts(k_b1_quad, 6); CHECK_EQ(b1_why(&g_b1, 6), VKN_PCV_FULL);                                  // two triangles
+    b1_verts(k_b1_q4, 4); g_b1.prim = 4; CHECK_EQ(b1_why(&g_b1, 4), VKN_PCV_FULL);                     // a quad (rewritten)
+    g_b1.prim = 2; CHECK_EQ(b1_why(&g_b1, 4), VKN_PCV_FULL);                                            // a fan of the same corners
+    g_b1.prim = 5; CHECK_EQ(b1_why(&g_b1, 4), VKN_PCV_PRIM);                                            // lines
+    g_b1 = b1_base(); b1_verts(k_b1_full, 3);
+    // ---- refusals
+    b1_verts(k_b1_small, 3); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_GEOMETRY); b1_verts(k_b1_full, 3);
+    b1_prog(2.0f, -1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_VERTEX); b1_prog(1.0f, -1);
+    g_b1_noprog = 1; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_NOPROG); g_b1_noprog = 0;
+    g_b1_out = 0; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_OUTPUT); g_b1_out = 1;
+    g_b1_ff = 1; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_SHADER); g_b1_ff = 0;
+    // (an alpha-tested draw refuses in the same check; not drawn here: its module variant needs the shader worker a forked child lacks)
+    g_b1.blend = H(40, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_BLEND); g_b1.blend = H(41, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_BLEND); g_b1.blend = 0;
+    g_b1.raster = H(91, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_RASTER); g_b1.raster = 0;
+    g_b1.vfmt = H(92, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_INPUT); g_b1.vfmt = H(90, 1);
+    g_b1.vb_off[0] = 4090; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_BUFFER); g_b1.vb_off[0] = 1024;
+    g_fxm = 2; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_FX); g_fxm = 0;                                       // the test effect asks for discard
+    g_b1.raster = H(40, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_CULLED);                                // back faces culled ...
+    b1_verts(k_b1_rev, 3); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_FULL); g_b1.raster = 0; b1_verts(k_b1_full, 3);   // ... the other winding is drawn
+    g_b1.scissor[2] = 0; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_EMPTY); g_b1.scissor[2] = 64;
+    targets(SN, NULL, NULL); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_MASK);
+    targets(g_a2, NULL, g_d3); g_b1.ds = H(40, 1); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_DS); g_b1.ds = 0;
+    {   // depth: D24S8 keeps its load (stencil), a D32F written with ALWAYS begins DONT_CARE too
+        const mk_ev *b = NULL; vkn_pass_end(); g_b1.ds = H(94, 1);
+        CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK_EQ(b1_load(b, 0), VK_ATTACHMENT_LOAD_OP_DONT_CARE); CHECK_EQ(b1_load(b, 1), VK_ATTACHMENT_LOAD_OP_LOAD);
+        targets(g_a2, NULL, D32); vkn_pass_clear_depth(D32, 1, 1.0f, 0); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_FULL);   // (the clear folds: CLEAR, not DONT_CARE)
+        vkn_pass_end(); vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+        CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK_EQ(b1_load(b, 0), VK_ATTACHMENT_LOAD_OP_DONT_CARE); CHECK_EQ(b1_load(b, 1), VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+        vkn_pass_stats3_get(&c); CHECK_EQ(c.cover_depth - a.cover_depth, 1);
+        g_b1.ds = 0; targets(g_a2, NULL, NULL);
+    }
+    {   // positions read from a uniform block (vertex slot 2 = Vulkan binding 6 of the test's vertex shader); refused with the sub-switch off
+        uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0); float *u = (float *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = 1.0f; vkn_draw_ubo(0, 2, off, 64);
+        b1_prog(1.0f, 6); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_FULL);
+        u[0] = 0.25f; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_GEOMETRY);                                    // x scaled down: not covered
+        b1_prog(1.0f, 7); CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_UBO);                                     // a binding the shader does not have
+        u[0] = 1.0f; b1_prog(1.0f, 6); { vkn_pass_policy q = {1, 0, 1, 0, 1, 0, 3}; vkn_pass_policy_set(&q); } CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_UBO);
+        b1_pol(1, 0, 1, 0); b1_prog(1.0f, -1);
+    }
+    // no facts (a pass the effect chain did not see) / stale facts (the draw was dropped after the chain)
+    vkn_pass_end(); { vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a); CHECK_EQ(vkn_pass_ready(NULL), 0); vkn_pass_stats3_get(&c); CHECK_EQ(c.cover_why[VKN_PCV_NOFACTS] - a.cover_why[VKN_PCV_NOFACTS], 1); }
+    vkn_pass_end(); { vkn_draw_in x = g_b1; x.vfmt = H(93, 1); x.vb[1] = 0; vkn_draw_arrays(&x, 0, 3);
+      vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a); CHECK_EQ(vkn_pass_ready(NULL), 0); vkn_pass_stats3_get(&c); CHECK_EQ(c.cover_why[VKN_PCV_STALE] - a.cover_why[VKN_PCV_STALE], 1); }
+    // ---- a part of the target (dynamic resolution): render area + DONT_CARE; what must stay inside it
+    {
+        vkn_pass_end(); const mk_ev *b = NULL; g_b1.viewport[2] = 32; g_b1.scissor[2] = 32;
+        CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_AREA); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+        CHECK(b && b->rect.offset.x == 0 && b->rect.extent.width == 32 && b->rect.extent.height == 32);
+        uint64_t m = mark(); vkn_draw_arrays(&g_b1, 0, 3); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 0);       // inside: the same pass
+        vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+        vkn_draw_in o = g_b1; o.viewport[2] = 64; o.scissor[2] = 64; b1_verts(k_b1_small, 3);         // a draw outside: the pass begins again, full, LOAD
+        m = mark(); CHECK_EQ(b1_draw(&o, 3, &b), VKN_PCV_GEOMETRY); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 1); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_LOAD);
+        CHECK(b && b->rect.extent.width == 64);
+        vkn_pass_stats3_get(&c); CHECK_EQ(c.area_restart_draw - a.area_restart_draw, 1);
+        b1_verts(k_b1_full, 3); vkn_pass_end(); CHECK_EQ(b1_draw(&g_b1, 3, NULL), VKN_PCV_AREA);
+        const float k0[4] = {0, 0, 0, 0}; const int32_t rr[4] = {40, 0, 8, 8};                       // a clear outside the area
+        m = mark(); vkn_pass_clear_color(g_a2, 0, k0, rr); CHECK_EQ(cnt(m, cb, MK_E_END_RP), 1); CHECK_EQ(cnt(m, cb, MK_E_CLEAR_ATT), 1);
+        const mk_ev *ca = nth(m, cb, MK_E_CLEAR_ATT, 0); CHECK(ca && ca->cr[0].rect.offset.x == 40 && ca->cr[0].rect.extent.width == 8);
+        vkn_pass_stats3_get(&c); CHECK_EQ(c.area_restart_clear - a.area_restart_clear, 1);
+        vkn_pass_end(); CHECK_EQ(b1_draw(&g_b1, 3, NULL), VKN_PCV_AREA);
+        m = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);         // a draw the chain did not see
+        vkn_pass_stats3_get(&c); CHECK_EQ(c.area_restart_other - a.area_restart_other, 1);
+        g_b1.viewport[2] = 62; g_b1.scissor[2] = 62; CHECK_EQ(b1_why(&g_b1, 3), VKN_PCV_SMALL);       // saves < 10 %
+        g_b1.viewport[2] = 32; g_b1.scissor[2] = 32; vkn_pass_end(); vkn_pass_clear_color(g_a2, 0, k0, NULL);
+        CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_AREA_CLEAR); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_CLEAR);
+        g_b1.viewport[2] = 64; g_b1.scissor[2] = 64;
+    }
+    // ---- verify and poison
+    b1_pol(2, 0, 1, 0);
+    { vkn_pass_end(); const mk_ev *b = NULL; vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+      CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_LOAD);
+      vkn_pass_stats3_get(&c); CHECK_EQ(c.would_dc - a.would_dc, 1); }
+    b1_pol(3, 0, 1, 0);
+    { vkn_pass_end(); const mk_ev *b = NULL; const uint64_t m = mark();
+      CHECK_EQ(b1_draw(&g_b1, 3, &b), VKN_PCV_FULL); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+      const mk_ev *ca = nth(m, cb, MK_E_CLEAR_ATT, 0), *d = nth(m, cb, MK_E_DRAW, 0);
+      CHECK(ca && b && d && ca->seq > b->seq && ca->seq < d->seq); if (ca) { CHECK_F(ca->ca[0].clearValue.color.float32[0], 1.0); CHECK_F(ca->ca[0].clearValue.color.float32[1], 0.0); } }
+    // ---- fresh targets
+    b1_pol(0, 0, 1, 0);
+    {
+        vkn_tex *F1 = mktex(702, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 702, 0), *F2 = mktex(703, EF_RGBA8, VKN_TC_COLOR, 4, 64, 32, 1, 2, 703, 0);
+        vkn_tex *F0 = mktex(704, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 704, 0);
+        CHECK(F1 && F2 && F0);
+        if (F1 && F2 && F0) {
+            g_b1.blend = H(41, 1); targets(F1, NULL, NULL); uint64_t m = mark(); const mk_ev *b = NULL; b1_draw(&g_b1, 3, &b);
+            CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_CLEAR); CHECK_EQ(clears_of(m, F1->image), 0); if (b) CHECK_F(b->cv[0].color.float32[3], 0.0);
+            target_lm(F2, 1, 0); m = mark(); b1_draw(&g_b1, 3, &b); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(clears_of(m, F2->image), 1);   // two layers: the zero fill
+            b1_pol(0, 0, 0, 0); targets(F0, NULL, NULL); m = mark(); b1_draw(&g_b1, 3, &b); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(clears_of(m, F0->image), 1);
+            g_b1.blend = 0;
+        }
+        // aliases of shared storage with different shapes (separate images, one identity): the other one written since -> DONT_CARE
+        b1_pol(0, 0, 2, 0);
+        vkn_tex *SA = shtex(705, 64, 32, 705, 0x9000, "AliasA"), *SB = shtex(706, 32, 32, 706, 0x9000, "AliasB");
+        CHECK(SA && SB && SA != SB);
+        if (SA && SB && SA != SB) {
+            const mk_ev *b = NULL;
+            targets(SA, NULL, NULL); b1_draw(&g_b1, 3, NULL); vkn_pass_end();
+            vkn_draw_in hb = g_b1; hb.viewport[2] = 32; hb.scissor[2] = 32; targets(SB, NULL, NULL); b1_draw(&hb, 3, NULL); vkn_pass_end();
+            vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+            targets(SA, NULL, NULL); b1_draw(&g_b1, 3, &b); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_DONT_CARE); vkn_pass_end();
+            vkn_pass_stats3_get(&c); CHECK_EQ(c.att_nload[VKN_PDC_ALIAS] - a.att_nload[VKN_PDC_ALIAS], 1);
+            b1_draw(&g_b1, 3, &b); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_LOAD); vkn_pass_end();            // not written by the other since
+            b1_pol(0, 0, 3, 0); targets(SB, NULL, NULL); b1_draw(&hb, 3, NULL); vkn_pass_end();
+            targets(SA, NULL, NULL); const uint64_t m = mark(); b1_draw(&g_b1, 3, &b); CHECK_EQ(b1_load0(b), VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+            CHECK_EQ(cnt(m, cb, MK_E_CLEAR_ATT), 1);                                                          // poisoned
+        }
+        vkn_pass_end();
+    }
+    fsubmit(0);
+    // ---- store history: S cleared every frame and drawn, never read; then read once
+    {
+        vkn_tex *S1 = mktex(710, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 710, 0), *S2 = mktex(711, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 711, 0);
+        vkn_tex *S3 = mktex(712, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 712, 0), *SH = shtex(713, 64, 32, 713, 0xa000, "SharedStore");
+        CHECK(S1 && S2 && S3 && SH); if (!S1 || !S2 || !S3 || !SH) return;
+        vkn_tex *const S[4] = {S1, S2, S3, SH}; const int mode[4] = {1, 2, 3, 1};
+        static int32_t rd[VKN_TEX_SLOTS]; for (int i = 0; i < VKN_TEX_SLOTS; i++) rd[i] = -1;
+        for (int k = 0; k < 4; k++) {
+            b1_pol(0, mode[k], 1, 0);
+            int st[8]; uint64_t clr[8]; vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+            for (int f = 0; f < 8; f++) {
+                cb = fbegin(1);
+                const float k0[4] = {0, 0, 0, 0};
+                targets(S[k], NULL, NULL); vkn_pass_clear_color(S[k], 0, k0, NULL);
+                const mk_ev *b = NULL; const uint64_t m = mark(); b1_draw(&g_b1, 3, &b); st[f] = b1_store(b, 0);
+                vkn_pass_end(); clr[f] = (uint64_t)cnt(m, cb, MK_E_CLEAR_ATT);
+                targets(g_b2, NULL, NULL);
+                vkn_draw_in rr = g_b1; rd[0] = (int32_t)S[k]->pool_id; rr.tex[1] = f == 5 ? rd : g_ftex;   // frame 5 samples S
+                b1_draw(&rr, 3, NULL); vkn_pass_end();
+                fsubmit(0);
+            }
+            vkn_pass_stats3_get(&c);
+            const int D = VK_ATTACHMENT_STORE_OP_DONT_CARE, T = VK_ATTACHMENT_STORE_OP_STORE;
+            for (int f = 0; f < 3; f++) CHECK_EQ(st[f], T);                                  // the streak grows: 0, 1, 2 frames "not read"
+            if (k == 0) { CHECK_EQ(st[3], D); CHECK_EQ(st[4], D); CHECK_EQ(st[5], D); CHECK_EQ(st[6], T); CHECK_EQ(st[7], T);   // frame 5's store is read: banned
+                          CHECK_EQ(c.violations - a.violations, 1); CHECK_EQ(c.bans - a.bans, 1); CHECK_EQ(c.store_dc - a.store_dc, 3); }
+            if (k == 1) { for (int f = 3; f < 8; f++) CHECK_EQ(st[f], T); CHECK_EQ(c.store_would - a.store_would, 3); CHECK_EQ(c.would_violations - a.would_violations, 1); CHECK_EQ(c.violations - a.violations, 0); }
+            if (k == 2) { for (int f = 3; f < 8; f++) CHECK_EQ(st[f], T); CHECK_EQ(c.store_poison - a.store_poison, 3); CHECK_EQ(clr[3], 1); CHECK_EQ(clr[2], 0); CHECK_EQ(c.violations - a.violations, 1); }
+            if (k == 3) { for (int f = 0; f < 8; f++) CHECK_EQ(st[f], T); CHECK(c.store_noelig - a.store_noelig >= 8); }   // shared storage: never
+        }
+    }
+    // ---- tile barrier: a fragment-only draw's read barrier; a compute read of the same texture afterwards gets a full one
+    {
+        b1_pol(0, 0, 1, 1);
+        vkn_tex *R = mktex(720, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 720, 0); CHECK(R != NULL); if (!R) return;
+        cb = fbegin(1);
+        targets(R, NULL, NULL); b1_draw(&g_b1, 3, NULL);
+        targets(g_b2, NULL, NULL);
+        static int32_t rt[VKN_TEX_SLOTS], ct[VKN_TEX_SLOTS]; for (int i = 0; i < VKN_TEX_SLOTS; i++) rt[i] = ct[i] = -1;
+        rt[0] = 720; ct[0] = 720;
+        vkn_draw_in fr = g_b1; fr.tex[1] = rt; uint64_t m = mark(); b1_draw(&fr, 3, NULL);
+        const mk_ev *bar = barrier_of(m, R->image, 0);
+        CHECK(bar && bar->l1 == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && bar->u[1] == (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
+        vkn_pass_stats3 a, c; vkn_pass_stats3_get(&a);
+        vkn_draw_in ci = g_in; ci.shader = H(33, 1); ci.tex[2] = ct; const vkn_img_bind ib1 = {1, H(306, 1)};
+        m = mark(); CHECK_EQ(vkn_draw_dispatch(&ci, &ib1, 1, 1, 1, 1), 0);
+        bar = barrier_of(m, R->image, 0);
+        CHECK(bar && bar->l0 == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && bar->l1 == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && bar->u[1] == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        vkn_pass_stats3_get(&c); CHECK_EQ(c.tilebar_fix - a.tilebar_fix, 1);
+        m = mark(); CHECK_EQ(vkn_draw_dispatch(&ci, &ib1, 1, 1, 1, 1), 0); CHECK(barrier_of(m, R->image, 0) == NULL);   // once
+        fsubmit(0);
+    }
+    // ---- the family rule of vkn_policy.h (the shader library's xbg_gpu_family + xbg_effective_family)
+    CHECK_EQ(vkn_policy_family_from(0x5143, "Adreno (TM) 750", NULL), VKN_FAM_ADRENO);
+    CHECK_EQ(vkn_policy_family_from(0x5143, "Turnip Adreno (TM) 750", "mali"), VKN_FAM_MALI);
+    CHECK_EQ(vkn_policy_family_from(0x5143, "x", "nobc,family-powervr"), VKN_FAM_POWERVR);
+    CHECK_EQ(vkn_policy_family_from(0x5143, "x", "pvr"), VKN_FAM_POWERVR);
+    CHECK_EQ(vkn_policy_family_from(0x1002, "AMD Xclipse 920", NULL), VKN_FAM_XCLIPSE);
+    CHECK_EQ(vkn_policy_family_from(0x10de, "Mali-G57", "0"), VKN_FAM_MALI);
+    CHECK_EQ(vkn_policy_family_from(0x10de, "something", "mali-ish"), VKN_FAM_OTHER);
+    CHECK_EQ(vkn_policy_load_default(VKN_FAM_ADRENO), 0); CHECK_EQ(vkn_policy_load_default(VKN_FAM_MALI), 1); CHECK_EQ(vkn_policy_store_default(VKN_FAM_POWERVR), 1);
+    CHECK_EQ(vkn_policy_fresh_default(VKN_FAM_ADRENO), 1); CHECK_EQ(vkn_policy_fresh_default(VKN_FAM_MALI), 2); CHECK_EQ(vkn_policy_tilebar_default(VKN_FAM_OTHER), 0);
+    vkn_pass_policy_set(NULL); vkn_pass_policy_get(&pg, NULL); CHECK_EQ(pg.load, 0); CHECK_EQ(pg.store, 0);
+    vkn_pass_cover_facts_fn(NULL);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_b1_pass(void) {
+    static const char *const env[][2] = {{"DM_VK_NATIVE_LOAD", NULL}, {NULL, NULL}};
+    static a5_res R; a5_child(env, b1_child, &R);
 }

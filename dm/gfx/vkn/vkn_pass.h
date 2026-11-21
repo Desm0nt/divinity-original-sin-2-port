@@ -10,7 +10,8 @@
 //     (and reopens with LOAD at the next draw).
 // "stale": a target not written in this frame and not cleared may still be read by the engine on purpose (history buffers, the
 // shadow atlas kept across frames): its content is kept (LOAD) unless the texture was never written at all. So DONT_CARE is used
-// only for never-written targets; the tile-GPU refinement (DONT_CARE for targets fully covered by the first draw) is stage 4.
+// only for never-written targets; the tile-GPU refinement (DONT_CARE for targets fully covered by the first draw, fresh targets,
+// DONT_CARE stores by history, fragment-stage read barriers) is stage 5.2 B1: the block at the end of this header (vkn_policy.h).
 // Layout bookkeeping: vkn_tex.layout is the truth; this module is the only one that changes it between vkn_rec_begin and submit
 // (uploads set it before). Single-threaded (the recording thread). No game addresses.
 #ifndef DM_VKN_PASS_H
@@ -88,6 +89,50 @@ void vkn_pass_cur_get(uint32_t *n, vkn_tex *color[VKN_PASS_COLORS], uint32_t lay
 enum { VKN_PASS_EV_CLEAR = 1, VKN_PASS_EV_SAMPLE = 2, VKN_PASS_EV_USE = 3 };
 typedef void (*vkn_pass_watch_fn)(vkn_tex *t, int ev, float depth);
 void vkn_pass_watch(vkn_tex *t, vkn_pass_watch_fn fn);
+
+// ==== [stage 5.2 B1] render-pass load / store policy for tile GPUs (vkn_pass.c "stage 5.2 B1"; switches and family defaults:
+// vkn_policy.h) ====
+// What is in effect (all 0 = the stage-4 rule of this header: the module default, so host tests and other callers keep it):
+//   load     DM_VK_NATIVE_LOAD    0 / 1 cover proof of the first draw -> loadOp DONT_CARE / 2 verify (counted, LOAD kept) / 3 poison
+//   store    DM_VK_NATIVE_STORE   0 / 1 storeOp DONT_CARE by history / 2 verify / 3 poison (STORE, then magenta / depth 0.5 in the pass)
+//   fresh    DM_VK_NATIVE_FRESH   0 / 1 CLEAR to zeros for never-written targets / 2 + shared-storage aliases DONT_CARE / 3 = 2 + poison
+//   tilebar  DM_VK_NATIVE_TILEBAR 0 / 1 fragment-stage read barriers of fragment-only draws
+//   area, ubo (DM_VK_NATIVE_LOAD_AREA / _LOAD_UBO): a proven part of the target as render area / positions from uniform blocks (1 = on)
+//   store_frames (DM_VK_NATIVE_STORE_FRAMES): frames of "not read" before a store is discarded (default 8)
+typedef struct vkn_pass_policy { int8_t load, store, fresh, tilebar, area, ubo; uint16_t store_frames; } vkn_pass_policy;
+// Exact values now (host tests; NULL = all off). A request (the host at install, from the environment) may carry -1 = the family
+// default: it is applied at the first recording begin with a device (the family is known then: vkn_shlib_policy, else vkn_policy_family_from),
+// with one log line. The effect function (vkn_fx.h, "pass-cover", order 900) is registered when load or tilebar is on.
+void vkn_pass_policy_set(const vkn_pass_policy *p);
+void vkn_pass_policy_request(const vkn_pass_policy *p);
+void vkn_pass_policy_get(vkn_pass_policy *p, int *family);
+// The shader facts of the cover proof: the vertex stage's position program (dm/gfx/nr/nr_cover.h), the fragment stage's Output
+// locations (bit = location) and VKN_SHLIB_FS_* bits (kill / depth / sample mask). Default: the shader library (vkn_shlib_vs_pos /
+// _fs_outputs / _fs_facts, weak); host tests install a stand-in (NULL = back to the default). 0 = filled, else no facts.
+struct nr_cv_prog; struct vkn_shader;
+typedef struct vkn_pass_cover_sh { const struct nr_cv_prog *pos; uint32_t fs_outputs, fs_facts; } vkn_pass_cover_sh;
+void vkn_pass_cover_facts_fn(int (*fn)(const struct vkn_shader *s, vkn_pass_cover_sh *out));
+// Outcome of the proof, by reason (VKN_PCV_FULL / _AREA = proven; the rest refusals, first failing check).
+enum { VKN_PCV_FULL, VKN_PCV_AREA, VKN_PCV_NOFACTS, VKN_PCV_STALE, VKN_PCV_FX, VKN_PCV_COND, VKN_PCV_SAMPLES, VKN_PCV_SHADER, VKN_PCV_NOPROG,
+       VKN_PCV_OUTPUT, VKN_PCV_BLEND, VKN_PCV_MASK, VKN_PCV_DS, VKN_PCV_RASTER, VKN_PCV_PRIM, VKN_PCV_INPUT, VKN_PCV_BUFFER, VKN_PCV_UBO,
+       VKN_PCV_VERTEX, VKN_PCV_EMPTY, VKN_PCV_GEOMETRY, VKN_PCV_CULLED, VKN_PCV_SMALL, VKN_PCV_AREA_CLEAR, VKN_PCV_3D, VKN_PCV_N };
+const char *vkn_pass_cover_name(int why);
+// Why an attachment began without LOAD (counted per attachment): CLEAR of a remembered clear, the cover proof (whole / area), a
+// shared-storage alias (fresh 2), CLEAR to zeros (fresh 1), never written (the stage-3 DONT_CARE).
+enum { VKN_PDC_CLEAR, VKN_PDC_COVER, VKN_PDC_AREA, VKN_PDC_ALIAS, VKN_PDC_ZERO, VKN_PDC_NEVER, VKN_PDC_N };
+typedef struct vkn_pass_stats3 {
+    uint64_t frames;                                  // vkn_frame() when read (the census divides deltas by it)
+    uint64_t att_load, att_nload[VKN_PDC_N];          // attachments begun LOAD / not LOAD by reason
+    uint64_t would_dc;                                // load 2: attachments the proof would have begun DONT_CARE
+    uint64_t cover_tried, cover_why[VKN_PCV_N], cover_exact, cover_depth;   // proofs run / by outcome; proven positions copied as they are; depth DONT_CARE
+    uint64_t area_passes, area_restart_draw, area_restart_clear, area_restart_other;
+    uint64_t poison_load, cover_lost;                 // attachments poisoned after the begin; a rule's pass whose first draw was not recorded
+    uint64_t att_store, store_dc, store_would, store_poison, store_noelig, store_banned;
+    uint64_t violations, would_violations, bans, table_full;
+    uint64_t load_bytes, store_bytes, load_saved_bytes, store_saved_bytes, would_bytes, store_would_bytes;   // the model: w x h x texel bytes
+    uint64_t tilebar_frag, tilebar_full, tilebar_fix;   // read barriers fragment-only / full; full barriers owed to a later non-fragment read
+} vkn_pass_stats3;
+void vkn_pass_stats3_get(vkn_pass_stats3 *s);
 
 #ifdef __cplusplus
 }

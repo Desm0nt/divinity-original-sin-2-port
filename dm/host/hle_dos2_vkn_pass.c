@@ -32,6 +32,8 @@
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_tex.h"
 #include "../gfx/vkn/vkn_pass.h"
+#include "../gfx/vkn/vkn_rt.h"   // [stage 5.5] the recording thread: the backend calls of this part are records (vkn_rt_pass_*)
+#include "../gfx/vkn/vkn_policy.h"   // [stage 5.2 B1] the load / store policy switches
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 #include "hle_dos2_vkn_pass.h"
@@ -111,7 +113,7 @@ VKN_HOOK vkn_h_srt(VKN_A) {
         dt = tex_of_rec(rec_nogen(r, depth));
         if (!dt) { g_c[C_SRT_DEPTH]++; if (red(C_SRT_DEPTH)) vkn_logf(RED "pass: SetRenderTargets depth %#llx unknown to the backend", (unsigned long long)depth); }
     }
-    vkn_pass_targets(n, ct, L, M, dt);
+    vkn_rt_pass_targets(n, ct, L, M, dt);
     // size, viewport cache, constants, blend cache: the original's tail, in its order
     int32_t w = 0, h = 0; int known = 1;
     const uint64_t c0 = n ? vkn_rd64(col) : 0;
@@ -141,7 +143,7 @@ VKN_HOOK vkn_h_ccl(VKN_A) {
         return 0;
     }
     float rgba[4]; memcpy(rgba, (const void *)(uintptr_t)a3, sizeof rgba);
-    vkn_pass_clear_color(t, (uint32_t)l, rgba, NULL);
+    vkn_rt_pass_clear_color(t, (uint32_t)l, rgba, NULL);
     return 0;
 }
 
@@ -159,7 +161,7 @@ void dm_vkn_pass_clear_rect(uint64_t tex_handle, int32_t layer, const float rgba
     }
     if (w <= 0 || h <= 0) return;   // an empty region clears nothing
     const int32_t rect[4] = {x, y, w, h};
-    vkn_pass_clear_color(t, (uint32_t)layer, rgba, rect);
+    vkn_rt_pass_clear_color(t, (uint32_t)layer, rgba, rect);
 }
 
 // ---- ClearDepthStencil ----
@@ -177,7 +179,7 @@ VKN_HOOK vkn_h_cds(VKN_A) {
         }
         g_c[C_CDS_BIND]++;
         vkn_tex *none[VKN_PASS_COLORS]; memset(none, 0, sizeof none);
-        vkn_pass_targets(0, none, NULL, NULL, t);
+        vkn_rt_pass_targets(0, none, NULL, NULL, t);
         vp_full(r, (int32_t)t->w, (int32_t)t->h);
     }
     int what;
@@ -189,9 +191,8 @@ VKN_HOOK vkn_h_cds(VKN_A) {
         g_c[C_CDS_MODE]++; if (red(C_CDS_MODE)) vkn_logf(RED "pass: ClearDepthStencil mode %u (the original traps)", (unsigned)mode);
         return 0;
     }
-    vkn_tex *bd = vkn_pass_depth();   // what NVN would clear: its bound depth target
-    if (!bd) { g_c[C_CDS_NONE]++; return 0; }   // (NVN clears nothing)
-    vkn_pass_clear_depth(bd, what, depth, stencil);
+    // what NVN would clear: its bound depth target (NVN clears nothing without one). [stage 5.5] looked up where the recording is
+    vkn_rt_pass_clear_bound_depth(what, depth, stencil, &g_c[C_CDS_NONE]);
     return 0;
 }
 
@@ -209,7 +210,7 @@ VKN_HOOK vkn_h_cpy(VKN_A) {
         if (red(C_CPY_BAD)) vkn_logf(RED "pass: CopyTexture %#llx -> %#llx: %s unknown to the backend", (unsigned long long)a2, (unsigned long long)a1, !src ? "source" : "destination");
         return 0;
     }
-    vkn_pass_copy(dst, src);
+    vkn_rt_pass_copy(dst, src);
     return 0;
 }
 
@@ -230,6 +231,33 @@ static void vkn_pass_census(void) {
              U(x.copy_drop), U(g_c[C_SRT_ARGS]), U(g_c[C_SRT_STALE]), U(g_c[C_SRT_UNKNOWN]), U(g_c[C_SRT_VIEW]), U(g_c[C_SRT_DEPTH]), U(g_c[C_SRT_SIZE]),
              U(g_c[C_CCL_BAD]), U(g_c[C_RECT_BAD]), U(g_c[C_CDS_BAD]), U(g_c[C_CDS_MODE]), U(g_c[C_CDS_NONE]), U(g_c[C_CPY_BAD]));
 #undef U
+    // [stage 5.2 B1] the load / store policy (vkn_pass.h "stage 5.2 B1"): per presented frame since the last census line
+    static vkn_pass_stats3 p0; vkn_pass_stats3 p; vkn_pass_stats3_get(&p);
+    vkn_pass_policy pol; int fam = 0; vkn_pass_policy_get(&pol, &fam);
+    const double f = p.frames > p0.frames ? (double)(p.frames - p0.frames) : 1.0, mb = 1048576.0;
+#define D(x) ((double)(p.x - p0.x) / f)
+    double nl = 0; for (int i = 0; i < VKN_PDC_N; i++) nl += D(att_nload[i]);
+    const double dc_rule = D(att_nload[VKN_PDC_COVER]) + D(att_nload[VKN_PDC_AREA]) + D(att_nload[VKN_PDC_ALIAS]) + D(att_nload[VKN_PDC_NEVER]);
+    char why[900]; int n = 0; why[0] = 0;
+    for (int i = VKN_PCV_NOFACTS; i < VKN_PCV_N && n < (int)sizeof why - 80; i++)
+        if (p.cover_why[i] != p0.cover_why[i]) n += snprintf(why + n, sizeof why - (size_t)n, "%s%s %.2f", n ? ", " : "", vkn_pass_cover_name(i), D(cover_why[i]));
+    vkn_logf("pass policy (%s; LOAD=%d STORE=%d FRESH=%d TILEBAR=%d area %d ubo %d frames %u): a frame over %.0f frames: attachments load %.1f, not loaded %.1f "
+             "[clear %.1f, dontcare %.1f = cover %.1f + area %.1f + alias %.1f + never written %.1f, clear to zero %.1f]%s; proofs %.1f: whole %.2f, part %.2f "
+             "(positions copied %.2f, depth too %.2f); refused: %s; area passes %.2f (restarts: draw %.3f, clear %.3f, other draw %.3f); poisoned %.2f, first draw lost %llu; "
+             "stores %.1f: dontcare %.1f, poisoned %.1f, would %.1f, not eligible %.1f, banned %.2f; violations %llu, verify violations %llu, bans %llu, tables full %llu; "
+             "traffic model: load %.1f MB + store %.1f MB a frame, saved load %.1f MB + store %.1f MB%s; tile barriers fragment %.1f, full %.1f, owed full %.2f",
+             vkn_policy_family_name(fam), pol.load, pol.store, pol.fresh, pol.tilebar, pol.area, pol.ubo, (unsigned)pol.store_frames, f, D(att_load), nl,
+             D(att_nload[VKN_PDC_CLEAR]), dc_rule, D(att_nload[VKN_PDC_COVER]), D(att_nload[VKN_PDC_AREA]), D(att_nload[VKN_PDC_ALIAS]), D(att_nload[VKN_PDC_NEVER]),
+             D(att_nload[VKN_PDC_ZERO]), pol.load == 2 ? " (verify: the proof would begin more DONT_CARE, below)" : "", D(cover_tried), D(cover_why[VKN_PCV_FULL]),
+             D(cover_why[VKN_PCV_AREA]), D(cover_exact), D(cover_depth), n ? why : "none", D(area_passes), D(area_restart_draw), D(area_restart_clear),
+             D(area_restart_other), D(poison_load), (unsigned long long)p.cover_lost, D(att_store), D(store_dc), D(store_poison), D(store_would), D(store_noelig),
+             D(store_banned), (unsigned long long)p.violations, (unsigned long long)p.would_violations, (unsigned long long)p.bans, (unsigned long long)p.table_full,
+             D(load_bytes) / mb, D(store_bytes) / mb, D(load_saved_bytes) / mb, D(store_saved_bytes) / mb, "", D(tilebar_frag), D(tilebar_full), D(tilebar_fix));
+    if (pol.load == 2 || pol.store == 2)
+        vkn_logf("pass policy verify: the proof would begin %.1f attachments a frame DONT_CARE (%.1f MB of load); the history would discard %.1f stores (%.1f MB)",
+                 D(would_dc), D(would_bytes) / mb, D(store_would), D(store_would_bytes) / mb);
+#undef D
+    p0 = p;
 }
 
 void dm_vkn_pass_register(void);
@@ -244,7 +272,21 @@ void dm_vkn_pass_register(void) {
     dm_vkn_site(0x928ab0, k_ccl, "ClearColorTarget", (void *)vkn_h_ccl, &g_o_ccl, VKN_M_NATIVE);
     dm_vkn_site(0x928be0, k_cds, "ClearDepthStencil", (void *)vkn_h_cds, &g_o_cds, VKN_M_NATIVE);
     dm_vkn_site(0x920b00, k_cpy, "CopyTexture", (void *)vkn_h_cpy, &g_o_cpy, VKN_M_NATIVE);
+    // [stage 5.5] all four encode their backend calls (vkn_rt_pass_*): no default sync
+    dm_vkn_stack_flag((void *)vkn_h_srt, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)vkn_h_ccl, DM_VKN_SF_ENC);
+    dm_vkn_stack_flag((void *)vkn_h_cds, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)vkn_h_cpy, DM_VKN_SF_ENC);
     vkn_pass_init();
+    {   // [stage 5.2 B1] the policy switches (vkn_policy.h): -1 = the family default, applied at the first recording begin (the device is known then)
+        vkn_pass_policy rq; memset(&rq, 0, sizeof rq);
+        rq.load = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD", -1, 0, 3, NULL);
+        rq.store = (int8_t)vkn_policy_env("DM_VK_NATIVE_STORE", -1, 0, 3, NULL);
+        rq.fresh = (int8_t)vkn_policy_env("DM_VK_NATIVE_FRESH", -1, 0, 3, NULL);
+        rq.tilebar = (int8_t)vkn_policy_env("DM_VK_NATIVE_TILEBAR", -1, 0, 1, NULL);
+        rq.area = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD_AREA", 1, 0, 1, NULL);
+        rq.ubo = (int8_t)vkn_policy_env("DM_VK_NATIVE_LOAD_UBO", 1, 0, 1, NULL);
+        rq.store_frames = (uint16_t)vkn_policy_env("DM_VK_NATIVE_STORE_FRAMES", 8, 1, 255, NULL);
+        vkn_pass_policy_request(&rq);
+    }
     dm_vkn_census(vkn_pass_census);
 }
 #endif

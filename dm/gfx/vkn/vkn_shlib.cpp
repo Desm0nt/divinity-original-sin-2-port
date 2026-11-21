@@ -51,6 +51,9 @@
 #include "../vulkan/engine/xbg_vertex.h"
 #include "../vulkan/engine/xbg_vertex_retype.h"
 #include "../nr/nr_ubodyn.h"
+#include "../vulkan/engine/xbg_spirv_pos.h"      // [stage 5.2 B1] position programs (vkn_shlib_vs_pos)
+#include "../vulkan/engine/xbg_spirv_raster.h"   // [stage 5.2 B1] fragment output locations (vkn_shlib_fs_outputs)
+#include "vkn_policy.h"                          // [stage 5.2 B1] DM_VK_NATIVE_LOAD by family
 
 extern "C" const char *dm_vk_driver_status(void) __attribute__((weak));   // vk_driver.c: the running driver (pipeguard list suffix)
 extern "C" int xbg_sha256_hex16(const void *data, size_t n, char out_hex17[17]);   // xbg_shader_key.c (pure)
@@ -72,6 +75,7 @@ struct Cfg {
          f2i_notrunc = false, texcoord_unguard = false, alpha = true, serial = false, retype_keep = false;
     int ubovec = 0, idvs = 0, early_z = 1, invariant = 0, gscull = 0x61, gather_snap = 1, spv_opt = 0, warp_mode = 1;
     int ubd_mode = 0; bool ubd_ro = false, ubd_scan = false;   // NR-08b (nrubd::init)
+    bool pos_on = false;   // [stage 5.2 B1] DM_VK_NATIVE_LOAD != 0 for the policy family: position programs / output masks built at load
 };
 Cfg g;
 std::mutex g_mu;          // the shader map and every load
@@ -563,6 +567,8 @@ struct Sh {
     int32_t fs_facts = -1;         // [DOS2] stage 5.1 O2: fragment: fs_facts_of(final words), set once at load; -1 = other stage
     int32_t vs_vindex = -1;        // [DOS2] stage 5.1 G: vertex: vs_vindex_of(final words), set once at load; -1 = other stage
     std::vector<uint32_t> words;   // vertex: the final words while DM_GFX_VTX_RETYPE is on (the "#vi" variants start from them)
+    std::unique_ptr<nr_cv_prog> pos;   // [stage 5.2 B1] vertex, g.pos_on: the position program of the final words (only when ok)
+    int64_t fs_out = -1;               // [stage 5.2 B1] fragment, g.pos_on: Output locations of the final words (bit = location), -1 = not built
     std::map<uint64_t, VkShaderModule> retyped, alpha;
 };
 std::unordered_map<std::string, std::unique_ptr<Sh>> g_sh;
@@ -631,6 +637,10 @@ Sh *load(const std::string &key, const void *control, const void *code) {
     // [DOS2] stage 5.1 G: the base module's words; the "#vi" retype variants are made from these same words by xbg_vertex_retype,
     // which rewrites input variables / loads only (it adds no BuiltIn), so the answer holds for every module of this shader
     if (h.stage == 0) p->vs_vindex = int32_t(vs_vindex_of(words));
+    // [stage 5.2 B1] DM_VK_NATIVE_LOAD (vkn_pass.c, the cover proof of a pass's first draw): the position program of the final words
+    // (xbg_spirv_pos_prog, NR-10b: 117 of DOS2's vertex shaders have one) and the fragment output locations (xbg_spirv_raster_facts)
+    if (g.pos_on && h.stage == 0) { nr_cv_prog pr; xbg_spirv_pos_prog(words.data(), words.size(), &pr); if (pr.ok) p->pos.reset(new nr_cv_prog(pr)); }
+    if (g.pos_on && h.stage == 4) p->fs_out = int64_t(xbg_spirv_raster_facts(words.data(), words.size(), 4).outputs);
     if (p->unusable.empty() && make_module(words, &p->module, key) != VK_SUCCESS) p->unusable = "vkCreateShaderModule failed";
     if (!p->unusable.empty()) ++st_unusable;
     Sh *out = p.get(); g_sh.emplace(key, std::move(p)); ++st_loads; st_ns += now_ns() - t0;
@@ -767,6 +777,7 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
     { const char *e = getenv("DM_GFX_WARP_MODE"); g.warp_mode = e && !strcmp(e, "native") ? 0 : e && !strcmp(e, "lone") ? 1 : g.subgroup.subgroupSize == 32 ? 0 : 1; }
     { const char *e = getenv("DM_GFX_VTX_RETYPE"); g.retype_keep = e && *e ? atoi(e) != 0 : g.props.vendorID != 0x5143; }
     { const char *e = getenv("DM_GFX_SPV_OPT"); g.spv_opt = e && *e ? atoi(e) : 0; if (g.spv_opt > 0) xbg_spvopt_init((g.base + "/spvopt").c_str(), g.spv_opt); }
+    g.pos_on = vkn_policy_load(int(g.policy)) != 0;   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with)
     g.ready = true;
     L("initialised (DM_VK_NATIVE_SHLIB: the translator is not initialised): gpu \"%s\" vendor %#x family %s policy %s sim %#x; subgroup %u stages %#x ops %#x; "
       "rewrites: quad %d warp32 %d ldc_fold %d forward_temps %d nan_minmax %d nan_sat %d ldc_canon %d f2i_notrunc %d texcoord_unguard %d ubovec %d idvs %d early_z %d "
@@ -807,6 +818,18 @@ extern "C" int vkn_shlib_vs_vindex(const void *shader) {
     const Sh *s = static_cast<const Sh *>(shader);
     return s && s->stage == 0 ? s->vs_vindex : -1;
 }
+// ==== [DOS2] VK-NATIVE stage 5.2 B1 (vkn_pass.c DM_VK_NATIVE_LOAD): facts of the final words for the cover proof; immutable after load
+// (as fs_facts): no lock. The policy family (xbg_effective_family of init; -1 before init) for vkn_policy.h's getters.
+extern "C" const nr_cv_prog *vkn_shlib_vs_pos(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 0 ? s->pos.get() : nullptr;
+}
+extern "C" int64_t vkn_shlib_fs_outputs(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 4 ? s->fs_out : -1;
+}
+extern "C" int vkn_shlib_policy(void) { return g.ready ? int(g.policy) : -1; }
+// ==== [/stage 5.2 B1]
 extern "C" VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!shader) return VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(g_mu); Sh &s = *static_cast<Sh *>(shader);

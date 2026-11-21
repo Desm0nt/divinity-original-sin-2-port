@@ -166,6 +166,15 @@ int vkn_shlib_fs_facts(const void *shader);
 // rewrite applied; the "#vi" variants add no BuiltIn) read BuiltIn VertexIndex / VertexId / BaseVertex (the NR-09 scan; a malformed
 // stream counts as reading), 0 = they do not, -1 = not a vertex shader of this library. Any thread.
 int vkn_shlib_vs_vindex(const void *shader);
+// ==== [DOS2] VK-NATIVE stage 5.2 B1 (vkn_pass.c DM_VK_NATIVE_LOAD, the cover proof of a pass's first draw) ====
+// Built at load only while DM_VK_NATIVE_LOAD resolves non-zero for the policy family (vkn_policy.h). A vertex shader object: its
+// position program (xbg_spirv_pos_prog of the final words, dm/gfx/nr/nr_cover.h), NULL = none / not built / not a vertex shader. A
+// fragment shader object: the Output locations its final words declare (bit = location; xbg_spirv_raster_facts), -1 = not built /
+// not a fragment shader. The policy family of init (xbg_effective_family: DM_GFX_SIM_GPU included), -1 before init. Any thread.
+struct nr_cv_prog;
+const struct nr_cv_prog *vkn_shlib_vs_pos(const void *shader);
+int64_t vkn_shlib_fs_outputs(const void *shader);
+int vkn_shlib_policy(void);
 
 // ---- host tests: the words handed to vkCreateShaderModule are what the comparison test checks (it mocks that entry point) ----
 #ifdef __cplusplus
