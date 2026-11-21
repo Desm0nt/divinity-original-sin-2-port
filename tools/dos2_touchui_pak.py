@@ -30,7 +30,8 @@ entries); then the 40-byte header (version 13, list offset, list size, parts 1, 
         touch (hints + the HUD of UI mode TOUCH made from the player's PC movies: hotBar_p minimap_p statusConsole_p playerInfo_p combatLog_p dmSide_p,
                tools/dos2_pchud_touch.py, docs/dos2/TOUCH_MODES_PLAN.md "Implemented: touch HUD"; every `hints` movie is byte for byte the same;
                + PlayerProfiles/Eoc/dmtouch_1.json = keyboard_1.json + controller_1.json of --engine <Engine.pak> (default: next to --sw) for
-               DM_DOS2_TOUCH_BASE=console, tools/dos2_touch_bind.py; --no-bind = without),
+               DM_DOS2_TOUCH_BASE=console, tools/dos2_touch_bind.py; --no-bind = without;
+               + tooltip_p = the PC tooltip window with its library inside, tools/dos2_ptooltip.py),
         --kit-m0 / --kit (hints / touch sets; docs/dos2/TOUCH_UNIFIED.md M0 / M2): the type 0x8d movies (dmColumn_d, dmSide_p) get the M0 probe
                (tools/dos2_touchkit.py m0_patch: the kit's input event names + a trace) or the whole dmTouch kit with their maps; without them
                every movie is what it was,

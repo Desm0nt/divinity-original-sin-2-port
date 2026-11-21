@@ -627,6 +627,9 @@ import dos2_ppanel_trade; dos2_ppanel_trade.install(sys.modules[__name__])
 import dos2_ptouch_gaps; dos2_ptouch_gaps.install(sys.modules[__name__])
 # the loading screen's touch tips (loadingScreen_p: ours before every second engine tip): tools/dos2_ptouch_tips.py adds its movie
 import dos2_ptouch_tips; dos2_ptouch_tips.install(sys.modules[__name__])
+# the PC tooltip window as one self-contained movie (tooltip_p: tooltip.swf + its library tooltipHelper_kb.swf inside, own class names, no
+# global library registration): tools/dos2_ptooltip.py adds its movie
+import dos2_ptooltip; dos2_ptooltip.install(sys.modules[__name__])
 
 
 def main():
