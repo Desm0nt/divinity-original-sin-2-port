@@ -54,7 +54,9 @@ static int is_depth(const vkn_tex *t) { return (t->aspect & (VK_IMAGE_ASPECT_DEP
 // [stage 5.2 B1] (the policy block below)
 static void ident_note(vkn_tex *t); static void b1_on_barrier(vkn_tex *t); static void b1_pass_closing(void); static void b1_pass_closed(void);
 static void b1_rec_begin(void); static void hist_read(vkn_tex *t, int how); static void hist_over(vkn_tex *t); static void disarm(void);
-static void written(vkn_tex *t) { t->pass_ever = 1; t->pass_written = vkn_frame() + 1; ident_note(t); }
+static void (*g_on_write)(vkn_tex *t);   // [mgpu P2] vkn_pass_on_write
+static void written(vkn_tex *t) { t->pass_ever = 1; t->pass_written = vkn_frame() + 1; ident_note(t); if (g_on_write) g_on_write(t); }
+void vkn_pass_on_write(void (*fn)(vkn_tex *t)) { g_on_write = fn; }
 
 static int same_set(const tset *a, const tset *b) {
     if (a->n != b->n || a->d != b->d) return 0;

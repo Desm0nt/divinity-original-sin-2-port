@@ -98,6 +98,20 @@ void vkn_ui_stats_get(vkn_ui_stats *s);
 // DM_VK_NATIVE_UIPASS_RULE: 0 per pass start (default, NR-UIX), 1 per frame (the whole UI layer detached only after a frame without DS).
 // mode -1 = the family default; sim_tiler: DM_GFX_SIM_GPU names a tile model. Install time (the host's registration).
 void vkn_ui_pass_config(int mode, int verify, int rule, int sim_tiler);
+// ==== [mgpu P1] the region of an Iggy filter target (VK-MOBILE-GPU-PLAN.md П1) ====
+// DM_VK_NATIVE_UIREGION (needs UIPASS >= 1): 0 off; 1 an epoch the host names as a pushed Iggy target (vkn_ui_region: TextureDrawBufferBegin
+// with a region, the rect it clears) whose first event is that region clear gets the region as its render area - no history, no
+// alignment, no 10 % rule; its colour-only draws are clipped to it (their scissor), not restarted: Iggy reads nothing of a pushed target
+// outside its region, and a colour target of its own is no one else's; a depth-stencil use or a clear outside the region drops the rule
+// (the level-2 restart: the DS is shared by every epoch); 2 verify (counted: would region / clip / drop; the epoch drawn full area); 3 poison
+// (1 + the texels outside the region cleared magenta first: a read of them shows). -1 = family default: the render-pass tilers 1, else 0.
+void vkn_ui_region_config(int mode);
+void vkn_ui_region(vkn_tex *t, const int32_t rect[4]);   // the host's naming (recording thread: a record)
+// ==== [mgpu P2] the Iggy filter cache (VK-MOBILE-GPU-PLAN.md П2; vkn_ui.c block "mgpu P2" has the rule) ====
+// DM_VK_NATIVE_UIFC: 0 off, 1 on (+ every 128th hit drawn and compared: a difference turns it off), 2 verify (every hit drawn and
+// compared: "differ" must stay 0), 3 poison (1 + a hit clears its region magenta one frame in 64); -1 = default 1. Any GPU (no UIPASS
+// needed). Install time.
+void vkn_ui_fc_config(int mode);
 void vkn_ui_pass_fence(void);
 enum { VKN_UIP_DS_HIST, VKN_UIP_DS_FRAME, VKN_UIP_DS_SHARED, VKN_UIP_DS_SIZE, VKN_UIP_DS_DYING, VKN_UIP_DS_N };   // detach refusals
 enum { VKN_UIP_AR_API, VKN_UIP_AR_CLEAR, VKN_UIP_AR_MS, VKN_UIP_AR_SAVE, VKN_UIP_AR_N };                          // area refusals
@@ -107,6 +121,13 @@ typedef struct vkn_ui_pass_stats {
     uint64_t area_hinted, area_applied, area_ignored, restarts, hint_dropped, px_full, px_area, ds_bytes, area_bytes;
     uint64_t ds_refused[VKN_UIP_DS_N], area_refused[VKN_UIP_AR_N];
     uint64_t w_detach, w_reattach, w_area, w_restart, w_ds_bytes, w_area_bytes;   // verify: what the level would have done
+    // [mgpu P1] DM_VK_NATIVE_UIREGION: mode; region epochs (area hinted = the region), their pixels; colour draws clipped to it; region rules
+    // dropped (a DS use / a clear outside); refused (counted in area_refused too); poisoned epochs; verify: would-region epochs / clips / drops
+    int region_mode;
+    uint64_t region_epochs, region_px, region_clipped, region_dropped, region_refused, region_poison, w_region, w_region_clip, w_region_drop;
+    // [mgpu P2] DM_VK_NATIVE_UIFC (vkn_ui.c "filter cache")
+    int fc_mode;
+    uint64_t fc_epochs, fc_hits, fc_misses, fc_stored, fc_refused[8], fc_draws_saved, fc_px_copied, fc_verify, fc_differ, fc_poison, fc_evicted, fc_flush[6];
 } vkn_ui_pass_stats;
 void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
 // What the pass module must provide for level 2 (declared weak in vkn_ui.c; absent = level 2 acts as level 1, refusal "api"):

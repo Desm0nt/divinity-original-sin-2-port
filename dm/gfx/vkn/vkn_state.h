@@ -117,7 +117,16 @@ void vkn_rp_key_init(vkn_rp_key *k);   // zero (the key is hashed as bytes), sam
 // The pass of a key (created on a miss). Returns the pass id (1-based, 0 = failure); *pass / *compat filled when not NULL.
 uint16_t vkn_rp_get(const vkn_rp_key *k, VkRenderPass *pass, uint16_t *compat);
 VkRenderPass vkn_rp_compat_pass(uint16_t compat);   // the first pass of that compatibility class (what pipelines are built against)
-int vkn_rp_mode_get(int *dep, int *te);   // [mgpu P6.2 / P6.3] how passes are built (vkn_state.c "mgpu P6"): narrow external dependency, initial layout
+int vkn_rp_mode_get(int *dep, int *te);
+// [mgpu P6.2 / P6.3] the pure parts (host test): the destination stages of the dependency after a pass (narrow: no vertex / compute), the
+// initial layout of an attachment (loaded, or te: the attachment layout vkn_pass always moves it into before the begin; else UNDEFINED)
+static inline VkPipelineStageFlags vkn_rp_dep_after(int narrow) {
+    const VkPipelineStageFlags att = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    return att | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | (narrow ? 0u : (VkPipelineStageFlags)(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+}
+static inline VkImageLayout vkn_rp_initial(int loaded, int te, int depth) {
+    return loaded || te ? (depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) : VK_IMAGE_LAYOUT_UNDEFINED;
+}   // [mgpu P6.2 / P6.3] how passes are built (vkn_state.c "mgpu P6"): narrow external dependency, initial layout
 // Framebuffer of (compatibility class, views in attachment order: bound colour slots then depth, extent, layers); created on a miss.
 VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers);
 // [VK-DRV] the same, made with render pass rp itself (DM_VK_NATIVE_FB_EXACT, vkn_drv.h: PowerVR stock); rp NULL = vkn_fb_get.

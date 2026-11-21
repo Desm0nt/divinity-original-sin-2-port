@@ -603,6 +603,9 @@ VKN_HOOK h_blur(VKN_A) {
 // handle from the free vector +0x2580 (re-made at the frame size when it differs) or a new one (handle + 0x1bf2860 + hash node + the
 // texture vector); into the used vector +0x2598; the new stack entry; its hash node gets the region; the colour target; the state
 // reset, full scissor and viewport of the frame, projection; the region (+2 px) cleared to transparent black; viewport, projection.
+// [mgpu P1] a pushed target with a region: Iggy draws and reads only its cleared rect until TextureDrawBufferEnd (vkn_ui.h vkn_ui_region)
+typedef struct ui_region_rec { vkn_tex *t; int32_t r[4]; } ui_region_rec;
+static void ui_region_fn(void *a) { const ui_region_rec *r = (const ui_region_rec *)a; vkn_ui_region(r->t, r->r); }
 static int tdb_impl(uint64_t ctx, uint64_t reg, uint64_t uid, uint64_t st) {
     const int32_t fw = (int32_t)vkn_rd32(ctx + 0xc0), fh = (int32_t)vkn_rd32(ctx + 0xc4);
     const uint64_t top = vkn_rd64(ctx + 0x1b0);
@@ -692,6 +695,7 @@ static int tdb_impl(uint64_t ctx, uint64_t reg, uint64_t uid, uint64_t st) {
         memcpy((void *)(uintptr_t)ctx, m, sizeof m);
     }
     const int32_t rect[4] = {cx, cy, cw, chh};
+    if (reg) { const ui_region_rec rr = {tex_of(vkn_rd64(h)), {cx, cy, cw, chh}}; vkn_rt_call(ui_region_fn, &rr, sizeof rr); }   // [mgpu P1] the target's region
     vkn_rt_ui_clear_color(tex_of(vkn_rd64(h)), rect);
     if (st) { wr16(st, (uint16_t)(vkn_rd16(st) | 0x40)); wr16(st + 0xe, (uint16_t)(vkn_rd16(st + 0xe) + 1)); wr32(st + 0x28, vkn_rd32(st + 0x28) + (uint32_t)(chh * cw)); }
     vs_apply(ctx);
@@ -795,7 +799,7 @@ static int model_2c(uint64_t list, unsigned op, uint64_t pkt, uint64_t *len) {
 static vkn_ui_pass_stats g_ups0; static uint64_t g_ups_frame0;
 static void ui_pass_census(void) {
     vkn_ui_pass_stats a; vkn_ui_pass_stats_get(&a);
-    if (a.mode <= 0) return;   // (off, or no device yet)
+    if (a.mode <= 0 && !a.fc_mode) return;   // (off, or no device yet; [mgpu P2] the filter cache runs without the UI pass)
     const vkn_ui_pass_stats *p = &g_ups0; const uint64_t fr = vkn_frame();
     const double f = fr > g_ups_frame0 ? (double)(fr - g_ups_frame0) : 1.0, mb = 1048576.0;
 #define D(x) ((double)(a.x - p->x) / f)
@@ -811,6 +815,15 @@ static void ui_pass_census(void) {
              D(area_refused[VKN_UIP_AR_MS]), D(area_refused[VKN_UIP_AR_SAVE]));
     if (a.verify) vkn_logf("ui pass verify: a frame: would detach %.2f, of them would re-attach %.3f (%.1f MB saved); would narrow %.2f, would restart %.3f (%.1f MB saved)",
                            D(w_detach), D(w_reattach), D(w_ds_bytes) / mb, D(w_area), D(w_restart), D(w_area_bytes) / mb);
+    // [mgpu P1] / [mgpu P2]
+    vkn_logf("ui region / filter cache (mgpu): DM_VK_NATIVE_UIREGION=%d: a frame: region epochs %.2f (%.3f M pixels), colour draws clipped %.2f, rules dropped %.3f, refused %.3f, poisoned %.2f; "
+             "verify: would %.2f, would clip %.2f, would drop %.3f | DM_VK_NATIVE_UIFC=%d: epochs seen %.2f, hits %.2f, misses %.2f, stored %.2f, draws saved %.1f, pixels copied %.3f M, evicted %.3f; "
+             "refused: not a region epoch %.2f, a draw not cacheable %.2f, a texture without a version %.2f, too many draws %.2f, DS use %.2f, cache full %.2f, other %.2f; "
+             "verify compares %.3f, differ %llu (total); poison %.3f; held calls flushed by: targets %.2f, a fence %.2f, the engine %.2f, the recording end %.2f, other %.2f",
+             a.region_mode, D(region_epochs), D(region_px) / 1e6, D(region_clipped), D(region_dropped), D(region_refused), D(region_poison), D(w_region), D(w_region_clip), D(w_region_drop),
+             a.fc_mode, D(fc_epochs), D(fc_hits), D(fc_misses), D(fc_stored), D(fc_draws_saved), D(fc_px_copied) / 1e6, D(fc_evicted), D(fc_refused[0]), D(fc_refused[1]), D(fc_refused[2]),
+             D(fc_refused[3]), D(fc_refused[4]), D(fc_refused[5]), D(fc_refused[6]), D(fc_verify), (unsigned long long)a.fc_differ, D(fc_poison),
+             D(fc_flush[0]), D(fc_flush[1]), D(fc_flush[2]), D(fc_flush[3]), D(fc_flush[4]));
 #undef D
     g_ups0 = a; g_ups_frame0 = fr;
 }
@@ -870,6 +883,8 @@ void dm_vkn_ui_register(void) {
             static const char *const k_tile[] = {"mali", "powervr", "pvr", "family-mali", "family-powervr"};
             for (unsigned i = 0; i < sizeof k_tile / sizeof k_tile[0]; i++) if (n == strlen(k_tile[i]) && !strncmp(t, k_tile[i], n)) sim_tiler = 1;
         }
+        { const char *rg = getenv("DM_VK_NATIVE_UIREGION"); vkn_ui_region_config(rg && *rg ? atoi(rg) : -1); }   // [mgpu P1] (-1 = render-pass tilers 1, else 0)
+        { const char *fc = getenv("DM_VK_NATIVE_UIFC"); vkn_ui_fc_config(fc && *fc ? atoi(fc) : -1); }          // [mgpu P2]
         vkn_ui_pass_config(e && *e ? atoi(e) : -1, v && *v ? atoi(v) : 0, r && *r ? atoi(r) : 0, sim_tiler);
     }
     {   // [rt P6] DM_VK_NATIVE_UISET (vkn_ui.h): 0 a fresh set per UI draw, 1 (default) sets of the recording by content, 2 = 1 without reuse (counted)

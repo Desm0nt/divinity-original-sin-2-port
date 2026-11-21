@@ -176,6 +176,8 @@ int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32
 // [mgpu P2] a function run at the entry of every vkn_pass_* call that records or changes state (targets, clears, copies, layouts,
 // samples, ready, end): the UI cache flushes the calls it holds back. NULL = none. The hook is cleared while it runs.
 void vkn_pass_before(void (*fn)(void));
+// [mgpu P2] fn(t) after every GPU write this module records into t (attachment of a pass that begins, clear, copy destination, storage).
+void vkn_pass_on_write(void (*fn)(vkn_tex *t));
 
 #ifdef __cplusplus
 }
