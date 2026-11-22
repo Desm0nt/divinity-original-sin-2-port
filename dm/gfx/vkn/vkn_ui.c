@@ -475,13 +475,13 @@ static void ui_region_x(vkn_tex *t, const int32_t rect[4]) {
 // texels outside the region are never read (the region contract, vkn_ui_region). Modes: 0 off; 1 on, every 128th hit drawn and compared
 // with its slot (a difference: red line, the cache off for the session); 2 verify: every hit drawn as a miss and compared (differ must
 // stay 0); 3 poison: 1 + one frame in 64 a hit clears the region magenta instead (the cached path is visible). Default (-1): 1.
-enum { FC_N = 128, FC_AW = 2560, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 1024, FC_CT = 256, FC_CMP = 4 };
+enum { FC_N = 128, FC_AW = 2560, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 1024, FC_CT = 256, FC_CMP = 192 };   // FC_CMP: [mgpu P7e] compares in flight (UIFC=2 compares every would-hit: ~35 a frame, each read 4 frames later)
 enum { FCR_NOREG, FCR_DRAW, FCR_TEX, FCR_MANY, FCR_DS, FCR_FULL, FCR_OTHER };
 enum { FCF_TARGETS, FCF_FENCE, FCF_ENGINE, FCF_CLOSE, FCF_OTHER };
 enum { FCE_VP = 1, FCE_SC, FCE_CLR, FCE_DRAW };
 typedef struct fc_ent { uint64_t key; uint16_t x, y, w, h; uint32_t frame; uint8_t live; int8_t page; } fc_ent;   // page: [mgpu P7c] -1 = the atlas slot (x, y), else a page at the region's own place
 typedef struct fc_ct { const vkn_tex *t; VkImage img; uint64_t key; uint8_t valid; } fc_ct;
-typedef struct fc_cmp { int live; uint64_t frame, key; vkn_block b; uint32_t bytes; } fc_cmp;
+typedef struct fc_cmp { int live, page; uint64_t frame, key; vkn_block b; uint32_t bytes; int32_t r[4]; char desc[640]; } fc_cmp;   // page: [mgpu P7d] the entry was a page's; desc: [mgpu P7e] its draws
 typedef struct fc_hdr { uint32_t size; uint8_t kind, pad[3]; } fc_hdr;
 typedef struct fc_draw { fc_hdr h; vkn_ui_draw_in in; vkn_block vb; uint32_t o_vsc, o_fsc, o_fsc1, o_verts, o_idx; uint8_t has_vb, pad[3]; } fc_draw;
 static struct {
@@ -518,6 +518,18 @@ static void fc_written(vkn_tex *t) {   // vkn_pass_on_write: a GPU write drops t
 }
 // ---- [mgpu P7c] redirects of pushed targets to the pages (a cache hit without a copy) ----
 static int fc_ov(const int32_t a[4], const int32_t b[4]) { return a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]; }
+// [mgpu P7d] a page entry keeps its region with a guard band of the target around it (FC_GUARD texels, clipped): a blur's taps reach a
+// few texels past the region it reads (phone run F04: a 349x41 blur step differed from its page copy, the cache went off) - with the band
+// the page holds what the target held around the region when the entry was stored, as the atlas copy left it in the target
+enum { FC_GUARD = 16 };
+static void fc_guard(const int32_t r[4], uint32_t W, uint32_t H, int32_t g[4]) {
+    int32_t x0 = r[0] - FC_GUARD, y0 = r[1] - FC_GUARD, x1 = r[0] + r[2] + FC_GUARD, y1 = r[1] + r[3] + FC_GUARD;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int32_t)W) x1 = (int32_t)W;
+    if (y1 > (int32_t)H) y1 = (int32_t)H;
+    g[0] = x0; g[1] = y0; g[2] = x1 - x0; g[3] = y1 - y0;
+}
 static vkn_tex *fc_rd(vkn_tex *t) {   // the texture a read of t takes
     if (t) for (uint32_t i = 0; i < g_fc.nrd; i++) if (g_fc.rd[i].t == t) return g_fc.rd[i].img == t->image && !g_fc.rd[i].p->dead ? g_fc.rd[i].p : t;
     return t;
@@ -585,6 +597,7 @@ static void fc_flush(int why) {
 static void fc_before(void) { fc_flush(FCF_ENGINE); }   // (vkn_pass_before: the engine or the recording end touches vkn_pass)
 static int fc_holding(void) { return g_fc.hold && !g_fc.replay; }
 // vkn_ui_region: a pushed target whose region is named; the epoch's calls are held from now on
+static void fc_lr_put(const vkn_tex *t, const int32_t r[4]);   // [mgpu P7e]
 static void fc_begin(vkn_tex *t, const int32_t rect[4]) {
     if (g_fc.hold) fc_flush(FCF_OTHER);
     if (!fc_on() || !t || t != g_color || t->dead || t->samples > 1 || rect[2] <= 0 || rect[3] <= 0) return;
@@ -592,6 +605,7 @@ static void fc_begin(vkn_tex *t, const int32_t rect[4]) {
     // [mgpu P7] wide strips too (W07: 1343x55 and 2400x157 regions were "other", 5 a frame): up to the atlas width when at most a quarter high
     if (!((rect[2] <= FC_AW / 2 && rect[3] <= FC_AH / 2) || (rect[2] <= FC_AW && rect[3] <= FC_AH / 4))) { g_ups.fc_refused[FCR_OTHER]++; return; }
     g_fc.hold = 1; g_fc.bad = 0; g_fc.t = t; g_fc.d = g_depth; memcpy(g_fc.rect, rect, sizeof g_fc.rect);
+    fc_lr_put(t, rect);   // [mgpu P7e]
     g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.first = 1;
     g_fc.key = fc_mix(fc_mix(fc_mix(0xf11ce, (uint64_t)t->format), (uint64_t)(uint32_t)rect[0] << 32 | (uint32_t)rect[1]), (uint64_t)(uint32_t)rect[2] << 32 | (uint32_t)rect[3]);
     vkn_pass_before(fc_before);
@@ -705,7 +719,8 @@ static int fc_page_for(const vkn_tex *t, const int32_t r[4]) {
         const vkn_tex *pg = g_fc.pg[p];
         if (!pg || pg->dead || pg->w != t->w || pg->h != t->h || pg->format != t->format || pg->samples != t->samples) continue;
         int ov = 0;
-        for (uint32_t i = 0; i < FC_N && !ov; i++) { const fc_ent *e = &g_fc.e[i]; if (e->live && e->page == (int8_t)p) { const int32_t er[4] = {e->x, e->y, e->w, e->h}; ov = fc_ov(er, r); } }
+        int32_t rg[4]; fc_guard(r, pg->w, pg->h, rg);   // [mgpu P7d] guarded rects never overlap
+        for (uint32_t i = 0; i < FC_N && !ov; i++) { const fc_ent *e = &g_fc.e[i]; if (e->live && e->page == (int8_t)p) { const int32_t er[4] = {e->x, e->y, e->w, e->h}; int32_t eg[4]; fc_guard(er, pg->w, pg->h, eg); ov = fc_ov(eg, rg); } }
         if (!ov) return (int)p;
     }
     if (g_fc.npg >= 4 || t->samples > 1) return -1;
@@ -744,29 +759,93 @@ static fc_ent *fc_alloc_page(uint64_t key, const int32_t r[4], int page) {   // 
     return e;
 }
 // a compare of the target's region with an entry's slot: both read back now, checked 4 frames later (fc_cmp_check)
+// [mgpu P7e] the last region epoch of a texture (the description of a self-check names what a draw reads of its input)
+static struct { const vkn_tex *t; int32_t r[4]; } g_fclr[16]; static uint32_t g_fclr_at;
+static void fc_lr_put(const vkn_tex *t, const int32_t r[4]) {
+    for (uint32_t i = 0; i < 16; i++) if (g_fclr[i].t == t) { memcpy(g_fclr[i].r, r, 16); return; }
+    g_fclr[g_fclr_at].t = t; memcpy(g_fclr[g_fclr_at].r, r, 16); g_fclr_at = (g_fclr_at + 1) & 15;
+}
+static const int32_t *fc_lr_get(const vkn_tex *t) { for (uint32_t i = 0; i < 16; i++) if (g_fclr[i].t == t) return g_fclr[i].r; return NULL; }
+static void fc_tname(char *o, size_t n, const vkn_tex *t) { if (!t) snprintf(o, n, "-"); else if (t->sname[0]) snprintf(o, n, "%s", t->sname); else snprintf(o, n, "tex#%04llx", (unsigned long long)(t->handle & 0xffff)); }
+// the held epoch's draws (still in g_fc.buf): per draw the vertex box (positions, texture coordinates in texels of unit 0) and per unit
+// what it reads (name, the redirect, the version kind, the unit texture's last region)
+static void fc_describe(char *o, size_t n) {
+    size_t at = 0; int k = 0; o[0] = 0;
+    for (uint32_t p = 0; p < g_fc.n && at + 120 < n; k++) {
+        const fc_hdr *h = (const fc_hdr *)(const void *)(g_fc.buf + p); p += h->size;
+        if (h->kind != FCE_DRAW) continue;
+        const fc_draw *d = (const fc_draw *)(const void *)h; const vkn_ui_draw_in *in = &d->in;
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
+        if (!d->has_vb && d->o_verts && in->vfmt == VKN_UI_VF_V2TC2) {
+            const float *f = (const float *)(const void *)((const uint8_t *)d + d->o_verts);
+            for (uint32_t i = 0; i < in->nverts && i < 64; i++) {
+                const float *q = f + 4 * i;
+                if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1];
+                if (q[2] < u0) u0 = q[2]; if (q[2] > u1) u1 = q[2]; if (q[3] < v0) v0 = q[3]; if (q[3] > v1) v1 = q[3];
+            }
+        }
+        const vkn_tex *t0 = in->tex[0];
+        const float tw = t0 ? (float)t0->w : 1.0f, th = t0 ? (float)t0->h : 1.0f;
+        at += (size_t)snprintf(o + at, n - at, "%sdraw: fs %llx blend %u, box %.1f,%.1f-%.1f,%.1f uv texels %.1f,%.1f-%.1f,%.1f", at ? "; " : "",
+                               (unsigned long long)(in->fs & 0xffffff), in->blend, x0, y0, x1, y1, u0 * tw, v0 * th, u1 * tw, v1 * th);
+        if (in->fsc1 && d->o_fsc1) { const float *e4 = (const float *)(const void *)((const uint8_t *)d + d->o_fsc1); at += (size_t)snprintf(o + at, n - at, " block1 %.4g %.4g %.4g %.4g", e4[0], e4[1], e4[2], e4[3]); }
+        for (int u = 0; u < VKN_UI_UNITS && at + 80 < n; u++) {
+            const vkn_tex *t = in->tex[u]; if (!t) continue;
+            char nm[32]; fc_tname(nm, sizeof nm, t); uint64_t v = 0; const int ver = fc_tex_ver(t, &v);
+            const vkn_tex *rd = fc_rd((vkn_tex *)(uintptr_t)t); const int32_t *lr = fc_lr_get(t);
+            at += (size_t)snprintf(o + at, n - at, " u%d %s %ux%u %s%s", u, nm, t->w, t->h, ver ? "no-version" : !t->pass_ever ? "cpu" : "cached", rd != t ? " (read from a page)" : "");
+            if (lr) at += (size_t)snprintf(o + at, n - at, " region %d,%d %dx%d", lr[0], lr[1], lr[2], lr[3]);
+        }
+    }
+}
 static void fc_cmp_put(const fc_ent *e) {
     fc_cmp *c = NULL; for (int i = 0; i < FC_CMP && !c; i++) if (!g_fc.cmp[i].live) c = &g_fc.cmp[i];
     VkCommandBuffer cb = vkn_cb();
     if (!c || !cb) return;
     const uint32_t bytes = (uint32_t)e->w * e->h * 4u;
-    if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * bytes, 16, &c->b)) return;
     vkn_tex *src = e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas;   // [mgpu P7c]
     if (!src || src->dead) return;
+    if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * bytes, 16, &c->b)) return;
+    fc_describe(c->desc, sizeof c->desc);   // [mgpu P7e]
     vkn_pass_layout(g_fc.t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); vkn_pass_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy r = {.bufferOffset = c->b.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {g_fc.rect[0], g_fc.rect[1], 0}, .imageExtent = {e->w, e->h, 1}};
     vkCmdCopyImageToBuffer(cb, g_fc.t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
     r.bufferOffset = c->b.off + bytes; r.imageOffset.x = e->x; r.imageOffset.y = e->y;
     vkCmdCopyImageToBuffer(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
     c->live = 1; c->frame = vkn_frame(); c->key = e->key; c->bytes = bytes; g_ups.fc_verify++;
+    c->page = e->page >= 0; memcpy(c->r, g_fc.rect, sizeof c->r);   // [mgpu P7d]
 }
 static void fc_cmp_check(int all) {
     for (int i = 0; i < FC_CMP; i++) {
         fc_cmp *c = &g_fc.cmp[i];
         if (!c->live || (!all && vkn_frame() < c->frame + 4)) continue;
         const int differ = memcmp(c->b.cpu, (const uint8_t *)c->b.cpu + c->bytes, c->bytes) != 0;
-        if (differ) {
+        if (differ) {   // [mgpu P7e] what differs: texels, their box in the region, how many lie within 3 texels of its edge, the largest step
+            const uint8_t *A = (const uint8_t *)c->b.cpu, *B = A + c->bytes; const int32_t W = c->r[2], H = c->r[3];
+            uint32_t nd = 0, ne = 0, md = 0; int32_t bx0 = W, by0 = H, bx1 = -1, by1 = -1; uint8_t sa[4] = {0}, sb[4] = {0};
+            for (int32_t y = 0; y < H; y++) for (int32_t x = 0; x < W; x++) {
+                const uint8_t *a = A + 4 * ((size_t)y * W + x), *b = B + 4 * ((size_t)y * W + x);
+                if (!memcmp(a, b, 4)) continue;
+                if (!nd) { memcpy(sa, a, 4); memcpy(sb, b, 4); }
+                nd++; if (x < 3 || y < 3 || x >= W - 3 || y >= H - 3) ne++;
+                for (int q = 0; q < 4; q++) { const uint32_t dd = a[q] > b[q] ? (uint32_t)(a[q] - b[q]) : (uint32_t)(b[q] - a[q]); if (dd > md) md = dd; }
+                if (x < bx0) bx0 = x; if (y < by0) by0 = y; if (x > bx1) bx1 = x; if (y > by1) by1 = y;
+            }
+            vkn_logf(RED "ui: filter cache self-check: %s entry %d,%d %dx%d key %016llx: %u of %d texels differ (%u within 3 of the edge), box %d,%d-%d,%d, largest step %u, first drawn %u %u %u %u / cached %u %u %u %u",
+                     c->page ? "page" : "atlas", c->r[0], c->r[1], W, H, (unsigned long long)c->key, nd, W * H, ne, bx0, by0, bx1, by1, md, sa[0], sa[1], sa[2], sa[3], sb[0], sb[1], sb[2], sb[3]);
+            vkn_logf(RED "ui: filter cache self-check: the epoch: %s", c->desc);
+            g_ups.fc_diff_edge += ne == nd;
+        }
+        if (differ && c->page && g_fc_pages) {   // [mgpu P7d] the pages off (every redirect made real, the page entries dropped), the atlas cache stays
+            g_ups.fc_differ++; g_ups.fc_page_off++;
+            UI_RED(RR_STATIC, "filter cache: a region kept in a page (key %016llx, %d,%d %dx%d) differs from the drawn one: the pages are off for this session (the atlas copies stay)",
+                   (unsigned long long)c->key, c->r[0], c->r[1], c->r[2], c->r[3]);
+            g_fc_pages = 0;
+            for (uint32_t p = 0; p < g_fc.npg; p++) if (g_fc.pg[p]) { const int32_t all[4] = {0, 0, (int32_t)g_fc.pg[p]->w, (int32_t)g_fc.pg[p]->h}; fc_rd_materialize(g_fc.pg[p], all); }
+            for (uint32_t k = 0; k < FC_N; k++) if (g_fc.e[k].live && g_fc.e[k].page >= 0) g_fc.e[k].live = 0;
+        } else if (differ) {
             g_ups.fc_differ++;
-            UI_RED(RR_STATIC, "filter cache: a cached region (key %016llx, %u bytes) differs from the drawn one%s", (unsigned long long)c->key, c->bytes,
+            UI_RED(RR_STATIC, "filter cache: a cached region (key %016llx, %d,%d %dx%d, %u bytes) differs from the drawn one%s", (unsigned long long)c->key, c->r[0], c->r[1], c->r[2], c->r[3], c->bytes,
                    g_fc.mode == 1 ? ": the cache is off for this session" : "");
             if (g_fc.mode == 1 || g_fc.mode == 3) { g_fc.mode = 0; g_ups.fc_mode = 0; }
             for (uint32_t k = 0; k < FC_N; k++) if (g_fc.e[k].live && g_fc.e[k].key == c->key) g_fc.e[k].live = 0;
@@ -780,7 +859,7 @@ static int fc_hit_page(vkn_tex *t, const fc_ent *e) {
     if (!pg || pg->dead || !g_fc_pages) return 0;
     fc_rd_drop_t(t);
     if (g_fc.nrd >= 32) return 0;
-    g_fc.rd[g_fc.nrd].t = t; g_fc.rd[g_fc.nrd].p = pg; g_fc.rd[g_fc.nrd].img = t->image; memcpy(g_fc.rd[g_fc.nrd].r, g_fc.rect, sizeof g_fc.rect); g_fc.nrd++;
+    g_fc.rd[g_fc.nrd].t = t; g_fc.rd[g_fc.nrd].p = pg; g_fc.rd[g_fc.nrd].img = t->image; fc_guard(g_fc.rect, t->w, t->h, g_fc.rd[g_fc.nrd].r); g_fc.nrd++;   // [mgpu P7d]
     g_ups.fc_rd_hits++;
     return 1;
 }
@@ -820,12 +899,17 @@ static void fc_end(void) {
     if (why < 0 && check) {   // drawn; the drawn region is compared with the stored slot (the slot stays)
         fc_cmp_put(e);
         fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
+        // [mgpu P7e] and then read from the page as a hit would be (the verify exercises what mode 1 consumes: later steps and composites
+        // read the cached content; the target holds the drawn one only for the compare)
+        if (e->page >= 0 && fc_hit_page(t, e)) { g_ups.fc_rd_verify++; g_ups.fc_rd_hits--; }   // (not counted as a hit)
     } else if (why < 0) {
         g_ups.fc_misses++;
         const int pgi = g_fc_pages ? fc_page_for(t, g_fc.rect) : -1;   // [mgpu P7c]
-        if (pgi >= 0) { fc_rd_materialize(g_fc.pg[pgi], g_fc.rect); e = fc_alloc_page(key, g_fc.rect, pgi); }
+        int32_t gr[4]; fc_guard(g_fc.rect, t->w, t->h, gr);   // [mgpu P7d]
+        if (pgi >= 0) { fc_rd_materialize(g_fc.pg[pgi], gr); e = fc_alloc_page(key, g_fc.rect, pgi); }
         else e = fc_alloc(key, w, h);
-        if (!vkn_pass_copy_rect(e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas, e->x, e->y, t, g_fc.rect[0], g_fc.rect[1], w, h)) {
+        if (e->page >= 0 ? !vkn_pass_copy_rect(g_fc.pg[e->page], gr[0], gr[1], t, gr[0], gr[1], (uint32_t)gr[2], (uint32_t)gr[3])
+                         : !vkn_pass_copy_rect(g_fc.atlas, e->x, e->y, t, g_fc.rect[0], g_fc.rect[1], w, h)) {
             g_ups.fc_stored++;
             fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
         } else e->live = 0;
@@ -1539,7 +1623,7 @@ static void lh_dsclip_mark(void) {
         if (h->kind == LH_TGT) { cc = ((lh_ptr *)(void *)h)->a; cd = ((lh_ptr *)(void *)h)->b; continue; }
         if (h->kind != LH_REG || !h->grp || !cd) continue;
         vkn_tex *t = ((lh_ptr *)(void *)h)->a, *d = cd; (void)cc;
-        uint16_t wr = 0; int bad = 0; uint32_t end = g_lh.n;
+        uint16_t wr = 0, any = 0; int bad = 0; uint32_t end = g_lh.n;
         vkn_tex *ec = t, *ed = d;
         for (uint32_t a2 = here + h->size; a2 < g_lh.n;) {   // the epoch
             const lh_hdr *x = (const lh_hdr *)(const void *)(g_lh.buf + a2);
@@ -1548,11 +1632,13 @@ static void lh_dsclip_mark(void) {
             if (x->kind == LH_CDS) { const lh_ptr *q = (const lh_ptr *)(const void *)x; if (q->v[0] || (uint8_t)q->v[1] == 0xff) { bad = 1; break; } wr |= (uint8_t)q->v[1]; }
             else if (x->kind == LH_DRAW) {
                 if (x->pad[0] & 1) { bad = 1; break; }
-                uint16_t r, w; int dr; lh_ds_units(x, &r, &w, &dr); wr |= w;
+                uint16_t r, w; int dr; lh_ds_units(x, &r, &w, &dr); wr |= w; any |= r | w;
             }
             if (a2 >= g_lh.n) end = g_lh.n;
         }
-        if (bad) continue;
+        any |= wr;
+        if (!any) continue;   // [mgpu P7d] (no DS use: nothing to clip, not counted)
+        if (bad) { g_ups.lh_dsclip_no++; continue; }
         if (wr) {   // dead after the epoch?
             uint16_t pend = wr; vkn_tex *dd = ed;
             for (uint32_t a3 = end; a3 < g_lh.n && pend;) {
@@ -1564,7 +1650,7 @@ static void lh_dsclip_mark(void) {
                 if (r & pend) break;
                 if (!dr) pend &= (uint16_t)~w;   // a clear: those units overwritten everywhere
             }
-            if (pend) continue;
+            if (pend) { g_ups.lh_dsclip_no++; continue; }
         }
         h->pad[0] |= 2; g_ups.lh_dsclip++;
     }
@@ -2230,9 +2316,36 @@ void vkn_ui_targets(vkn_tex *color, vkn_tex *depth) { LH_T0(); if (lh_want()) lh
 void vkn_ui_viewport(int32_t x, int32_t y, int32_t w, int32_t h) { LH_T0(); if (lh_want()) lh_vs(LH_VP, x, y, w, h); else ui_viewport_x(x, y, w, h); LH_T1(); }
 void vkn_ui_scissor(int32_t x, int32_t y, int32_t w, int32_t h) { LH_T0(); if (lh_want()) lh_vs(LH_SC, x, y, w, h); else ui_scissor_x(x, y, w, h); LH_T1(); }
 void vkn_ui_clear_ds(int depth, uint8_t mask) { LH_T0(); if (lh_want()) lh_clear_ds(depth, mask); else ui_clear_ds_x(depth, mask); LH_T1(); }
-void vkn_ui_clear_color(vkn_tex *t, const int32_t rect[4]) { LH_T0(); if (lh_want()) lh_clear_color(t, rect); else ui_clear_color_x(t, rect); LH_T1(); }
+static struct { const vkn_tex *t; int32_t o[4], g[4]; uint8_t on; } g_fcg_last;
+void vkn_ui_clear_color(vkn_tex *t, const int32_t rect[4]) {
+    if (g_fcg_last.on && rect && t == g_fcg_last.t && !memcmp(rect, g_fcg_last.o, 16)) rect = g_fcg_last.g;   // [mgpu P7e] the region's clear, grown
+    g_fcg_last.on = 0;
+    LH_T0(); if (lh_want()) lh_clear_color(t, rect); else ui_clear_color_x(t, rect); LH_T1();
+}
+// [mgpu P7e] DM_VK_NATIVE_UIFC_GUARD: a pushed target's region (TextureDrawBufferBegin's cleared rect) grows by FC_GUARD texels on every side
+// (clipped to the target) and its clear with it: a blur step's taps reach past the region the step before drew (F04 / G03: a 349x41 blur
+// step drawn twice from the same inputs differed - what it read beyond its input's region is whatever the target held there, from earlier
+// uses of that texture). With the band cleared those texels are transparent black every time: the filter cache's key then covers all its
+// step reads (exact), and the drawn image no longer depends on leftovers of other filters. 0 off, 1 on, -1 = the tile families 1 (the UI
+// layer hold's default), else 0.
+static int g_fcg_req = -1, g_fcg = -1;
+void vkn_ui_fc_guard_config(int mode) { g_fcg_req = mode < -1 || mode > 1 ? 0 : mode; g_fcg = -1; }
+static int fcg_on(void) {
+    if (g_fcg >= 0) return g_fcg;
+    if (g_fcg_req >= 0) return g_fcg = g_fcg_req;
+    if (!vkn_device()) return 0;
+    (void)lh_on(); g_fcg = g_lh.tile ? 1 : 0;
+    vkn_logf("ui filter guard (mgpu P7e): DM_VK_NATIVE_UIFC_GUARD=%d (family default; a pushed target's region and its clear grow by %d texels)", g_fcg, (int)FC_GUARD);
+    return g_fcg;
+}
 void vkn_ui_region(vkn_tex *t, const int32_t rect[4]) {
     if (!rect || rect[2] <= 0 || rect[3] <= 0) return;
+    int32_t g[4];
+    if (t && fcg_on()) {   // [mgpu P7e]
+        fc_guard(rect, t->w, t->h, g);
+        g_fcg_last.t = t; memcpy(g_fcg_last.o, rect, 16); memcpy(g_fcg_last.g, g, 16); g_fcg_last.on = 1; g_ups.fc_guard++;
+        rect = g;
+    }
     LH_T0(); if (lh_want()) lh_region(t, rect); else ui_region_x(t, rect); LH_T1();
 }
 void vkn_ui_pass_fence(void) { LH_T0(); if (g_lh.hold && !g_lh.replay) lh_fence(); else ui_fence_x(); LH_T1(); }

@@ -861,10 +861,11 @@ static void ui_pass_census(void) {
              D(lh_area_restart), D(lh_vdouble), (unsigned long long)a.lh_vdiffer);
     // [mgpu P7c] segments the hold started at a reuse; filter-cache hits answered by a page (no copy, no binding); pushed bindings never
     // made (never used) / made at first use; region epochs whose DS writes are dead after them (DS draws clipped)
-    vkn_logf("ui runs 3 (mgpu P7c): a presented frame: segments started at a reuse %.2f | filter cache pages %llu (%.1f MB alive), hits by a page %.2f, page regions made "
-             "real %.3f | pushed bindings never made %.2f, made at first use %.2f | region epochs DS-dead after %.2f, DS draws clipped %.2f",
-             D(lh_seg_reuse), (unsigned long long)a.fc_pages, (double)a.fc_page_bytes / mb, D(fc_rd_hits), D(fc_rd_real), D(lh_lazy_skipped), D(lh_lazy_bound),
-             D(lh_dsclip), D(region_dsclip));
+    vkn_logf("ui runs 3 (mgpu P7c): a presented frame: segments started at a reuse %.2f | filter cache pages %llu (%.1f MB alive), hits by a page %.2f (verified ones then read from it %.2f), page regions made "
+             "real %.3f, pages off by a self-check %llu (total) | pushed bindings never made %.2f, made at first use %.2f | region epochs with a DS use: dead after %.2f, "
+             "not %.2f; DS draws clipped %.2f | regions grown by the guard band %.2f, self-check differences only at the edge %llu (total)",
+             D(lh_seg_reuse), (unsigned long long)a.fc_pages, (double)a.fc_page_bytes / mb, D(fc_rd_hits), D(fc_rd_verify), D(fc_rd_real), (unsigned long long)a.fc_page_off, D(lh_lazy_skipped),
+             D(lh_lazy_bound), D(lh_dsclip), D(lh_dsclip_no), D(region_dsclip), D(fc_guard), (unsigned long long)a.fc_diff_edge);
 #undef D
     g_ups0 = a; g_ups_frame0 = fr;
 }
@@ -926,6 +927,7 @@ void dm_vkn_ui_register(void) {
         }
         { const char *rg = getenv("DM_VK_NATIVE_UIREGION"); vkn_ui_region_config(rg && *rg ? atoi(rg) : -1); }   // [mgpu P1] (-1 = render-pass tilers 1, else 0)
         { const char *fc = getenv("DM_VK_NATIVE_UIFC"); vkn_ui_fc_config(fc && *fc ? atoi(fc) : -1); }          // [mgpu P2]
+        { const char *fg = getenv("DM_VK_NATIVE_UIFC_GUARD"); vkn_ui_fc_guard_config(fg && *fg ? atoi(fg) : -1); }   // [mgpu P7e] (-1 = tile families 1)
         { const char *l = getenv("DM_VK_NATIVE_UILAYER"), *c = getenv("DM_VK_NATIVE_UICACHE");                  // [mgpu P7] (-1 = render-pass tilers 1, else 0)
           vkn_ui_layer_config(l && *l ? atoi(l) : -1, c && *c ? atoi(c) : -1); }
         vkn_ui_pass_config(e && *e ? atoi(e) : -1, v && *v ? atoi(v) : 0, r && *r ? atoi(r) : 0, sim_tiler);

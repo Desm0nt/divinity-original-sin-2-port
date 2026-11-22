@@ -112,6 +112,8 @@ void vkn_ui_region(vkn_tex *t, const int32_t rect[4]);   // the host's naming (r
 // compared: "differ" must stay 0), 3 poison (1 + a hit clears its region magenta one frame in 64); -1 = default 1. Any GPU (no UIPASS
 // needed). Install time.
 void vkn_ui_fc_config(int mode);
+// [mgpu P7e] DM_VK_NATIVE_UIFC_GUARD (vkn_ui.c): a pushed target's region and its clear grow by 16 texels (0 off, 1 on, -1 tile families 1).
+void vkn_ui_fc_guard_config(int mode);
 void vkn_ui_pass_fence(void);
 enum { VKN_UIP_DS_HIST, VKN_UIP_DS_FRAME, VKN_UIP_DS_SHARED, VKN_UIP_DS_SIZE, VKN_UIP_DS_DYING, VKN_UIP_DS_N };   // detach refusals
 enum { VKN_UIP_AR_API, VKN_UIP_AR_CLEAR, VKN_UIP_AR_MS, VKN_UIP_AR_SAVE, VKN_UIP_AR_N };                          // area refusals
@@ -153,6 +155,8 @@ typedef struct vkn_ui_pass_stats {
     // region about to be reused); pushed bindings of the hold's replay made real at their first use / never used (never bound)
     uint64_t fc_pages, fc_page_bytes, fc_rd_hits, fc_rd_real, lh_lazy_bound, lh_lazy_skipped;
     uint64_t lh_dsclip, region_dsclip;   // [mgpu P7c] region epochs proven DS-dead after them; their DS draws / masked clears clipped to the region
+    uint64_t lh_dsclip_no, fc_page_off;  // [mgpu P7d] region epochs with a DS use not proven dead (read later / run end / a whole clear); the pages turned off by a self-check
+    uint64_t fc_guard, fc_diff_edge, fc_rd_verify;   // (+ verified hits then read from their page)     // [mgpu P7e] regions grown by the guard band; self-check differences that lie only within 3 texels of the region's edge
 } vkn_ui_pass_stats;
 // [mgpu P7] flush reasons: an engine draw / depth read on GDraw's binding (a custom draw), a conflicting engine use, the layer used by the
 // engine (Combine), a pass end (a piece, the recording's close), the size limit, other
