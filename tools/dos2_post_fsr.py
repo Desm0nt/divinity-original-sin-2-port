@@ -8,11 +8,19 @@
    a 1:1 stretch (m.dpdx = 1 / width): the outputs must be equal bit for bit.
 3. Proof EASU (stretch ratio < 1): the module against an independent numpy FsrEasuF that reads the 12 texels by index (no gather corner
    arithmetic), on random images and positions at ratios 0.5 .. 0.9 incl. the drawn-part edge (clamp): max |difference| must stay < 2e-6.
+3b. [VK-DRS-FSR] the anti-aliasing pass before EASU (-DFSR_PRE -> ppfxaa_fsr_pre.frag.spv.inc, drawn by dm/gfx/vkn/vkn_fsr.c at s < 1):
+   against the translated PPFXAA at a 1:1 stretch (TexCoord0 = the texel centre = gl_FragCoord / size): bit for bit.
+3c. --jaggies (VK-DRS-FSR): a synthetic scene (hard edges at 3..80 degrees, 1-1.5 px lines) rendered point-sampled (no MSAA, like the
+   game's geometry) into the drawn part at 75 % / 50 %, moving 0.37 / 0.21 px a frame, upscaled by the MODULES in the interpreter:
+   the console (translated PPFXAA = FXAA at the output pixel + bilinear stretch, FSR off), today's FSR (EASU of the raw image) and the fix
+   (the pre pass at render resolution, then EASU of its output; the copy outside the pre pass's scissor is NaN: EASU must never read it).
+   Against an 8 x 8 supersampled reference: mean edge error and shimmer (frame-to-frame change against the reference's) on the edge
+   band; then the same with a numpy copy (checked against the modules) at 320 x 200, with RCAS 0.5 / 1.0 stops; PNG strips into --out.
 4. --images: offline before / after on the owner's screenshots (src/work/logs t4.png / light1.png, not in git): a crop box-downscaled to
    the ratio (a stand-in for the low-resolution render: no aliasing of its own - the real low render is sharper and jaggier), then upscaled
    bilinear (today's stretch) / EASU / EASU + RCAS 0.5 stops (the gear's medium sharpening); PSNR against the full-resolution crop and side
    by side PNGs into --out (default the scratch folder given, else work/fsr-shots).
-Usage: dos2_post_fsr.py [--n 400] [--no-build] [--images DIR_OF_PNG --out DIR]
+Usage: dos2_post_fsr.py [--n 400] [--jaggies] [--images DIR_OF_PNG --out DIR]
 """
 import argparse, struct, subprocess, sys, tempfile
 from pathlib import Path
@@ -46,6 +54,8 @@ F = np.float32
 
 
 INC_H = HERE.parent / 'dm' / 'android' / 'shaders' / 'ppfxaa_fsrh.frag.spv.inc'
+INC_P = HERE.parent / 'dm' / 'android' / 'shaders' / 'ppfxaa_fsr_pre.frag.spv.inc'   # [VK-DRS-FSR] the pre pass (-DFSR_PRE)
+PRE = []   # [VK-DRS-FSR] the pre pass module (build)
 
 
 def build_one(tr, inc, defines):
@@ -54,20 +64,27 @@ def build_one(tr, inc, defines):
         run([tool('glslc'), '--target-env=vulkan1.1', '-O', '-fshader-stage=frag', *defines, '-I', str(SRC.parent), '-o', str(spv), str(SRC)])
         run([tool('spirv-val'), '--target-env', 'vulkan1.1', str(spv)])
         data = spv.read_bytes()
-    check_iface(data, tr['spirv'])
+    if '-DFSR_PRE' in defines:   # its own draw (vkn_fsr.c): no inputs, the same output, descriptors a subset of the translated ones
+        n, t = Spv(data), Spv(tr['spirv'])
+        if n.io(1) or n.io(3) != t.io(3): raise SystemExit('pre pass interface: inputs %s (want none), outputs %s / %s' % (n.io(1), n.io(3), t.io(3)))
+        extra = {(s_, b) for _, k, s_, b, _ in n.descriptors()} - {(s_, b) for _, k, s_, b, _ in t.descriptors()}
+        if extra: raise SystemExit('pre pass descriptors not in the translated module: %s' % sorted(extra))
+    else: check_iface(data, tr['spirv'])
     w = struct.unpack('<%dI' % (len(data) // 4), data)
     lines = ['// [DOS2] N6 DM_HACK_FSR: SPIR-V of tools/dos2_post/PPFXAA_fsr.frag (glslc --target-env=vulkan1.1 -O %s), made by tools/dos2_post_fsr.py'
              % ' '.join(defines)]
+    if '-DFSR_PRE' in defines: lines[0] = lines[0].replace('N6 DM_HACK_FSR', 'VK-DRS-FSR pre pass (FXAA at the render resolution before EASU)')
     for i in range(0, len(w), 8): lines.append(', '.join('0x%08x' % x for x in w[i:i + 8]) + ',')
     inc.write_text('\n'.join(lines) + '\n')
-    print('built %s: %d words (translated PPFXAA %d words), interface = the translated one' % (inc.name, len(w), len(tr['spirv']) // 4))
+    print('built %s: %d words (translated PPFXAA %d words), interface %s' % (inc.name, len(w), len(tr['spirv']) // 4,
+          'checked (no inputs, the output, a subset of the descriptors)' if '-DFSR_PRE' in defines else '= the translated one'))
     return data
 
 
 def build(bundles):
     """-> (fp32 module, half module (-DEASU_H), the translated PPFXAA after spirv-opt -O)"""
     tr = read_bundle(Path(bundles) / (KEY + '.xgs'))
-    data = build_one(tr, INC, []); data_h = build_one(tr, INC_H, ['-DEASU_H'])
+    data = build_one(tr, INC, []); data_h = build_one(tr, INC_H, ['-DEASU_H']); PRE[:] = [build_one(tr, INC_P, ['-DFSR_PRE'])]
     with tempfile.TemporaryDirectory() as tmp:
         to, too = Path(tmp) / 'tr.spv', Path(tmp) / 'tro.spv'
         to.write_bytes(tr['spirv']); run([tool('spirv-opt'), '-O', str(to), '-o', str(too)])
@@ -281,6 +298,202 @@ def prove_easu(nat, n):
     return bad
 
 
+# ---------------------------------------------------------------------------------------------------------------- [VK-DRS-FSR] pre pass
+def prove_pre(nat_p, tr_opt, n):
+    """the pre pass at texel centres (its TexCoord0 = gl_FragCoord / size) == the translated PPFXAA at a 1:1 stretch, bit for bit"""
+    rng = np.random.default_rng(0xfa5a)
+    mt, mp = SI.Module(tr_opt), SI.Module(nat_p)
+    bad = 0
+    for it in range(n):
+        inp, ubo, tx = PM.case('PPFXAA', rng, False)
+        img = tx[10]; fc = inp['FragCoord']
+        tc = (float(F(F(fc[0]) / F(img.w))), float(F(F(fc[1]) / F(img.h))), 0.0, 1.0)
+        a = mt.run({'FragCoord': fc, 1: tc}, ubo, tx); b = mp.run({'FragCoord': fc}, ubo, tx)
+        if not PM.same(a, b):
+            bad += 1
+            if bad <= 3: print('  MISMATCH pre pass fc=%s translated=%s pre=%s' % (fc, a, b))
+    print('pre pass (FXAA at the render resolution): %d random texel centres, == the translated PPFXAA at 1:1 bit for bit: %d / %d' % (n, n - bad, n))
+    return bad
+
+
+# ---------------------------------------------------------------------------------------------------------------- [VK-DRS-FSR] jaggies
+def scene(x, y, t, sc):
+    """a continuous scene in output pixels of a (320 sc) x (200 sc) target; t = frame (motion 0.37 / 0.21 px a frame)"""
+    X, Y = x - F(0.37 * t), y - F(0.21 * t)
+    bg = 0.35 + 0.12 * np.sin(X * (0.11 / sc)) * np.cos(Y * (0.09 / sc)) + 0.08 * np.sin((X + 2 * Y) * (0.05 / sc))
+    rgb = np.stack([bg, bg * 0.9, bg * 0.8], -1)
+    for cx, cy, ang, col in ((60, 50, 0.05, (0.95, 0.9, 0.7)), (170, 60, 0.18, (0.1, 0.15, 0.2)), (270, 55, 0.52, (0.9, 0.3, 0.2)),
+                             (80, 140, 0.785, (0.85, 0.85, 0.9)), (200, 150, 1.4, (0.05, 0.05, 0.08))):   # rotated quads: edges at 3 .. 80 degrees
+        m = np.ones(X.shape, bool)
+        for qd in range(4):
+            a = ang + qd * np.pi / 2; m &= (np.cos(a) * (X - cx * sc) + np.sin(a) * (Y - cy * sc)) < 28 * sc
+        rgb = np.where(m[..., None], np.array(col, F), rgb)
+    for cx, cy, a, w, col in ((150, 110, 0.07, 1.2, (1, 1, 1)), (150, 120, 0.33, 0.8, (1, 0.95, 0.8)), (290, 120, 1.25, 1.5, (0.02, 0.02, 0.02)),
+                              (40, 185, 0.6, 1.0, (0.95, 0.95, 1.0))):                                  # thin lines (output px wide)
+        d = np.abs(-np.sin(a) * (X - cx * sc) + np.cos(a) * (Y - cy * sc))
+        rgb = np.where((d < w / 2)[..., None], np.array(col, F), rgb)
+    return rgb.astype(F)
+
+
+def ground_truth(W, H, t, ss=8):
+    o = (np.arange(ss) + 0.5) / ss; yy, xx = np.mgrid[0:H, 0:W].astype(F); acc = np.zeros((H, W, 3), F)
+    for a_ in o:
+        for b_ in o: acc += scene(xx + F(a_), yy + F(b_), t, W / 320.0)
+    return acc / F(ss * ss)
+
+
+def low_target(W, H, s, t):
+    """the engine's full-size target: the point-sampled render (no MSAA) in its top-left drawn part, the rest the part's edge (a stale stand-in)"""
+    lw, lh = int(np.floor(s * W + 0.5)), int(np.floor(s * H + 0.5))
+    yy, xx = np.mgrid[0:lh, 0:lw].astype(F)
+    lo = scene((xx + F(0.5)) / F(s), (yy + F(0.5)) / F(s), t, W / 320.0)
+    tg = np.empty((H, W, 4), F); tg[..., 3] = 1
+    tg[:lh, :lw, :3] = lo; tg[:lh, lw:, :3] = lo[:, -1:]; tg[lh:, :, :3] = tg[lh - 1:lh, :, :3]
+    return tg
+
+
+def lum(a): return a[..., 0] * F(0.299) + a[..., 1] * F(0.587) + a[..., 2] * F(0.114)
+
+
+def measure(outs, gts, W, H):
+    """{method: [frames]} -> {method: (edge error, shimmer)} on the reference's edge band (the right / bottom 5 % dropped)"""
+    gl = lum(np.array(gts)); gy, gx = np.gradient(gl, axis=(1, 2)); band = np.hypot(gx, gy) > 0.04
+    b = band.copy()
+    for sh in ((0, 1), (0, -1), (1, 0), (-1, 0)): b |= np.roll(band, sh, axis=(1, 2))
+    b[:, :, int(W * 0.95):] = False; b[:, int(H * 0.95):, :] = False
+    res = {}
+    for k, o in outs.items():
+        ol = lum(np.array(o)); dm, dg = np.diff(ol, axis=0), np.diff(gl, axis=0)
+        res[k] = (float(np.abs(ol - gl)[b].mean()), float(np.abs(dm - dg)[b[1:]].mean()))
+    return res
+
+
+METHODS = ('console (FSR off)', 'EASU (today)', 'FXAA pre + EASU (fix)')
+
+
+def jaggies_interp(tr_opt, nat_h, nat_p, frames=6, W=64, H=40):
+    """the three stretch passes as the MODULES run them (interpreter) on the small scene -> rows, worst |fxaa_np - pre module|, NaN read"""
+    mt, mh, mp = SI.Module(tr_opt), DModule(nat_h), SI.Module(nat_p)
+    c1 = struct.pack('<2fi', 1 / 12, 0.5, 1) + bytes(244); c15 = PM.cbuf({13: (0, 0, W, H)})
+    rows = []; worst_np = 0.0; nan_seen = 0
+    for s in (0.75, 0.5):
+        outs = {k: [] for k in METHODS}; gts = []
+        sw, sh = min(W, int(np.ceil(s * W)) + 1), min(H, int(np.ceil(s * H)) + 1)   # vkn_fsr.c's scissor of the pre pass
+        for t in range(frames):
+            gts.append(ground_truth(W, H, t)); tg = low_target(W, H, s, t); tex = SI.Texture(tg, 'linear')
+            pre = np.full((H, W, 4), np.nan, F)   # the copy: undefined outside the scissor (NaN here: EASU must never read it)
+            for y in range(sh):
+                for x in range(sw):
+                    pre[y, x] = mp.run({'FragCoord': (x + 0.5, y + 0.5, 0.5, 1.0)}, {16: c15, 22: c1}, {10: tex})[0]
+            gx_, gy_ = np.meshgrid((np.arange(sw, dtype=F) + F(0.5)) / F(W), (np.arange(sh, dtype=F) + F(0.5)) / F(H))
+            dif = np.abs(fxaa_np(tg, gx_, gy_) - pre[:sh, :sw, :3]).max(-1); worst_np = max(worst_np, float(np.mean(dif > 1e-4)))
+            ptex = SI.Texture(pre, 'linear'); mh.dpdx, mh.dpdy = s / W, s / H
+            o = {k: np.zeros((H, W, 3), F) for k in METHODS}
+            for y in range(H):
+                for x in range(W):
+                    inp = {'FragCoord': (x + 0.5, y + 0.5, 0.5, 1.0), 1: (float(F((x + 0.5) / W * s)), float(F((y + 0.5) / H * s)), 0.0, 1.0)}
+                    o[METHODS[0]][y, x] = mt.run(inp, {16: c15, 22: c1}, {10: tex})[0][:3]
+                    o[METHODS[1]][y, x] = mh.run(inp, {16: c15, 22: c1}, {10: tex})[0][:3]
+                    o[METHODS[2]][y, x] = mh.run(inp, {16: c15, 22: c1}, {10: ptex})[0][:3]
+            nan_seen += int(np.isnan(o[METHODS[2]]).sum())
+            for k in METHODS: outs[k].append(o[k])
+        for k, (e, sm) in measure(outs, gts, W, H).items(): rows.append((s, k, e, sm))
+    return rows, worst_np, nan_seen
+
+
+def fxaa_np(img, u, v):
+    """numpy copy of PPFXAA_mobile.frag fxaa() (c1 = 1/12, 0.5, 1; c15[13].zw = the texture size); clamp-to-edge bilinear"""
+    h, w = img.shape[:2]
+    def fetch(i, j): return img[np.clip(j, 0, h - 1), np.clip(i, 0, w - 1)]
+    def bil(uu, vv):   # as spv_interp Texture.sample (double precision weights)
+        x = uu.astype(np.float64) * w - 0.5; y = vv.astype(np.float64) * h - 0.5; i0 = np.floor(x).astype(int); j0 = np.floor(y).astype(int)
+        fx = (x - i0)[..., None]; fy = (y - j0)[..., None]
+        return ((fetch(i0, j0) * (1 - fx) + fetch(i0 + 1, j0) * fx) * (1 - fy) + (fetch(i0, j0 + 1) * (1 - fx) + fetch(i0 + 1, j0 + 1) * fx) * fy).astype(F)
+    def gat(uu, vv, o=0):   # as spv_interp Texture.gather (the footprint in 8 sub-texel bits, like a GPU)
+        x = uu.astype(np.float64) * w - 0.5; y = vv.astype(np.float64) * h - 0.5
+        i0 = np.floor(np.round(x * 256) / 256).astype(int) + o; j0 = np.floor(np.round(y * 256) / 256).astype(int) + o
+        g = lambda i, j: fetch(i, j)[..., 1]
+        return g(i0, j0 + 1), g(i0 + 1, j0 + 1), g(i0 + 1, j0), g(i0, j0)
+    cm = bil(u, v); M = cm[..., 1]
+    S, SE, E, _ = gat(u, v); Wt, _, N, NW = gat(u, v, -1)
+    rmax = np.maximum(np.maximum(E, np.maximum(S, M)), np.maximum(Wt, N)); rng_ = rmax - np.minimum(np.minimum(Wt, N), np.minimum(E, np.minimum(S, M)))
+    early = rng_ < np.maximum(F(0), rmax * F(0.16666667))
+    NE = bil(u + F(1) / F(w), v - F(1) / F(h))[..., 1]; SW = bil(u - F(1) / F(w), v + F(1) / F(h))[..., 1]
+    we, ns = E + Wt, S + N; ry, rx = F(1) / F(h), F(1) / F(w)
+    nwne, sene, sesw, nwsw = NW + NE, SE + NE, SE + SW, NW + SW
+    ea = np.abs(-2 * M + we) * 2 + np.abs(-2 * N + nwne) + np.abs(-2 * S + sesw); eb = np.abs(-2 * M + ns) * 2 + np.abs(-2 * E + sene) + np.abs(-2 * Wt + nwsw)
+    vert = eb >= ea; horz = ~vert
+    l1 = np.where(eb < ea, Wt, N); l2 = np.where(horz, E, S); sx = np.where(horz, F(0), rx); sy = np.where(horz, ry, F(0))
+    g1, g2 = np.abs(l1 - M), np.abs(l2 - M); pairP = g1 >= g2
+    ln = np.where(vert, ry, rx); ln = np.where(pairP, -ln, ln)
+    vb = np.where(vert, ln * F(0.5) + v, v); ub = np.where(horz, ln * F(0.5) + u, u)
+    yP, xP, xN, yN = sy + vb, sx + ub, ub - sx, vb - sy
+    gg = lambda x, y: bil(x, y)[..., 1]
+    tP, tN = gg(xP, yP), gg(xN, yN); lnn = np.where(pairP, M + l1, M + l2); gs = np.maximum(g1, g2) * F(0.25)
+    with np.errstate(all='ignore'): tt = np.nan_to_num(np.clip((F(1) / rng_) * np.abs(((ns + we) * 2 + sene + nwsw) * F(1 / 12) - M), 0, 1))
+    sp = (F(-2) * tt + F(3)) * tt * tt; ltM = M < lnn * F(0.5)
+    eA, eB = F(-0.5) * lnn + tP, F(-0.5) * lnn + tN
+    nA = ~(np.abs(eA) >= gs); ltB = np.abs(eB) < gs; nB = ~(np.abs(eB) >= gs)
+    xA = np.where(nA, sx * F(1.5) + xP, xP); yA = np.where(nA, sy * F(1.5) + yP, yP); xB = np.where(ltB, sx * F(-1.5) + xN, xN); yB = np.where(nB, sy * F(-1.5) + yN, yN)
+    a1 = nB | nA
+    eB = np.where(a1 & nB, F(-0.5) * lnn + gg(xB, yB), eB); eA = np.where(a1 & nA, F(-0.5) * lnn + gg(xA, yA), eA)
+    aB, aA = np.abs(eB), np.abs(eA); ltB2 = aB < gs; nB2 = np.where(a1, ~(aB >= gs), nB); nA2 = np.where(a1, ~(aA >= gs), nA)
+    xB = np.where(a1 & ltB2, sx * F(-3) + xB, xB); yB = np.where(a1 & nB2, sy * F(-3) + yB, yB); xA = np.where(a1 & nA2, sx * F(3) + xA, xA); yA = np.where(a1 & nA2, sy * F(3) + yA, yA)
+    a2 = a1 & (nB2 | nA2)
+    eB = np.where(a2 & nB2, F(-0.5) * lnn + gg(xB, yB), eB); eA = np.where(a2 & nA2, F(-0.5) * lnn + gg(xA, yA), eA)
+    aB, aA = np.abs(eB), np.abs(eA)
+    yB = np.where(a2 & ~(aB >= gs), sy * F(-12) + yB, yB); xB = np.where(a2 & (aB < gs), sx * F(-12) + xB, xB)
+    m3 = a2 & ~(aA >= gs); xA = np.where(m3, sx * F(12) + xA, xA); yA = np.where(m3, sy * F(12) + yA, yA)
+    dN = np.where(horz, v - yB, u - xB); dP = np.where(horz, yA - v, xA - u)
+    good = np.where(dN < dP, (eB < 0) != ltM, (eA < 0) != ltM)
+    with np.errstate(all='ignore'): po = np.where(good, (F(1) / (dP + dN)) * -np.minimum(dP, dN) + F(0.5), F(0))
+    m = np.maximum(sp * sp * F(0.75), po)
+    uf = np.where(horz, m * ln + u, u); vf = np.where(vert, m * ln + v, v)
+    return np.where(early[..., None], cm, bil(uf, vf))[..., :3]
+
+
+def jaggies_np(frames=8, W=320, H=200):
+    """the same three passes in numpy at 320 x 200 (fxaa_np checked against the pre module; easu_image = the EASU form), + RCAS"""
+    rows = []; strips = {}
+    for s in (0.75, 0.5):
+        outs = {k: [] for k in METHODS}; gts = []
+        lw, lh = int(np.floor(s * W + 0.5)), int(np.floor(s * H + 0.5))
+        yy, xx = np.mgrid[0:H, 0:W].astype(F); u, v = (xx + F(0.5)) / F(W) * F(s), (yy + F(0.5)) / F(H) * F(s)
+        ly, lx = np.mgrid[0:lh, 0:lw].astype(F)
+        for t in range(frames):
+            gts.append(ground_truth(W, H, t, 6)); tg = low_target(W, H, s, t)
+            outs[METHODS[0]].append(fxaa_np(tg, u, v))
+            outs[METHODS[1]].append(easu_image(tg[:lh, :lw, :3], W, H))
+            outs[METHODS[2]].append(easu_image(fxaa_np(tg, (lx + F(0.5)) / F(W), (ly + F(0.5)) / F(H)), W, H))
+        for st in (None, 1.0, 0.5):
+            o2 = outs if st is None else {k + ' + RCAS %.1f' % st: [rcas(np.clip(x, 0, 1), st) for x in v_] for k, v_ in outs.items()}
+            for k, (e, sm) in measure(o2, gts, W, H).items(): rows.append((s, k, e, sm))
+        strips[s] = (gts[0], {k: v_[0] for k, v_ in outs.items()})
+    return rows, strips
+
+
+def jaggies(tr_opt, nat_h, nat_p, out_dir):
+    rows, worst, nans = jaggies_interp(tr_opt, nat_h, nat_p)
+    bad = 0
+    print('jaggies, the modules in the interpreter (64 x 40, 6 frames moving 0.37 / 0.21 px; numpy fxaa copy vs the pre module: pixels off by > 1e-4 '
+          'at most %.2f %% of a frame; NaN of the copy outside the pre pass that EASU read: %d):' % (worst * 100, nans))
+    for s_, k, e, sm in rows: print('  %3d %%  %-26s edge error %.4f  shimmer %.4f' % (s_ * 100, k, e, sm))
+    if worst > 0.005 or nans: bad += 1; print('  FAIL: numpy fxaa differs from the pre module / EASU read past the pre pass')
+    for sc in (0.75, 0.5):
+        r = {k: (e, sm) for s_, k, e, sm in rows if s_ == sc}
+        if not r[METHODS[2]][1] < r[METHODS[1]][1]: bad += 1; print('  FAIL: at %d %% the fix does not shimmer less than today' % (sc * 100))
+    rows2, strips = jaggies_np()
+    print('jaggies, numpy at 320 x 200 (8 frames):')
+    for s_, k, e, sm in rows2: print('  %3d %%  %-40s edge error %.4f  shimmer %.4f' % (s_ * 100, k, e, sm))
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+    for s_, (gt, o) in strips.items():
+        st = np.concatenate([np.clip(t_[40:160, 20:300], 0, 1) for t_ in [gt] + [o[k] for k in METHODS]], axis=0)
+        Image.fromarray((st * 255 + 0.5).astype(np.uint8)).resize((280 * 3, 480 * 3), Image.NEAREST).save(out / ('jaggies_%d.png' % int(s_ * 100)))
+    print('  strips (reference | console | EASU today | fix), x3 nearest: %s' % out)
+    return bad
+
+
 # ---------------------------------------------------------------------------------------------------------------- offline images
 def easu_image(lo, out_w, out_h):
     """vectorised FsrEasuF of the whole output (same formulas as easu_ref; the input = the drawn part, so no clamp needed)"""
@@ -364,11 +577,14 @@ def main():
     ap.add_argument('--bundles', default=str(WORK / 'shaders-vk'))
     ap.add_argument('--n', type=int, default=400)
     ap.add_argument('--images', default='')
+    ap.add_argument('--jaggies', action='store_true', help='VK-DRS-FSR: the jaggies / shimmer measure (interpreter + numpy, a few minutes)')
     ap.add_argument('--out', default=str(WORK / 'fsr-shots'))
     a = ap.parse_args()
     nat, nat_h, tr_opt = build(a.bundles)
     bad = prove_11(nat, tr_opt, a.n) + prove_easu(nat, a.n)
     print('half module (-DEASU_H):'); bad += prove_11(nat_h, tr_opt, a.n) + prove_easu_h(nat_h, a.n)
+    bad += prove_pre(PRE[0], tr_opt, a.n)   # [VK-DRS-FSR]
+    if a.jaggies: bad += jaggies(tr_opt, nat_h, PRE[0], a.out)
     if a.images: error_bound_h(a.images, a.n * 5); images(a.images, a.out)
     if bad: raise SystemExit('%d failures' % bad)
 

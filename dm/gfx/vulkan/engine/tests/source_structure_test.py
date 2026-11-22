@@ -3705,14 +3705,14 @@ def nrdrift_check():   # [DOS2] NR-DRIFT (docs/dos2/nr/NR-DRIFT.md): the "[nr] g
     assert 'if (hold != g_hold && g_tgt_mode) { g_hold = hold; dq_publish(); }' in q and 'if (g_settle.mode) {' in q, 'NR-DRIFT: the monitor applies the hold only with the switch'
     assert 'int dm_dos2_drs_info(float *pct, int *hold, float *target_ms) {' in q, 'NR-DRIFT: the DRS state for the growth line'
     assert (root / 'gfx/vulkan/engine/tests/nr_drift_test.c').is_file() and (root / 'gfx/vulkan/engine/xbg_nr_probe.comp').is_file(), 'NR-DRIFT: host test and probe source exist'
-    # DM_DOS2_DRS_SPIKE: default 0, the site words checked before the jump goes in, the cave from nr_drift.h (Unicorn-tested)
-    assert 'const char *sp = getenv("DM_DOS2_DRS_SPIKE"); int sm = sp && *sp ? atoi(sp) : 0;' in q, 'NR-DRIFT: DM_DOS2_DRS_SPIKE default 0'
+    # DM_DOS2_DRS_SPIKE: default 1 since VK-DRS-FSR (22.11; was 0), the site words checked before the jump goes in, the cave from nr_drift.h (Unicorn-tested)
+    assert 'const char *sp = getenv("DM_DOS2_DRS_SPIKE"); int sm = sp && *sp ? atoi(sp) : 1;' in q, 'NR-DRIFT / VK-DRS-FSR: DM_DOS2_DRS_SPIKE default 1'
     si = q[q.index('static int dq_spike_install(module_t *m, uint32_t mode) {'):q.index('void dm_dos2_quality_install(void);   // main.c host_preload')]
     assert si.index('memcmp(m->base + NRD_SPIKE_SITE, nrd_spike_orig, sizeof nrd_spike_orig)') < si.index('dq_poke(m, NRD_SPIKE_SITE, j, 4)'), 'NR-DRIFT: spike site checked word for word first'
     assert 'memcpy(c, nrd_spike_cave, sizeof nrd_spike_cave);' in si and 'nrd_spike_init((uint32_t *)g_q, mode);' in si, 'NR-DRIFT: the cave and its page from nr_drift.h'
     assert (root / 'gfx/vulkan/engine/tests/nr_drift_cave_test.py').is_file(), 'NR-DRIFT: the Unicorn test of the cave exists'
     print('PASS: NR-DRIFT: nr_drift.h pure C; growth .inc inside the unnamed namespace after the containers; probe after the slot-begin barrier, own 4 stamps, '
-          'a barrier after each item, one item a half period, never waits; DOS2 default on, 0 = nothing; DM_DOS2_DRS_SETTLE default 0, publish held / normal; DM_DOS2_DRS_SPIKE default 0, site checked, cave from nr_drift.h')
+          'a barrier after each item, one item a half period, never waits; DOS2 default on, 0 = nothing; DM_DOS2_DRS_SETTLE default 0, publish held / normal; DM_DOS2_DRS_SPIKE default 1 (VK-DRS-FSR), site checked, cave from nr_drift.h')
 
 
 def inputatt_check():   # [DOS2] NR-ONCHIP on the phone 19.11: S2F light.s2 reads Sky through an input attachment (SPIR-V capability 40);
@@ -4328,5 +4328,51 @@ def nrz11_check():   # [DOS2] NR-ZERO Z8 refusals and the walker's cost (docs/do
         assert est < 1000, 'Z11: the line "%s..." may not fit xbg_logf\'s 1 024 bytes (%d)' % (fmt[:40], est)
     return 'NR-ZERO Z8 section 39: a twin fragment shader is answered under its own shaders (DM_NR_Z8_TWIN), every other guard is a changed State; a vertex range is a value, not a word of the answer; buckets of four ways, the head compared first, the seqlock with fences; the walker\'s outcome rides with the mark and is counted at the command section; no values records for draw2 alone; every z8 line fits the log buffer'
 print('PASS: '+nrz11_check())
+def vkdrsfsr_check():   # [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): the 3D-resolution row live; the FXAA pre pass before EASU
+    rd = lambda p: (root / p).read_text(encoding='utf-8')
+    q = rd('host/hle_dos2_quality.c'); j = rd('android/app/src/main/java/com/xiaoboluo/d2r/Tl2Gear.java'); act = rd('android/app/src/main/java/com/xiaoboluo/d2r/DmActivity.java')
+    jni = rd('android/jni_android.c')
+    # native: one live call for every choice of the row; the cave always in with our page (factor 1 = exact); the monitor keeps the object
+    assert 'int dm_dos2_res3d_live(int fixed_pct, int fps, int floor_pct) {' in q and 'if (pg) g_cave = !dq_cave_install(m);' in q, 'VK-DRS-FSR: the live call; the ceiling cave always in'
+    lv = q[q.index('int dm_dos2_res3d_live(int fixed_pct, int fps, int floor_pct) {'):]
+    lv = lv[:lv.index('\n}\n')]
+    assert 'if (!g_q || !g_tgt_mode)' in lv and 'if (!g_cave)' in lv and 'atomic_store(&g_user_pct, ce); atomic_store(&g_live_floor, fl);' in lv and 'atomic_store(&g_live_on, 1);' in lv, \
+        'VK-DRS-FSR: the live call needs the target copy and the cave, sets ceiling / floor, then arms the keeper'
+    mon = q[q.index('static void *dq_monitor(void *arg) {'):q.index('// [DOS2] N6 DM_HACK_LOD')]
+    assert 'if (atomic_load(&g_live_on)) dq_live_keep(d);' in mon, 'VK-DRS-FSR: the monitor keeps the DRS object only after a live call'
+    kp = q[q.index('static void dq_live_keep(const dq_drs_t *d) {'):q.index('static void *dq_monitor(void *arg) {')]
+    assert 'w->min_w = mw; w->min_h = mh;' in kp and 'w->cur_w = nw; w->cur_h = nh;' in kp and '(int)((float)d->max_w * (fl / 100.0f))' in kp, 'VK-DRS-FSR: the keeper writes min (SetSize\'s rule) and current'
+    assert 'static _Atomic int g_user_pct = 100;' in q, 'VK-DRS-FSR: the ceiling is read by the monitor while the gear writes it'
+    assert (root / 'gfx/vulkan/engine/tests/nr_drs_live_test.py').is_file(), 'VK-DRS-FSR: the Unicorn test of the controller with the live calls'
+    # JNI + Java: the row is live for every choice; the old live call stays (pause-menu mode switch on old builds)
+    assert 'JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Res3d(JNIEnv *env, jclass cls, jint fixed_pct, jint fps, jint floor_pct)' in jni, 'VK-DRS-FSR: JNI'
+    assert 'static native boolean nativeSetDos2Res3d(int fixedPct, int fps, int floorPct);' in act, 'VK-DRS-FSR: DmActivity native'
+    dl = j[j.index('static boolean dos2DrsLive(DmActivity a, boolean hh, String why) {'):]
+    dl = dl[:dl.index('\n    }\n')]
+    assert 'DmActivity.nativeSetDos2Res3d(d[0] == 1 ? 0 : res, d[1], d[2])' in dl, 'VK-DRS-FSR: the gear hands every choice to the live call'
+    r3 = j[j.index('static final class Res3d implements GearSettings.Section {'):j.index('static boolean dos2FsrPref(SharedPreferences p) {')]
+    assert 'R.string.dos2_res3d_for_docked), true));' in r3 and 'g.when(g.str(R.string.dos2_drs_min), true)' in r3 and 'g.when(g.str(R.string.dos2_drs_target), true)' in r3, 'VK-DRS-FSR: the row and its sub-rows say "at once"'
+    assert 'public void after(GearSettings g) { dos2DrsLive(a, a.startedHandheld, "gear"); }' in r3 and 'Tl2Gear.dos2DrsLive(this, !on, "pause menu mode switch")' in act, 'VK-DRS-FSR: live on Save and on the pause-menu mode switch'
+    for f in ('values', 'values-ru'):
+        x = rd('android/app/src/main/res/%s/d3_settings.xml' % f)
+        n3 = x[x.index('<string name="dos2_res3d_note">'):]; n3 = n3[:n3.index('</string>')]
+        assert 'next launch' not in n3 and 'следующего запуска' not in n3, 'VK-DRS-FSR: the note no longer says "next launch" (%s)' % f
+    # FSR: the pre pass module (built by tools/dos2_post_fsr.py -DFSR_PRE, proven = the translated PPFXAA at 1:1), the piece, its install
+    frag = (root.parent / 'tools/dos2_post/PPFXAA_fsr.frag').read_text(encoding='utf-8')
+    assert '#ifdef FSR_PRE\nvec4 TexCoord0;' in frag and 'TexCoord0 = vec4(gl_FragCoord.xy / vec2(textureSize(tSrc, 0)), 0.0, 1.0);\n    outColor = fxaa();' in frag, 'VK-DRS-FSR: the pre pass = fxaa() at the texel centre'
+    inc = rd('android/shaders/ppfxaa_fsr_pre.frag.spv.inc')
+    assert '-DFSR_PRE' in inc.split('\n')[0] and '0x07230203,' in inc.split('\n')[1], 'VK-DRS-FSR: SPIR-V of the pre pass'
+    fsr = rd('gfx/vkn/vkn_fsr.c'); named = rd('gfx/vkn/vkn_shlib_named.cpp')
+    assert '#include "../../android/shaders/ppfxaa_fsr_pre.frag.spv.inc"' in fsr and 'vkn_fx_register("fsr-aa", fsr_fx, NULL, 450)' in fsr, 'VK-DRS-FSR: the piece (order 450: after post 400)'
+    assert 'if ((g_fsr == 1 || g_fsr == 3) && m == 1 && vkn_fsr_install) vkn_fsr_install(-1);' in named, 'VK-DRS-FSR: installed only where the FSR module is swapped in'
+    ff = fsr[fsr.index('static void fsr_fx('):fsr.index('// ---------------------------------------------------------------- install, stats')]
+    assert ff.index('if (out->skip || out->shader)') < ff.index('vkn_pass_targets(1, c2, l2, m2, NULL);') < ff.index('vkn_fx_force(&po);') < ff.index('vkn_fx_force(NULL);') \
+        < ff.index('vkn_pass_targets(n0, col, lay, mip, dep);') < ff.index('out->shader = e->twin;'), 'VK-DRS-FSR: the pre pass into the copy, the engine\'s set put back, then the twin'
+    assert 'if (fabsf(c3[0] - 1.0f) < 1.0f / 1024.0f) { g.st.one_to_one++; return; }' in ff and 'if (g.mode == VKN_FSR_AA_COUNT) { g.st.would++; return; }' in ff, 'VK-DRS-FSR: 1:1 untouched; mode 2 counts only'
+    assert 'const char *e = getenv("DM_VK_NATIVE_FSR_AA"); mode = e && *e ? atoi(e) : VKN_FSR_AA_ON;' in fsr, 'VK-DRS-FSR: DM_VK_NATIVE_FSR_AA default 1'
+    s3 = rd('gfx/vulkan/engine/tests/vkn_stage3_test.c')
+    assert 'test_fsr();' in s3 and 'dm/gfx/vkn/vkn_fsr.c' in s3[:6000], 'VK-DRS-FSR: the host test runs and links the piece'
+    return 'VK-DRS-FSR: the 3D-resolution row live for every choice (JNI, gear, strings), the cave always in, the keeper only after a live call; the FXAA pre pass (module, piece order 450, install with the FSR swap, 1:1 untouched, default 1, host test)'
+print('PASS: ' + vkdrsfsr_check())
 _bad=delimiter_gate()
 assert not _bad,_bad

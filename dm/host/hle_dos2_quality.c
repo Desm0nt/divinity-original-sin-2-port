@@ -125,7 +125,9 @@ static const uint32_t k_clamp[4] = {0x1e272220 /* fcmp s17,s7 */, 0x1e274e33 /* 
 static const uint32_t k_aa_rd = 0xb9406508;   // ldr w8,[x8,#0x64] at each FXAA-step reader (0xab6e34 / 0xab6ec8 / 0xab6f80)
 
 static module_t *g_main;
-static int g_user_pct = 100;           // DM_DOS2_DRS max
+static _Atomic int g_user_pct = 100;   // DM_DOS2_DRS max; [DOS2] VK-DRS-FSR: also the live 3D resolution's ceiling (dm_dos2_res3d_live)
+static _Atomic int g_live_on;          // [DOS2] VK-DRS-FSR: 1 after a live 3D-resolution change: the monitor keeps the DRS object at its floor / ceiling
+static _Atomic int g_live_floor;       // ... the floor it keeps (% of the window per side, 50..100; 0 = leave the object's own minimum)
 static _Atomic int g_ceil_pct = 100;   // run-time ceiling (the ladder's), 50..100, 100 = no ceiling
 static int g_drs_log, g_tgt_mode, g_thermal, g_cave;
 static uint32_t g_spike;            // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: the cave's mode bits (NRD_SPIKE_*), 0 = not installed   // g_tgt_mode: 0 the game's, 1 the host's frame budget, 2 fixed
@@ -192,7 +194,7 @@ static float dq_gpu_ms(void) {
 
 void dm_dos2_drs_set_ceiling(int pct);   // the run-time ceiling (the thermal ladder's): 50..100 % of the window height
 void dm_dos2_drs_set_ceiling(int pct) { atomic_store(&g_ceil_pct, pct < 50 ? 50 : pct > 100 ? 100 : pct); }
-static int dq_eff_pct(void) { int p = atomic_load(&g_ceil_pct); return g_user_pct < p ? g_user_pct : p; }
+static int dq_eff_pct(void) { const int p = atomic_load(&g_ceil_pct), u = atomic_load(&g_user_pct); return u < p ? u : p; }
 
 // [DOS2] NR-DRIFT: the target the controller should use (g_tq) and what it reads (g_q[0..1]); they differ only while DM_DOS2_DRS_SETTLE
 // holds the target at 100 ms around a load screen (the game's own "DRS off" path: it never steps down).
@@ -281,6 +283,37 @@ static void dq_bloom_watch(void) {
     if (told++ < 4) LOG("[quality] DM_HACK_NOBLOOM=1: Bloom (GraphicSettings +%#x) 1 -> 0: no bloom chain (%d)", GS_BLOOM, told);
 }
 
+// [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): after a live 3D-resolution change (dm_dos2_res3d_live) the monitor keeps the DRS object
+// inside [floor, ceiling] at 4 Hz. Floor: the object's min (+0x10 / +0x14 int, what the controller's step down stops at, 0xc0654c) = the
+// window size x floor, as SetSize computes it ((int)(w x f)); SetSize (a window change) writes its boot factor again - put back here within
+// 250 ms. Current (+0x28 / +0x2c float, what the controller steps from; its scale +0x30 is recomputed from it every evaluated frame,
+// 0xc05ef4): snapped into [floor, ceiling] once it is outside (the controller itself only climbs 1.25 % per second of headroom and comes
+// down to a lower ceiling about 1 s later). Plain aligned 4-byte stores, the same fields the controller writes; one that lands between its
+// load and its store is lost for that frame and made again at the next tick. Nothing is written before the first live call.
+static void dq_live_keep(const dq_drs_t *d) {
+    static int told;
+    if (d->max_w <= 0 || d->max_h <= 0) return;
+    dq_drs_t *w = (dq_drs_t *)(uintptr_t)d;
+    const int fl = atomic_load(&g_live_floor);
+    if (fl >= 50 && fl <= 100) {
+        const int mw = (int)((float)d->max_w * (fl / 100.0f)), mh = (int)((float)d->max_h * (fl / 100.0f));
+        if (d->min_w != mw || d->min_h != mh) {
+            if (told < 24) { told++; LOG("[quality] live 3D resolution: DRS min %dx%d -> %dx%d (%d %% of %dx%d)", d->min_w, d->min_h, mw, mh, fl, d->max_w, d->max_h); }
+            w->min_w = mw; w->min_h = mh;
+        }
+    }
+    const float c = (float)dq_eff_pct() / 100.0f, cw = (float)d->max_w * c, ch = (float)d->max_h * c;
+    const float lw = (float)d->min_w < cw ? (float)d->min_w : cw, lh = (float)d->min_h < ch ? (float)d->min_h : ch;
+    const float uw = d->cur_w, uh = d->cur_h;
+    float nw = uw, nh = uh;
+    if (uh > ch + 0.5f || uw > cw + 0.5f) { nw = cw; nh = ch; }
+    else if (uh < lh - 0.5f || uw < lw - 0.5f) { nw = lw; nh = lh; }
+    if (nw == uw && nh == uh) return;
+    if (told < 24) { told++; LOG("[quality] live 3D resolution: DRS current %.0fx%.0f -> %.0fx%.0f (floor %dx%d, ceiling %d %%)", (double)uw, (double)uh, (double)nw,
+                                 (double)nh, d->min_w, d->min_h, dq_eff_pct()); }
+    w->cur_w = nw; w->cur_h = nh;
+}
+
 static void *dq_monitor(void *arg) {
     (void)arg;
     int seen = 0, tick = 0, pct_logged = 100; uint64_t next_log = 0; float tgt_logged = 0;
@@ -359,6 +392,7 @@ static void *dq_monitor(void *arg) {
             float f = pct / 100.0f; if (g_q[2] != f) g_q[2] = f;
             if (pct != pct_logged && g_drs_log) { pct_logged = pct; LOG("[quality] DRS ceiling %d %% (cave factor %.2f)", pct, (double)f); }
         }
+        if (atomic_load(&g_live_on)) dq_live_keep(d);   // [DOS2] VK-DRS-FSR
         if (g_drs_log) {
             uint64_t t = now_ns();
             if (t >= next_log) {
@@ -637,14 +671,20 @@ void dm_dos2_quality_install(void) {
             if (g_tgt_mode == 2) LOG("[quality] DM_DOS2_DRS_TARGET_MS=%s: target %.2f ms, step up under %.2f ms", te, (double)g_q[0], (double)g_q[1]);
         } else LOG("[quality] the game's DRS target 31.5 ms (built for 30 fps)%s", fixed == 0 ? ": DM_DOS2_DRS_TARGET_MS=0" : "");
         // the ceiling cave, when a ceiling can be asked for
-        if (pg && (g_user_pct < 100 || g_thermal)) g_cave = !dq_cave_install(m);
-        {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: 0 / unset = today; 1 = apply, 2 = count only; ":2" = min of 2 samples (default ":3")
-            const char *sp = getenv("DM_DOS2_DRS_SPIKE"); int sm = sp && *sp ? atoi(sp) : 0; const char *co = sp ? strchr(sp, ':') : NULL;
+        // [DOS2] VK-DRS-FSR: always in (it was only for a ceiling below 100 / the ladder): a live change of the 3D resolution (dm_dos2_res3d_live)
+        // needs the ceiling at run time. Factor 1 = the clamp limits x 1.0 = exactly the game's (fmul by 1.0 is exact).
+        if (pg) g_cave = !dq_cave_install(m);
+        {   // [DOS2] NR-DRIFT DM_DOS2_DRS_SPIKE: 0 = the game's raw sample; 1 = apply, 2 = count only; ":2" = min of 2 samples (default ":3").
+            // [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): unset = 1 now (was 0). The controller steps up only after 1 s of frames that ALL
+            // predict a step under the threshold, and down after two evaluations over target - 0.5 ms with no cheap frame between: with the
+            // frame-time jitter of a phone (sd 0.8 ms at 1.7 ms under the threshold, Unicorn run of the game's controller, nr_drs_live_test.py)
+            // it never climbs from its floor; the min of 3 samples climbs as on a steady load and ignores 1-2 slow frames.
+            const char *sp = getenv("DM_DOS2_DRS_SPIKE"); int sm = sp && *sp ? atoi(sp) : 1; const char *co = sp ? strchr(sp, ':') : NULL;
             uint32_t bits = sm == 1 ? NRD_SPIKE_APPLY | NRD_SPIKE_COUNT : sm == 2 ? NRD_SPIKE_COUNT : 0;
             if (bits && !(co && atoi(co + 1) == 2)) bits |= NRD_SPIKE_MIN3;
             if (bits && !pg) LOG("[quality] DM_DOS2_DRS_SPIKE=%s: no data page: off", sp);
             else if (bits && !dq_spike_install(m, bits)) g_spike = bits;
-            else if (!bits) LOG("[quality] DM_DOS2_DRS_SPIKE=0: one slow frame may drop the DRS to its model's size at once (NR-DRIFT)");
+            else if (!bits) LOG("[quality] DM_DOS2_DRS_SPIKE=0: two slow frames may drop the DRS to its model's size at once, frame-time jitter stalls its climb (NR-DRIFT, VK-DRS-FSR)");
         }
         if (g_thermal) LOG("[quality] DM_DOS2_THERMAL=1: thermal ladder on (1 Hz; headroom 0.7 / 0.8 / 0.9 -> DRS ceiling 85 / 75 / 65 %%, "
                            "+ ShadowQuality 2 at 0.8, + Bloom off at 0.9)%s", g_cave ? "" : "; no DRS ceiling (cave not in)");
@@ -681,6 +721,34 @@ int dm_dos2_drs_live(int on, int fps) {
     else g_tgt_mode = 1;   // the monitor thread follows the present period again
     LOG("[quality] live DRS %s: target %.2f ms%s%s", on ? "on" : "off", (double)g_tq[0], on && fps <= 0 ? " (the host's frame budget from now on)" : "",
         g_hold ? " (published after the DM_DOS2_DRS_SETTLE hold)" : "");
+    return 1;
+}
+// [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): the gear's 3D-resolution row live (JNI DmActivity.nativeSetDos2Res3d), every choice:
+//   fixed_pct 50..100: fixed p % per side = floor = ceiling = p, the 100 ms target (never steps away); the current size snapped to p at once.
+//   fixed_pct 0      : dynamic, floor floor_pct (50..99), ceiling 100, target 1000 / fps x 0.95 (fps <= 0: the host's frame budget);
+//                      a current size below the new floor snapped up to it, then the game's controller steps as it always does.
+// What the start env does with DM_DOS2_DRS / DM_HACK_SCALE (the fmov floor, the ceiling) is redone here at run time on the DRS object and
+// our page; the boot fmov stays (SetSize's factor after a window change; the monitor puts the live floor back within 250 ms).
+// Needs our target copy (every DM_DOS2_DRS mode but "skip") and the ceiling cave (now always in with the copy). 0 = not possible (logged).
+int dm_dos2_res3d_live(int fixed_pct, int fps, int floor_pct);
+int dm_dos2_res3d_live(int fixed_pct, int fps, int floor_pct) {
+    if (!g_q || !g_tgt_mode) { LOG("[quality] live 3D resolution not possible (no target copy: DM_DOS2_DRS=skip or the patch failed): next launch"); return 0; }
+    if (!g_cave) { LOG("[quality] live 3D resolution not possible (the DRS ceiling cave is not in): next launch"); return 0; }
+    const int fixed = fixed_pct > 0; int fl, ce;
+    if (fixed) { fl = ce = fixed_pct < 50 ? 50 : fixed_pct > 100 ? 100 : fixed_pct; }
+    else { fl = floor_pct < 50 ? 50 : floor_pct > 99 ? 99 : floor_pct; ce = 100; }
+    atomic_store(&g_user_pct, ce); atomic_store(&g_live_floor, fl);
+    if (fixed) { g_tgt_mode = 2; dq_set_target(100.0f); }
+    else if (fps > 0) { g_tgt_mode = 2; dq_set_target(1000.0f / (float)fps * 0.95f); }
+    else g_tgt_mode = 1;   // the monitor thread follows the present period again
+    g_q[2] = (float)dq_eff_pct() / 100.0f;   // the ceiling now (the monitor writes it every tick too)
+    atomic_store(&g_live_on, 1);
+    const dq_drs_t *d = g_main ? dq_drs() : NULL;
+    if (fixed) LOG("[quality] live 3D resolution: fixed %d %% of the window per side (floor = ceiling, target 100 ms)%s; DRS current %.0fx%.0f of %dx%d", ce,
+                   g_hold ? " (published after the DM_DOS2_DRS_SETTLE hold)" : "", d ? (double)d->cur_w : 0.0, d ? (double)d->cur_h : 0.0, d ? d->max_w : 0, d ? d->max_h : 0);
+    else LOG("[quality] live 3D resolution: dynamic, floor %d %%, ceiling %d %%, target %.2f ms%s%s; DRS current %.0fx%.0f of %dx%d", fl, dq_eff_pct(), (double)g_tq[0],
+             fps <= 0 ? " (the host's frame budget from now on)" : "", g_hold ? " (published after the DM_DOS2_DRS_SETTLE hold)" : "", d ? (double)d->cur_w : 0.0,
+             d ? (double)d->cur_h : 0.0, d ? d->max_w : 0, d ? d->max_h : 0);
     return 1;
 }
 // [DOS2] NR-DRIFT: the DRS height now in % of the window (-1 = no DRS object yet) and whether DM_DOS2_DRS_SETTLE holds the target

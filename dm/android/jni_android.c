@@ -1029,6 +1029,16 @@ JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Drs(JN
     (void)on; (void)fps; return JNI_FALSE;
 #endif
 }
+// [DOS2] VK-DRS-FSR: the gear's 3D-resolution row live (hle_dos2_quality.c dm_dos2_res3d_live): fixed % (50..100) or 0 = dynamic with its target
+// fps and floor %; false = not possible now (the next launch applies it)
+JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Res3d(JNIEnv *env, jclass cls, jint fixed_pct, jint fps, jint floor_pct) {
+    (void)env; (void)cls;
+#ifdef DM_GAME_DOS2
+    int dm_dos2_res3d_live(int fixed_pct, int fps, int floor_pct); return dm_dos2_res3d_live(fixed_pct, fps, floor_pct) ? JNI_TRUE : JNI_FALSE;
+#else
+    (void)fixed_pct; (void)fps; (void)floor_pct; return JNI_FALSE;
+#endif
+}
 // [DOS2] the iPad button column of bottomBar_d from the gear / the gamepad rule, live (hle_dos2_touchui_vis.c): 0 shown, 1 folded, 2 hidden
 JNIEXPORT jboolean JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeSetDos2Column(JNIEnv *env, jclass cls, jint state) {
     (void)env; (void)cls;

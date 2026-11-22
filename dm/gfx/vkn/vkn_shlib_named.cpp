@@ -35,6 +35,8 @@ extern "C" int vkn_post_mobile(void) __attribute__((weak));
 extern "C" int vkn_hacks_lcap_mode(void) __attribute__((weak));
 extern "C" int vkn_hacks_lcap_sel(void) __attribute__((weak));   // [gpu2] DM_VK_NATIVE_LCAP_SEL (weak: then the env rule of vkn_hacks.c)
 extern "C" void vkn_hacks_census(void) __attribute__((weak));
+extern "C" void vkn_fsr_install(int mode) __attribute__((weak));   // [DOS2] VK-DRS-FSR (vkn_fsr.h)
+extern "C" void vkn_fsr_census(void) __attribute__((weak));
 
 #define NS_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
 namespace {
@@ -113,6 +115,8 @@ void hacks_init(XbgGpuFamily fam, int m) {
                                       : "the clustered lights that add less than 1/64 of the pixel's own light skipped, faded up to 1/32", g_lsel,
           g_lcap, m == 1 ? (g_lcap == 1 ? " (LIGHTFUSE yields while the cap is in use: vkn_hacks.h)" : "") : m == 2 ? " - DM_VK_NATIVE_SH=2 (verify): not used" : " - DM_VK_NATIVE_SH=0: NOT used");
     if ((g_fsr || g_lights) && m != 1) red("DM_HACK_FSR=%d / DM_HACK_LIGHTS=%d need DM_VK_NATIVE_SH=1 (it is %d): not applied", g_fsr, g_lights, m);
+    // [DOS2] VK-DRS-FSR (vkn_fsr.h): the console's FXAA at the render resolution before EASU (DM_VK_NATIVE_FSR_AA, default 1)
+    if ((g_fsr == 1 || g_fsr == 3) && m == 1 && vkn_fsr_install) vkn_fsr_install(-1);
 }
 void init(VkPhysicalDevice phys, bool ffl2, int policy) {
     const XbgGpuFamily fam = XbgGpuFamily(policy);
@@ -322,6 +326,7 @@ std::atomic<vkn_shlib_reader> g_read{nullptr};   // the library's reader (saved 
 std::atomic<uint64_t> c_lf_ok{0}, c_lf_refused{0};
 // The fused bundle "<v>.ClusteredLightingWithSSAO" for the translated bundle `tr` of the Light key: 1 = `nb` holds it and it passes.
 int lcf_ok();   // [stage 5.4 G1] below
+int tile_read(const std::string &key, std::vector<uint8_t> &out, bool &from_pack, vkn_shlib_reader read);   // [P10] the end block
 int lf_bundle(int i, char v, const std::vector<uint8_t> &tr, std::vector<uint8_t> &nb, const char **why) {
     char pk[32]; *why = NULL;
     if (g_lights && g_lcap == 2) {   // [stage 5.4 G1] DM_VK_NATIVE_LCAP=2: the capped fused module (built in) behind the translated head
@@ -385,6 +390,7 @@ int vkn_shlib_named_read(const std::string &key, std::vector<uint8_t> &out, bool
     if (t_bypass || !read) return -1;
     std::call_once(g_init, [&] { g_dir = dir; g_read.store(read); init(phys, ffl2, policy); });
     if (key.size() == 20 && (!key.compare(16, 4, "#nlf") || !key.compare(16, 4, "#nlg"))) return lf_read(key, out, from_pack, read);   // [stage 5.1 A4] LIGHTFUSE (any DM_VK_NATIVE_SH)
+    if ((key.size() == 19 || (key.size() == 20 && strchr("fgFG", key[19]))) && !key.compare(16, 3, "#nt")) return tile_read(key, out, from_pack, read);   // [P10] tile twins
     if (g_mode <= 0) return -1;
     // "<key>#nrt": the translated bundle of a replaced key (vkn_shlib_named_alt), read past this module
     if (key.size() == 20 && !key.compare(16, 4, "#nrt")) { t_bypass++; const bool have = read(key.substr(0, 16), out, from_pack); t_bypass--; return have ? 1 : 0; }
@@ -454,9 +460,13 @@ extern "C" void vkn_shlib_named_hacks_get(vkn_shlib_named_hacks *h) {   // [stag
     for (int k = 0; k < 2; k++) { h->state[k] = g_hk_st[k].load(); h->swapped[k] = c_hk_swapped[k]; h->refused[k] = c_hk_refused[k]; }
 }
 extern "C" void vkn_shlib_named_census(void) {
-    if (vkn_hacks_census) vkn_hacks_census();   // [stage 5.4 G3] the DM_HACK_* lines ride on this census (dm_vkn_census has 16 slots)
+    if (vkn_hacks_census) vkn_hacks_census();
+    if (vkn_fsr_census) vkn_fsr_census();   // [DOS2] VK-DRS-FSR   // [stage 5.4 G3] the DM_HACK_* lines ride on this census (dm_vkn_census has 16 slots)
     vkn_shlib_named_stats s; vkn_shlib_named_stats_get(&s);
     if (s.mode < 0) return;   // the library read no bundle yet (or is not the loader: modes 0 / 2, DM_VK_NATIVE_SHLIB=0)
+    { vkn_tile_stats t; vkn_shlib_named_tile_stats(&t);   // [P10]
+      if (t.ok | t.none | t.refused) vkn_logf("shlib named: tile twins (P10): handed out %llu, no twin for the module %llu, refused by a check %llu",
+                                              (unsigned long long)t.ok, (unsigned long long)t.none, (unsigned long long)t.refused); }
     uint64_t tm = 0, tg = 0, tf = 0; uint32_t ta = 0; if (vkn_sampler_cmp_stats) vkn_sampler_cmp_stats(&tm, &tg, &tf, &ta);
     vkn_logf("shlib named: DM_VK_NATIVE_SH=%d (%s), DM_VK_NATIVE_SH_PCF=%d (%s): pack %s (%u bundles); entries %s %u of %d (bundle reads %s %llu), "
              "kept translated %llu, refused: head %llu / interface %llu / descriptors %llu, missing in the pack %llu, off by a name contradiction %llu; "
@@ -513,4 +523,188 @@ extern "C" int vkn_shlib_named_same_bundle(const char *key_a, const char *key_b)
     t_bypass++; const bool ha = read(key_a, a, fp), hb = read(key_b, b, fp); t_bypass--;
     return ha && hb && !a.empty() && a == b ? 1 : 0;
 }
+
+// ==== [P10] input-attachment twins for the merged tile pass (vkn_shlib_named.h; tools/dos2_tile_shaders.py makes and proves them) ====
+#include "vkn_shader.h"   // vkn_shader.xs (vkn_shlib_vs_out_prog)
+namespace {
+#include "../../android/shaders/tile_twins.inc"
+const int k_tile_n = int(sizeof k_tile_rows / sizeof k_tile_rows[0]);
+std::atomic<uint64_t> c_tile_ok{0}, c_tile_none{0}, c_tile_refused{0};
+std::atomic<const char *> g_tile_last{nullptr};   // the built-in file of the twin handed out last (census, host test)
+uint64_t tile_fnv(const uint8_t *p, size_t n) { uint64_t x = 0xcbf29ce484222325ull; for (size_t i = 0; i < n; i++) { x ^= p[i]; x *= 0x100000001b3ull; } return x; }
+// OpDecorate <id> Binding (33) <n>: the bindings a module declares
+void tile_declared(const uint32_t *w, size_t n, uint64_t d[4]) {
+    memset(d, 0, 4 * sizeof d[0]);
+    for (size_t k = 5; k < n;) {
+        const uint32_t c = w[k] >> 16, op = w[k] & 0xffff; if (!c || k + c > n) break;
+        if (op == 71 && c >= 4 && w[k + 2] == 33 && w[k + 3] < 256) d[w[k + 3] >> 6] |= 1ull << (w[k + 3] & 63);
+        k += c;
+    }
+}
+// The input attachments of a module: every id decorated InputAttachmentIndex (43) with its Binding (33) in set 0, by ascending binding.
+bool tile_inputs(const uint32_t *w, size_t n, vkn_tile_var *v) {
+    struct In { uint32_t id, index, binding, set; bool has_b; }; std::vector<In> in;
+    memset(v, 0, sizeof *v);
+    if (n < 5 || w[0] != 0x07230203u) return false;
+    for (size_t k = 5; k < n;) {
+        const uint32_t c = w[k] >> 16, op = w[k] & 0xffff; if (!c || k + c > n) return false;
+        if (op == 71 && c >= 4 && w[k + 2] == 43) in.push_back({w[k + 1], w[k + 3], 0, 0, false});
+        k += c;
+    }
+    for (size_t k = 5; k < n;) {
+        const uint32_t c = w[k] >> 16, op = w[k] & 0xffff;
+        if (op == 71 && c >= 4) for (In &x : in) if (x.id == w[k + 1]) { if (w[k + 2] == 33) { x.binding = w[k + 3]; x.has_b = true; } if (w[k + 2] == 34) x.set = w[k + 3]; }
+        k += c;
+    }
+    if (in.size() > 16) return false;
+    std::sort(in.begin(), in.end(), [](const In &a, const In &b) { return a.binding < b.binding; });
+    for (size_t i = 0; i < in.size(); i++) {
+        if (!in[i].has_b || in[i].set || in[i].binding > 255 || in[i].index > 15) return false;
+        for (size_t j = 0; j < i; j++) if (in[j].binding == in[i].binding || in[j].index == in[i].index) return false;
+        v->binding[i] = uint8_t(in[i].binding); v->index[i] = uint8_t(in[i].index);
+    }
+    v->n = uint8_t(in.size()); return true;
+}
+// A twin's words against the module it replaces and its table row. NULL = every check holds (*var, declared filled).
+const char *tile_check(const vkn_tile_row &r, const uint32_t *cw, size_t cn, const uint32_t *tw, size_t tn, vkn_tile_var *var, uint64_t declared[4]) {
+    uint32_t ci = 0, co = 0, ti = 0, to = 0;
+    if (nr_sh_io(cw, cn, &ci, &co) || nr_sh_io(tw, tn, &ti, &to)) return "the entry point interface is not readable";
+    if (to != co) return "output locations differ from the replaced module's";
+    uint32_t want = ci;
+    if ((r.cond & VKN_TILE_C_CENTER) && r.center_loc < 32 && !(ti >> r.center_loc & 1)) want &= ~(1u << r.center_loc);   // the coordinate the twin does not read
+    if (ti != want) return "input locations differ from the replaced module's";
+    uint64_t cd[4]; tile_declared(cw, cn, cd); tile_declared(tw, tn, declared);
+    for (int k = 0; k < 4; k++) if (declared[k] & ~cd[k]) return "a descriptor the replaced module does not declare";
+    if (nr_sh_depth_bindings(tw, tn) != nr_sh_depth_bindings(cw, cn)) return "depth-compare bindings differ from the replaced module's";
+    vkn_tile_var v;
+    if (!tile_inputs(tw, tn, &v)) return "the input attachments are not readable (no binding / set 0 / index < 16 / unique)";
+    if (v.n != r.n || memcmp(v.binding, r.binding, r.n) || memcmp(v.index, r.index, r.n)) return "the input attachments are not the table row's";
+    v.cond = r.cond; v.center_loc = r.center_loc; *var = v; return NULL;
+}
+// The player's DeferredSky c1 bits (as lcf_ok reads them; no state)
+bool tile_sky_c1(vkn_shlib_reader read, uint32_t c[2]) {
+    const int sky = nr_sh_find_name("DeferredSky"); std::vector<uint8_t> b; bool fp = false; c[0] = c[1] = 0;
+    if (!read || sky < 0) return false;
+    t_bypass++; const bool have = read(std::string(nr_sh_table[sky].key, 16), b, fp); t_bypass--;
+    if (!have || b.size() < 32) return false;
+    uint32_t h[8]; memcpy(h, b.data(), sizeof h); const size_t o = 32 + size_t(h[3]) * 32 + size_t(h[4]) * 4;
+    if (h[5] < 8 || o + 8 > b.size()) return false;
+    memcpy(c, b.data() + o, 8); return true;
+}
+// The twin bundle (translated head + the twin's words) of (key, variant) under every check. 1 = nb / *row / *var / declared filled;
+// 0 = none (*why; *plain: there is simply no twin for the module the key has - not a failed check). fault: vkn_shlib_named_tile_fault.
+int tile_bundle(const std::string &k16, char variant, vkn_shlib_reader read, std::vector<uint8_t> &nb, const vkn_tile_row **row, vkn_tile_var *var,
+                uint64_t declared[4], const char **why, bool *plain, uint64_t *hash, int fault = 0) {
+    *why = NULL; *plain = false; *row = NULL; *hash = 0;
+    const int i = entry(k16); if (i < 0) { *why = "not a fragment key of the engine shaders by name"; *plain = true; return 0; }
+    std::vector<uint8_t> tr, cur; bool fp = false;
+    t_bypass++; const bool have = read(k16, tr, fp); t_bypass--;
+    const size_t th = have ? nr_sh_head(tr.data(), tr.size()) : 0;
+    if (!th) { *why = "the translated bundle of the key is missing"; return 0; }
+    if (!variant) {   // the module the key has now: the library's own read (hack / pack swap applied)
+        if (!read(k16, cur, fp) || cur.empty()) { *why = "the bundle of the key is not readable"; return 0; }
+        if (cur == tr) { *why = "the key has its translated module (a translated module has no twin)"; *plain = true; return 0; }
+    } else {
+        const char lv = variant == 'F' ? 'f' : variant == 'G' ? 'g' : variant;
+        if (i != lf_light_entry(k16)) { *why = "not the fragment key of ClusteredLightingWithSSAO"; *plain = true; return 0; }
+        if (!lf_bundle(i, lv, tr, cur, why)) return 0;
+    }
+    const size_t ch = nr_sh_head(cur.data(), cur.size());
+    if (!ch || (cur.size() - ch) % 4) { *why = "the bundle of the key is malformed"; return 0; }
+    const std::vector<uint32_t> cw = spirv_of(cur);
+    *hash = tile_fnv(cur.data() + ch, cur.size() - ch) ^ (fault == 1 ? 1u : 0u);
+    const char *name = nr_sh_table[i].name;
+    bool any = false;   // the shader has twins at all
+    for (int k = 0; k < k_tile_n && !*row; k++) {
+        const vkn_tile_row &r = k_tile_rows[k];
+        if (r.variant != variant || strcmp(r.name, name)) continue;
+        any = true;
+        if (r.base_hash == *hash && r.base_words == cw.size()) *row = &r;
+    }
+    if (!*row && !any) { *why = "this engine shader has no twin (only LinearizeDepth, CascadedPCF_* and the fused light do)"; *plain = true; return 0; }
+    if (!*row) { *why = "no twin was proven against the module the key has (another build of the pack, another DeferredSky c1, or a hack module)"; return 0; }
+    const vkn_tile_row &r = **row;
+    if (r.c1[0] | r.c1[1]) {
+        uint32_t c[2];
+        if (!tile_sky_c1(read, c) || c[0] != r.c1[0] || c[1] != r.c1[1]) { *why = "the player's DeferredSky c1 is not the one the twin was compiled with"; return 0; }
+    }
+    std::vector<uint32_t> tw(r.spv, r.spv + r.spv_bytes / 4);
+    if (fault >= 2) {   // the host test's faults: one decoration of the twin changed
+        bool done = false;
+        for (size_t k = 5; k < tw.size() && !done;) {
+            const uint32_t c = tw[k] >> 16, op = tw[k] & 0xffff; if (!c || k + c > tw.size()) break;
+            if (op == 71 && c >= 4) {
+                if (fault == 2 && tw[k + 2] == 43) { tw[k + 3] ^= 8u; done = true; }
+                else if (fault == 3 && tw[k + 2] == 33) { tw[k + 3] = 255u; done = true; }
+                else if (fault == 4 && tw[k + 2] == 30) {   // Location of an Output variable
+                    for (size_t q = 5; q < tw.size();) { const uint32_t qc = tw[q] >> 16, qo = tw[q] & 0xffff; if (!qc) break;
+                        if (qo == 59 && qc >= 4 && tw[q + 2] == tw[k + 1] && tw[q + 3] == 3) { tw[k + 3] += 5u; done = true; break; } q += qc; }
+                }
+            }
+            k += c;
+        }
+        if (!done) { *why = "fault not applicable"; *plain = true; return 0; }
+    }
+    if ((*why = tile_check(r, cw.data(), cw.size(), tw.data(), tw.size(), var, declared))) return 0;
+    nb.assign(tr.begin(), tr.begin() + th); nb.resize(th + tw.size() * 4); memcpy(nb.data() + th, tw.data(), tw.size() * 4);
+    const uint32_t len = uint32_t(tw.size() * 4); memcpy(nb.data() + 24, &len, 4);   // the SPIR-V length word (h[6])
+    if (!nr_sh_head_equal(tr.data(), tr.size(), nb.data(), nb.size())) { *why = "head differs from the translated bundle"; return 0; }
+    if (!variant && !nr_sh_bindings_ok(nb.data(), nb.size())) { *why = "a descriptor outside the head's binding table"; return 0; }
+    return 1;
+}
+// read_bundle's door for "<key>#nt" / "<key>#nt<f|g|F|G>": the checked twin bundle in place of a file
+int tile_read(const std::string &key, std::vector<uint8_t> &out, bool &from_pack, vkn_shlib_reader read) {
+    std::vector<uint8_t> nb; const vkn_tile_row *row; vkn_tile_var var; uint64_t decl[4], hash; const char *why; bool plain;
+    if (!tile_bundle(key.substr(0, 16), key.size() == 20 ? key[19] : 0, read, nb, &row, &var, decl, &why, &plain, &hash)) return 0;   // (vkn_shlib_named_tile said why)
+    out.swap(nb); from_pack = true; return 1;
+}
+}  // namespace
+
+extern "C" int vkn_shlib_named_tile(const char *fs_key, char variant, xbg_vkn_stage *out, uint64_t declared[4], vkn_tile_var *var) {
+    uint64_t decl[4] = {0, 0, 0, 0}; vkn_tile_var v; memset(&v, 0, sizeof v);
+    if (declared) memset(declared, 0, 4 * sizeof declared[0]);
+    if (var) *var = v;
+    const vkn_shlib_reader read = g_read.load();
+    if (!fs_key || strlen(fs_key) != 16 || !out || (variant && variant != 'f' && variant != 'g' && variant != 'F' && variant != 'G')) return 1;
+    if (!read || !vkn_shlib_ready()) return -1;
+    const std::string k16(fs_key); std::vector<uint8_t> nb; const vkn_tile_row *row; uint64_t hash; const char *why; bool plain;
+    if (!tile_bundle(k16, variant, read, nb, &row, &v, decl, &why, &plain, &hash)) {
+        const int i = entry(k16); const char *nm = i >= 0 ? nr_sh_table[i].name : "?";
+        if (plain) { if (c_tile_none.fetch_add(1) < 16) L("tile: %s (%s, variant %c): no twin - %s: the separate passes", nm, fs_key, variant ? variant : '0', why); }
+        else { c_tile_refused++; red("tile: %s (%s, variant %c, module %016llx): twin refused - %s: the separate passes", nm, fs_key, variant ? variant : '0', (unsigned long long)hash, why); }
+        return 1;
+    }
+    std::string lk = k16 + "#nt"; if (variant) lk += variant;
+    const int rc = vkn_shlib_shader(lk.c_str(), nullptr, nullptr, out);
+    if (rc || !out->module || out->stage != 4) {
+        c_tile_refused++; red("tile: %s (%s): the library made no fragment module of the twin (rc %d, stage %u): the separate passes", row->inc, fs_key, rc, rc ? 0u : out->stage);
+        return rc < 0 ? -1 : 1;
+    }
+    if (declared) memcpy(declared, decl, sizeof decl);
+    if (var) *var = v;
+    char ins[160]; int k = 0; ins[0] = 0;
+    for (int q = 0; q < v.n && k < int(sizeof ins) - 10; q++) k += snprintf(ins + k, sizeof ins - size_t(k), " %u:%u", v.binding[q], v.index[q]);
+    g_tile_last.store(row->inc);
+    if (c_tile_ok.fetch_add(1) < 32)
+        L("tile: %s for %s (variant %c): the module %016llx it was proven against, %u words, input attachments (binding:index)%s, conditions%s%s%s", row->inc, fs_key,
+          variant ? variant : '0', (unsigned long long)hash, row->spv_bytes / 4, ins, v.cond & VKN_TILE_C_SCALE1 ? " render scale 1" : "",
+          v.cond & VKN_TILE_C_CENTER ? " + coordinate at the pixel centre, NEAREST" : "", v.cond & VKN_TILE_C_SHARE ? " + bindings 200/206/212/224 = 10/22/16/34" : "");
+    return 0;
+}
+extern "C" void vkn_shlib_named_tile_stats(vkn_tile_stats *s) { if (s) { s->ok = c_tile_ok; s->none = c_tile_none; s->refused = c_tile_refused; s->last = g_tile_last.load(); } }
+extern "C" int vkn_shlib_named_tile_fault(const char *fs_key, char variant, int fault) {
+    const vkn_shlib_reader read = g_read.load();
+    if (!fs_key || strlen(fs_key) != 16 || !read || fault < 1 || fault > 4) return -1;
+    std::vector<uint8_t> nb; const vkn_tile_row *row; vkn_tile_var v; uint64_t decl[4], hash; const char *why; bool plain;
+    if (!tile_bundle(fs_key, variant, read, nb, &row, &v, decl, &why, &plain, &hash)) return -1;   // no twin without the fault: nothing to test
+    if (tile_bundle(fs_key, variant, read, nb, &row, &v, decl, &why, &plain, &hash, fault)) return 0;
+    return plain ? -1 : 1;
+}
+// vkn_shlib.cpp: the program of a vertex shader object's output at a location (its final words, read again)
+extern "C" int vkn_shlib_out_prog(const void *shader, uint32_t location, struct nr_cv_prog *out);
+extern "C" int vkn_shlib_vs_out_prog(const struct vkn_shader *s, uint32_t location, struct nr_cv_prog *out) {
+    if (!s || !out || !vkn_shlib_on() || !s->xs[VKN_SRC_VS]) return 1;
+    return vkn_shlib_out_prog(s->xs[VKN_SRC_VS], location, out);
+}
+// ==== [/P10]
 #endif

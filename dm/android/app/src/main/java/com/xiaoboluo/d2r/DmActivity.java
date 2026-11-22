@@ -100,6 +100,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     static int dos2ColumnState() { return !dos2PadOn || dos2ColPad == 2 ? dos2ColBase : dos2ColPad == 0 ? 2 : Math.max(dos2ColBase, 1); }
     static void dos2ColumnApply() { if (!DOS2) return; try { nativeSetDos2Column(dos2ColumnState()); } catch (Throwable t) { } }
     static native boolean nativeSetDos2Drs(boolean on, int fps);   // [DOS2] live dynamic resolution (hle_dos2_quality.c dm_dos2_drs_live)   // [XC2] dynamic resolution on / off, live (hle_xc2.c)
+    static native boolean nativeSetDos2Res3d(int fixedPct, int fps, int floorPct);   // [DOS2] VK-DRS-FSR: the 3D-resolution row live, every choice (hle_dos2_quality.c dm_dos2_res3d_live)
     static native void nativeFocus(int ev);
     static native void nativeTextResult(long id, boolean accepted, String text);
     // Platform services (jni_android.c): rumble needs the application Context; the motion sensors the display rotation; game controllers

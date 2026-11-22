@@ -96,6 +96,9 @@ typedef struct vkn_tex {
     char sname[32];                            // the engine's target name (logs)
     uint64_t shc_up;                           // [stage 5 A3] upload number (end of this header)
     uint8_t ui_tgt;                            // [mgpu P7] a target of the UI (vkn_ui.c: GDraw's set, the filter cache atlas): the journal's UI share
+    // [P10] the merged tile pass (vkn_pass.c "P10"; recording thread): tl_ep == the chain's / the observer's epoch: attachment tl_i of it;
+    // tl_rd == the chain's epoch: a draw of the chain sampled it (a foreign write of it must come after the chain)
+    uint32_t tl_ep, tl_rd; uint8_t tl_i;
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index
@@ -129,6 +132,8 @@ int vkn_sampler_create(uint64_t handle, uint32_t pool_id, uint32_t filter, uint3
                        uint32_t compare);   // 0 = ok
 int vkn_sampler_destroy(uint64_t handle);   // 1 = was known (VkSampler retired)
 VkSampler vkn_sampler_by_id(uint32_t sampler_id);   // engine sampler-pool id -> VkSampler (VK_NULL_HANDLE = unknown)
+// [P10] 1 = the id is known, its sampler filters NEAREST (min and mag) and no DM_VK_NATIVE_TEXHACK twin can replace it; else 0
+int vkn_sampler_nearest_by_id(uint32_t sampler_id);
 
 // VkFormat of an engine format (0..62) / of an NVN format number, before device fallbacks (UNDEFINED = none).
 VkFormat vkn_tex_engine_format(uint32_t efmt, int srgb, uint32_t *nvn_out);
@@ -227,6 +232,9 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
 // as any target. NULL = failure. vkn_tex_private_free: its owner lets go (dead, the framebuffers of its view forgotten; the object is
 // retired when the last reference - vkn_pass's current set - is dropped).
 void vkn_tex_private_free(vkn_tex *t);
+// [DOS2] VK-DRS-FSR (vkn_fsr.c): the backend's own COLOUR target: as vkn_tex_private_depth (no engine handle / id, vkn_pass takes it as any
+// target, vkn_tex_private_free lets it go), usage colour attachment + sampled + transfer, class VKN_TC_COLOR, `view` (sampled) and `att`.
+vkn_tex *vkn_tex_private_color(VkFormat fmt, uint32_t w, uint32_t h, const char *name);
 // ==== [stage 5.1 G] the binding generation (vkn_draw.h "stage 5 draw cost": the texture-binding reuse of DM_VK_NATIVE_COST bit SET) ====
 // + 1 (atomic, under this module's mutex) at every change that can make vkn_tex_view_by_id (the view or the vkn_tex it returns),
 // vkn_sampler_by_id or vkn_sampler_cmp_by_id answer differently for some id: a pool-id cell set or cleared (creation, attach to shared

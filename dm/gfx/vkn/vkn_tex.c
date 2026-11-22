@@ -473,6 +473,7 @@ static int attach_locked(vkn_tex *o, uint64_t handle, const vkn_tex_desc *d, con
 typedef struct up_ctx { vkn_tex *t; vkn_block blk; int have_blk; uint32_t n; uint64_t ns; vkn_bcg_job *job; VkBufferImageCopy c[]; } up_ctx;
 // (vkn_frame.c / vkn_pass.c; weak: this file also links without them, as in the stage-2 host test)
 extern VkCommandBuffer vkn_cb(void) __attribute__((weak));
+extern int vkn_tile_usage(void) __attribute__((weak));   // [P10] vkn_pass.c
 extern void vkn_pass_layout(vkn_tex *t, VkImageLayout to) __attribute__((weak));
 static void barrier(VkCommandBuffer cb, vkn_tex *t, VkImageLayout from, VkImageLayout to) {
     const VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
@@ -648,6 +649,8 @@ vkn_tex *vkn_tex_create(uint64_t handle, const vkn_tex_desc *d, const vkn_tex_sr
     if (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     if (d->cls == VKN_TC_COLOR || d->cls == VKN_TC_WINDOW) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (d->cls == VKN_TC_DEPTH) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    // [P10] targets may be read as input attachments of the merged tile pass (vkn_pass.c): only where the switch is on (tile families)
+    if ((d->cls == VKN_TC_COLOR || d->cls == VKN_TC_DEPTH) && vkn_tile_usage && vkn_tile_usage()) usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     if (d->storage && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == VK_SAMPLE_COUNT_1_BIT) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cube && w == h ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
         .imageType = d3 ? VK_IMAGE_TYPE_3D : d1 ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, dep}, .mipLevels = mips, .arrayLayers = layers,
@@ -1187,6 +1190,13 @@ int vkn_sampler_destroy(uint64_t handle) {
 }
 // [rt P3] (vkn_tex.h): mode 1 of DM_VK_NATIVE_TEXHACK picks the twin by the texture of the previous view lookup (t_hk_last)
 int vkn_sampler_by_id_pure(void) { return !(__atomic_load_n(&g_hk.on, __ATOMIC_ACQUIRE) && __atomic_load_n(&g_hk.mode, __ATOMIC_RELAXED) == 1); }
+int vkn_sampler_nearest_by_id(uint32_t id) {   // [P10]
+    if (id >= SAMP_IDS) return 0;
+    lk_lock();
+    const int ok = g_samp_by_id[id] && g_samp_args[id].known && !(g_samp_args[id].filter >= 1 && g_samp_args[id].filter <= 5) && !g_samp_args[id].compare && !(g_hk.on && g_samp_hk[id]);
+    pthread_mutex_unlock(&g_mu);
+    return ok;
+}
 VkSampler vkn_sampler_by_id(uint32_t id) {
     // [stage 5.4 G2] the texture this thread looked up last (vkn_tex_view_by_id: the draw path asks view then sampler per binding)
     vkn_tex *const lt = g_hk.on ? t_hk_last : NULL;
@@ -1488,6 +1498,28 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
     if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; tex_free(t); return NULL; }
     if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { tex_free(t); return NULL; }
     if (!(t->att = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0}))) { tex_free(t); return NULL; }
+    t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);
+    t->refs = 1;
+    return t;
+}
+// [DOS2] VK-DRS-FSR (vkn_fsr.c): the backend's own colour target, sampled too (vkn_tex.h)
+vkn_tex *vkn_tex_private_color(VkFormat fmt, uint32_t w, uint32_t h, const char *name) {
+    const vkn_dev *dv = vkn_device();
+    if (!dv || !w || !h || !fmt || fmt_is_depth(fmt)) return NULL;
+    vkn_tex *t = (vkn_tex *)calloc(1, sizeof *t);
+    if (!t) return NULL;
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, 1}, .mipLevels = 1,
+        .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    t->usage = usage; t->format = fmt; t->aspect = VK_IMAGE_ASPECT_COLOR_BIT; t->w = w; t->h = h; t->depth = 1; t->mips = 1; t->layers = 1; t->samples = 1;
+    t->nvn_target = 1; t->cls = VKN_TC_COLOR; t->layout = VK_IMAGE_LAYOUT_UNDEFINED; t->slot = ~0u; t->pool_id = ~0u; t->sampler_id = ~0u;
+    memset(t->layer_ids, 0xff, sizeof t->layer_ids);
+    sname_set(t->sname, name);
+    if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; tex_free(t); return NULL; }
+    if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { tex_free(t); return NULL; }
+    if (!(t->view = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0})) ||
+        !(t->att = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0}))) { tex_free(t); return NULL; }
     t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);
     t->refs = 1;
     return t;

@@ -15,11 +15,20 @@
 // Built twice (tools/dos2_post_fsr.py): fp32 FsrEasuF (ppfxaa_fsr.frag.spv.inc) and -DEASU_H the half-precision FsrEasuH form
 // (ppfxaa_fsrh.frag.spv.inc, mediump: fp16 ALU where the GPU has it; DM_HACK_FSR=1, the default of the hack).
 // Interface = the translated bundle's (as PPFXAA_mobile.frag): 16 fp_c15, 22 fp_c1, 10 t_8; in location 1 noperspective vec4; out location 0.
+// [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): -DFSR_PRE builds the anti-aliasing pass that runs BEFORE this module at s < 1 (the backend
+// piece dm/gfx/vkn/vkn_fsr.c, DM_VK_NATIVE_FSR_AA=1): the console's FXAA at the render resolution, 1:1 on the drawn part (TexCoord0 = the
+// texel centre gl_FragCoord.xy / size, the draw clipped to the part by its scissor), into a copy of the source the EASU draw then reads.
+// EASU wants an anti-aliased input (AMD's FSR 1 guide); without it the low-resolution stair steps are reconstructed sharp: the 22.11 report
+// "jaggies and shimmering at 75 %". Same bindings (16, 22, 10), no inputs, out location 0. ppfxaa_fsr_pre.frag.spv.inc.
 #include "common.glsl"
 CBUF(16, c15)
 CBUF(22, c1)
 layout(set = 0, binding = 10) uniform sampler2D tSrc;
+#ifdef FSR_PRE
+vec4 TexCoord0;   // set by main from gl_FragCoord: fxaa() below stays PPFXAA_mobile.frag word for word
+#else
 layout(location = 1) noperspective in vec4 TexCoord0;
+#endif
 layout(location = 0) out vec4 outColor;
 
 float g(float x, float y) { return textureLod(tSrc, nanz(vec2(x, y)), 0.0).y; }
@@ -285,11 +294,16 @@ vec4 easuH(vec2 ratio)
 
 void main()
 {
+#ifdef FSR_PRE
+    TexCoord0 = vec4(gl_FragCoord.xy / vec2(textureSize(tSrc, 0)), 0.0, 1.0);
+    outColor = fxaa();
+#else
     vec2 ratio = vec2(dFdx(TexCoord0.x), dFdy(TexCoord0.y)) * vec2(textureSize(tSrc, 0));   // uniform control flow: before any branch
     [[dont_flatten]] if (abs(ratio.x - 1.0) < (1.0 / 1024.0) || !(ratio.x > 0.0) || ratio.x > 1.0) outColor = fxaa();
 #ifdef EASU_H
     else outColor = easuH(vec2(ratio.x, ratio.y > 0.0 && ratio.y <= 1.0 ? ratio.y : ratio.x));
 #else
     else outColor = easu(vec2(ratio.x, ratio.y > 0.0 && ratio.y <= 1.0 ? ratio.y : ratio.x));
+#endif
 #endif
 }

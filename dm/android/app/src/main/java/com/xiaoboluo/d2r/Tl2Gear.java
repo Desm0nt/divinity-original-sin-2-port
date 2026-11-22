@@ -302,9 +302,12 @@ final class Tl2Gear {
     // ---- [DOS2] 3D resolution per Switch mode (owner 19.11; docs/dos2/nr/DRS-MODE.md, docs/dos2/nr/NR-HACKS.md; hle_dos2_quality.c). One
     // row per mode: "Dynamic" or a fixed 100 / 83 / 75 / 67 / 50 % of the window per side; the labels show the lines of that mode's window.
     // Only the 3D is scaled (the game's DRS object); the interface stays at the window = the screen's resolution (dos2Window).
-    //   fixed p : DM_DOS2_DRS=off + DM_HACK_SCALE=<p> (100 = the full window; native: min = max = p, 100 ms target)    next launch
+    //   fixed p : DM_DOS2_DRS=off + DM_HACK_SCALE=<p> (100 = the full window; native: min = max = p, 100 ms target)
     //   dynamic : DM_DOS2_DRS=<floor>:100 + DM_DOS2_DRS_TARGET_MS (1000 / fps x 0.95) + DM_HACK_SCALE=100 (so a hack tier never adds a
-    //             scale); target fps {30, 45, 60, 75, 90, 120} live (dos2DrsLive -> nativeSetDos2Drs), floor {85, 75, 60, 50} % next launch
+    //             scale); target fps {30, 45, 60, 75, 90, 120}, floor {85, 75, 60, 50} %
+    // [DOS2] VK-DRS-FSR (22.11, docs/dos2/nr/VK-DRS-FSR.md): EVERY choice of the row is live now (dos2DrsLive -> nativeSetDos2Res3d ->
+    // hle_dos2_quality.c dm_dos2_res3d_live: fixed % / dynamic, its target and floor, on the running game's DRS object); the start env above
+    // stays for the launch. Before, only the dynamic target was live (nativeSetDos2Drs): fixed <-> dynamic, a new % or floor waited for a restart.
     // Prefs: dos2_res3d_dk / _hh = 0 dynamic, else the %; dos2_drs_fps_dk / _hh (0 = the default target: the frame-rate limit when it is a
     // target, else 60), dos2_drs_min_dk / _hh (default 75). dos2_drs_dk / _hh are still written (1 dynamic / 0 fixed) for older builds.
     // No dos2_res3d_* yet (saved before 19.11): the mode's old DRS pick (dos2_drs_dk / _hh -1 = the mode's default: Handheld on, Docked off;
@@ -351,10 +354,9 @@ final class Tl2Gear {
     static boolean dos2DrsLive(DmActivity a, boolean hh, String why) {
         SharedPreferences p = a.gamePrefs();
         int[] d = dos2DrsFor(a, p, hh, dos2RunFps >= 0 ? dos2RunFps : dos2FpsPref(a, p));
-        boolean ok = false;
-        try { ok = DmActivity.nativeSetDos2Drs(d[0] == 1, d[1]); } catch (Throwable t) { /* no library yet */ }
-        a.crumb("3D resolution " + dos2DrsText(d, dos2Res3d(a, p, hh), hh) + " (" + why + ")"
-            + (ok ? ", target live (a new fixed % / floor, fixed <-> dynamic: next launch)" : ", not live: next launch"));
+        boolean ok = false; int res = dos2Res3d(a, p, hh);
+        try { ok = DmActivity.nativeSetDos2Res3d(d[0] == 1 ? 0 : res, d[1], d[2]); } catch (Throwable t) { /* no library yet */ }
+        a.crumb("3D resolution " + dos2DrsText(d, res, hh) + " (" + why + ")" + (ok ? ", live" : ", not live: next launch"));
         return ok;
     }
     static final class Res3d implements GearSettings.Section {
@@ -370,13 +372,13 @@ final class Tl2Gear {
             }
             opts = new int[o.size()]; String[] labels = new String[opts.length]; int i = 0;
             for (int f : o) { opts[i] = f; labels[i++] = String.valueOf(f); }
-            head = g.heading(box, "");
+            head = g.heading(box, "");   // (its text: show(); live since VK-DRS-FSR)
             String[] blank = new String[RES3D.length]; java.util.Arrays.fill(blank, "");
             res = g.radios(box, blank, 0, false);
             drs = g.vbox(box);   // the dynamic resolution's own rows: shown only while "Dynamic" is picked
             g.note(drs, g.when(g.str(R.string.dos2_drs_target), true));
             rfps = g.radios(drs, labels, 0, true);
-            g.note(drs, g.when(g.str(R.string.dos2_drs_min), false));   // the floor is patched into the game at start
+            g.note(drs, g.when(g.str(R.string.dos2_drs_min), true));   // [DOS2] VK-DRS-FSR: live (the monitor keeps it in the DRS object)
             String[] ml = new String[DOS2_DRS_MINS.length]; java.util.Arrays.fill(ml, "");
             rmin = g.radios(drs, ml, 0, true);
             g.note(box, g.str(R.string.dos2_res3d_note));
@@ -405,7 +407,7 @@ final class Tl2Gear {
         }
         void show(boolean hh) {   // the rows for one mode (quiet: the listeners keep the other mode's values)
             quiet = true; shownHh = hh; int m = hh ? 1 : 0;
-            head.setText(g.when(g.str(hh ? R.string.dos2_res3d_for_handheld : R.string.dos2_res3d_for_docked), false));
+            head.setText(g.when(g.str(hh ? R.string.dos2_res3d_for_handheld : R.string.dos2_res3d_for_docked), true));
             labels();
             res.check(res.getChildAt(GearSettings.indexOf(RES3D, pick[m], 1)).getId());
             int at = 0; for (int i = 0; i < opts.length; i++) if (opts[i] == fps[m]) at = i;
@@ -423,7 +425,7 @@ final class Tl2Gear {
                 game.putInt(dos2DrsMinKey(hh), mins[m]);
             }
         }
-        // live, no restart (the running game's DRS target is our copy), for the mode it runs in; a failed live call applies at the next launch
+        // live, no restart (the running game's DRS object and our target copy), for the mode it runs in; a failed live call applies at the next launch
         public void after(GearSettings g) { dos2DrsLive(a, a.startedHandheld, "gear"); }
         public void env(GearSettings g) throws ErrnoException {
             SharedPreferences p = g.gamePrefs(); boolean hh = p.getBoolean("handheld", false);

@@ -198,9 +198,9 @@
     <string name="dos2_res3d_for_handheld">3D resolution in Handheld mode</string>
     <string name="dos2_res3d_drs">Dynamic (DRS): the game picks it to hold the frame rate</string>
     <string name="dos2_res3d_fixed">%1$d %% (%2$dp)</string>
-    <string name="dos2_res3d_note">Only the 3D world is scaled: the interface and text always stay at the full window size and stay sharp. A lower percentage gives more FPS and less heat, but a softer 3D picture. Each Switch mode keeps its own choice; this shows the mode picked above. Switching between a fixed value and Dynamic applies on the next launch.</string>
+    <string name="dos2_res3d_note">Only the 3D world is scaled: the interface and text always stay at the full window size and stay sharp. A lower percentage gives more FPS and less heat, but a softer 3D picture. Each Switch mode keeps its own choice; this shows the mode picked above. Every choice here applies at once, without a restart.</string>
     <string name="dos2_res3d_drs_title">Dynamic resolution</string>
-    <string name="dos2_res3d_drs_text">Instead of a fixed resolution, the dynamic one will be used: the game lowers the 3D resolution by itself whenever the phone cannot hold the target frame rate, and raises it again when it can, but never below the lowest resolution chosen below (now %1$d %%). The interface always stays sharp. Applies on the next launch.</string>
+    <string name="dos2_res3d_drs_text">Instead of a fixed resolution, the dynamic one will be used: the game lowers the 3D resolution by itself whenever the phone cannot hold the target frame rate, and raises it again when it can, but never below the lowest resolution chosen below (now %1$d %%). The interface always stays sharp. Applies at once.</string>
     <string name="dos2_res3d_drs_ok">OK</string>
     <string name="dos2_fsr">Sharp upscaling FSR 1 instead of a blurry stretch (works only while the 3D is below 100 %, fixed or dynamic; best with Sharpening on)</string>
 </resources>
