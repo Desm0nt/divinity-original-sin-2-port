@@ -41,7 +41,8 @@ enum { PREPASS_NVN_EQUAL = 3, PREPASS_NVN_LEQUAL = 4, PREPASS_NVN_ALWAYS_ALPHA =
 // account: counted in the key's `kept`); MIXED / NEW are gate keeps of a candidate (counted in `held`, the key's verdict is not spoiled).
 enum { PREPASS_K_KILL = 0, PREPASS_K_FS = 1, PREPASS_K_STATE = 2, PREPASS_K_STENCIL = 3, PREPASS_K_ALPHA = 4, PREPASS_K_COUNTING = 5,
        PREPASS_K_NOTINDEXED = 6, PREPASS_K_LATE = 7, PREPASS_K_FULL = 8, PREPASS_K_FIRST = 9, PREPASS_K_MIXED = 10, PREPASS_K_NEW = 11,
-       PREPASS_K_N = 12 };
+       PREPASS_K_NOID = 12, PREPASS_K_N = 13 };
+// [eng2] NOID: the caller keys draws by instance (prepass_ctx.ident) and this draw has no instance identity (no per-object block): kept.
 // why a G-buffer draw of a candidate key cannot carry the override: FUNC = no depth test, or neither EQUAL nor LEQUAL without write; BLEND = a colour target
 // blends for real; KILL = the fragment stage may kill (discard, alpha test, alpha to coverage: its depth would not cover what the DEP draw
 // wrote); RASTER = cull / front face / polygon mode / depth bias / clamp / viewport / scissor differ from the skipped pre-pass draw's
@@ -91,13 +92,22 @@ static inline uint64_t prepass_key(uint64_t ibuf, int32_t first, int32_t count, 
 // raster: the hash of the first candidate's raster state (RASTER above)
 // claim_seq: the G-buffer draw number at which its last candidate was claimed (0 = not all claimed)
 // adm: 1 = the key was admitted this frame (a first skip after a clean frame; PREPASS_K_NEW keeps the rest beyond the admission limit)
-typedef struct { uint64_t key, vb0, raster; uint32_t cand, kept, held, skipped, used, gb_ok, gb_bad, claim_seq, adm, pad2; } prepass_slot;
+// [eng3] repaired: skipped draws the caller drew again itself (late, into the scene depth: prepass_note_repair) because no G-buffer draw
+// claimed them; repair_ok: every repair came before anything on that depth could see the depth without them (no hazard, no read before)
+// [eng4] rep_owed: the skips the repairs covered (skipped - used when repaired): a claim that comes after the repair (the G-buffer resumed after
+// another pass on the depth) finds the depth whole - the override on it is harmless - so the key stays fixed
+typedef struct { uint64_t key, vb0, raster; uint32_t cand, kept, held, skipped, used, gb_ok, gb_bad, claim_seq, adm, repaired, repair_ok, rep_owed; } prepass_slot;
 // one pre-pass draw: key (0 = not indexed), vertex stream 0 address, raster hash, vertices, why = prepass_classify()
 typedef struct { uint64_t key, vb0, raster, verts; int why; } prepass_pre_in;
 // one draw with colour targets: key, vb0, raster as above; pass = the identity of its colour target set (a hash of the targets' serials:
 // the G-buffer = the first set on this depth after the pre-pass); its depth test / func / write, stencil test, depth bounds test, real
 // blending or a partial colour mask, may kill (prepass_note_gbuffer)
-typedef struct { uint64_t key, vb0, raster, pass; int dt, df, dw, st, bounds, blend, kill; } prepass_gb_in;
+// [VK-ENGINE-SIDE I3] st_split = 1: st_dep says whether the draw's stencil RESULT depends on its depth test (depth test on, a stencil
+// write mask, depth-fail op != depth-pass op). A stencil test whose result does not (the same op either way, or no write) writes the same
+// stencil whatever depth the skipped draws left, and its colour / depth writes are repaired by the override like any EQUAL draw's: it is
+// no hazard (it is still refused as a claimer: its depth write would follow its stencil test). st_split = 0: every stencil test is a
+// hazard (the old rule; xbg_game.cpp leaves it 0).
+typedef struct { uint64_t key, vb0, raster, pass; int dt, df, dw, st, bounds, blend, kill; int st_split, st_dep; } prepass_gb_in;
 typedef struct {
     uint64_t frame, depth;   // depth: the scene depth target's serial (0 = none seen this frame)
     uint32_t n;              // keys in use
@@ -123,6 +133,8 @@ typedef struct { uint64_t key[PREPASS_CAP]; uint8_t ok[PREPASS_CAP]; uint32_t n;
 // what a retired table showed (the line and the compare use it)
 typedef struct {
     uint64_t frame; uint32_t keys, ok_keys, bad_keys, unmatched, ambiguous, refused, unsafe, unsafe_keys, vbdiff, hazard[PREPASS_H_N], gb_other;
+    uint32_t repaired;               // [eng3] skipped draws drawn again late (no G-buffer draw claimed them; prepass_note_repair)
+    uint32_t amb_same;               // [eng2] keys skipped with a second pre-pass draw or more claimers, under instance keys: the same instance (not bad)
     uint32_t pre_draws, pre_skip, pre_cand, keep[PREPASS_K_N], occ_after_skip, admitted, gb_draws, gb_df[16], gb_dw, gb_override, gb_refused[PREPASS_R_N];
     uint64_t pre_verts, skip_verts, keep_verts, cand_verts;
 } prepass_result;
@@ -130,6 +142,12 @@ typedef struct {
     prepass_frame f;
     prepass_hist hist[2]; int cur;   // hist[cur]: verdicts of the previous frame; hist[cur ^ 1]: being built from this frame's tables
     int gate;                        // 1 = history gate on (DM_DOS2_PREPASS_HIST)
+    // [eng2] 1 = the caller's keys name one INSTANCE (mesh range + the bytes of its per-object block: World / bones), not one mesh: two
+    // draws with one key are the same geometry at the same place, so their depth is the same - whichever G-buffer draw of the key takes
+    // the override lays down exactly the depth the skipped pre-pass draw would have (EQUAL of the others then passes where it did), and a
+    // second pre-pass draw of the key (kept or skipped) or a second claimer does not make the frame wrong. 0 = keys name a mesh (the old
+    // path): two instances of one mesh may share a key, the override may go to the wrong one: such a key is "ambiguous" = bad.
+    int ident;
     uint32_t admit_limit;            // newly clean keys allowed to start skipping per frame (DM_DOS2_PREPASS_ADMIT; 0 = no limit). Bounds
                                      // the burst when an area appears: new LEQUAL + write pipeline variants to build, extra G-buffer overdraw
     prepass_result last;             // the last retired table with a pre-pass
@@ -198,7 +216,13 @@ static inline uint32_t prepass_retire(prepass_ctx *c) {
         const prepass_slot *s = &f->slot[i];
         if (!s->key) continue;
         r->keys++;
-        const int hazard = f->hazard_seq && (!s->claim_seq || s->claim_seq >= f->hazard_seq);   // owed when the first hazard ran (a hazard draw never claims)
+        // [eng3] the skips no claimer took, every one drawn again by the caller before a hazard / read: the depth is whole again
+        const uint32_t owed = s->skipped > s->used ? s->skipped - s->used : 0;
+        // [eng4] (phone H10 / H12: the G-buffer interrupted by ~32 draws of another colour pass on the depth, then resumed: the repair ran at
+        // the first of them and covered every skip; the claims came after it, owed became 0 and the key was called unsafe - 32 bad keys a
+        // frame although the frame was right) fixed = every skip unclaimed at the repair was drawn again before any hazard / read
+        const int fixed = s->repaired && s->repair_ok && s->repaired >= s->rep_owed;
+        const int hazard = !fixed && f->hazard_seq && (!s->claim_seq || s->claim_seq >= f->hazard_seq);   // owed when the first hazard ran (a hazard draw never claims)
         if (s->cand) {
             r->unsafe_keys += (uint32_t)hazard;
             const int ok = !hazard && !s->kept && !s->gb_bad && s->gb_ok == s->cand;   // one claimer per candidate (more: which owes what is unknown)
@@ -206,10 +230,13 @@ static inline uint32_t prepass_retire(prepass_ctx *c) {
             prepass_hist_put(next, s->key, ok ? PREPASS_HIST_OK | (s->skipped ? PREPASS_HIST_EST : 0) : 0);
         }
         if (s->skipped) {
-            const uint32_t un = s->used < s->skipped ? s->skipped - s->used : 0;
+            const uint32_t un = owed > s->repaired ? owed - s->repaired : 0;
+            r->repaired += fixed ? s->rep_owed : 0;
             const int extra = s->gb_ok > s->cand;   // more claimers than candidates: the override may have gone to the wrong draw
-            r->unmatched += un; r->ambiguous += s->kept || extra ? 1u : 0u; r->refused += s->gb_bad ? 1u : 0u; r->unsafe += hazard ? 1u : 0u;
-            if (un || s->kept || extra || s->gb_bad || hazard) r->bad_keys++;
+            const int amb = s->kept || extra;   // [eng2] under instance keys: the same instance twice (exact)
+            r->unmatched += un; r->ambiguous += amb && !c->ident ? 1u : 0u; r->amb_same += amb && c->ident ? 1u : 0u;
+            r->refused += s->gb_bad ? 1u : 0u; r->unsafe += hazard ? 1u : 0u;
+            if (un || (amb && !c->ident) || s->gb_bad || hazard) r->bad_keys++;
         }
     }
     c->last_valid = 1; c->tables++;
@@ -274,7 +301,7 @@ static inline int prepass_note_gbuffer(prepass_ctx *c, uint64_t depth, const pre
     if (f->pre_cand > f->claims) {   // candidates still unclaimed: this draw sees the depth the skip changes
         int h = -1;
         if (!claim_pass) h = PREPASS_H_PASS;
-        else if (in->st) h = PREPASS_H_STENCIL;
+        else if (in->st && (!in->st_split || in->st_dep)) h = PREPASS_H_STENCIL;
         else if (in->bounds) h = PREPASS_H_BOUNDS;
         else if (in->dt && !(in->df == 1 || in->df == 2 || in->df == PREPASS_NVN_EQUAL || in->df == PREPASS_NVN_LEQUAL)) h = PREPASS_H_FUNC;
         else if (in->dt && in->dw && in->blend) h = PREPASS_H_BLENDW;
@@ -303,6 +330,18 @@ static inline void prepass_note_read(prepass_ctx *c, uint64_t serial) {
     prepass_frame *f = &c->f;
     if (!f->depth || f->depth != serial || f->pre_cand <= f->claims) return;
     f->hazard[PREPASS_H_READ]++; if (!f->hazard_seq) f->hazard_seq = f->gb_seq + 1;
+}
+// [eng3] n skipped draws of key were drawn again by the caller (into the scene depth, the same draws); ok = before any hazard or read of
+// that depth (else they still count as unmatched / unsafe). The key does not become clean (gb_ok < cand): the history keeps it out.
+static inline void prepass_note_repair(prepass_ctx *c, uint64_t key, uint32_t n, int ok) {
+    prepass_frame *f = &c->f;
+    if (!f->depth) return;
+    prepass_slot *s = key ? prepass_find(f, key, 0) : 0;
+    if (!s) return;
+    const uint32_t owed = s->skipped > s->used + s->repaired ? s->skipped - s->used - s->repaired : 0;   // [eng4] (before this repair)
+    if (!s->repaired) s->rep_owed = 0;
+    s->rep_owed += owed < n ? owed : n;
+    s->repaired += n; s->repair_ok = (s->repaired == n ? 1u : s->repair_ok) & (ok ? 1u : 0u);
 }
 // A draw that was given the override (mode 1) was not recorded after all: its depth is missing this frame; the key is refused.
 static inline void prepass_note_lost(prepass_ctx *c, uint64_t key) {

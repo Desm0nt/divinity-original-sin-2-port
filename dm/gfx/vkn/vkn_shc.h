@@ -185,6 +185,7 @@ void vkn_shc_ehash_stats(uint64_t *used, uint64_t *verified, uint64_t *differ);
 // Line "[vkn] shcache eng far ..." in the 10 s census.
 typedef struct vkn_shc_eng_stats {
     uint64_t dec, drawn, drawn_draws, empty, skipped, restored, poisoned, empty_kept, missing, would, would_draws, saved, unsaved, lost, bad, reds;
+    uint64_t saved_adopt;   // [eng4] far tiles saved in the frame their atlas was adopted in (its clear not seen: clear value unknown)
 } vkn_shc_eng_stats;
 void vkn_shc_eng_far(int dec);                 // recording thread
 int vkn_shc_eng_far_bad(void);                 // any thread: bad decisions so far (the host side's fallback)

@@ -92,7 +92,7 @@ static struct {
     // [eng I1b] DM_VK_ENG_FARRATE (vkn_shc.h): the engine's decision for the frame being recorded (e_dec: -1 none yet, 0 drawn, 1 left
     // out, 2 would be left out), the far draws seen since it came, the far tile (e_rect), the safe point owed (e_pend); f_eseq: the
     // decision number whose drawn far tile F holds; e_empty: the last drawn decision had no far draw (its tile was the clear value)
-    int e_mode, e_period, e_dec, e_seen, e_pend, e_empty, e_saved_last; uint32_t e_draws; int32_t e_rect[4]; uint64_t e_seq, f_eseq;
+    int e_mode, e_period, e_dec, e_seen, e_pend, e_empty, e_saved_last, f_bits_known, adopt_seen; uint64_t adopt_frame; uint32_t e_draws; int32_t e_rect[4]; uint64_t e_seq, f_eseq;
     vkn_shc_eng_stats es;
     int st;                                   // [eng I1a] DM_VK_ENG_SHSTATIC (no precopy: an owned tile must stay as the engine side leaves it)
 } g;
@@ -799,16 +799,22 @@ static void eng_settle(void) {
         if (!seen) { g.es.empty++; g.e_empty = 1; g.f_ok = 0; return; }   // no far caster drew: the tile is the clear value
         g.e_empty = 0; g.e_saved_last = 0;
         if (g.e_mode != 1 && g.e_mode != 3) return;
-        if (!clear_ok || !g.atlas || (!g.F && !(g.F = img_make("shc far")))) { g.f_ok = 0; g.es.unsaved++; return; }
+        // [eng4] (phone H10 / H12: "a left-out frame after a drawn one whose tile could not be saved" at every load - FARRATE default 1 now)
+        // the frame the atlas was adopted in: the engine's whole clear of the atlas came before the adoption (this function's watch did not
+        // exist yet), so the clear is not seen - but the tile is the engine's drawn far tile all the same. It is saved with its clear value
+        // unknown; the put-back then needs only this frame's clear (it overwrites the whole far tile).
+        const int adopt = !clear_ok && g.adopt_seen && g.adopt_frame == g.frame;
+        if ((!clear_ok && !adopt) || !g.atlas || (!g.F && !(g.F = img_make("shc far")))) { g.f_ok = 0; g.es.unsaved++; return; }
         if (copy_tile(g.atlas, g.F, g.e_rect)) { g.f_ok = 0; g.es.unsaved++; return; }
         g.e_saved_last = 1;
         g.f_ok = 1; memcpy(g.f_rect, g.e_rect, sizeof g.f_rect); g.f_frame = g.frame; g.f_gen = g.atlas_gen; g.f_bits = g.clear_bits; g.f_eseq = g.e_seq; g.es.saved++;
+        g.f_bits_known = !adopt; if (adopt) g.es.saved_adopt++;   // [eng4]
         __atomic_store_n(&g_e_tile, g.e_rect[2], __ATOMIC_RELAXED);
         return;
     }
     g.es.skipped++;
     if (seen) { g.f_ok = 0; eng_bad("a frame the engine left the far cascade out of drew into the far tile: the decision and the recording disagree"); return; }
-    const int f_ok = g.F && g.f_ok && g.f_gen == g.atlas_gen && g.f_bits == g.clear_bits && clear_ok && g.e_seq - g.f_eseq < (uint64_t)g.e_period;
+    const int f_ok = g.F && g.f_ok && g.f_gen == g.atlas_gen && (!g.f_bits_known || g.f_bits == g.clear_bits) && clear_ok && g.e_seq - g.f_eseq < (uint64_t)g.e_period;   // [eng4] f_bits_known
     if (!f_ok) {
         if (g.e_empty) { g.es.empty_kept++; return; }   // (the last drawn far tile was the clear value too: nothing to restore)
         g.es.missing++;
@@ -1534,7 +1540,7 @@ static int atlas_take(vkn_tex *d, uint64_t frame) {
         vkn_logf("shcache: the shadow atlas changes from %ux%u (%s) to %ux%u (%s): every layer dropped", g.atlas->w, g.atlas->h, g.atlas->sname, d->w, d->h, d->sname);
         vkn_pass_watch(NULL, NULL); vkn_tex_unref(g.atlas);
     } else vkn_logf("shcache: shadow atlas %ux%u format %d (%s)", d->w, d->h, (int)d->format, d->sname);
-    g.atlas = d; g.atlas_gen++; g.atlas_last = frame; g.s.atlas_changes++; g.clear_seen = 0;
+    g.atlas = d; g.atlas_gen++; g.atlas_last = frame; g.s.atlas_changes++; g.clear_seen = 0; g.adopt_frame = frame; g.adopt_seen = 1;   // [eng4]
     layers_drop();
     if (!same_shape) { img_free(); g.img_fail = 0; }
     vkn_pass_watch(d, on_watch);

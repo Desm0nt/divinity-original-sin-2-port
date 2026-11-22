@@ -8,6 +8,9 @@
 //               target = the G-buffer side; every other draw costs one pointer compare (ctx->depth) and returns.
 //   key         prepass_key(engine index buffer handle, first index, count, base vertex 0, instances, base instance 0) of an indexed
 //               draw (the engine's draws have no base vertex / instance); arrays draws have key 0 (never skipped, as before).
+//               [eng2] mixed with the draw's instance (vkn_prepass.c inst_id: the bytes of its per-object block, vertex binding 0:
+//               World / bones), so a key names one object, not one mesh (xbg_prepass.h prepass_ctx.ident); a draw without that
+//               block is kept ("noid").
 //   facts       fragment class 0 none / 1 empty main (the old empty_fs rule on the library's final words: one function whose body is
 //               only OpLabel / OpReturn) / 2 kills (vkn_shlib_fs_facts KILL: OpKill / OpTerminateInvocation / OpDemote) / 3 other;
 //               unknown (no library) = 3, a kill unknown on the G-buffer side = kill. Depth test / write / func (Vulkan op + 1 = the
@@ -53,6 +56,9 @@ int vkn_prepass_mode(void);                 // in effect (0 = off / not installe
 typedef struct vkn_prepass_stats {
     uint64_t pre_seen, gb_seen, skipped, overrides, lost, reads, counting_open, ds_full, facts_unknown, fallbacks, tables, bad_frames, bad_keys, reds;
     uint64_t nofs;   // [mgpu P4] pre-pass draws whose fragment stage an earlier piece (MAT) dropped: class 0 (DM_VK_NATIVE_PREPASS_NOFS, default 1)
+    uint64_t st_free;   // [VK-ENGINE-SIDE I3] G-buffer stencil draws whose stencil result does not depend on depth: no hazard
+    uint64_t repaired, repair_runs, repair_stale, repair_drop, twin_mesh, rec_full;   // [eng3] late repairs of unclaimed skips; G-buffer twins by mesh; no record
+    uint64_t noid;      // [eng2] pre-pass candidates kept: no per-object block (no instance identity, vkn_prepass.c inst_id)
 } vkn_prepass_stats;
 void vkn_prepass_stats_get(vkn_prepass_stats *s);
 void vkn_prepass_census(void);              // the line of the last retired table now

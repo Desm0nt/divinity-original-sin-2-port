@@ -19,7 +19,7 @@ static long checks;
 
 static prepass_ctx C;
 static prepass_pre_in PI(uint64_t key, int why) { prepass_pre_in p = {key, 0x1000, 7, 30, why}; return p; }
-static prepass_gb_in GI(uint64_t key, int df) { prepass_gb_in g = {key, 0x1000, 7, 1, 1, df, 0, 0, 0, 0, 0}; return g; }
+static prepass_gb_in GI(uint64_t key, int df) { prepass_gb_in g = {key, 0x1000, 7, 1, 1, df, 0, 0, 0, 0, 0, 0, 0}; return g; }
 
 static void test_classify(void) {
     CHECK(prepass_is_depth_only(0, 1, 2160, 972));
@@ -178,7 +178,7 @@ static void frame(const obj *o, int n, const int *pre_order, const gref *gb, int
         const obj *b = &o[gb[k].obj]; const gdraw *g = &b->g[gb[k].gi];
         int df = g->df, dw = g->dw;
         if (mode) {
-            prepass_gb_in q = {prepass_key(0x1000u + 0x100u * (unsigned)b->key, 0, 6, 0, 1, 0), 0x40, 7u + (unsigned)g->shift, 1, 1, g->df, g->dw, g->st, 0, g->blend, g->kill != 0};
+            prepass_gb_in q = {prepass_key(0x1000u + 0x100u * (unsigned)b->key, 0, 6, 0, 1, 0), 0x40, 7u + (unsigned)g->shift, 1, 1, g->df, g->dw, g->st, 0, g->blend, g->kill != 0, 0, 0};
             if (prepass_note_gbuffer(&C, 3, &q) && mode == 1) { df = F_LEQUAL; dw = 1; }
         }
         for (int x = b->x0 + g->shift; x < b->x1 + g->shift && x < W; x++) {

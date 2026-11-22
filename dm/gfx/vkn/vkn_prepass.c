@@ -417,6 +417,12 @@ void vkn_prepass_install(uint32_t vendor, const char *device_name) {
     const int def = family_tile(vendor, device_name);
     const char *e = getenv("DM_VK_NATIVE_PREPASS");
     g.mode = e && *e ? prepass_clamp_mode(atol(e)) : def;
+    {   // [23.11] I2 (DM_VK_ENG_OCC) takes its depth snapshot with a compute pass at the pre-pass end - a read the repair of skipped
+        // draws cannot precede (phone I03 / H10 / H12: "unsafe 32 ... read 2" every other frame). Until I2 orders its snapshot after the
+        // repair, the skip is off while I2 is on (I2 is off by default and parked).
+        const char *oc = getenv("DM_VK_ENG_OCC");
+        if (g.mode == PREPASS_SKIP && oc && *oc && atol(oc) > 0) { vkn_logf("DM_VK_NATIVE_PREPASS=1 with DM_VK_ENG_OCC=%s: the skip is off (I2's mid-frame depth snapshot cannot see repaired draws): 2 (count only)", oc); g.mode = PREPASS_COUNT; }
+    }
     const char *h = getenv("DM_VK_NATIVE_PREPASS_HIST"); g.hist = h && *h ? atol(h) != 0 : 1;
     const char *ad = getenv("DM_VK_NATIVE_PREPASS_ADMIT"); g.admit = ad && *ad && atol(ad) >= 0 ? (uint32_t)atol(ad) : 32u;
     const char *l = getenv("DM_VK_NATIVE_PREPASS_LOG"); g.log_every = l && *l && atol(l) > 0 ? (uint64_t)atol(l) : 300u;
