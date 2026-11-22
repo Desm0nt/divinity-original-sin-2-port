@@ -90,6 +90,7 @@ extern void vkn_ui_stats_get(struct vkn_ui_stats *s) __attribute__((weak));
 typedef struct pj_att { char name[24]; uint32_t fmt; uint8_t load, store, depth; } pj_att;
 typedef struct pj_ent { pj_att a[VKN_PASS_COLORS + 1]; uint8_t na, why, joined; uint32_t w, h; VkRect2D area; uint64_t lb, sb; uint32_t draws; } pj_ent;
 static struct { int init, target, armed; uint32_t heavy, n, cap, passes; pj_ent *e; uint64_t d0, u0, lb, sb; int open, ui; } g_pj;   // ui: [mgpu P7] a UI target is attached
+static void (*g_pj_after)(int target);   // [mgpu P7b] vkn_pass_log_after
 static int pj_cfg(void) {
     if (!g_pj.init) { g_pj.init = 1; const char *e = getenv("DM_VK_NATIVE_PASSLOG"); g_pj.target = e && *e && atoi(e) > 0 ? atoi(e) : 0; }
     return g_pj.target;
@@ -160,9 +161,13 @@ static void pj_rec_close(void) {   // (close listener, after vkn_pass_end) a hea
     for (int i = 0; i < VKN_PE_N && o < (int)sizeof r - 80; i++) if (nb[i]) o += snprintf(r + o, sizeof r - (size_t)o, "%s%s %u (%.1f MB)", o ? ", " : "", k_pe_name[i], nb[i], by[i]);
     vkn_logf("passlog %d: heavy frame %u (frame %llu): %u passes, %llu draws, model %.1f MB load + %.1f MB store; ended by: %s (ops: L load / C clear / - dont care, then S store / - dont care)",
              g_pj.target, g_pj.heavy, (unsigned long long)vkn_frame(), g_pj.n, (unsigned long long)td, tl, ts, r);
+    if (g_pj_after) g_pj_after(g_pj.target);   // [mgpu P7b] the UI's run log of this frame
     g_pj.n = 0; g_pj.armed = 0; g_pj.target = -1;
 }
 void vkn_pass_stats4_get(vkn_pass_stats4 *s) { if (s) *s = g_s4; }
+uint32_t vkn_pass_log_at(void) { return g_pj.n; }   // [mgpu P7b]
+int vkn_pass_log_armed(void) { return g_pj.armed; }
+void vkn_pass_log_after(void (*fn)(int target)) { g_pj_after = fn; }
 // [mgpu P2] the hook run before every recording entry point (vkn_pass.h vkn_pass_before)
 static void (*g_before)(void);
 #define BEFORE() do { if (g_before) { void (*f_)(void) = g_before; g_before = NULL; f_(); } } while (0)

@@ -174,7 +174,11 @@ static int fc_holding(void); static void fc_put_vs(uint8_t kind, int32_t x, int3
 static void fc_put_draw(const vkn_ui_draw_in *in); static void fc_flush(int why); static void fc_end(void); static int fc_hold_clear(vkn_tex *t, const int32_t rect[4]);
 static int fc_same_set(const vkn_tex *c, const vkn_tex *d);
 static int ui_draw_x(const vkn_ui_draw_in *in); static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]);
+static struct { uint8_t on, rq, dsclip; vkn_tex *c, *d; int32_t rr[4]; } g_pb; static void ui_bind_now(void); static uint8_t g_reg_dsclip;   // [mgpu P7c] (below: lazy pushed bindings)
 static int g_up_noarea;   // [mgpu P7] the hold's hoisted layer replay: the layer's epoch takes no render-area decision (one pass)
+// [mgpu P7b] the hoisted layer replay knows the whole run: its depth-stencil need (-1 none = the history rule, 0 detach, 1 keep) and the
+// union of every rect its layer events touch (g_up_lh_area_on: hinted as the render area instead of the history seed)
+static int g_up_lh_ds = -1, g_up_lh_area_on; static nb_ua_rect g_up_lh_area;
 static void ui_viewport_x(int32_t x, int32_t y, int32_t w, int32_t h) {
     if (fc_holding()) { fc_put_vs(1, x, y, w, h); return; }   // [mgpu P2]
     g_vp = (VkViewport){(float)x, (float)y, (float)w, (float)h, 0.0f, 1.0f}; g_vp_set = 1;
@@ -202,6 +206,7 @@ typedef struct up_ep {
     uint8_t hint, area_seen, narrowed, restarted;         // applied area state
     uint8_t wdetach, wmiss, warea, wrestart;              // verify: would detach / would have re-attached / would narrow / would restart
     uint8_t rq, region, wregion;                          // [mgpu P1] the host named the region (rq, rrect); the region area is applied / verify
+    uint8_t dsclip;                                       // [mgpu P7c] the hold proved the epoch's depth-stencil writes dead after it: its DS draws are clipped too
     int32_t rrect[4];
     vkn_tex *c, *d; uint32_t serial, w, h; uint64_t key2;
     nb_ua_rect uni, area;
@@ -304,6 +309,7 @@ static void up_decide(nb_ua_rect r, uint64_t what, int full_clear) {
         if (!g_ep.dref) why = VKN_UIP_DS_DYING;
         else if (g_ep.d->w != g_ep.c->w || g_ep.d->h != g_ep.c->h || g_ep.d->samples != g_ep.c->samples) why = VKN_UIP_DS_SIZE;   // (the pass is the smallest attachment)
         else if (g_ep.shared && (!vkn_pass_area_get || up_open())) why = VKN_UIP_DS_SHARED;   // the set was current before GDraw took it, a pass may be open: detaching would break it
+        else if (g_up_lh_ds >= 0) { det = !g_up_lh_ds; if (det) g_ups.lh_g0_det++; else g_ups.lh_g0_keep++; }   // [mgpu P7b] the run's own answer (exact: it holds every draw)
         else if (stress) det = 1;
         else if (g_up.rule == 1) { det = !g_up_fds_prev; if (!det) why = VKN_UIP_DS_FRAME; }
         else { det = !nr_uix_ds_keep(e, g_up_fno, UP_DECAY); if (!det) why = VKN_UIP_DS_HIST; }
@@ -333,6 +339,18 @@ static void up_decide(nb_ua_rect r, uint64_t what, int full_clear) {
         }
         return;
     }
+    if (g_up.mode >= 2 && g_up_noarea && g_up_lh_area_on) {   // [mgpu P7b] the hoisted run's union: every later event of the epoch lies inside it
+        int why = -1; const nb_ua_rect s = nb_ua_clip(g_up_lh_area, nb_ua_full(g_ep.w, g_ep.h));
+        const uint64_t full = (uint64_t)g_ep.w * g_ep.h;
+        if (!g_up.verify && !g_ups.api) why = VKN_UIP_AR_API;
+        else if (full_clear || g_ep.c->pass_nclr || (g_ep.d && !g_ep.detached && g_ep.d->pass_dclr)) why = VKN_UIP_AR_CLEAR;
+        else if (g_ep.c->samples > 1) why = VKN_UIP_AR_MS;
+        else if (nb_ua_empty(s) || nb_ua_px(s) * 10 > full * 9) why = VKN_UIP_AR_SAVE;
+        if (why >= 0) g_ups.area_refused[why]++;
+        else if (g_up.verify) { g_ep.area = s; g_ep.warea = 1; g_ups.w_area++; }
+        else { g_ep.area = s; const VkRect2D a = up_vk(s); if (!vkn_pass_area_hint(&a)) { g_ep.hint = 1; g_ups.area_hinted++; g_ups.lh_area++; g_ups.lh_area_px += nb_ua_px(s); g_ups.lh_area_full += full; } }
+        return;
+    }
     if (g_up.mode >= 2 && !g_up_noarea) {   // render area ([mgpu P7] not for the hoisted layer: its pass is one)
         int why = -1; nb_ua_rect s = nb_ua_none();
         const nb_ua_hent *h = !stress && e && !nb_ua_empty(e->uni) ? e : NULL;
@@ -358,13 +376,17 @@ static void up_event(nb_ua_rect r, int needs_ds, uint64_t what, int full_clear) 
     }
     // [mgpu P1] a region epoch: a colour-only draw outside the region is clipped to it (vkn_ui_draw: its scissor); a depth-stencil use
     // (the DS is shared with the other epochs: its texels outside the region matter) or a clear outside ends the region rule (below)
-    if (g_ep.region && (needs_ds || what == UP_KEY_DS || what == UP_KEY_CLEAR) && !nb_ua_contains(g_ep.area, r)) { g_ep.region = 0; g_ups.region_dropped++; }
-    if (g_ep.region && !needs_ds && what != UP_KEY_DS && what != UP_KEY_CLEAR) { if (!nb_ua_contains(g_ep.area, r)) g_ups.region_clipped++; }
+    // [mgpu P7c] dsclip: a DS draw / masked stencil clear stays inside the region too (clipped): the DS texels it would write outside are
+    // never read again (the hold's proof), the ones inside are the same
+    const int dsc = g_ep.dsclip && what != UP_KEY_CLEAR && (needs_ds || what == UP_KEY_DS);
+    if (g_ep.region && (needs_ds || what == UP_KEY_DS || what == UP_KEY_CLEAR) && !dsc && !nb_ua_contains(g_ep.area, r)) { g_ep.region = 0; g_ups.region_dropped++; }
+    if (g_ep.region && dsc) { if (!nb_ua_contains(g_ep.area, r)) g_ups.region_dsclip++; }
+    else if (g_ep.region && !needs_ds && what != UP_KEY_DS && what != UP_KEY_CLEAR) { if (!nb_ua_contains(g_ep.area, r)) g_ups.region_clipped++; }
     else if (g_ep.wregion && !needs_ds && what != UP_KEY_DS && what != UP_KEY_CLEAR) { if (!nb_ua_contains(g_ep.area, r)) g_ups.w_region_clip++; }
     else if (g_ep.wregion && !nb_ua_contains(g_ep.area, r)) { g_ep.wregion = 0; g_ups.w_region_drop++; }
     if (g_ep.hint && !g_ep.region && !nb_ua_contains(g_ep.area, r)) {   // outside the area: the narrowed pass ends, the rest of the epoch is full area (LOAD)
         VkRect2D a;
-        if (vkn_pass_area_get(&a) && up_narrow(&a)) { vkn_pass_end(); g_ups.restarts++; g_ep.restarted = 1; } else g_ups.hint_dropped++;
+        if (vkn_pass_area_get(&a) && up_narrow(&a)) { vkn_pass_end(); g_ups.restarts++; g_ep.restarted = 1; if (g_up_noarea) g_ups.lh_area_restart++; } else g_ups.hint_dropped++;
         up_hint_drop();
     }
     if (g_ep.warea && !g_ep.wrestart && !nb_ua_contains(g_ep.area, r)) { g_ep.wrestart = 1; g_ups.w_restart++; }
@@ -408,6 +430,7 @@ static void up_begin(vkn_tex *c, vkn_tex *d, int shared) {
 }
 static void ui_fence_x(void) {
     if (fc_holding()) fc_flush(1);   // [mgpu P2] (FCF_FENCE)
+    ui_bind_now();   // [mgpu P7c]
     if (!g_ep.on) return;
     if (!up_mine()) { up_lost(); return; }
     int closed = 0;
@@ -430,7 +453,8 @@ void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s) { if (s) { *s = g_ups; if (!g_u
 // region; Iggy draws and reads nothing else of it until TextureDrawBufferEnd)
 static void ui_region_x(vkn_tex *t, const int32_t rect[4]) {
     if (!rect || rect[2] <= 0 || rect[3] <= 0) return;
-    if (g_up.region && g_ep.on && g_ep.c == t && !g_ep.decided) { g_ep.rq = 1; memcpy(g_ep.rrect, rect, sizeof g_ep.rrect); }
+    if (g_pb.on && g_pb.c == t) { g_pb.rq = 1; g_pb.dsclip = g_reg_dsclip; memcpy(g_pb.rr, rect, sizeof g_pb.rr); }   // [mgpu P7c] (given at the binding)
+    else if (g_up.region && g_ep.on && g_ep.c == t && !g_ep.decided) { g_ep.rq = 1; g_ep.dsclip = g_reg_dsclip; memcpy(g_ep.rrect, rect, sizeof g_ep.rrect); }
     fc_begin(t, rect);   // [mgpu P2]
 }
 // ==== [/stage 5.2 B2] ====
@@ -455,7 +479,7 @@ enum { FC_N = 128, FC_AW = 2560, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 102
 enum { FCR_NOREG, FCR_DRAW, FCR_TEX, FCR_MANY, FCR_DS, FCR_FULL, FCR_OTHER };
 enum { FCF_TARGETS, FCF_FENCE, FCF_ENGINE, FCF_CLOSE, FCF_OTHER };
 enum { FCE_VP = 1, FCE_SC, FCE_CLR, FCE_DRAW };
-typedef struct fc_ent { uint64_t key; uint16_t x, y, w, h; uint32_t frame; uint8_t live; } fc_ent;
+typedef struct fc_ent { uint64_t key; uint16_t x, y, w, h; uint32_t frame; uint8_t live; int8_t page; } fc_ent;   // page: [mgpu P7c] -1 = the atlas slot (x, y), else a page at the region's own place
 typedef struct fc_ct { const vkn_tex *t; VkImage img; uint64_t key; uint8_t valid; } fc_ct;
 typedef struct fc_cmp { int live; uint64_t frame, key; vkn_block b; uint32_t bytes; } fc_cmp;
 typedef struct fc_hdr { uint32_t size; uint8_t kind, pad[3]; } fc_hdr;
@@ -468,7 +492,12 @@ static struct {
     fc_ct ct[FC_CT];
     fc_cmp cmp[FC_CMP];
     uint64_t hits_all;
+    // [mgpu P7c] pages: textures of the pushed targets' shape holding cached regions at their own place; redirects: a pushed target whose
+    // region's content is a page's (a hit without a copy) - its reads take the page until the target is written again
+    vkn_tex *pg[4]; uint32_t npg;
+    struct { vkn_tex *t, *p; VkImage img; int32_t r[4]; } rd[32]; uint32_t nrd;
 } g_fc;
+static int g_fc_pages;   // [mgpu P7c] the pages are in use (the UI layer hold is on: a hit then needs no GPU work at all)
 static uint8_t g_fca_cookie;
 static uint64_t fc_mix(uint64_t h, uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); h *= 0xff51afd7ed558ccdull; return h ^ (h >> 33); }
 static uint64_t fc_bytes(uint64_t h, const void *p, uint32_t n) {
@@ -480,10 +509,29 @@ static uint64_t fc_bytes(uint64_t h, const void *p, uint32_t n) {
 }
 void vkn_ui_fc_config(int mode) { g_fc.req = mode < -1 || mode > 3 ? 0 : mode; g_fc.init = 0; }
 static void lh_written(vkn_tex *t);   // [mgpu P7]
+static void fc_rd_drop_t(const vkn_tex *t);   // [mgpu P7c]
 static void fc_written(vkn_tex *t) {   // vkn_pass_on_write: a GPU write drops the content key of t
+    if (g_fc.nrd) fc_rd_drop_t(t);   // [mgpu P7c] its content is its own again
     if (!g_fc.mode) return;
     const uint32_t h = (uint32_t)(((uintptr_t)t >> 4) * 0x9E3779B1u) & (FC_CT - 1);
     for (uint32_t i = 0; i < 8; i++) { fc_ct *c = &g_fc.ct[(h + i) & (FC_CT - 1)]; if (c->t == t) { c->valid = 0; return; } }
+}
+// ---- [mgpu P7c] redirects of pushed targets to the pages (a cache hit without a copy) ----
+static int fc_ov(const int32_t a[4], const int32_t b[4]) { return a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]; }
+static vkn_tex *fc_rd(vkn_tex *t) {   // the texture a read of t takes
+    if (t) for (uint32_t i = 0; i < g_fc.nrd; i++) if (g_fc.rd[i].t == t) return g_fc.rd[i].img == t->image && !g_fc.rd[i].p->dead ? g_fc.rd[i].p : t;
+    return t;
+}
+static void fc_rd_del(uint32_t i) { g_fc.rd[i] = g_fc.rd[--g_fc.nrd]; }
+static void fc_rd_drop_t(const vkn_tex *t) { for (uint32_t i = 0; i < g_fc.nrd; i++) if (g_fc.rd[i].t == t) { fc_rd_del(i); return; } }
+// page p is about to be written over r: every redirect into it there is made real first (the region copied into its target)
+static void fc_rd_materialize(const vkn_tex *p, const int32_t r[4]) {
+    for (uint32_t i = 0; i < g_fc.nrd;) {
+        if (g_fc.rd[i].p != p || !fc_ov(g_fc.rd[i].r, r)) { i++; continue; }
+        vkn_tex *t = g_fc.rd[i].t; int32_t rr[4]; memcpy(rr, g_fc.rd[i].r, sizeof rr); const VkImage img = g_fc.rd[i].img;
+        fc_rd_del(i);
+        if (!t->dead && t->image == img) { (void)vkn_pass_copy_rect(t, rr[0], rr[1], (vkn_tex *)(uintptr_t)p, rr[0], rr[1], (uint32_t)rr[2], (uint32_t)rr[3]); g_ups.fc_rd_real++; }
+    }
 }
 static void ui_on_write(vkn_tex *t) { fc_written(t); lh_written(t); }   // [mgpu P7] vkn_pass_on_write
 static fc_ct *fc_ct_get(const vkn_tex *t, int create) {
@@ -650,6 +698,28 @@ static int fc_atlas(const vkn_tex *t) {   // the atlas in t's format (one format
     g_fc.afmt = t->nvn_fmt;
     return 0;
 }
+// [mgpu P7c] a page of t's shape with no live entry over r (made on first need, at most 4); -1 = none
+static uint8_t g_fcp_cookie[4];
+static int fc_page_for(const vkn_tex *t, const int32_t r[4]) {
+    for (uint32_t p = 0; p < g_fc.npg; p++) {
+        const vkn_tex *pg = g_fc.pg[p];
+        if (!pg || pg->dead || pg->w != t->w || pg->h != t->h || pg->format != t->format || pg->samples != t->samples) continue;
+        int ov = 0;
+        for (uint32_t i = 0; i < FC_N && !ov; i++) { const fc_ent *e = &g_fc.e[i]; if (e->live && e->page == (int8_t)p) { const int32_t er[4] = {e->x, e->y, e->w, e->h}; ov = fc_ov(er, r); } }
+        if (!ov) return (int)p;
+    }
+    if (g_fc.npg >= 4 || t->samples > 1) return -1;
+    vkn_tex_desc d; memset(&d, 0, sizeof d);
+    d.nvn_fmt = t->nvn_fmt; d.efmt = t->efmt; d.nvn_target = 1; d.w = t->w; d.h = t->h; d.depth = d.mips = d.layers = d.samples = 1; d.cls = VKN_TC_COLOR;
+    d.pool_id = ~0u; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) d.layer_ids[i] = ~0u; d.sampler_id = ~0u; d.cookie = (uint64_t)(uintptr_t)&g_fcp_cookie[g_fc.npg];
+    const vkn_tex_src src = {.kind = VKN_SRC_NONE};
+    const char *why = NULL;
+    vkn_tex *pg = vkn_tex_create(1ull << 32 | 0xffffffffull, &d, &src, &why);
+    if (!pg || pg->format != t->format) { if (pg) vkn_tex_destroy_cookie(d.cookie); g_fc.npg = 4; return -1; }   // (no pages this session: the atlas)
+    snprintf(pg->sname, sizeof pg->sname, "ui-filter-page-%u", g_fc.npg); pg->ui_tgt = 1;
+    g_fc.pg[g_fc.npg] = pg; g_ups.fc_pages++; g_ups.fc_page_bytes += pg->bytes;
+    return (int)g_fc.npg++;
+}
 static fc_ent *fc_find(uint64_t key) { for (uint32_t i = 0; i < FC_N; i++) if (g_fc.e[i].live && g_fc.e[i].key == key) return &g_fc.e[i]; return NULL; }
 static fc_ent *fc_alloc(uint64_t key, uint32_t w, uint32_t h) {
     fc_ent *e = NULL;
@@ -661,8 +731,16 @@ static fc_ent *fc_alloc(uint64_t key, uint32_t w, uint32_t h) {
         for (uint32_t i = 0; i < FC_N; i++) if (g_fc.e[i].live) { g_fc.e[i].live = 0; g_ups.fc_evicted++; }
         g_fc.ax = g_fc.ay = g_fc.arow = 0;
     }
-    e->live = 1; e->key = key; e->x = (uint16_t)g_fc.ax; e->y = (uint16_t)g_fc.ay; e->w = (uint16_t)w; e->h = (uint16_t)h; e->frame = (uint32_t)vkn_frame();
+    e->live = 1; e->key = key; e->x = (uint16_t)g_fc.ax; e->y = (uint16_t)g_fc.ay; e->w = (uint16_t)w; e->h = (uint16_t)h; e->frame = (uint32_t)vkn_frame(); e->page = -1;
     g_fc.ax += (w + 7u) & ~7u; if (((h + 7u) & ~7u) > g_fc.arow) g_fc.arow = (h + 7u) & ~7u;
+    return e;
+}
+static fc_ent *fc_alloc_page(uint64_t key, const int32_t r[4], int page) {   // [mgpu P7c] an entry kept in a page at r (an LRU slot)
+    fc_ent *e = NULL;
+    for (uint32_t i = 0; i < FC_N && !e; i++) if (!g_fc.e[i].live) e = &g_fc.e[i];
+    if (!e) { e = &g_fc.e[0]; for (uint32_t i = 1; i < FC_N; i++) if (g_fc.e[i].frame < e->frame) e = &g_fc.e[i]; }
+    if (e->live) { e->live = 0; g_ups.fc_evicted++; }
+    e->live = 1; e->key = key; e->x = (uint16_t)r[0]; e->y = (uint16_t)r[1]; e->w = (uint16_t)r[2]; e->h = (uint16_t)r[3]; e->frame = (uint32_t)vkn_frame(); e->page = (int8_t)page;
     return e;
 }
 // a compare of the target's region with an entry's slot: both read back now, checked 4 frames later (fc_cmp_check)
@@ -672,11 +750,13 @@ static void fc_cmp_put(const fc_ent *e) {
     if (!c || !cb) return;
     const uint32_t bytes = (uint32_t)e->w * e->h * 4u;
     if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * bytes, 16, &c->b)) return;
-    vkn_pass_layout(g_fc.t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); vkn_pass_layout(g_fc.atlas, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkn_tex *src = e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas;   // [mgpu P7c]
+    if (!src || src->dead) return;
+    vkn_pass_layout(g_fc.t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); vkn_pass_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy r = {.bufferOffset = c->b.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {g_fc.rect[0], g_fc.rect[1], 0}, .imageExtent = {e->w, e->h, 1}};
     vkCmdCopyImageToBuffer(cb, g_fc.t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
     r.bufferOffset = c->b.off + bytes; r.imageOffset.x = e->x; r.imageOffset.y = e->y;
-    vkCmdCopyImageToBuffer(cb, g_fc.atlas->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
+    vkCmdCopyImageToBuffer(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->b.buf, 1, &r);
     c->live = 1; c->frame = vkn_frame(); c->key = e->key; c->bytes = bytes; g_ups.fc_verify++;
 }
 static void fc_cmp_check(int all) {
@@ -693,6 +773,16 @@ static void fc_cmp_check(int all) {
         }
         vkn_block_free(&c->b); c->live = 0;
     }
+}
+// [mgpu P7c] a hit kept in a page: t's reads take the page (its region holds exactly what the copy would have put into t). 1 = done
+static int fc_hit_page(vkn_tex *t, const fc_ent *e) {
+    vkn_tex *pg = g_fc.pg[e->page];
+    if (!pg || pg->dead || !g_fc_pages) return 0;
+    fc_rd_drop_t(t);
+    if (g_fc.nrd >= 32) return 0;
+    g_fc.rd[g_fc.nrd].t = t; g_fc.rd[g_fc.nrd].p = pg; g_fc.rd[g_fc.nrd].img = t->image; memcpy(g_fc.rd[g_fc.nrd].r, g_fc.rect, sizeof g_fc.rect); g_fc.nrd++;
+    g_ups.fc_rd_hits++;
+    return 1;
 }
 // the clean end (vkn_ui_targets of another set): hit or miss
 static void fc_end(void) {
@@ -717,7 +807,9 @@ static void fc_end(void) {
         if (g_fc.mode == 3 && (vkn_frame() & 63) == 0) {
             static const float mg[4] = {1, 0, 1, 1}; vkn_pass_clear_color(t, 0, mg, g_fc.rect); g_ups.fc_poison++;
             fc_ct *c = fc_ct_get(t, 1); if (c) c->valid = 0;
-        } else if (!vkn_pass_copy_rect(t, g_fc.rect[0], g_fc.rect[1], g_fc.atlas, e->x, e->y, w, h)) {
+        } else if (e->page >= 0 && fc_hit_page(t, e)) {   // [mgpu P7c] no copy: the target's reads take the page
+            fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
+        } else if (!vkn_pass_copy_rect(t, g_fc.rect[0], g_fc.rect[1], e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas, e->x, e->y, w, h)) {
             fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
         } else { e->live = 0; fc_replay(); }   // (the copy failed: drawn as recorded)
         g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.hold = 0;
@@ -730,8 +822,10 @@ static void fc_end(void) {
         fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
     } else if (why < 0) {
         g_ups.fc_misses++;
-        e = fc_alloc(key, w, h);
-        if (!vkn_pass_copy_rect(g_fc.atlas, e->x, e->y, t, g_fc.rect[0], g_fc.rect[1], w, h)) {
+        const int pgi = g_fc_pages ? fc_page_for(t, g_fc.rect) : -1;   // [mgpu P7c]
+        if (pgi >= 0) { fc_rd_materialize(g_fc.pg[pgi], g_fc.rect); e = fc_alloc_page(key, g_fc.rect, pgi); }
+        else e = fc_alloc(key, w, h);
+        if (!vkn_pass_copy_rect(e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas, e->x, e->y, t, g_fc.rect[0], g_fc.rect[1], w, h)) {
             g_ups.fc_stored++;
             fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
         } else e->live = 0;
@@ -749,8 +843,34 @@ static int fc_hold_clear(vkn_tex *t, const int32_t rect[4]) {   // the region cl
     return 1;
 }
 
+// [mgpu P7c] the hold's replay binds a pushed target lazily: vkn_pass gets the set at its first use (a draw, a clear, a depth-stencil
+// clear, a fence); a pushed epoch the filter cache answers from a page uses nothing - never bound, so the layer's open pass stays open
+// (a binding has no effect of its own besides ending passes). g_pb: the pending binding and the region the host named for it.
+static int g_ui_lazy;   // set by the hold around its replay
+static vkn_tex *g_lh_layer(void);
+static void ui_targets_real(vkn_tex *color, vkn_tex *depth);
+static void ui_bind_now(void) {
+    if (!g_pb.on) return;
+    g_pb.on = 0; g_ups.lh_lazy_bound++;
+    ui_targets_real(g_pb.c, g_pb.d);
+    if (g_pb.rq && g_up.region && g_ep.on && g_ep.c == g_pb.c && !g_ep.decided) { g_ep.rq = 1; g_ep.dsclip = g_pb.dsclip; memcpy(g_ep.rrect, g_pb.rr, sizeof g_ep.rrect); }
+    g_pb.rq = 0; g_pb.dsclip = 0;
+}
 static void ui_targets_x(vkn_tex *color, vkn_tex *depth) {
     if (fc_holding()) { if (fc_same_set(color, depth)) { g_st.targets++; return; } fc_end(); }   // [mgpu P2] the clean end of a held epoch
+    if (g_pb.on) {   // [mgpu P7c]
+        if (g_pb.c == color && g_pb.d == depth) { g_st.targets++; return; }
+        g_pb.on = 0; g_pb.rq = 0; g_ups.lh_lazy_skipped++;   // never used: never bound
+    }
+    if (g_ui_lazy && color && color != g_lh_layer() && !color->dead) {
+        g_pb.on = 1; g_pb.rq = 0; g_pb.c = color; g_pb.d = depth;
+        g_color = color; g_depth = depth; color->ui_tgt = 1; if (depth) depth->ui_tgt = 1;
+        g_st.targets++;
+        return;
+    }
+    ui_targets_real(color, depth);
+}
+static void ui_targets_real(vkn_tex *color, vkn_tex *depth) {
     int shared = 0;
     if (up_on() && up_targets(color, depth, &shared)) { g_st.targets++; return; }   // [stage 5.2 B2]
     vkn_tex *c[VKN_PASS_COLORS] = {color};
@@ -924,6 +1044,7 @@ static int unit_of_slot(uint32_t slot) { return slot <= 2 ? (int)slot : slot == 
 
 static int ui_draw_x(const vkn_ui_draw_in *in) {
     if (fc_holding()) { fc_put_draw(in); return 0; }   // [mgpu P2] held (drawn at the epoch's end, or replaced by the cached region)
+    ui_bind_now();   // [mgpu P7c]
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st.drop_cb++; UI_RED(RR_CB, "a draw outside any recording: dropped"); return 1; }
     if (statics()) { g_st.drop_shader++; return 1; }
@@ -935,7 +1056,7 @@ static int ui_draw_x(const vkn_ui_draw_in *in) {
     // textures first (layouts; a pass is ended where needed), then the pass
     vkn_tex *tex[VKN_UI_UNITS];
     for (int u = 0; u < VKN_UI_UNITS; u++) {
-        vkn_tex *t = in->tex[u];
+        vkn_tex *t = fc_rd(in->tex[u]);   // [mgpu P7c] (a cache hit kept in a page)
         if (t && (t->dead || !t->view)) { t = NULL; g_st.placeholder++; }
         if (t && g_ep.on && g_ep.detached && t == g_ep.d) { t = NULL; g_st.feedback++; }   // [stage 5.2 B2] NVN has it bound: as vkn_pass_sample answers
         if (t && vkn_pass_sample(t)) { t = NULL; g_st.feedback++; }
@@ -1089,6 +1210,7 @@ static int ui_draw_x(const vkn_ui_draw_in *in) {
 
 static void ui_clear_ds_x(int depth, uint8_t mask) {
     if (fc_holding()) { g_ups.fc_refused[4]++; fc_flush(4); }   // [mgpu P2] a depth-stencil use: drawn as recorded (FCR_DS, FCF_OTHER)
+    ui_bind_now();   // [mgpu P7c]
     vkn_tex *t = vkn_pass_depth();   // NVN clears the bound depth target: the one of the current set (GDraw's or the engine's)
     if (g_ep.on && g_ep.detached && !t && up_mine()) t = g_ep.d;   // [stage 5.2 B2] detached: NVN still has GDraw's depth bound
     if (!t || t->dead) return;
@@ -1117,7 +1239,8 @@ static void ui_clear_ds_x(int depth, uint8_t mask) {
     if (ring_put(tri, sizeof tri, 0, &vb, &vo, NULL)) { g_st.drop_ring++; return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     const VkViewport vp = {0.0f, 0.0f, (float)pi.width, (float)pi.height, 0.0f, 1.0f};
-    const VkRect2D sc = {{0, 0}, {pi.width, pi.height}};
+    VkRect2D sc = {{0, 0}, {pi.width, pi.height}};
+    if (g_ep.on && g_ep.region && g_ep.dsclip) { VkRect2D a; if (vkn_pass_area_get(&a) && up_narrow(&a)) sc = a; }   // [mgpu P7c]
     vkCmdSetViewport(cb, 0, 1, &vp); vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdBindVertexBuffers(cb, 0, 1, &vb, &vo);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -1127,6 +1250,7 @@ static void ui_clear_ds_x(int depth, uint8_t mask) {
 
 static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]) {
     if (fc_holding()) { if (fc_hold_clear(t, rect)) return; fc_flush(4); }   // [mgpu P2]
+    ui_bind_now();   // [mgpu P7c]
     if (!t || t->dead) return;
     static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     int region = 0;
@@ -1180,10 +1304,11 @@ void vkn_ui_stats_get(vkn_ui_stats *s) { if (s) *s = g_st; }
 // 64 clears the layer magenta instead). -1 = family default (render-pass tilers 1, else 0). Install time (vkn_ui_layer_config).
 enum { LH_TGT = 1, LH_VP, LH_SC, LH_CDS, LH_CLR, LH_DRAW, LH_REG, LH_FENCE };
 enum { LH_SET = 48, LH_TH = 64, LH_MAXB = 8u << 20, LH_MAXE = 16384, LH_CMP = 4, LH_BAND = 64 };
+enum { LH_AL = 16, LH_SP = 4, LH_SP_IDLE = 600, LH_RJ = 32 };   // [mgpu P7b] aliases, spares (and frames unused before one goes), run-log entries
 typedef struct lh_hdr { uint32_t size; uint8_t kind, grp, pad[10]; } lh_hdr;   // 16 bytes
 typedef struct lh_ptr { lh_hdr h; vkn_tex *a, *b; int32_t v[4]; int32_t has, pad; } lh_ptr;   // TGT (a, b) / VP / SC (v) / CDS (v0, v1) / CLR (a, has, v) / REG (a, v)
 typedef struct lh_draw_e { lh_hdr h; vkn_ui_draw_in in; vkn_block vb; uint32_t o_vsc, o_fsc, o_fsc1, o_verts, o_idx; uint8_t has_vb, pad[3]; } lh_draw_e;
-typedef struct lh_cmp { int live; uint64_t frame, key; vkn_block b; uint32_t bytes; } lh_cmp;
+typedef struct lh_cmp { int live, dbl; uint64_t frame, key; vkn_block b; uint32_t bytes; } lh_cmp;   // dbl: [mgpu P7b] in order vs hoisted
 static struct {
     int lreq, creq, init, lmode, cmode, tile;
     vkn_tex *L;                                       // the layer
@@ -1201,10 +1326,24 @@ static struct {
     uint64_t hits_all, alt; uint32_t band;
     lh_cmp cmp[LH_CMP];
     uint32_t tdepth; uint64_t t0;                     // CPU time of the entry points (nesting)
+    // [mgpu P7b] (block "mgpu P7b" below)
+    uint8_t g0_ds, ds_g1, fev, fcls, uwhy;            // a layer entry needs the depth-stencil attached; a pushed entry uses it; the flushing event, its class; why not hoisted
+    uint32_t ren;                                     // renames in this run
+    vkn_tex *pend_o, *pend_p; uint32_t pend_at[4], npend;   // a rename waiting for the binding's first colour use (offsets of the entries naming pend_p)
+    // [mgpu P7c] segments the hold itself starts (a reuse no rename can serve): their first entries; textures the layer read since the last one
+    uint32_t fb[16], nfb, blk_at; uint8_t last_cg, r0sfull; vkn_tex *r0s[LH_SET]; uint32_t nr0s;
+    uint8_t uninit, dsany, readl;                     // a pushed target / DS drawn before the run cleared it; any DS entry; a pushed draw reads the layer / DS
+    VkViewport vpf; VkRect2D scr;                     // the live viewport / scissor at the run's begin (the double run of UILAYER=2 restarts from them)
+    vkn_tex *vds;                                     // UILAYER=2: the depth-stencil copy of the double run
+    char fname[24];                                   // the texture the flushing event touched (the run log)
+    struct { vkn_tex *o, *p; } al[LH_AL]; uint32_t nal, al_serial;   // logical pushed target -> the texture holding its newest content (this recording)
+    struct { vkn_tex *t; uint64_t used; } sp[LH_SP]; uint32_t nsp; // spares: pushed-target twins of this module
+    uint64_t *dsr; uint32_t ndsr;                     // the symbolic depth-stencil check: read signatures by entry ordinal
 } g_lh;
 void vkn_ui_layer_config(int layer, int cache) { g_lh.lreq = layer < -1 || layer > 3 ? 0 : layer; g_lh.creq = cache < -1 || cache > 3 ? 0 : cache; g_lh.init = 0; }
 static void lh_ev(int ev, vkn_tex *a, vkn_tex *b);
 static void lh_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
+static void lh_rj_print(int target);   // [mgpu P7b]
 static int lh_on(void) {
     if (g_lh.init) return g_lh.lmode || g_lh.cmode;
     const vkn_dev *d = vkn_device(); if (!d) return 0;
@@ -1219,8 +1358,9 @@ static int lh_on(void) {
              g_lh.lmode == 2 ? "verify: hoisted / in order on alternate recordings, equal runs compared" : "poison: 1 + pushed targets magenta after a hoisted run",
              g_lh.cmode, g_lh.creq < 0 ? "family default" : "env", g_lh.cmode == 0 ? "off" : g_lh.cmode == 1 ? "an unchanged UI is not drawn again (every 256th hit drawn and compared)" :
              g_lh.cmode == 2 ? "verify: every would-hit drawn and compared" : "poison: 1 + a hit in 64 clears the layer magenta", g_lh.tile);
+    g_fc_pages = g_lh.lmode != 0;   // [mgpu P7c]
     if (g_lh.lmode || g_lh.cmode) {
-        vkn_pass_before_ev(lh_ev); vkn_pass_on_write(ui_on_write);
+        vkn_pass_before_ev(lh_ev); vkn_pass_on_write(ui_on_write); vkn_pass_log_after(lh_rj_print);   // [mgpu P7b] (the run log)
         static int fx; if (!fx) fx = !vkn_fx_register("ui-layer", lh_fx, NULL, 0);   // (before "ui-pass-fence" at 1)
     }
     return g_lh.lmode || g_lh.cmode;
@@ -1246,7 +1386,219 @@ static void lh_content(vkn_tex *t, uint64_t v) { const int i = lh_th(t); if (i >
 // the key holds only what the run itself puts into a target: a pushed target / the depth must be cleared by the run before a draw lands
 // in it (the layer begins with the engine's remembered clear, checked at the flush)
 static void lh_init(vkn_tex *t) { const int i = lh_th(t); if (i >= 0) g_lh.th[i].init = 1; }
-static void lh_need_init(vkn_tex *t) { if (!t || t == g_lh.L) return; const int i = lh_th(t); if (i >= 0 && !g_lh.th[i].init && g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_INIT; } }
+static void lh_need_init(vkn_tex *t) { if (!t || t == g_lh.L) return; const int i = lh_th(t); if (i >= 0 && !g_lh.th[i].init) { g_lh.uninit = 1; if (g_lh.keyok) { g_lh.keyok = 0; g_lh.keywhy = VKN_UICR_INIT; } } }
+// ==== [mgpu P7b] renames of pushed targets, the symbolic depth-stencil check, the run log ====
+// Renames. GDraw recycles its render-target handles (the free vector of TextureDrawBufferBegin): a pushed target T whose content a
+// layer draw of the run has read can be pushed again for a later filter (phone run M20: "target reuse", the run in order = a layer pass
+// per filter). Hoisted, every filter block runs before every layer draw: the later block would overwrite what the earlier composite
+// reads. The exact way out is SSA-like: T's new content goes to another texture of T's shape - T itself when T does not hold content a
+// layer draw of this run read, else a spare this module owns (same width, height, format, samples) that holds nothing anyone can still
+// read (no alias names it, no layer draw of this run read it) - and every LATER held reference to T (targets, clears, regions, texture
+// units) names that texture. In Iggy's order T's older content is gone once T is written again, so no later entry can want it; the
+// alias lives until the recording ends (a later run of it reads T's newest content where it is). The engine's own uses are checked
+// against both names (the conflict rule). At most LH_SP spares; one unused for LH_SP_IDLE frames is destroyed.
+static vkn_tex *lh_map(vkn_tex *t) { if (t) for (uint32_t i = 0; i < g_lh.nal; i++) if (g_lh.al[i].o == t) return g_lh.al[i].p; return t; }
+static int lh_aliased(const vkn_tex *p) { for (uint32_t i = 0; i < g_lh.nal; i++) if (g_lh.al[i].p == p) return 1; return 0; }
+static uint64_t g_sp_gen;
+// [mgpu P7c] read by a layer draw since the last segment the hold started (a texture whose readers all ran in an earlier segment is free)
+static int lh_r0s(const vkn_tex *t) { return t && (g_lh.r0sfull || lh_in(g_lh.r0s, g_lh.nr0s, t)); }
+static vkn_tex *lh_spare(const vkn_tex *o) {
+    int fr = -1;
+    for (uint32_t i = 0; i < LH_SP; i++) {
+        vkn_tex *s = g_lh.sp[i].t;
+        if (!s) { if (fr < 0) fr = (int)i; continue; }
+        if (s->dead || s->w != o->w || s->h != o->h || s->format != o->format || s->samples != o->samples || s->nvn_fmt != o->nvn_fmt) continue;
+        if (lh_aliased(s) || lh_r0s(s)) continue;
+        g_lh.sp[i].used = vkn_frame();
+        return s;
+    }
+    if (fr < 0) return NULL;
+    vkn_tex_desc d; memset(&d, 0, sizeof d);
+    d.nvn_fmt = o->nvn_fmt; d.efmt = o->efmt; d.nvn_target = 1; d.w = o->w; d.h = o->h; d.depth = d.mips = d.layers = 1; d.samples = o->samples ? o->samples : 1; d.cls = VKN_TC_COLOR;
+    d.pool_id = ~0u; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) d.layer_ids[i] = ~0u; d.sampler_id = ~0u;
+    d.cookie = 1ull << 63 | (++g_sp_gen) << 8 | (uint64_t)fr;   // (never an engine object's address)
+    const vkn_tex_src src = {.kind = VKN_SRC_NONE};
+    const char *why = NULL;
+    vkn_tex *s = vkn_tex_create(1ull << 32 | 0xffffffffull, &d, &src, &why);
+    if (!s || s->format != o->format) { if (s) vkn_tex_destroy_cookie(d.cookie); UI_RED(RR_STATIC, "ui layer: no spare pushed target (%s): that run in order", why ? why : "format"); return NULL; }
+    snprintf(s->sname, sizeof s->sname, "ui-spare-%d", fr); s->ui_tgt = 1;
+    g_lh.sp[fr].t = s; g_lh.sp[fr].used = vkn_frame();
+    g_ups.lh_spares++; g_ups.lh_spare_bytes += s->bytes;
+    return s;
+}
+static void lh_spare_idle(void) {   // (a new recording) spares unused for LH_SP_IDLE frames go
+    for (uint32_t i = 0; i < LH_SP; i++) {
+        vkn_tex *s = g_lh.sp[i].t;
+        if (!s || (!s->dead && g_lh.sp[i].used + LH_SP_IDLE > vkn_frame())) continue;
+        if (g_ups.lh_spare_bytes >= s->bytes) g_ups.lh_spare_bytes -= s->bytes;
+        if (!s->dead) vkn_tex_destroy_cookie(s->cookie);
+        g_lh.sp[i].t = NULL;
+    }
+}
+// a pushed target o (physical p now) is about to be written by the run while a layer draw of the run read p: the texture for its new
+// content (NULL = none free: the run cannot be hoisted)
+static vkn_tex *lh_rename(vkn_tex *o, vkn_tex *p) {
+    vkn_tex *n = NULL;
+    if (p != o && !lh_r0s(o)) n = o;   // o itself holds an older content nobody can read any more
+    else n = lh_spare(o);
+    if (!n) { g_ups.lh_rename_fail++; return NULL; }
+    uint32_t i = 0; while (i < g_lh.nal && g_lh.al[i].o != o) i++;
+    if (n == o) { if (i < g_lh.nal) g_lh.al[i] = g_lh.al[--g_lh.nal]; }
+    else if (i < g_lh.nal) g_lh.al[i].p = n;
+    else if (g_lh.nal < LH_AL) { g_lh.al[g_lh.nal].o = o; g_lh.al[g_lh.nal].p = n; g_lh.nal++; }
+    else { g_ups.lh_rename_fail++; return NULL; }
+    g_ups.lh_renamed++; g_lh.ren++;
+    return n;
+}
+// The symbolic depth-stencil check (a pushed entry uses the depth-stencil the layer's entries use: GDraw binds one DS for every target).
+// Each DS unit (stencil bits 0..7, depth = bit 8) of each DS texture holds a symbolic value: the start value, a constant (a clear: depth
+// 1.0, stencil 0; a masked stencil clear is a full-target REPLACE 0) or "what draw k made of the values it saw" (a hash of k and the
+// values of every unit k tests or writes). The run is simulated in its order and hoisted (pushed entries first, then the layer's); the
+// hoist keeps the depth-stencil exact when every draw that TESTS depth or stencil sees the same values in both and the run ends with the
+// same values (whatever the regions: whole-target values, a sufficient condition). Draw units: stencil test (bit 0 of GDraw's state)
+// reads the value-mask bits and REPLACEs the write-mask bits where it passes; depth test (bit 1) reads depth, depth write (bit 2) writes it.
+enum { LH_DSU = 9, LH_DST = 2 };
+static void lh_ds_units(const lh_hdr *h, uint16_t *r, uint16_t *w, int *draw) {
+    *r = *w = 0; *draw = 0;
+    if (h->kind == LH_CDS) { const lh_ptr *p = (const lh_ptr *)(const void *)h; *w = (uint16_t)((p->v[0] ? 0x100 : 0) | (uint8_t)p->v[1]); return; }
+    if (h->kind != LH_DRAW) return;
+    const vkn_ui_draw_in *in = &((const lh_draw_e *)(const void *)h)->in;
+    if (in->ds & 1) { *r |= in->stencil_cmp; *w |= in->stencil_write; }
+    if (in->ds & 2) *r |= 0x100;
+    if (in->ds & 4) *w |= 0x100;
+    *draw = in->ds != 0;
+}
+typedef struct lh_dss { vkn_tex *t[LH_DST]; uint64_t v[LH_DST][LH_DSU]; } lh_dss;
+// Segments: the run is executed as consecutive segments, each hoisted inside itself (its pushed entries, then its layer entries); one
+// segment = the whole run hoisted, a segment per pushed block = the run's own order. A segment starts at a pushed block (a stretch of
+// pushed entries between layer entries). The plan (lh_plan) merges block after block into the current segment while the prefix of the
+// run up to the next block keeps the depth-stencil exact, and starts a new segment at a block whose pushed draw reads the layer or its
+// DS as a texture (first in its segment it sees the layer as in the run's order).
+enum { LH_SEG = 16, LH_BLK = 64 };
+static void lh_at(uint32_t off, vkn_tex **d, uint32_t *k) {   // the depth target current at byte offset off (the run's order) and the entry ordinal there
+    vkn_tex *dd = g_lh.d0; uint32_t kk = 0;
+    for (uint32_t at = 0; at < off && at < g_lh.n; kk++) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; if (h->kind == LH_TGT) dd = ((const lh_ptr *)(const void *)h)->b; }
+    *d = dd; *k = kk;
+}
+// entries [a, b) of group g (-1 = all) into the symbolic state; sig[k] = the values entry k tested
+static int lh_ds_range(lh_dss *st, uint32_t a, uint32_t b, int g, uint64_t *sig) {
+    vkn_tex *d; uint32_t k; lh_at(a, &d, &k);
+    for (uint32_t at = a; at < b; k++) {
+        const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+        if (h->kind == LH_TGT) { d = ((const lh_ptr *)(const void *)h)->b; continue; }
+        if (g >= 0 && h->grp != g) continue;
+        uint16_t r, w; int draw; lh_ds_units(h, &r, &w, &draw);
+        if (!(r | w) || !d) continue;
+        int ti = -1; for (int i = 0; i < LH_DST && ti < 0; i++) if (st->t[i] == d) ti = i;
+        for (int i = 0; i < LH_DST && ti < 0; i++) if (!st->t[i]) { st->t[i] = d; ti = i; for (int u = 0; u < LH_DSU; u++) st->v[i][u] = fc_mix(0x5747 ^ (uint64_t)(uintptr_t)d, (uint64_t)u); }
+        if (ti < 0) return -1;
+        uint64_t *v = st->v[ti];
+        if (!draw) { for (int u = 0; u < LH_DSU; u++) if (w >> u & 1) v[u] = u == 8 ? 0xd1d1 : 0x5050; continue; }   // a clear: constants
+        uint64_t sg = fc_mix(0x6e6, (uint64_t)(uintptr_t)d);
+        for (int u = 0; u < LH_DSU; u++) if (r >> u & 1) sg = fc_mix(sg, v[u] ^ (uint64_t)u << 56);
+        if (k < g_lh.ndsr) sig[k] = sg;
+        uint64_t x = fc_mix(sg, k);
+        for (int u = 0; u < LH_DSU; u++) if (w >> u & 1) x = fc_mix(x, v[u] ^ (uint64_t)u << 48);
+        for (int u = 0; u < LH_DSU; u++) if (w >> u & 1) v[u] = fc_mix(x, (uint64_t)u);
+    }
+    return 0;
+}
+// 0 = entries [0, end) executed by the segments seg[0..nseg) leave the depth-stencil as the run's order does (every DS-testing entry sees
+// the same values, the same values at `end`); 1 = not; -1 = more DS textures than tracked / no memory
+static int lh_ds_prefix(const uint32_t *seg, uint32_t nseg, uint32_t end) {
+    if (g_lh.ndsr < g_lh.nents) {
+        uint64_t *n = (uint64_t *)realloc(g_lh.dsr, 2ull * g_lh.nents * sizeof *n); if (!n) return -1;
+        g_lh.dsr = n; g_lh.ndsr = g_lh.nents;
+    }
+    uint64_t *sa = g_lh.dsr, *sb = g_lh.dsr + g_lh.ndsr;
+    memset(sa, 0, 2ull * g_lh.ndsr * sizeof *sa);
+    lh_dss xa, xb; memset(&xa, 0, sizeof xa); memset(&xb, 0, sizeof xb);
+    if (lh_ds_range(&xa, 0, end, -1, sa)) return -1;
+    for (uint32_t i = 0; i < nseg && seg[i] < end; i++) {
+        const uint32_t a = seg[i], b = i + 1 < nseg && seg[i + 1] < end ? seg[i + 1] : end;
+        if (lh_ds_range(&xb, a, b, 1, sb) || lh_ds_range(&xb, a, b, 0, sb)) return -1;
+    }
+    if (memcmp(sa, sb, g_lh.ndsr * sizeof *sa)) return 1;
+    for (int i = 0; i < LH_DST; i++) {   // the same textures, the same end values (the order of first use may differ)
+        if (!xa.t[i]) continue;
+        int j = 0; while (j < LH_DST && xb.t[j] != xa.t[i]) j++;
+        if (j == LH_DST || memcmp(xa.v[i], xb.v[j], sizeof xa.v[i])) return 1;   // (start values are named by the texture: equal in both)
+    }
+    return 0;
+}
+// [mgpu P7c] the region epochs whose depth-stencil writes are dead after them: REG entry flag 2. An epoch = from a pushed target's REG
+// entry to the next binding of another target. Its DS units written (stencil write masks of its DS draws, masked clears, depth writes)
+// must be fully overwritten (a clear of each) before any read of them, scanning the rest of the run in its order; the run's end with a
+// unit still pending refuses (a later run or frame might read it). An epoch with a whole DS clear or a pushed read of the layer / DS
+// is refused. Then clipping the epoch's DS draws to its region changes only DS texels nobody reads.
+static void lh_dsclip_mark(void) {
+    if (!g_lh.ds_g1) return;
+    vkn_tex *cd = g_lh.d0, *cc = g_lh.c0;
+    for (uint32_t at = 0; at < g_lh.n;) {
+        lh_hdr *h = (lh_hdr *)(void *)(g_lh.buf + at); const uint32_t here = at; at += h->size;
+        if (h->kind == LH_TGT) { cc = ((lh_ptr *)(void *)h)->a; cd = ((lh_ptr *)(void *)h)->b; continue; }
+        if (h->kind != LH_REG || !h->grp || !cd) continue;
+        vkn_tex *t = ((lh_ptr *)(void *)h)->a, *d = cd; (void)cc;
+        uint16_t wr = 0; int bad = 0; uint32_t end = g_lh.n;
+        vkn_tex *ec = t, *ed = d;
+        for (uint32_t a2 = here + h->size; a2 < g_lh.n;) {   // the epoch
+            const lh_hdr *x = (const lh_hdr *)(const void *)(g_lh.buf + a2);
+            if (x->kind == LH_TGT) { const lh_ptr *q = (const lh_ptr *)(const void *)x; if (q->a != ec || q->b != ed) { end = a2; break; } }
+            a2 += x->size;
+            if (x->kind == LH_CDS) { const lh_ptr *q = (const lh_ptr *)(const void *)x; if (q->v[0] || (uint8_t)q->v[1] == 0xff) { bad = 1; break; } wr |= (uint8_t)q->v[1]; }
+            else if (x->kind == LH_DRAW) {
+                if (x->pad[0] & 1) { bad = 1; break; }
+                uint16_t r, w; int dr; lh_ds_units(x, &r, &w, &dr); wr |= w;
+            }
+            if (a2 >= g_lh.n) end = g_lh.n;
+        }
+        if (bad) continue;
+        if (wr) {   // dead after the epoch?
+            uint16_t pend = wr; vkn_tex *dd = ed;
+            for (uint32_t a3 = end; a3 < g_lh.n && pend;) {
+                const lh_hdr *x = (const lh_hdr *)(const void *)(g_lh.buf + a3); a3 += x->size;
+                if (x->kind == LH_TGT) { dd = ((const lh_ptr *)(const void *)x)->b; continue; }
+                if (dd != d) continue;
+                if (x->kind == LH_DRAW && (x->pad[0] & 1)) { pend = 0xffff; break; }   // (the DS sampled as a texture)
+                uint16_t r, w; int dr; lh_ds_units(x, &r, &w, &dr);
+                if (r & pend) break;
+                if (!dr) pend &= (uint16_t)~w;   // a clear: those units overwritten everywhere
+            }
+            if (pend) continue;
+        }
+        h->pad[0] |= 2; g_ups.lh_dsclip++;
+    }
+}
+static int lh_content_kind(uint8_t k) { return k == LH_CLR || k == LH_CDS || k == LH_DRAW || k == LH_REG; }
+// the segments of a hoistable run: 0 = seg[0..*nseg) (byte offsets of their first entries; seg[0] = 0), -1 = more than LH_SEG / LH_BLK
+// or the check could not run (the run in its order)
+static int lh_plan(uint32_t *seg, uint32_t *nseg, uint32_t *by_ds, uint32_t *by_rl) {
+    uint32_t blk[LH_BLK]; uint8_t brl[LH_BLK]; uint32_t nb = 0; int prev = 0;
+    *nseg = 1; seg[0] = 0; *by_ds = *by_rl = 0;
+    if (!g_lh.ds_g1 && !g_lh.readl && !g_lh.nfb) return 0;
+    for (uint32_t at = 0; at < g_lh.n;) {
+        const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at);
+        if (lh_content_kind(h->kind)) {
+            if (h->grp && !prev) { if (nb == LH_BLK) return -1; blk[nb] = at; brl[nb] = 0; nb++; }
+            if (h->grp && (h->pad[0] & 1)) brl[nb - 1] = 1;
+            prev = h->grp;
+        }
+        at += h->size;
+    }
+    for (uint32_t i = 0; i < nb; i++) {
+        const uint32_t end = i + 1 < nb ? blk[i + 1] : g_lh.n;
+        if (blk[i] == seg[*nseg - 1]) continue;   // (a block that starts its segment runs in the run's order)
+        int need = brl[i], r = 0;
+        for (uint32_t f = 0; f < g_lh.nfb && !need; f++) need = g_lh.fb[f] == blk[i];   // [mgpu P7c] the hold's own segments
+        if (!need && g_lh.ds_g1) { r = lh_ds_prefix(seg, *nseg, end); if (r < 0) return -1; need = r; }
+        if (!need) continue;
+        if (*nseg == LH_SEG) return -1;
+        seg[(*nseg)++] = blk[i];
+        int forced = 0; for (uint32_t f = 0; f < g_lh.nfb; f++) forced |= g_lh.fb[f] == blk[i];
+        if (forced) {} else if (brl[i]) (*by_rl)++; else (*by_ds)++;
+    }
+    return 0;
+}
 static void *lh_put(uint8_t kind, uint32_t bytes) {
     bytes = (bytes + 15u) & ~15u;
     if (g_lh.n + bytes > g_lh.cap) {
@@ -1271,7 +1623,7 @@ static uint32_t lh_copy(lh_draw_e **dp, const void *src, uint32_t n) {   // byte
     return off;
 }
 static void lh_flush(int why);
-static void lh_unsafe(int why) { if (!g_lh.unsafe) { g_lh.unsafe = 1; g_ups.lh_unsafe[why]++; } }
+static void lh_unsafe(int why) { if (!g_lh.unsafe) { g_lh.unsafe = 1; g_lh.uwhy = (uint8_t)why; g_ups.lh_unsafe[why]++; } }
 // the content version of a texture unit for the key (0 = ok)
 static int lh_tex_ver(vkn_tex *t, uint64_t *v) {
     if (!t || t->dead || !t->view) { *v = 0x51ace; return 0; }   // (the placeholder at draw time)
@@ -1282,7 +1634,13 @@ static int lh_tex_ver(vkn_tex *t, uint64_t *v) {
 // a run begins (the first held call): the live UI state is the run's starting state
 static void lh_begin(void) {
     const uint32_t ser = vkn_cb_serial();
-    if (ser != g_lh.serial) { g_lh.serial = ser; g_lh.runs = 0; }
+    if (ser != g_lh.serial) {
+        g_lh.serial = ser; g_lh.runs = 0;
+        g_ups.lh_alias_live += g_lh.nal; g_lh.nal = 0; lh_spare_idle();   // [mgpu P7b] renames last until the recording ends
+    }
+    g_lh.g0_ds = g_lh.ds_g1 = 0; g_lh.fev = 0; g_lh.fcls = VKN_UILT_NONE; g_lh.fname[0] = 0; g_lh.uwhy = 0; g_lh.ren = 0;   // [mgpu P7b]
+    g_lh.uninit = g_lh.dsany = g_lh.readl = 0; g_lh.vpf = g_vp; g_lh.scr = g_sc; g_lh.pend_o = g_lh.pend_p = NULL; g_lh.npend = 0;
+    g_lh.nfb = 0; g_lh.blk_at = 0; g_lh.last_cg = 0; g_lh.r0sfull = 0; g_lh.nr0s = 0;   // [mgpu P7c]
     g_lh.hold = 1; g_lh.owns = 0; g_lh.unsafe = 0; g_lh.content = 0; g_lh.fence = 0; g_lh.has_l = 0; g_lh.has_f = 0; g_lh.keyok = 1; g_lh.keywhy = 0;
     g_lh.c0 = g_color; g_lh.d0 = g_depth; g_lh.cc = g_color; g_lh.cd = g_depth;
     g_lh.vp0_set = (uint8_t)g_vp_set; g_lh.vp0[0] = (int32_t)g_vp.x; g_lh.vp0[1] = (int32_t)g_vp.y; g_lh.vp0[2] = (int32_t)g_vp.width; g_lh.vp0[3] = (int32_t)g_vp.height;
@@ -1320,12 +1678,52 @@ static int lh_want(void) {
 }
 static void lh_check_size(void) { if (g_lh.n > LH_MAXB || g_lh.nents > LH_MAXE) lh_flush(VKN_UILF_SIZE); }
 // ---- holding: one function per entry point ----
+// [mgpu P7b] a pushed target o (held as p) bound again after a layer draw of the run read p: the rename waits for the binding's first
+// colour use - a clear of it (TextureDrawBufferBegin's region clear: the new content starts from nothing) renames, a draw into it first
+// (content on top of what the layer read) is the reuse rule (in order). The entries already held under the binding (its targets, its
+// region) are patched to the new name.
+static void lh_pend_drop(void) { g_lh.pend_o = g_lh.pend_p = NULL; g_lh.npend = 0; }
+static void lh_pend_note(void *e) { if (g_lh.pend_p && g_lh.npend < 4) g_lh.pend_at[g_lh.npend++] = (uint32_t)((uint8_t *)e - g_lh.buf); }
+// [mgpu P7c] a segment starting at byte offset `at` (a block start): every layer draw before it runs before every pushed entry after it,
+// so the textures they read are free again. 0 = started; -1 = no more segments (the reuse rule: in order)
+static int lh_force_seg(uint32_t at) {
+    if (g_lh.nfb && g_lh.fb[g_lh.nfb - 1] >= at) return 0;
+    if (g_lh.nfb >= 15 || !at) return -1;
+    g_lh.fb[g_lh.nfb++] = at; g_lh.nr0s = 0; g_lh.r0sfull = 0; g_ups.lh_seg_reuse++;
+    return 0;
+}
+static void lh_cnote(const lh_hdr *h) {   // (every content entry, its group final) the start of the current pushed block
+    if (h->grp && !g_lh.last_cg) g_lh.blk_at = (uint32_t)((const uint8_t *)h - g_lh.buf);
+    g_lh.last_cg = h->grp;
+}
+static void lh_pend_bind(vkn_tex *o, vkn_tex *p, void *e) {   // (lh_targets) a pushed binding of p
+    lh_pend_drop();
+    if (!p || p == g_lh.L || !lh_r0s(p)) return;
+    if (g_lh.unsafe || !g_lh.lmode) { lh_unsafe(VKN_UILU_REUSE); return; }   // (a run that runs in order anyway keeps its names)
+    g_lh.pend_o = o; g_lh.pend_p = p; lh_pend_note(e);
+}
+// at = the entry being held (its own block start when the block begins with it)
+static vkn_tex *lh_pend_use(vkn_tex *t, int clear, uint32_t at) {   // the binding's first colour use of t: the name its entry gets
+    if (!g_lh.pend_p || t != g_lh.pend_p) return t;
+    vkn_tex *o = g_lh.pend_o, *p = g_lh.pend_p, *n = clear ? lh_rename(o, p) : NULL;
+    if (!n) {   // [mgpu P7c] no texture free, or content drawn on top: this block starts a segment (the layer's readers of p run first)
+        if (lh_force_seg(g_lh.last_cg ? g_lh.blk_at : at)) lh_unsafe(VKN_UILU_REUSE);
+        lh_pend_drop(); return t;
+    }
+    for (uint32_t i = 0; i < g_lh.npend; i++) { lh_ptr *e = (lh_ptr *)(void *)(g_lh.buf + g_lh.pend_at[i]); if (e->a == p) e->a = n; }
+    if (g_lh.cc == p) g_lh.cc = n;
+    lh_add_set(g_lh.w, &g_lh.nw, &g_lh.wfull, o);   // (the engine's use of the name conflicts as before)
+    lh_pend_drop();
+    return n;
+}
 static void lh_targets(vkn_tex *c, vkn_tex *d) {
     lh_ptr *e = (lh_ptr *)lh_put(LH_TGT, sizeof *e);
-    if (!e) { lh_flush(VKN_UILF_OTHER); ui_targets_x(c, d); return; }
-    g_lh.cc = c; g_lh.cd = d; e->h.grp = (uint8_t)(c && c != g_lh.L ? 1 : 0); e->a = c; e->b = d; g_lh.owns = 0; g_lh.seen_tgt = 1;
-    if (e->h.grp && lh_in(g_lh.r0, g_lh.nr0, c)) lh_unsafe(VKN_UILU_REUSE);   // a pushed target the layer read before: written again now
-    g_lh.key = fc_mix(fc_mix(fc_mix(g_lh.key, LH_TGT), lh_tag(c)), lh_tag(d));
+    vkn_tex *pc = lh_map(c);   // [mgpu P7b] (renames)
+    if (!e) { lh_flush(VKN_UILF_OTHER); ui_targets_x(pc, d); return; }
+    g_lh.cc = pc; g_lh.cd = d; e->h.grp = (uint8_t)(pc && pc != g_lh.L ? 1 : 0); e->a = pc; e->b = d; g_lh.owns = 0; g_lh.seen_tgt = 1;
+    if (e->h.grp && pc != c) lh_add_set(g_lh.w, &g_lh.nw, &g_lh.wfull, c);   // (the engine's use of the name conflicts as before)
+    lh_pend_bind(c, e->h.grp ? pc : NULL, e);
+    g_lh.key = fc_mix(fc_mix(fc_mix(g_lh.key, LH_TGT), lh_tag(c)), lh_tag(d));   // (by the name: the rename is the run's own choice)
 }
 static void lh_vs(uint8_t kind, int32_t x, int32_t y, int32_t w, int32_t h) {
     lh_ptr *e = (lh_ptr *)lh_put(kind, sizeof *e);
@@ -1345,27 +1743,37 @@ static void lh_clear_ds(int depth, uint8_t mask) {
     lh_ptr *e = (lh_ptr *)lh_put(LH_CDS, sizeof *e);
     if (!e) { lh_flush(VKN_UILF_OTHER); ui_clear_ds_x(depth, mask); return; }
     e->v[0] = depth; e->v[1] = mask;
-    if (e->h.grp) lh_unsafe(VKN_UILU_DS);
+    lh_cnote(&e->h);
+    // [mgpu P7b] a pushed DS use: the symbolic check at the flush decides (was: never hoisted); a masked clear on the layer is a stencil draw
+    g_lh.dsany = 1;
+    if (e->h.grp) g_lh.ds_g1 = 1;
+    else if (mask && mask != 0xff && g_lh.cd && (g_lh.cd->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) g_lh.g0_ds = 1;
     lh_note_w(g_lh.cd); g_lh.content = 1;
     g_lh.key = fc_mix(fc_mix(g_lh.key, LH_CDS), (uint64_t)(uint32_t)depth << 8 | mask);
     if (depth && mask == 0xff) lh_init(g_lh.cd); else lh_need_init(g_lh.cd);
     lh_content(g_lh.cd, (uint64_t)(uint32_t)depth << 8 | mask);
 }
-static void lh_clear_color(vkn_tex *t, const int32_t rect[4]) {
+static void lh_clear_color(vkn_tex *t0, const int32_t rect[4]) {
     lh_ptr *e = (lh_ptr *)lh_put(LH_CLR, sizeof *e);
+    vkn_tex *t = lh_map(t0);   // [mgpu P7b]
     if (!e) { lh_flush(VKN_UILF_OTHER); ui_clear_color_x(t, rect); return; }
+    t = lh_pend_use(t, 1, (uint32_t)((uint8_t *)e - g_lh.buf));
     e->a = t; e->has = rect != NULL; if (rect) memcpy(e->v, rect, 16);
     e->h.grp = (uint8_t)(t && t != g_lh.L ? 1 : 0);
-    if (e->h.grp && lh_in(g_lh.r0, g_lh.nr0, t)) lh_unsafe(VKN_UILU_REUSE);
+    lh_cnote(&e->h);
+    if (e->h.grp && t != t0) lh_add_set(g_lh.w, &g_lh.nw, &g_lh.wfull, t0);
     lh_note_w(t);
-    g_lh.key = fc_bytes(fc_mix(fc_mix(g_lh.key, LH_CLR), lh_tag(t) | (uint64_t)e->has << 32), e->v, 16);
+    g_lh.key = fc_bytes(fc_mix(fc_mix(g_lh.key, LH_CLR), lh_tag(t0 && t != t0 ? t0 : t) | (uint64_t)e->has << 32), e->v, 16);
     lh_init(t);   // (a pushed target is read only inside its cleared region; the layer's whole clears are the engine's)
     lh_content(t, fc_bytes(0xc1, e->v, 16));
 }
 static void lh_region(vkn_tex *t, const int32_t rect[4]) {
     lh_ptr *e = (lh_ptr *)lh_put(LH_REG, sizeof *e);
+    t = lh_map(t);   // [mgpu P7b] (the name the region's epoch draws into)
     if (!e) { lh_flush(VKN_UILF_OTHER); ui_region_x(t, rect); return; }
+    if (g_lh.pend_p && t == g_lh.pend_p) lh_pend_note(e);   // (patched if the binding is renamed)
     e->a = t; memcpy(e->v, rect, 16); e->h.grp = (uint8_t)(t && t != g_lh.L ? 1 : 0);
+    lh_cnote(&e->h);
     lh_pre(0);
     g_lh.key = fc_bytes(fc_mix(fc_mix(g_lh.key, LH_REG), lh_tag(t)), e->v, 16);
 }
@@ -1375,9 +1783,12 @@ static void lh_fence(void) {
     e->h.grp = 0; g_lh.fence = 1;
     g_lh.key = fc_mix(g_lh.key, LH_FENCE);
 }
-static void lh_draw(const vkn_ui_draw_in *in) {
+static void lh_draw(const vkn_ui_draw_in *in0) {
     lh_draw_e *d = (lh_draw_e *)lh_put(LH_DRAW, sizeof *d);
+    vkn_ui_draw_in mi = *in0; const vkn_ui_draw_in *in = &mi;   // [mgpu P7b] the units by the names that hold their content now
+    for (int u = 0; u < VKN_UI_UNITS; u++) mi.tex[u] = lh_map(in0->tex[u]);
     if (!d) { lh_flush(VKN_UILF_OTHER); ui_draw_x(in); return; }
+    if (g_lh.pend_p && g_lh.cc == g_lh.pend_p) lh_pend_use(g_lh.cc, 0, (uint32_t)((uint8_t *)d - g_lh.buf));   // [mgpu P7b] drawn into before a clear
     d->in = *in;
     const uint32_t stride = in->vfmt == VKN_UI_VF_V2 ? 8u : 16u;
     if (in->vb) { d->vb = *in->vb; d->has_vb = 1; }
@@ -1390,16 +1801,18 @@ static void lh_draw(const vkn_ui_draw_in *in) {
         if ((o = lh_copy(&d, in->idx, in->quads ? 0 : in->nidx * 2u)) == ~0u) goto oom; d->o_idx = o;
     }
     g_lh.ndraws++; g_ups.lh_draws++;
+    lh_cnote(&d->h);
     lh_pre(1);
     {
         const int grp = d->h.grp;
         lh_note_w(g_lh.cc);
-        if (in->ds) { lh_note_w(g_lh.cd); if (grp) lh_unsafe(VKN_UILU_DS); }
+        if (in->ds) { lh_note_w(g_lh.cd); g_lh.dsany = 1; if (grp) g_lh.ds_g1 = 1; else g_lh.g0_ds = 1; }   // [mgpu P7b] (a pushed DS use: the symbolic check at the flush)
         for (int u = 0; u < VKN_UI_UNITS; u++) {
             vkn_tex *t = in->tex[u]; if (!t) continue;
             lh_add_set(g_lh.r, &g_lh.nr, &g_lh.rfull, t);
-            if (grp && (t == g_lh.L || t == g_lh.cd)) lh_unsafe(VKN_UILU_READL);
-            if (!grp) { uint8_t f = 0; lh_add_set(g_lh.r0, &g_lh.nr0, &f, t); if (f) lh_unsafe(VKN_UILU_MANY); }
+            if (t != in0->tex[u]) lh_add_set(g_lh.r, &g_lh.nr, &g_lh.rfull, in0->tex[u]);   // [mgpu P7b] (the name too: the engine's writes conflict)
+            if (grp && (t == g_lh.L || t == g_lh.cd)) { d->h.pad[0] |= 1; g_lh.readl = 1; }   // [mgpu P7b] its block starts a segment (was: the run in order)
+            if (!grp) { uint8_t f = 0; lh_add_set(g_lh.r0, &g_lh.nr0, &f, t); if (f) lh_unsafe(VKN_UILU_MANY); lh_add_set(g_lh.r0s, &g_lh.nr0s, &g_lh.r0sfull, t); }
         }
     }
     {   // the key (fc_put_draw's fields; textures by the run's versions)
@@ -1420,7 +1833,7 @@ static void lh_draw(const vkn_ui_draw_in *in) {
     return;
 oom:
     g_lh.n = (uint32_t)((uint8_t *)d - g_lh.buf); g_lh.nents--;
-    lh_flush(VKN_UILF_OTHER); ui_draw_x(in);
+    lh_flush(VKN_UILF_OTHER); ui_draw_x(&mi);
 }
 // ---- executing a held run ----
 static void lh_exec(const lh_hdr *h) {
@@ -1431,7 +1844,7 @@ static void lh_exec(const lh_hdr *h) {
     case LH_SC: ui_scissor_x(p->v[0], p->v[1], p->v[2], p->v[3]); break;
     case LH_CDS: ui_clear_ds_x(p->v[0], (uint8_t)p->v[1]); break;
     case LH_CLR: ui_clear_color_x(p->a, p->has ? p->v : NULL); break;
-    case LH_REG: ui_region_x(p->a, p->v); break;
+    case LH_REG: g_reg_dsclip = (h->pad[0] & 2) != 0; ui_region_x(p->a, p->v); g_reg_dsclip = 0; break;
     case LH_FENCE: ui_fence_x(); break;
     case LH_DRAW: {
         const lh_draw_e *d = (const lh_draw_e *)(const void *)h; vkn_ui_draw_in in = d->in; const uint8_t *b = (const uint8_t *)d;
@@ -1455,13 +1868,14 @@ static void lh_scan_state(const lh_hdr *h, lh_st *sv) {
     else if (h->kind == LH_VP) { memcpy(sv->vp, p->v, 16); sv->vp_set = 1; }
     else if (h->kind == LH_SC) { memcpy(sv->sc, p->v, 16); sv->sc_set = 1; }
 }
-static void lh_group(int g, const lh_st *s0, lh_st *ap) {
+static void lh_group_rng(int g, uint32_t a, uint32_t b, const lh_st *s0, lh_st *ap) {   // [mgpu P7b] entries [a, b) (byte offsets) of group g
     lh_st sv = *s0;
-    for (uint32_t at = 0; at < g_lh.n;) {
+    for (uint32_t at = 0; at < g_lh.n && at < b;) {
         const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at);
+        const uint32_t here = at;
         at += h->size;
         if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
-        if (h->grp != g || h->kind == LH_FENCE) continue;
+        if (here < a || h->grp != g || h->kind == LH_FENCE) continue;
         lh_state_apply(&sv, ap);
         lh_exec(h);
     }
@@ -1471,6 +1885,69 @@ static void lh_final_state(const lh_st *s0, lh_st *ap) {
     lh_st sv = *s0;
     for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; lh_scan_state(h, &sv); }
     if (sv.c) lh_state_apply(&sv, ap);
+}
+// [mgpu P7b] the union of the rects the run's layer entries can touch, as up_event will see them (vkn_ui_draw: viewport + margin x
+// scissor x the epoch's size; region clears clipped; a masked stencil clear, or a whole DS clear while the DS is attached, the whole
+// target). 0 = a non-empty union in *out
+static int lh_g0_area(const lh_st *s0, int ds, nb_ua_rect *out) {
+    lh_st sv = *s0; nb_ua_rect u = nb_ua_none();
+    for (uint32_t at = 0; at < g_lh.n;) {
+        const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+        if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
+        if (h->grp != 0 || h->kind == LH_FENCE || h->kind == LH_REG || !sv.c) continue;
+        const uint32_t W = sv.d && sv.d->w < sv.c->w ? sv.d->w : sv.c->w, H = sv.d && sv.d->h < sv.c->h ? sv.d->h : sv.c->h;
+        const lh_ptr *p = (const lh_ptr *)(const void *)h;
+        nb_ua_rect r = nb_ua_none();
+        if (h->kind == LH_DRAW) {
+            const int vp = sv.vp_set && sv.vp[2] > 0 && sv.vp[3] > 0;
+            int32_t sx = sv.sc[0], sy = sv.sc[1], sw = sv.sc[2], sh = sv.sc[3];   // (ui_scissor_x's clamp)
+            if (sx < 0) { sw += sx; sx = 0; }
+            if (sy < 0) { sh += sy; sy = 0; }
+            if (sw < 0) sw = 0;
+            if (sh < 0) sh = 0;
+            r = nb_ua_draw_rect(vp ? (float)sv.vp[0] : 0.0f, vp ? (float)sv.vp[1] : 0.0f, vp ? (float)sv.vp[2] : (float)W, vp ? (float)sv.vp[3] : (float)H,
+                                sv.sc_set ? sx : 0, sv.sc_set ? sy : 0, sv.sc_set ? (uint32_t)sw : W, sv.sc_set ? (uint32_t)sh : H, W, H, UP_MARGIN);
+        } else if (h->kind == LH_CLR) {
+            if (p->a != sv.c) continue;
+            r = nb_ua_full(p->a->w, p->a->h);
+            if (p->has) r = nb_ua_clip(up_rect(p->v[0], p->v[1], p->v[0] + p->v[2], p->v[1] + p->v[3]), r);
+        } else if (h->kind == LH_CDS) {
+            const int masked = p->v[1] && (uint8_t)p->v[1] != 0xff && sv.d && (sv.d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+            if (masked || (ds && (p->v[0] || p->v[1]))) r = nb_ua_full(W, H);
+        }
+        if (!nb_ua_empty(r)) u = nb_ua_empty(u) ? r : nb_ua_union(u, r);
+    }
+    *out = u;
+    return nb_ua_empty(u) ? -1 : 0;
+}
+// [mgpu P7b] the double run's depth-stencil: the one DS texture the run's entries use (*d; NULL = none used), copied into g_lh.vds of its
+// shape (made on first use). -1 = more than one, or no copy texture
+static int lh_vds(vkn_tex **d) {
+    *d = NULL;
+    if (!g_lh.dsany) return 0;
+    vkn_tex *t = g_lh.d0;
+    for (uint32_t at = 0; at < g_lh.n;) {
+        const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+        if (h->kind != LH_TGT) continue;
+        vkn_tex *b = ((const lh_ptr *)(const void *)h)->b;
+        if (b && t && b != t) return -1;
+        if (b) t = b;
+    }
+    if (!t || t->dead) return t ? -1 : 0;
+    vkn_tex *s = g_lh.vds;
+    if (s && (s->dead || s->w != t->w || s->h != t->h || s->format != t->format || s->samples != t->samples)) { if (!s->dead) vkn_tex_destroy_cookie(s->cookie); s = g_lh.vds = NULL; }
+    if (!s) {
+        vkn_tex_desc dd; memset(&dd, 0, sizeof dd);
+        dd.nvn_fmt = t->nvn_fmt; dd.efmt = t->efmt; dd.nvn_target = 1; dd.w = t->w; dd.h = t->h; dd.depth = dd.mips = dd.layers = 1; dd.samples = t->samples ? t->samples : 1; dd.cls = VKN_TC_DEPTH;
+        dd.pool_id = ~0u; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) dd.layer_ids[i] = ~0u; dd.sampler_id = ~0u; dd.cookie = 1ull << 63 | 1ull << 62 | (++g_sp_gen) << 8;
+        const vkn_tex_src src = {.kind = VKN_SRC_NONE};
+        const char *why = NULL;
+        s = vkn_tex_create(1ull << 32 | 0xffffffffull, &dd, &src, &why);
+        if (!s || s->format != t->format) { if (s) vkn_tex_destroy_cookie(dd.cookie); return -1; }
+        snprintf(s->sname, sizeof s->sname, "ui-verify-ds"); g_lh.vds = s;
+    }
+    *d = t;
+    return 0;
 }
 // a band of the layer into a staging block (the compare of verify / self-check); a remembered clear of the layer stays remembered
 static int lh_band(lh_cmp *c, uint32_t y0, uint32_t bh, int second) {
@@ -1493,6 +1970,7 @@ static lh_cmp *lh_cmp_new(void) {
     c->bytes = L->w * bh * 4u;   // (Iggy's layer: RGBA8)
     if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * c->bytes, 16, &c->b)) return NULL;
     if (c->b.cpu) memset(c->b.cpu, 0, 2ull * c->bytes);   // (both halves are written by the copies; a copy that did not run compares equal zeros)
+    c->dbl = 0;
     return c;
 }
 static void lh_cmp_check(int all) {
@@ -1500,7 +1978,10 @@ static void lh_cmp_check(int all) {
         lh_cmp *c = &g_lh.cmp[i];
         if (!c->live || (!all && vkn_frame() < c->frame + 4)) continue;
         const int differ = memcmp(c->b.cpu, (const uint8_t *)c->b.cpu + c->bytes, c->bytes) != 0;
-        if (differ) {
+        if (differ && c->dbl) {   // [mgpu P7b] the double run of UILAYER=2
+            g_ups.uc_differ++; g_ups.lh_vdiffer++;
+            UI_RED(RR_STATIC, "ui layer: a band of the layer (%u bytes) differs between the run in its order and hoisted (renames / pushed DS / one pass)", c->bytes);
+        } else if (differ) {
             g_ups.uc_differ++;
             UI_RED(RR_STATIC, "ui layer / cache: a band of the layer (key %016llx, %u bytes) differs between two recordings of the same UI run%s", (unsigned long long)c->key, c->bytes,
                    g_lh.cmode == 1 || g_lh.cmode == 3 ? ": the UI cache is off for this session" : "");
@@ -1509,13 +1990,38 @@ static void lh_cmp_check(int all) {
         vkn_block_free(&c->b); c->live = 0;
     }
 }
+// [mgpu P7b] the run log: one record per flushed run of a journaled recording (DM_VK_NATIVE_PASSLOG), printed after that frame's passlog
+// lines: which journal passes the run's execution began (p0 .. p1 - 1), entries / draws by group, how it ran and why, what flushed it
+typedef struct lh_rj { uint32_t p0, p1, ents, d0, d1, ren, nal, seg; uint8_t how, why, ev, cls, uwhy, ds, area, lonly, cont, dsg1; char name[24]; } lh_rj;
+static lh_rj g_rj[LH_RJ]; static uint32_t g_nrj, g_rj_ser;
+static void lh_rj_print(int target) {
+    static const char *const fl[VKN_UILF_N] = {"an engine draw on GDraw's binding", "a conflict", "the layer used", "a pass end", "size", "other"};
+    static const char *const ev[10] = {"-", "targets", "draw", "sample", "storage", "layout", "clear", "copy", "pass end", "depth read"};
+    static const char *const cl[VKN_UILT_N] = {"the layer", "a depth-stencil", "a pushed target", "a texture the run reads", "nothing of the run"};
+    static const char *const un[VKN_UILU_N] = {"no layer", "pushed DS order", "pushed read of the layer", "target reuse (no texture free)", "many reads"};
+    for (uint32_t i = 0; i < g_nrj; i++) {
+        const lh_rj *r = &g_rj[i];
+        char pr[32]; if (r->p1 > r->p0) snprintf(pr, sizeof pr, "#%03u..#%03u", r->p0, r->p1 - 1); else snprintf(pr, sizeof pr, "no pass begun (at #%03u)", r->p0);
+        char sg[24]; sg[0] = 0; if (r->how == 1 && r->seg > 1) snprintf(sg, sizeof sg, " in %u segments", r->seg);
+        vkn_logf("passlog %d ui run %u: %s | entries %u, draws layer %u + pushed %u%s | %s%s%s%s%s, DS %s%s, renamed %u (aliases %u) | flushed by %s: %s on %s (%s)",
+                 target, i, pr, r->ents, r->d0, r->d1, r->dsg1 ? ", a pushed DS use" : "",
+                 r->how == 1 ? "hoisted" : r->how == 2 ? "skipped (cache hit)" : "in order", sg, r->how == 1 && r->lonly ? " (the layer alone)" : "",
+                 r->how == 0 && r->uwhy < VKN_UILU_N && r->uwhy != 0xff ? ": " : "", r->how == 0 && r->uwhy < VKN_UILU_N && r->uwhy != 0xff ? un[r->uwhy] : "",
+                 r->ds == 1 ? "kept" : r->ds == 0 ? "detached" : "by history", r->how == 1 ? (r->cont ? ", the engine draws into the layer next" : r->area ? ", run area" : "") : "",
+                 r->ren, r->nal, r->why < VKN_UILF_N ? fl[r->why] : "?", r->ev < 10 ? ev[r->ev] : "?", r->name[0] ? r->name : "-", r->cls < VKN_UILT_N ? cl[r->cls] : "?");
+    }
+    g_nrj = 0;
+}
 static void lh_flush(int why) {
     if (!g_lh.hold) return;
-    g_lh.hold = 0;
+    g_lh.hold = 0; lh_pend_drop();
     const uint64_t t0 = vkn_now_ns();
     if (why >= 0 && why < VKN_UILF_N) g_ups.lh_flush[why]++;
     lh_cmp_check(0);
     if (!g_lh.nents) return;
+    const int logit = vkn_pass_log_armed();   // [mgpu P7b] the run log
+    const uint32_t lp0 = logit ? vkn_pass_log_at() : 0;
+    int how = 0, rj_ds = -1, rj_area = 0, rj_cont = 0; uint32_t rj_seg = 0;
     // the engine's bound set now (put back after the run when the engine bound it after the run's last binding)
     uint32_t en = 0; vkn_tex *ec[VKN_PASS_COLORS], *ed = NULL; uint32_t el[VKN_PASS_COLORS], em[VKN_PASS_COLORS];
     vkn_pass_cur_get(&en, ec, el, em, &ed);
@@ -1546,7 +2052,7 @@ static void lh_flush(int why) {
             poison = skip && g_lh.cmode == 3 && (vkn_frame() & 63) == 0;
         }
     }
-    g_lh.replay = 1;
+    g_lh.replay = 1; g_ui_lazy = g_lh.lmode != 0;   // [mgpu P7c] lazy pushed bindings
     lh_st s0; memset(&s0, 0, sizeof s0); s0.c = g_lh.c0; s0.d = g_lh.d0;
     s0.vp_set = g_lh.vp0_set; memcpy(s0.vp, g_lh.vp0, 16); s0.sc_set = g_lh.sc0_set; memcpy(s0.sc, g_lh.sc0, 16);
     lh_st ap = s0; ap.tgt_set = 0;   // (applied: the live state, except the set vkn_pass holds now)
@@ -1554,28 +2060,86 @@ static void lh_flush(int why) {
         vkn_pass_clear_take(g_lh.L, NULL, 1);   // the layer keeps the last recording's UI, which is this run's
         if (poison) { static const float mg[4] = {1, 0, 1, 1}; vkn_pass_clear_color(g_lh.L, 0, mg, NULL); g_ups.uc_poison++; }
         lh_final_state(&s0, &ap);
-        g_ups.uc_hits++; g_ups.uc_draws_saved += g_lh.ndraws; g_ups.uc_calls_saved += g_lh.nents;
+        g_ups.uc_hits++; g_ups.uc_draws_saved += g_lh.ndraws; g_ups.uc_calls_saved += g_lh.nents; how = 2;
     } else {
         lh_cmp *c = check ? lh_cmp_new() : NULL;
         const uint32_t bh = g_lh.L && g_lh.L->h < LH_BAND ? g_lh.L->h : LH_BAND;
         const uint32_t y0 = c && g_lh.L->h > bh ? (g_lh.band++ * bh) % (g_lh.L->h - bh + 1) : 0;
         if (c && lh_band(c, y0, bh, 0)) { vkn_block_free(&c->b); c = NULL; }
-        int hoist = g_lh.lmode && !g_lh.unsafe && g_lh.has_f && g_lh.has_l;
-        if (g_lh.lmode == 2 && hoist) hoist = (int)(g_lh.alt++ & 1);
-        if (hoist) {
-            lh_group(1, &s0, &ap);
-            {   // the layer's first set (the clean end of a P2 epoch), then every texture the layer reads made sampleable: a layout change inside
-                // the layer's pass would end it (the composites read the pushed targets just drawn)
-                lh_st sv = s0;
-                for (uint32_t at = 0; at < g_lh.n;) {
-                    const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
-                    if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
-                    if (h->grp == 0 && h->kind != LH_FENCE) break;
+        // [mgpu P7b] a run with the layer alone is hoisted too (one layer pass: fences dropped, the run's DS / area decisions); a pushed
+        // depth-stencil use is hoisted when the symbolic check finds the order free
+        int hoist = g_lh.lmode && !g_lh.unsafe && g_lh.has_l;
+        uint32_t seg[LH_SEG], nseg = 1, sds = 0, srl = 0; seg[0] = 0;
+        if (g_lh.lmode) lh_dsclip_mark();   // [mgpu P7c] (in any order: the proof is the run's own order)
+        if (hoist && lh_plan(seg, &nseg, &sds, &srl)) { lh_unsafe(VKN_UILU_DS); g_ups.lh_ds_bad++; hoist = 0; }
+        else if (hoist) { if (g_lh.ds_g1 && !sds) g_ups.lh_ds_ok++; if (sds) g_ups.lh_ds_bad++; g_ups.lh_segs += nseg - 1; g_ups.lh_seg_ds += sds; g_ups.lh_seg_rl += srl; rj_seg = nseg; }
+        // [mgpu P7b] UILAYER=2: a run whose layer begins with a remembered whole clear runs twice from one start - in its order, a band of
+        // the layer read back, the layer cleared again and the depth-stencil put back (a copy), then hoisted, the band read again: equal
+        // bands 4 frames later, else "differ" (the P7 line) and a red line. Other runs alternate hoisted / in order by recording as before.
+        lh_cmp *c2 = NULL; uint32_t y2 = 0; int once = 0;
+        if (g_lh.lmode == 2 && hoist) {
+            float vv[4]; vkn_tex *vd = NULL;
+            if (!c && !g_lh.uninit && g_lh.L && !g_lh.L->dead && vkn_pass_clear_take(g_lh.L, vv, 0) && !lh_vds(&vd) && (c2 = lh_cmp_new()) != NULL) {
+                c2->dbl = 1;
+                y2 = g_lh.L->h > bh ? (g_lh.band++ * bh) % (g_lh.L->h - bh + 1) : 0;
+                if (vd) vkn_pass_copy(g_lh.vds, vd);
+                if (g_lh.c0) ui_targets_x(g_lh.c0, g_lh.d0);
+                for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; lh_exec(h); }
+                if (lh_band(c2, y2, bh, 0)) { vkn_block_free(&c2->b); c2 = NULL; once = 1; g_ups.lh_ordered++; }   // (no read-back: it stays the run in order)
+                else {
+                    ui_fence_x();   // (a new epoch: the second run takes its own decisions)
+                    vkn_pass_clear_color(g_lh.L, 0, vv, NULL);
+                    if (vd) vkn_pass_copy(vd, g_lh.vds);
+                    g_vp = g_lh.vpf; g_sc = g_lh.scr; g_vp_set = g_lh.vp0_set; g_sc_set = g_lh.sc0_set;
+                    ap = s0; ap.tgt_set = 0;
+                    g_ups.lh_vdouble++;
                 }
-                lh_state_apply(&sv, &ap);
-                for (uint32_t i = 0; i < g_lh.nr0; i++) if (g_lh.r0[i] != sv.c && g_lh.r0[i] != sv.d && !g_lh.r0[i]->dead) (void)vkn_pass_sample(g_lh.r0[i]);
+            } else hoist = (int)(g_lh.alt++ & 1);
+        }
+        if (once) {
+        } else if (hoist) {
+            lh_st sv = s0;
+            for (uint32_t at = 0; at < g_lh.n;) {   // the layer's first set (the run-level decisions below)
+                const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+                if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &sv); continue; }
+                if (h->grp == 0 && h->kind != LH_FENCE) break;
             }
-            g_up_noarea = 1; lh_group(0, &s0, &ap); g_up_noarea = 0;
+            {   // [mgpu P7b] the layer epoch's decisions from the run. cont: the engine draws into the layer right after the run (the event that
+                // flushed it is a draw / depth use and the set it will draw with has the layer): the pass should stay open for it - its
+                // depth-stencil as that set has it, no narrowed area. Else: the DS attached only when a layer entry tests / writes it, the
+                // render area = the union of the run's layer rects.
+                if (!g_lh.has_f) g_ups.lh_layer_only++;
+                vkn_tex *nd = NULL; vkn_tex *nc = NULL;
+                if (restore) { nc = en ? ec[0] : NULL; nd = ed; } else { lh_st fs = s0; for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; lh_scan_state(h, &fs); } nc = fs.c; nd = fs.d; }
+                const int cont = (g_lh.fev == VKN_PBE_READY || g_lh.fev == VKN_PBE_DEPTH) && nc == g_lh.L;
+                if (cont) { g_ups.lh_cont++; rj_cont = 1; }
+                g_up_lh_ds = g_lh.g0_ds || (cont && nd && nd == sv.d) ? 1 : 0;
+                nb_ua_rect ar = nb_ua_none();
+                g_up_lh_area_on = !cont && !lh_g0_area(&s0, g_up_lh_ds, &ar); g_up_lh_area = ar;
+            }
+            rj_ds = g_up_lh_ds; rj_area = g_up_lh_area_on; how = 1;
+            for (uint32_t si = 0; si < nseg; si++) {   // [mgpu P7b] segment by segment (one = the whole run)
+                const uint32_t a = seg[si], b = si + 1 < nseg ? seg[si + 1] : g_lh.n;
+                lh_group_rng(1, a, b, &s0, &ap);
+                // the segment's first layer set (the clean end of a P2 epoch), then every texture its layer entries read made sampleable: a
+                // layout change inside the layer's pass would end it (the composites read the pushed targets just drawn)
+                lh_st fv = s0; int any = 0;
+                for (uint32_t at = 0; at < b;) {
+                    const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); const uint32_t here = at; at += h->size;
+                    if (h->kind == LH_TGT || h->kind == LH_VP || h->kind == LH_SC) { lh_scan_state(h, &fv); continue; }
+                    if (here >= a && h->grp == 0 && h->kind != LH_FENCE) { any = 1; break; }
+                }
+                if (!any) continue;
+                lh_state_apply(&fv, &ap);
+                for (uint32_t at = a; at < b;) {
+                    const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size;
+                    if (h->kind != LH_DRAW || h->grp) continue;
+                    const vkn_ui_draw_in *in = &((const lh_draw_e *)(const void *)h)->in;
+                    for (int u = 0; u < VKN_UI_UNITS; u++) { vkn_tex *t = fc_rd(in->tex[u]); if (t && t != fv.c && t != fv.d && !t->dead) (void)vkn_pass_sample(t); }
+                }
+                g_up_noarea = 1; lh_group_rng(0, a, b, &s0, &ap); g_up_noarea = 0;
+            }
+            g_up_lh_ds = -1; g_up_lh_area_on = 0;
             lh_final_state(&s0, &ap);
             if (g_lh.fence) ui_fence_x();
             g_ups.lh_hoisted++;
@@ -1589,7 +2153,10 @@ static void lh_flush(int why) {
             g_ups.lh_ordered++;
         }
         if (c && !lh_band(c, y0, bh, 1)) { c->live = 1; c->frame = vkn_frame(); c->key = key; g_ups.uc_verify++; } else if (c) vkn_block_free(&c->b);
+        if (c2 && !lh_band(c2, y2, bh, 1)) { c2->live = 1; c2->frame = vkn_frame(); c2->key = key; g_ups.uc_verify++; } else if (c2) vkn_block_free(&c2->b);   // [mgpu P7b]
     }
+    if (fc_holding()) fc_end();   // [mgpu P7c] (a pushed epoch at the run's end: answered now) and a binding still pending made real
+    g_ui_lazy = 0; ui_bind_now();
     if (restore) vkn_pass_targets(en, ec, el, em, ed);
     g_lh.replay = 0;
     // the candidate for the next recording: this run, the textures it wrote, tracked from now on
@@ -1598,36 +2165,59 @@ static void lh_flush(int why) {
         g_lh.ntw = 0; for (uint32_t i = 0; i < g_lh.nw; i++) g_lh.tw[g_lh.ntw++] = g_lh.w[i];
         g_lh.track = (uint8_t)(cand && !g_lh.wfull); g_lh.tdirty = (uint8_t)(poison || g_lh.wfull);
     }
+    if (logit) {   // [mgpu P7b] the run log
+        const uint32_t ser = vkn_cb_serial();
+        if (ser != g_rj_ser) { g_rj_ser = ser; g_nrj = 0; }
+        if (g_nrj < LH_RJ) {
+            lh_rj *r = &g_rj[g_nrj++]; memset(r, 0, sizeof *r);
+            r->p0 = lp0; r->p1 = vkn_pass_log_at(); r->ents = g_lh.nents; r->ren = g_lh.ren; r->nal = g_lh.nal;
+            for (uint32_t at = 0; at < g_lh.n;) { const lh_hdr *h = (const lh_hdr *)(const void *)(g_lh.buf + at); at += h->size; if (h->kind == LH_DRAW) { if (h->grp) r->d1++; else r->d0++; } }
+            r->how = (uint8_t)how; r->why = (uint8_t)(why >= 0 && why < VKN_UILF_N ? why : VKN_UILF_OTHER); r->ev = g_lh.fev; r->cls = g_lh.fcls;
+            r->uwhy = g_lh.unsafe ? g_lh.uwhy : 0xff; r->ds = (uint8_t)(rj_ds < 0 ? 2 : rj_ds); r->area = (uint8_t)rj_area; r->cont = (uint8_t)rj_cont;
+            r->lonly = !g_lh.has_f; r->dsg1 = g_lh.ds_g1; r->seg = rj_seg; memcpy(r->name, g_lh.fname, sizeof r->name);
+        }
+    }
     g_lh.n = 0; g_lh.nents = 0; g_lh.ndraws = 0;
     g_ups.ui_ns += vkn_now_ns() - t0;
 }
 // vkn_pass_before_ev: an engine use while a run is held (the rule at the top)
+// [mgpu P7b] the run log / census: the engine event that flushes the run and what it touched (t = NULL: nothing of the run)
+static void lh_ev_note(int ev, vkn_tex *t) {
+    g_lh.fev = (uint8_t)ev;
+    g_lh.fcls = !t ? VKN_UILT_NONE : t == g_lh.L ? VKN_UILT_LAYER : (t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? VKN_UILT_DS : lh_w(t) ? VKN_UILT_PUSHED : VKN_UILT_READ;
+    if (ev >= 0 && ev < 10) g_ups.lh_fev[ev]++;
+    g_ups.lh_ftex[g_lh.fcls]++;
+    if (!t) snprintf(g_lh.fname, sizeof g_lh.fname, "-");
+    else if (t->sname[0]) snprintf(g_lh.fname, sizeof g_lh.fname, "%s", t->sname);
+    else snprintf(g_lh.fname, sizeof g_lh.fname, "tex#%04llx", (unsigned long long)(t->handle & 0xffff));
+}
 static void lh_ev(int ev, vkn_tex *a, vkn_tex *b) {
     if (g_lh.replay || !g_lh.hold) return;
-    int why = -1;
+    int why = -1; vkn_tex *hit = NULL;
     switch (ev) {
     case VKN_PBE_TARGETS: g_lh.owns = 1; return;
     case VKN_PBE_READY: case VKN_PBE_DEPTH:
-        if (!g_lh.owns) why = VKN_UILF_BOUND;
+        if (!g_lh.owns) { why = VKN_UILF_BOUND; hit = g_lh.cc; }
         else {
             uint32_t n = 0; vkn_tex *c[VKN_PASS_COLORS], *d = NULL; vkn_pass_cur_get(&n, c, NULL, NULL, &d);
-            for (uint32_t i = 0; i < n && why < 0; i++) if (lh_wr(c[i])) why = VKN_UILF_CONFLICT;
-            if (why < 0 && lh_wr(d)) why = VKN_UILF_CONFLICT;
+            for (uint32_t i = 0; i < n && why < 0; i++) if (lh_wr(c[i])) { why = VKN_UILF_CONFLICT; hit = c[i]; }
+            if (why < 0 && lh_wr(d)) { why = VKN_UILF_CONFLICT; hit = d; }
         }
         break;
-    case VKN_PBE_SAMPLE: if (lh_w(a)) why = a == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
-    case VKN_PBE_STORAGE: case VKN_PBE_LAYOUT: case VKN_PBE_CLEAR: if (lh_wr(a)) why = a == g_lh.L && ev == VKN_PBE_LAYOUT ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
-    case VKN_PBE_COPY: if (lh_wr(a) || lh_w(b)) why = b == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; break;
+    case VKN_PBE_SAMPLE: if (lh_w(a)) { why = a == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; hit = a; } break;
+    case VKN_PBE_STORAGE: case VKN_PBE_LAYOUT: case VKN_PBE_CLEAR: if (lh_wr(a)) { why = a == g_lh.L && ev == VKN_PBE_LAYOUT ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; hit = a; } break;
+    case VKN_PBE_COPY: if (lh_wr(a) || lh_w(b)) { why = b == g_lh.L ? VKN_UILF_LAYER : VKN_UILF_CONFLICT; hit = lh_wr(a) ? a : b; } break;
     case VKN_PBE_END: why = VKN_UILF_END; break;
     default: why = VKN_UILF_OTHER; break;
     }
-    if (why >= 0) lh_flush(why);
+    if (why >= 0) { lh_ev_note(ev, hit); lh_flush(why); }
 }
 // the effect chain, first: an engine draw while the run's binding is GDraw's (a custom draw) - before any piece looks at the set
 static void lh_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
     (void)in; (void)ctx; (void)out; (void)user;
-    if (g_lh.hold && !g_lh.replay && !g_lh.owns) lh_flush(VKN_UILF_BOUND);
+    if (g_lh.hold && !g_lh.replay && !g_lh.owns) { lh_ev_note(VKN_PBE_READY, g_lh.cc); lh_flush(VKN_UILF_BOUND); }
 }
+static vkn_tex *g_lh_layer(void) { return g_lh.L; }   // [mgpu P7c]
 void vkn_ui_layer(vkn_tex *L) {   // the host (RenderingBegin): GDraw's base colour target
     if (L == g_lh.L) return;
     if (g_lh.hold) lh_flush(VKN_UILF_OTHER);

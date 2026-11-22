@@ -847,6 +847,24 @@ static void ui_pass_census(void) {
 #undef Q
         q0 = q;
     }
+    // [mgpu P7b] what flushes the runs, how they run: renames, the pushed DS check, the layer pass's run-level DS / area
+    vkn_logf("ui runs (mgpu P7b): a presented frame: flushed by the engine's draw %.2f, depth read %.2f, clear %.2f, sample %.2f, layout %.2f, copy %.2f, storage %.2f, "
+             "pass end %.2f; touching the layer %.2f, a depth-stencil %.2f, a pushed target %.2f, a texture the run reads %.2f, nothing of the run %.2f | hoisted with the layer "
+             "alone %.2f; pushed targets renamed %.2f (refused: no texture free %.3f), spares made %llu (%.1f MB alive), aliases at a recording end %.2f",
+             D(lh_fev[VKN_PBE_READY]), D(lh_fev[VKN_PBE_DEPTH]), D(lh_fev[VKN_PBE_CLEAR]), D(lh_fev[VKN_PBE_SAMPLE]), D(lh_fev[VKN_PBE_LAYOUT]), D(lh_fev[VKN_PBE_COPY]),
+             D(lh_fev[VKN_PBE_STORAGE]), D(lh_fev[VKN_PBE_END]), D(lh_ftex[VKN_UILT_LAYER]), D(lh_ftex[VKN_UILT_DS]), D(lh_ftex[VKN_UILT_PUSHED]), D(lh_ftex[VKN_UILT_READ]),
+             D(lh_ftex[VKN_UILT_NONE]), D(lh_layer_only), D(lh_renamed), D(lh_rename_fail), (unsigned long long)a.lh_spares, (double)a.lh_spare_bytes / mb, D(lh_alias_live));
+    vkn_logf("ui runs 2 (mgpu P7b): a presented frame: pushed DS use order-free %.2f, not %.2f; segments more %.2f (by the DS %.2f, a pushed read of the layer %.2f) | "
+             "layer DS from the run: detached %.2f, kept %.2f; the engine draws into the layer next %.2f; run area: passes %.2f, pixels %.2f of %.2f M, restarts %.3f | "
+             "DM_VK_NATIVE_UILAYER=2: runs drawn twice and compared %.2f, differ %llu (total)",
+             D(lh_ds_ok), D(lh_ds_bad), D(lh_segs), D(lh_seg_ds), D(lh_seg_rl), D(lh_g0_det), D(lh_g0_keep), D(lh_cont), D(lh_area), D(lh_area_px) / 1e6, D(lh_area_full) / 1e6,
+             D(lh_area_restart), D(lh_vdouble), (unsigned long long)a.lh_vdiffer);
+    // [mgpu P7c] segments the hold started at a reuse; filter-cache hits answered by a page (no copy, no binding); pushed bindings never
+    // made (never used) / made at first use; region epochs whose DS writes are dead after them (DS draws clipped)
+    vkn_logf("ui runs 3 (mgpu P7c): a presented frame: segments started at a reuse %.2f | filter cache pages %llu (%.1f MB alive), hits by a page %.2f, page regions made "
+             "real %.3f | pushed bindings never made %.2f, made at first use %.2f | region epochs DS-dead after %.2f, DS draws clipped %.2f",
+             D(lh_seg_reuse), (unsigned long long)a.fc_pages, (double)a.fc_page_bytes / mb, D(fc_rd_hits), D(fc_rd_real), D(lh_lazy_skipped), D(lh_lazy_bound),
+             D(lh_dsclip), D(region_dsclip));
 #undef D
     g_ups0 = a; g_ups_frame0 = fr;
 }

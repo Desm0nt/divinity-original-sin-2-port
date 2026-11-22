@@ -173,6 +173,11 @@ typedef struct vkn_pass_stats4 {
     uint64_t ui_passes, ui_load, ui_store, ui_pass_draws, ui_copies, ui_copy;
 } vkn_pass_stats4;
 void vkn_pass_stats4_get(vkn_pass_stats4 *s);
+// [mgpu P7b] the UI's run log beside the journal: the index the next journaled pass of this recording gets; 1 = this recording is
+// journaled (DM_VK_NATIVE_PASSLOG armed); fn(k) runs right after the k-th heavy frame's lines are printed (NULL = none). Recording thread.
+uint32_t vkn_pass_log_at(void);
+int vkn_pass_log_armed(void);
+void vkn_pass_log_after(void (*fn)(int target));
 // ==== [mgpu P2] a region copy between two colour textures of one format (the UI filter cache, vkn_ui.c): layouts by this module ====
 // (dst x, y) <- src (x, y, w, h), level 0 layer 0; the open pass ends. 0 = recorded.
 int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32_t sx, int32_t sy, uint32_t w, uint32_t h);

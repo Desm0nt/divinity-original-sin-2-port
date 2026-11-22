@@ -115,6 +115,9 @@ void vkn_ui_fc_config(int mode);
 void vkn_ui_pass_fence(void);
 enum { VKN_UIP_DS_HIST, VKN_UIP_DS_FRAME, VKN_UIP_DS_SHARED, VKN_UIP_DS_SIZE, VKN_UIP_DS_DYING, VKN_UIP_DS_N };   // detach refusals
 enum { VKN_UIP_AR_API, VKN_UIP_AR_CLEAR, VKN_UIP_AR_MS, VKN_UIP_AR_SAVE, VKN_UIP_AR_N };                          // area refusals
+// [mgpu P7b] what the engine event that flushed a run touched: the layer, a depth-stencil target, a pushed target, a texture the run reads
+// only, none (a pass end, the size limit, other)
+enum { VKN_UILT_LAYER, VKN_UILT_DS, VKN_UILT_PUSHED, VKN_UILT_READ, VKN_UILT_NONE, VKN_UILT_N };
 typedef struct vkn_ui_pass_stats {
     int mode, verify, rule, tile, api;   // in effect (mode -1 until the device is known); api: the pass module has the area functions
     uint64_t ui_frames, epochs, epochs_ds, detached, kept_off, reattach, fence_reattach, fence_end, fence_draw, set_lost;
@@ -136,6 +139,20 @@ typedef struct vkn_ui_pass_stats {
     uint64_t lh_runs, lh_calls, lh_draws, lh_flush[8], lh_hoisted, lh_ordered, lh_unsafe[8], lh_poison;
     uint64_t uc_cand, uc_refused[12], uc_would, uc_hits, uc_draws_saved, uc_calls_saved, uc_verify, uc_differ, uc_poison;
     uint64_t ui_ns, ui_calls;
+    // [mgpu P7b] (vkn_ui.c "mgpu P7b"): flushes by the engine's event (index = VKN_PBE_*) and by what it touched (VKN_UILT_*); runs
+    // hoisted with the layer alone (no pushed target: one pass, fences dropped); pushed targets renamed (a reuse after the layer read
+    // them: the new content goes to another texture of the same shape), renames refused (no free texture), spares made (bytes alive);
+    // runs whose pushed depth-stencil use was proven order-free by the symbolic check / was not; the layer epoch's depth-stencil taken
+    // from the run (detached / kept), its render area from the run (passes, pixels of the full target), restarts of such a pass (0)
+    uint64_t lh_fev[10], lh_ftex[VKN_UILT_N], lh_layer_only, lh_renamed, lh_rename_fail, lh_spares, lh_spare_bytes, lh_ds_ok, lh_ds_bad;
+    uint64_t lh_g0_det, lh_g0_keep, lh_area, lh_area_px, lh_area_full, lh_area_restart, lh_alias_live, lh_cont;
+    uint64_t lh_vdouble, lh_vdiffer;   // UILAYER=2: runs drawn twice (in order, then hoisted) and compared; bands that differed (total)
+    uint64_t lh_segs, lh_seg_ds, lh_seg_rl;   // hoisted runs' segments beyond the first; started by the DS check / by a pushed read of the layer
+    uint64_t lh_seg_reuse;                    // [mgpu P7c] segments the hold started at a reuse (no texture free / content drawn on top)
+    // [mgpu P7c] the filter cache's pages (made, bytes alive), hits answered by a redirect (no copy), redirects made real by a copy (a page
+    // region about to be reused); pushed bindings of the hold's replay made real at their first use / never used (never bound)
+    uint64_t fc_pages, fc_page_bytes, fc_rd_hits, fc_rd_real, lh_lazy_bound, lh_lazy_skipped;
+    uint64_t lh_dsclip, region_dsclip;   // [mgpu P7c] region epochs proven DS-dead after them; their DS draws / masked clears clipped to the region
 } vkn_ui_pass_stats;
 // [mgpu P7] flush reasons: an engine draw / depth read on GDraw's binding (a custom draw), a conflicting engine use, the layer used by the
 // engine (Combine), a pass end (a piece, the recording's close), the size limit, other
@@ -161,6 +178,13 @@ void vkn_ui_pass_stats_get(vkn_ui_pass_stats *s);
 // DM_VK_NATIVE_UILAYER: 0 off / 1 filter blocks executed before the layer (one layer pass) / 2 verify / 3 poison; DM_VK_NATIVE_UICACHE:
 // 0 off / 1 an unchanged UI run is not executed again / 2 verify / 3 poison; -1 = family default (render-pass tilers 1, else 0). Any GPU.
 // Install time. Every vkn_ui_* call above is held while either is on (and executed at the run's flush).
+// [mgpu P7b] UILAYER 1 also: a run with the layer alone is hoisted (its fences dropped, one pass); a pushed target GDraw binds again after
+// a layer draw of the run read it is renamed at its region clear (the new content in another texture of its shape: the target itself or a
+// spare of this module, at most 4) instead of running the run in order; a pushed depth-stencil use or a pushed draw that reads the layer
+// splits the run into segments, each hoisted inside itself, where a symbolic depth-stencil check (or the layer read) asks for it; the
+// layer epoch takes its depth-stencil (attached only when a layer entry tests / writes it, or the engine draws into the layer with it
+// right after the run) and its render area (the union of the run's layer rects) from the run. UILAYER 2 draws a run whose layer begins
+// with a remembered whole clear twice (in its order, then hoisted) and compares a band of the layer. Run log: DM_VK_NATIVE_PASSLOG.
 void vkn_ui_layer_config(int layer, int cache);
 void vkn_ui_layer(vkn_tex *L);   // the host (RenderingBegin, a record): GDraw's base colour target (the layer)
 void vkn_ui_layer_flush(void);   // a held run executed now (tests)
