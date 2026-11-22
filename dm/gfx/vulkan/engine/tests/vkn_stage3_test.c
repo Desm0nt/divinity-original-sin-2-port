@@ -2650,6 +2650,10 @@ static void test_moving(void) {
 // acks reach the plan 2 frames late (as the recording thread runs behind). Children: truth (everything off), SHSTATIC=1 (+ the cache,
 // scroll and culling on: their defaults), =2 (verify), =3 (poison). 1 and 2 equal the truth in every frame; 3 differs; the counters show
 // layers built, reused exact and shifted, the drops by reason, members left out, verdicts (the wind caster and the flag never OK).
+// [fix2 22.11] (phone G06: the per-view block of a reuse was not the layer's camera) frame 33: cascade 1's per-view block is 0.4 texel off
+// the camera words the engine side plans with (the engine's words say "the same camera", the draws read another): SAFE (default) - the
+// layer is not taken, the members (given in the SKIP span) are drawn, the frame equals the truth; SAFE=0 - a layer is reused only after a
+// HOLD frame confirmed its camera, the injected frame lacks it (1 BAD, at most 1 frame differs).
 #include "../../../nr/nr_shst.h"
 enum { ST_F = 64, ST_N = 40, ST_LAG = 2 };
 typedef struct st_res {
@@ -2694,7 +2698,7 @@ static void st_scn(st_res *r) {
     const int v0 = mk_val_errors, e0 = mk_errors;
     vkn_shs_cam_block(12, 128, 0); vkn_shs_test_prog(mv_prog); vkn_shc_test_nofs(mv_nofs);
     vkn_shc_install();
-    const int mode = vkn_shc_eng_st_mode();
+    const int mode = vkn_shc_eng_st_mode(), safe = vkn_shc_eng_st_safe();
     { const char *e = getenv("DM_VK_ENG_SHSTATIC"); CHECK_EQ(mode, e && *e ? atoi(e) : 0); }
     vkn_tex *A = mktex(540, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 512, 512, 1, 1, 540, 0);
     CHECK(A != NULL); if (!A) return;
@@ -2752,6 +2756,7 @@ static void st_scn(st_res *r) {
             {   // the per-view block: View rows at 0, ViewProjection rows at 128
                 uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(192, &off), 0);
                 float pv[48]; memset(pv, 0, sizeof pv); memcpy(pv, vp, sizeof vp); memcpy(pv + 32, vp, sizeof vp);
+                if (f == 33 && k == 1) { pv[3] += 0.4f * s; pv[32 + 3] += 0.4f * s; }   // [fix2] the draws read another camera than the engine's words
                 memcpy((uint8_t *)vkn_ring_cpu() + off, pv, 192); vkn_draw_ubo(0, 12, off, 192);
                 uint32_t fo = 0; CHECK_EQ(vkn_ring_alloc(64, &fo), 0); memset((uint8_t *)vkn_ring_cpu() + fo, 0x11, 64); vkn_draw_ubo(1, 0, fo, 64);
             }
@@ -2775,7 +2780,8 @@ static void st_scn(st_res *r) {
                 uint32_t cw[NRST_CAMW]; memset(cw, 0, sizeof cw); memcpy(cw + NRST_VP, vp, 64); memcpy(cw + NRST_VIEW, vp, 64);
                 { const float pos[3] = {(float)cx, (float)cy, 0}, far = 1.0f; memcpy(cw + NRST_POS, pos, 12); memcpy(cw + NRST_FAR, &far, 4); cw[NRST_AUX] = 7; }
                 const int32_t tr[4] = {rect[k][0], 512 - MV_T - rect[k][1], MV_T, MV_T};   // (the engine's viewport in its own origin: the backend learns the tile from the draws)
-                nrst_plan_frame(&cas[k], &par, in, n, cw, tr, st_verdict_t, (void *)(intptr_t)k, ack_e[ST_LAG][k], ack_s[ST_LAG][k] == 2, grp, slot, tag, &pl);
+                uint32_t ae = 0; int ab = 0; nrst_ack_view(safe, cas[k].epoch, ack_e[ST_LAG][k], ack_s[ST_LAG][k], &ae, &ab);
+                nrst_plan_frame(&cas[k], &par, in, n, cw, tr, st_verdict_t, (void *)(intptr_t)k, ae, ab, grp, slot, tag, &pl);
                 vkn_shst_mark mk; memset(&mk, 0, sizeof mk);
                 mk.magic = VKN_SHST_MAGIC; mk.kind = VKN_SHST_START; mk.k = (uint32_t)k; mk.act = (uint32_t)pl.act; mk.epoch = pl.epoch; mk.nx = pl.nx; mk.ny = pl.ny;
                 memcpy(mk.rect, tr, sizeof mk.rect);
@@ -2787,10 +2793,15 @@ static void st_scn(st_res *r) {
                 }
             } else for (uint32_t i = 0; i < n; i++) grp[i] = NRST_G_DYN;
             // the groups in the engine side's order (dm/host/hle_dos2_vkn_eng.c st_frame)
-            static const uint8_t ord[NRST_A_N][4] = {{NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255},
-                                                     {NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN, 255}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH}};
+            static const uint8_t ord_all[2][NRST_A_N][4] = {
+                {{NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255},
+                 {NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN, 255}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH}},
+                {{NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255},
+                 {NRST_G_LEFT, NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH}}};
+            const uint8_t (*ord)[4] = ord_all[safe ? 1 : 0];
             for (int j = 0; j < 4 && ord[pl.act][j] != 255; j++) {
                 const int g = ord[pl.act][j];
+                if (own && safe && pl.act == NRST_A_REUSE && g == NRST_G_LEFT) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_SKIP0, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
                 if (own && pl.act == NRST_A_VERIFY && g == NRST_G_LEFT) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_V1, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
                 if (own && pl.act == NRST_A_VERIFY && g == NRST_G_TOUCH) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_V2, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
                 for (uint32_t i = n; i-- > 0;) {
@@ -2819,6 +2830,7 @@ static void st_scn(st_res *r) {
                     }
                     CHECK(vkn_pass_depth() == A); CHECK(vkn_pass_color(0) == NULL);
                 }
+                if (own && safe && pl.act == NRST_A_REUSE && g == NRST_G_LEFT) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_SKIP1, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
                 if (own && g == NRST_G_STATIC) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_MID, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
                 if (own && g == NRST_G_OBS) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_NONE, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
             }
@@ -2848,21 +2860,23 @@ static void test_eng_static(void) {
     static const char *const e_ver[][2] = {{"DM_VK_ENG_SHSTATIC", "2"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
     static const char *const e_poi[][2] = {{"DM_VK_ENG_SHSTATIC", "3"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
     static const char *const e_alone[][2] = {{"DM_VK_ENG_SHSTATIC", "1"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHSCROLL", "0"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
+    static const char *const e_unsafe[][2] = {{"DM_VK_ENG_SHSTATIC", "1"}, {"DM_VK_ENG_SHSTATIC_SAFE", "0"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
 #undef ST_BASE
     if (!g_mv_sh || !g_mv_prog) { CHECK(g_mv_sh && g_mv_prog); return; }   // (made by test_moving)
-    static st_res T, S1, S2, S3, S4;
-    st_child(e_truth, st_scn, &T); st_child(e_on, st_scn, &S1); st_child(e_ver, st_scn, &S2); st_child(e_poi, st_scn, &S3); st_child(e_alone, st_scn, &S4);
+    static st_res T, S1, S2, S3, S4, S5;
+    st_child(e_truth, st_scn, &T); st_child(e_on, st_scn, &S1); st_child(e_ver, st_scn, &S2); st_child(e_poi, st_scn, &S3); st_child(e_alone, st_scn, &S4); st_child(e_unsafe, st_scn, &S5);
     { int distinct = 0; for (int f = 13; f < 24; f++) distinct += T.h[f] != T.h[f - 1]; CHECK(distinct > 8); }
-    const struct { const char *name; const st_res *r; int equal; } run[] = {{"SHSTATIC=1 (+ cache, scroll, cull)", &S1, 1}, {"SHSTATIC=2 (verify)", &S2, 1}, {"SHSTATIC=3 (poison)", &S3, 0}, {"SHSTATIC=1, cache off", &S4, 1}};
+    const struct { const char *name; const st_res *r; int equal; } run[] = {{"SHSTATIC=1 (+ cache, scroll, cull)", &S1, 1}, {"SHSTATIC=2 (verify)", &S2, 1}, {"SHSTATIC=3 (poison)", &S3, 0}, {"SHSTATIC=1, cache off", &S4, 1}, {"SHSTATIC=1 SAFE=0", &S5, 2}};
     for (size_t i = 0; i < sizeof run / sizeof run[0]; i++) {
         int bad = 0, first = -1; for (int f = 0; f < ST_F; f++) if (run[i].r->h[f] != T.h[f]) { bad++; if (first < 0) first = f; }
-        if (run[i].equal) { CHECK_EQ(bad, 0); if (bad) printf("  eng static %s: %d frames differ from the truth, first %d\n", run[i].name, bad, first); }
+        if (run[i].equal == 1) { CHECK_EQ(bad, 0); if (bad) printf("  eng static %s: %d frames differ from the truth, first %d\n", run[i].name, bad, first); }
+        else if (run[i].equal == 2) { CHECK(bad <= 1); if (bad) CHECK_EQ(first, 33); }   // SAFE=0: only the injected frame may lack its layer
         else CHECK(bad > 0);
         const vkn_shc_st_stats *s = &run[i].r->ss; const nrst_stats *p1 = &run[i].r->ps[1], *p2 = &run[i].r->ps[2];
         uint64_t left = 0; for (int f = 0; f < ST_F; f++) left += run[i].r->left[f];
         printf("  eng static %-34s frames differing %2d; draws recorded %5llu (truth %llu); casters left out %llu; c1 build %llu reuse %llu (exact %llu shifted %llu) hold %llu verify %llu, c2 build %llu reuse %llu; "
                "drops c1+c2: turned %llu z %llu frac %llu big %llu moved %llu gone %llu refresh %llu nack %llu; no build: few %llu moving %llu; verdicts ok %llu once %llu not %llu (no bounds %llu, sig %llu); "
-               "reuses %llu, copies %llu, poisoned %llu, xchk %llu (bad %llu), BAD %llu; verify tiles %llu equal %llu k1 %llu kn %llu strip %llu skipped %llu\n",
+               "reuses %llu, copies %llu, poisoned %llu, xchk %llu (bad %llu), skipped / drawn members %llu / %llu, fallbacks %llu, would be bad %llu, BAD %llu; verify tiles %llu equal %llu k1 %llu kn %llu strip %llu skipped %llu\n",
                run[i].name, bad, (unsigned long long)run[i].r->recorded, (unsigned long long)T.recorded, (unsigned long long)left,
                (unsigned long long)p1->act[NRST_A_BUILD], (unsigned long long)p1->act[NRST_A_REUSE], (unsigned long long)p1->exact, (unsigned long long)p1->shifted, (unsigned long long)p1->act[NRST_A_HOLD],
                (unsigned long long)p1->act[NRST_A_VERIFY], (unsigned long long)p2->act[NRST_A_BUILD], (unsigned long long)p2->act[NRST_A_REUSE],
@@ -2871,10 +2885,13 @@ static void test_eng_static(void) {
                (unsigned long long)(p1->drop[NRST_R_REFRESH] + p2->drop[NRST_R_REFRESH]), (unsigned long long)(p1->drop[NRST_R_NACK] + p2->drop[NRST_R_NACK]),
                (unsigned long long)(p1->nob[NRST_N_FEW] + p2->nob[NRST_N_FEW]), (unsigned long long)(p1->nob[NRST_N_MOVING] + p2->nob[NRST_N_MOVING]),
                (unsigned long long)s->v[NRST_V_OK], (unsigned long long)s->v[NRST_V_ONCE], (unsigned long long)s->v[NRST_V_NOT], (unsigned long long)s->not_why[5], (unsigned long long)s->not_why[8],
-               (unsigned long long)s->reused, (unsigned long long)s->copies, (unsigned long long)s->poisoned, (unsigned long long)s->xchk, (unsigned long long)s->xchk_bad, (unsigned long long)s->bad,
+               (unsigned long long)s->reused, (unsigned long long)s->copies, (unsigned long long)s->poisoned, (unsigned long long)s->xchk, (unsigned long long)s->xchk_bad, (unsigned long long)s->skipped_members, (unsigned long long)s->drawn_members, (unsigned long long)s->fallback,
+               (unsigned long long)s->wbad, (unsigned long long)s->bad,
                (unsigned long long)s->vcmp, (unsigned long long)s->veq, (unsigned long long)s->vk1, (unsigned long long)s->vkn, (unsigned long long)s->vstrip, (unsigned long long)s->vskip);
         if (getenv("ST_DEBUG")) { printf("    acts c1/c2:"); for (int f = 0; f < ST_F; f++) printf(" %u%u", run[i].r->act[f][1], run[i].r->act[f][2]); printf("\n"); }
-        CHECK_EQ(s->bad, 0); CHECK_EQ(s->xchk_bad, 0); CHECK_EQ(s->stray, 0); CHECK_EQ(s->unterminated, 0);
+        if (run[i].r == &S5) CHECK(s->bad <= 1); else CHECK_EQ(s->bad, 0);
+        CHECK_EQ(s->xchk_bad, 1); CHECK(s->xchk > 20); CHECK_EQ(s->stray, 0); CHECK_EQ(s->unterminated, 0);   // [fix2] exactly the injected mismatch
+        if (run[i].r == &S1 || run[i].r == &S4) { CHECK(s->fallback >= 1); CHECK(s->skipped_members > 500); CHECK(s->drawn_members >= 1); }
         CHECK_EQ(run[i].r->wind_member, 0); CHECK_EQ(run[i].r->flag_member, 0);   // the wind caster and the flag are never in a layer
         CHECK(p1->act[NRST_A_BUILD] >= 3); CHECK(p1->drop[NRST_R_MOVED] >= 1); CHECK(p2->drop[NRST_R_GONE] >= 1);
         CHECK(p1->drop[NRST_R_Z] + p2->drop[NRST_R_Z] >= 1); CHECK(p1->drop[NRST_R_FRAC] + p2->drop[NRST_R_FRAC] >= 1); CHECK(p1->drop[NRST_R_TURN] + p2->drop[NRST_R_TURN] >= 1);
@@ -2883,7 +2900,8 @@ static void test_eng_static(void) {
         if (run[i].r == &S2) {   // verify: nothing left out, every would-be reuse compared and equal
             CHECK_EQ(left, 0); CHECK(p1->act[NRST_A_VERIFY] > 10); CHECK(s->vcmp > 10); CHECK_EQ(s->veq, s->vcmp); CHECK_EQ(s->vk1 + s->vkn + s->vstrip, 0); CHECK_EQ(s->reused, 0);
         } else {
-            CHECK(left > 500); CHECK(p1->exact > 5); CHECK(p1->shifted > 5); CHECK(p1->act[NRST_A_HOLD] >= 1); CHECK(run[i].r->recorded < T.recorded);
+            CHECK(left > 500); CHECK(p1->exact > 5); CHECK(p1->shifted > 5); CHECK(run[i].r->recorded < T.recorded);
+            if (run[i].r == &S5) CHECK(p1->act[NRST_A_HOLD] >= 3);   // (a confirmation frame after every build)
             if (run[i].r == &S3) CHECK(s->poisoned >= 3); else CHECK(s->reused > 20);
         }
     }
@@ -3985,6 +4003,52 @@ static void test_b4_prepass(void) {
         CHECK_EQ(predraws[2], 2);
         { const prepass_result *r = (const prepass_result *)vkn_prepass_test_last(); CHECK(r && r->keep[PREPASS_K_NOID] == 2 && r->pre_skip == 0); }   // (both draws: the first one too)
         vkn_draw_ubo(0, 0, b4w[0], 64);
+    }
+    // [eng3] (phone G03: "unmatched 1, unsafe 1") a skipped pre-pass draw whose G-buffer draw does not come in the G-buffer pass. The depth
+    // content model (D16): the scene depth after the frame must equal the run that skipped nothing - the skipped draw is drawn again
+    // before the first draw that could see the depth without it (a draw into it in another colour pass / a draw sampling it); and a
+    // G-buffer draw of the same mesh with other per-object bytes claims for the skipped draw (LEQUAL + write).
+    {
+        const int dm0 = mk_depth_on; mk_depth_on = 1;
+        vkn_tex *Dz = mktex(334, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 640, 360, 1, 1, 334, 0), *Cz = mktex(335, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 335, 0);
+        vkn_tex *Fz = mktex(336, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 336, 0), *Lz = mktex(337, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 337, 0);
+        CHECK(Dz && Cz && Fz && Lz);
+        int32_t rt[VKN_TEX_SLOTS], rs[VKN_TEX_SLOTS]; for (int i = 0; i < VKN_TEX_SLOTS; i++) rt[i] = rs[i] = -1;
+        rt[0] = 334; rs[0] = 10;
+        // case 0: the twin never comes, then a draw into Dz in another colour pass; case 1: then a draw that samples Dz; case 2: the twin comes
+        // with other per-object bytes (the mesh twin)
+        for (int cs = 0; cs < 3 && Dz && Cz && Fz && Lz; cs++) {
+            uint64_t truth = 0, got = 0; int gw = -1;
+            for (int mode = 0; mode < 2; mode++) {
+                vkn_prepass_test_setup(mode ? 1 : 0, b4_facts);
+                for (int i = 0; i < 4; i++) {
+                    const int odd = i == 3;
+                    VkCommandBuffer cb = fbegin(1); targets(NULL, NULL, Dz); vkn_pass_clear_depth(Dz, 1, 1.0f, 0);
+                    vkn_draw_ubo(0, 0, b4w[0], 64); vkn_draw_indexed(&pre, 3, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1);   // X (first), P
+                    targets(Cz, NULL, Dz);
+                    vkn_draw_in r9 = gb; vkn_draw_indexed(&r9, 9, 3, 1);   // another G-buffer draw (the pass begins)
+                    if (!odd || cs == 2) { vkn_draw_ubo(0, 0, odd ? b4w[1] : b4w[0], 64); vkn_draw_indexed(&gb, 0, 3, 1);
+                        if (odd) { const mk_gp *p = b5_pipe(cb); gw = p && p->has_ds ? (int)p->ds.depthWriteEnable * 10 + (int)p->ds.depthCompareOp : -1; } }
+                    vkn_draw_ubo(0, 0, b4w[0], 64);
+                    if (cs == 1) { targets(Lz, NULL, NULL); vkn_draw_in rd = g_in; rd.tex[1] = rt; rd.smp[1] = rs; vkn_draw_indexed(&rd, 0, 3, 1); }
+                    else { targets(Fz, NULL, Dz); vkn_draw_in fw = gb; vkn_draw_indexed(&fw, 12, 3, 1); }   // another colour pass on Dz
+                    fsubmit(1);
+                    if (odd) { int clr = 0; const uint64_t h = a5_hash_rect(Dz, 0, 0, 640, 360, &clr); if (mode) got = h; else truth = h; }
+                }
+                { fbegin(1); targets(NULL, NULL, Dz); vkn_pass_clear_depth(Dz, 1, 1.0f, 0); vkn_draw_indexed(&pre, 3, 3, 1); fsubmit(0); }   // (retires frame 3's table)
+                if (mode) {
+                    const prepass_result *r = (const prepass_result *)vkn_prepass_test_last();   // frame 3's table (retired by the frame after)
+                    CHECK(r && r->bad_keys == 0 && r->unmatched == 0 && r->unsafe == 0);
+                    if (r && cs < 2) CHECK_EQ(r->repaired, 1);
+                }
+            }
+            vkn_prepass_stats ps; vkn_prepass_stats_get(&ps);
+            if (cs < 2) { CHECK(got == truth); CHECK(ps.repaired >= 1); }
+            else { CHECK_EQ(gw, 10 + VK_COMPARE_OP_LESS_OR_EQUAL); CHECK(ps.twin_mesh >= 1); }
+            printf("  prepass eng3 case %d: depth %s the truth, repaired %llu, mesh twins %llu, bad frames %llu\n", cs, got == truth ? "equals" : "DIFFERS from",
+                   (unsigned long long)ps.repaired, (unsigned long long)ps.twin_mesh, (unsigned long long)ps.bad_frames);
+        }
+        mk_depth_on = dm0;
     }
 #undef B4_FRAME
     vkn_prepass_census();

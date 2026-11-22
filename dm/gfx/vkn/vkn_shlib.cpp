@@ -833,7 +833,10 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
             vkGetPhysicalDeviceProperties2(g.c.physical, &p2); drv = uint32_t(dp.driverID);
         }
         const int pf = vkn_policy_tile_pass(int(g.policy), drv) && !vkn_policy_tiler(int(g.policy)) ? VKN_FAM_MALI : int(g.policy);
-        g.pos_on = vkn_policy_load(pf) != 0;
+        // [P10 fix 5] ... and wherever the merged tile pass is on: LinearizeDepth's centre proof reads the same position program and the
+        // fragment outputs. Phone run F06 (Turnip, DM_VK_NATIVE_TILELIGHT=1, LOAD 0 by family): "the coordinate is not proven to be the own
+        // pixel's centre" - no program was built (pos_on false), under the Mali model (LOAD 1) the same draw passed
+        g.pos_on = vkn_policy_load(pf) != 0 || vkn_policy_tilelight(int(g.policy), drv, nullptr) != 0;
         g.pos_drv = drv;
     }
     g.noout = vkn_policy_env_or("DM_GFX_NOOUT_MASK", vkn_policy_noout_mask_default(int(g.policy)), nullptr) != 0;   // [stage 5.3 V2] (vkn_drv.c reads it the same way)

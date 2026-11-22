@@ -192,6 +192,58 @@ int vkn_shc_eng_far_tile(void);                // any thread: the far tile's wid
 int vkn_shc_eng_far_mode(void);
 void vkn_shc_eng_stats_get(vkn_shc_eng_stats *s);   // the current window
 void vkn_shc_eng_test(int mode, int period);   // host tests
+// ==== [eng I1a] (docs/dos2/nr/VK-ENGINE-SIDE.md section 13) the persistent static-caster layer, driven BY THE ENGINE ====
+// DM_VK_ENG_SHSTATIC  0 off (default); 1 on; 2 verify (the engine draws everything; every _VERIFY-th would-be reuse of a cascade the
+//                     tile is read back after the dynamic casters (V1), after the members that touch no strip (V2) and at the end, with
+//                     the layer: min(tile after V1, layer shifted) against the tile drawn is compared texel by texel at retire, and the
+//                     strips must not get a fragment from the members the engine would leave out); 3 poison (as 1, but every
+//                     _POISON-th reuse leaves the cleared tile: the static shadows blink - the layer is what stands there).
+//                     _FROM = the first cascade (default 1: the near cascade has ~10 casters and its list holds the atlas clear).
+// The engine side (dm/host/hle_dos2_vkn_eng.c with dm/gfx/nr/nr_shst.h, which has the rules) takes over the draw build of a cascade:
+// it decides per frame and gives the draw build its casters in groups, with markers in the cascade's command list (an engine callback
+// command; they arrive here in the order of the draws, vkn_shc_eng_st on the recording thread):
+//   START(act)   OFF / HOLD: everything is drawn as the engine asks (the cache of this file leaves the cascade alone: owned);
+//                BUILD: the static members come first; REUSE: the layer goes into the cleared tile now (shifted by nx, ny texels: tile
+//                pixel p <- layer pixel p - n), the members are not drawn at all but for the strip touchers; VERIFY (mode 2).
+//   OBJ(slot, tag)  the draws until the next marker are one caster's: classified (order-free depth-only into the tile, affine position
+//                with bounds, no acting fragment stage, no storage) and signed (mesh content versions, shader / states / arguments, its
+//                own position words); the verdict (per slot + tag; ONCE after one good observation, OK after two equal ones in two
+//                frames, NOT, UNKNOWN) is published for the engine side (vkn_shc_eng_st_verdict).
+//   NONE         no caster is observed until the next marker.   MID   BUILD: the tile (clear + the members) is copied into the layer
+//                image E; the ack (epoch, good: every member's draws were OK / bad) is published (vkn_shc_eng_st_ack).
+//   V1 / V2      mode 2 read-backs.   END   the cascade's casters are done.
+// A REUSE that cannot be honoured (no layer of that epoch, another atlas / tile / clear value, the copy cannot be recorded, the first
+// draw's per-view block not the layer's shifted by (nx, ny)) is BAD (red line): the frame lacks the static shadows; the engine side stops
+// for the session after 3. Line "[vkn] shcache eng static ..." in the census.
+enum { VKN_SHST_START = 1, VKN_SHST_OBJ, VKN_SHST_NONE, VKN_SHST_MID, VKN_SHST_V1, VKN_SHST_V2, VKN_SHST_END, VKN_SHST_SKIP0, VKN_SHST_SKIP1 };
+// [fix2 22.11] (phone G06: per-view mismatches; the layer's camera was taken from the last announcement) DM_VK_ENG_SHSTATIC_SAFE (default 1):
+// the members of a REUSE are still given to the draw build, between SKIP0 / SKIP1 (first in the cascade); the layer goes into the tile at
+// the cascade's first draw, after that draw's per-view block matched the layer's camera shifted by (nx, ny) - then the members are skipped
+// here, else they are drawn (a fallback: the tile is exact). 0: the members are not given at all; a layer is reused only after a later
+// frame of its epoch (HOLD / VERIFY) confirmed its camera. Acks: 1 confirmed, 2 bad, 3 built (camera not yet confirmed). The layer's
+// camera = the per-view block a draw of the cascade read (never "the last announcement"); a mismatch dumps both blocks (first 8).
+typedef struct vkn_shst_mark {
+    uint32_t magic, kind, k, act;      // magic VKN_SHST_MAGIC; act: nr_shst.h NRST_A_* (START)
+    uint32_t epoch, slot, tag, pad;    // START: the layer's epoch; OBJ: the caster's slot and tag
+    int32_t nx, ny, rect[4];           // START: the shift (REUSE / VERIFY), the tile (atlas pixels)
+    uint32_t n[6];                     // START: casters by group (nr_shst.h NRST_G_*; [5] the members), census only
+} vkn_shst_mark;
+#define VKN_SHST_MAGIC 0x54534853u
+void vkn_shc_eng_st(const vkn_shst_mark *m);          // recording thread
+int vkn_shc_eng_st_mode(void);                         // DM_VK_ENG_SHSTATIC as the backend took it (0 when not installed)
+int vkn_shc_eng_st_from(void);
+int vkn_shc_eng_st_safe(void);                         // [fix2] DM_VK_ENG_SHSTATIC_SAFE
+int vkn_shc_eng_st_verdict(int k, uint32_t slot, uint32_t tag);   // any thread: nr_shst.h NRST_V_*
+int vkn_shc_eng_st_ack(int k, uint32_t *epoch);       // any thread: 0 none yet, 1 good (confirmed), 2 bad, 3 built (for *epoch)
+int vkn_shc_eng_st_bad(void);                          // any thread: reuses that could not be honoured (session)
+typedef struct vkn_shc_st_stats {
+    uint64_t starts[VKN_SHC_CAS][5], draws[VKN_SHC_CAS][5], built[VKN_SHC_CAS], built_bad[VKN_SHC_CAS], layer_draws[VKN_SHC_CAS];
+    uint64_t reused, copies, poisoned, bad, lost, xchk, xchk_bad, stray, unterminated;
+    uint64_t fallback, wbad, skipped_members, drawn_members;   // [fix2]
+    uint64_t groups, v[4], v_empty, not_why[12];
+    uint64_t vcmp, veq, vall, vk1, vkn, vstrip, vskip; uint32_t vmax;
+} vkn_shc_st_stats;
+void vkn_shc_eng_st_stats_get(vkn_shc_st_stats *s);   // the current window
 #ifdef __cplusplus
 }
 #endif

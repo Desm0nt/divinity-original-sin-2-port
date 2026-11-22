@@ -23,6 +23,7 @@
 #include "vkn_mat.h"   // [stage 5.2 B5 fixpp] vkn_mat_apply: the MAT decision for a replayed caster
 #include "vkn_drv.h"   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments
 #include "vkn_shs.h"   // [VK-SHADOWS-MOVING] caster bounds, the scroll piece
+#include "../nr/nr_shst.h"   // [eng I1a] NRST_A_* / NRST_V_* (the engine side's plan)
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -93,6 +94,7 @@ static struct {
     // decision number whose drawn far tile F holds; e_empty: the last drawn decision had no far draw (its tile was the clear value)
     int e_mode, e_period, e_dec, e_seen, e_pend, e_empty, e_saved_last; uint32_t e_draws; int32_t e_rect[4]; uint64_t e_seq, f_eseq;
     vkn_shc_eng_stats es;
+    int st;                                   // [eng I1a] DM_VK_ENG_SHSTATIC (no precopy: an owned tile must stay as the engine side leaves it)
 } g;
 static int g_e_bad, g_e_tile;   // [eng I1b] (atomics: the engine side reads them) decisions that contradicted the recording; the far tile's width
 
@@ -128,8 +130,11 @@ static int shape_why(const vkn_tex *t, int colours, int arms) {
 }
 
 // ---- images ----
-static uint64_t img_bytes(void) { return (g.S ? g.S->bytes : 0) + (g.X ? g.X->bytes : 0) + (g.F ? g.F->bytes : 0); }
+static uint64_t st_img_bytes(void);   // [eng I1a]
+static void st_img_free(void);
+static uint64_t img_bytes(void) { return (g.S ? g.S->bytes : 0) + (g.X ? g.X->bytes : 0) + (g.F ? g.F->bytes : 0) + st_img_bytes(); }
 static void img_free(void) {
+    st_img_free();   // [eng I1a] the layer image E (its layers are lost: counted, the engine is told by the acks)
     if (g.S) vkn_tex_private_free(g.S);
     if (g.X) vkn_tex_private_free(g.X);
     if (g.F) vkn_tex_private_free(g.F);
@@ -156,8 +161,9 @@ fail:
     return -1;
 }
 static void scroll_reset_all(void);   // [VK-SHADOWS-MOVING]
+static void st_layers_lost(void);     // [eng I1a]
 static void layers_drop(void) {
-    scroll_reset_all();
+    scroll_reset_all(); st_layers_lost();
     for (int i = 0; i < NRSHC_CAS; i++) { if (g.cas[i]) g.cas[i]->layer = 0; g.slot_has[i] = g.slot_real[i] = 0; }
 }
 
@@ -854,6 +860,7 @@ static void clear_in_pass(const int32_t r[4]) {
 }
 static void precopy(void) {
     g.pre = 0; g.pre_frame = g.frame;
+    if (g.st) return;   // [eng I1a] (a precopied tile of a cascade the engine side owns would never be put back)
     if (g.mode != NRSHC_ON || !g.S || g.dirty || g.img_fail || !cond_ok() || !(g.clear_seen && g.clear_frame == g.frame)) return;
     uint32_t m = 0;
     for (int j = 0; j < NRSHC_CAS; j++) {
@@ -1171,6 +1178,346 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     else if (g.R.reuse && r->action == NRSHC_A_HIT && g.mode == NRSHC_ON) { if (t.ok && o < NRSHC_DRAWS) { out->skip = 1; g.s.rate_skipped++; } else g.s.rate_drawn++; }
 }
 
+// ================================================================================================ [eng I1a]
+// DM_VK_ENG_SHSTATIC (vkn_shc.h block "eng I1a"; the engine side's rules and proofs: dm/gfx/nr/nr_shst.h). State: gq. Recording thread,
+// but for the verdict / ack tables and the bad count (atomics: the engine's job threads read them).
+enum { ST_VT = NRST_TAB, ST_W_COLOUR = 0, ST_W_TILE, ST_W_SCISSOR, ST_W_ORDER, ST_W_BIND, ST_W_BOUNDS, ST_W_FS, ST_W_VERSION, ST_W_SIG, ST_W_SIGV, ST_W_N };
+static const char *const k_st_w[ST_W_N] = {"colour target", "not the tile", "scissor", "order", "storage / feedback", "no bounds", "fragment stage", "no content version",
+                                           "own position words changed", "mesh written again"};   // ([fix2] the last two: two observations of other signatures)
+_Static_assert(ST_W_N <= 12, "vkn_shc_st_stats.not_why");
+typedef struct stq {
+    uint64_t frame; int act, phase; uint32_t epoch; int32_t rect[4], nx, ny;   // phase 1: the members of a BUILD (before MID), 2: after
+    int gon, gok, gunk, gwhy; uint32_t gslot, gtag, gnd; uint64_t gsig;     // the caster under observation (OBJ .. next marker)
+    uint32_t nd, bad_members;                                               // draws of the cascade this frame; members that were not OK
+    int lok, llost; uint32_t lepoch, lbits, ldraws; int32_t lrect[4]; uint64_t lgen; float lref[12]; int lref_ok;   // the layer in E
+    int xchk;                                                               // REUSE: the first draw's per-view block still to compare
+    int rk; int32_t trect[4];                                               // the tile where the cascade's draws went (learnt from them: the
+                                                                            // engine names its viewport in its own origin); rk: known this frame
+    int vcmp, vha, vhb; vkn_block va, vb; uint32_t vcount, pcount;          // mode 2 read-backs (A after V1, B after V2); counters
+    // [fix2 22.11] (phone G06): dref - the per-view block of THIS cascade's draws (the last one read; the layer's camera is taken from it at
+    // MID, never from an announcement of another cascade); pend - REUSE: the layer goes into the tile only at the first draw, after its
+    // per-view block was compared (use: it went in); skip - inside the SKIP span (DM_VK_ENG_SHSTATIC_SAFE: the members, drawn unless the
+    // layer is in the tile); conf - a later frame of the layer's epoch had the layer's camera (ack 1); gsv: the observed caster's mesh part
+    float dref[12]; int dref_ok, pend, use, skip, conf; uint64_t gsv;
+} stq;
+static struct {
+    int mode, from; uint32_t verify_n, poison_n;
+    vkn_tex *E;                                   // the layer image (the atlas's format and size: every cascade's layer at its tile)
+    uint64_t *vt, *sig, *sigv; uint32_t *vfr;     // per (cascade, slot): tag << 32 | verdict (engine side reads); signature (+ its mesh part); frame
+    int safe; uint32_t dumps;                     // [fix2] DM_VK_ENG_SHSTATIC_SAFE; per-view mismatches dumped
+    int cur;                                      // the cascade between START and END (-1 none)
+    stq q[NRSHC_CAS];
+    vkn_shc_st_stats s; int reds;
+} gq = {.cur = -1};
+static uint64_t g_st_ack[NRSHC_CAS]; static int g_st_bad;
+#define ST_RED(...) do { if (gq.reds < 24) { gq.reds++; vkn_logf(RED "shcache eng static: " __VA_ARGS__); } } while (0)
+static void st_bad(int k, const char *what) {
+    if (gq.mode == 2) { gq.s.wbad++; ST_RED("cascade %d: %s (verify: the engine drew everything; with =1 this frame would lack the static shadows)", k, what); return; }
+    __atomic_add_fetch(&g_st_bad, 1, __ATOMIC_RELEASE); gq.s.bad++;
+    ST_RED("cascade %d: %s - this frame's tile lacks the static shadows (%d so far; the engine stops after 3)", k, what, __atomic_load_n(&g_st_bad, __ATOMIC_RELAXED));
+}
+static uint64_t st_img_bytes(void) { return gq.E ? gq.E->bytes : 0; }
+static void st_layers_lost(void) {   // the atlas changed / went away: no layer survives (the engine is told by a bad ack)
+    for (int k = 0; k < NRSHC_CAS; k++) {
+        stq *q = &gq.q[k];
+        if (q->lok) { q->lok = 0; q->llost = 1; __atomic_store_n(&g_st_ack[k], (uint64_t)q->lepoch << 8 | 2u, __ATOMIC_RELEASE); }
+    }
+}
+static void st_img_free(void) { if (gq.E) { st_layers_lost(); vkn_tex_private_free(gq.E); gq.E = NULL; } }
+int vkn_shc_eng_st_mode(void) { return g.inst ? gq.mode : 0; }
+int vkn_shc_eng_st_from(void) { return gq.from; }
+int vkn_shc_eng_st_safe(void) { return gq.safe; }
+int vkn_shc_eng_st_bad(void) { return __atomic_load_n(&g_st_bad, __ATOMIC_ACQUIRE); }
+int vkn_shc_eng_st_verdict(int k, uint32_t slot, uint32_t tag) {
+    if (!gq.vt || k < 0 || k >= NRSHC_CAS || slot >= ST_VT) return NRST_V_UNKNOWN;
+    const uint64_t v = __atomic_load_n(&gq.vt[(size_t)k * ST_VT + slot], __ATOMIC_ACQUIRE);
+    return (uint32_t)(v >> 32) == tag ? (int)(v & 0xff) : NRST_V_UNKNOWN;
+}
+int vkn_shc_eng_st_ack(int k, uint32_t *epoch) {
+    if (k < 0 || k >= NRSHC_CAS) { if (epoch) *epoch = 0; return 0; }
+    const uint64_t v = __atomic_load_n(&g_st_ack[k], __ATOMIC_ACQUIRE);
+    if (epoch) *epoch = (uint32_t)(v >> 8);
+    return (int)(v & 0xff);
+}
+void vkn_shc_eng_st_stats_get(vkn_shc_st_stats *s) { if (s) *s = gq.s; }
+// src -> dst over the tile r: tile pixel p of dst <- tile pixel p - n of src (the kept part; the exposed strips are not touched).
+static int st_copy(vkn_tex *src, vkn_tex *dst, const int32_t r[4], int32_t nx, int32_t ny) {
+    const int32_t kx0 = nx > 0 ? nx : 0, kx1 = nx < 0 ? r[2] + nx : r[2], ky0 = ny > 0 ? ny : 0, ky1 = ny < 0 ? r[3] + ny : r[3];
+    if (kx1 <= kx0 || ky1 <= ky0) return 0;
+    VkCommandBuffer cb = vkn_cb();
+    if (!cb || !src || !dst) return -1;
+    g.self = 1;
+    vkn_pass_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   // (ends an open pass; runs a remembered clear first)
+    vkn_pass_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    g.self = 0;
+    if (src->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || dst->layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) return -1;
+    const VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, .srcOffset = {r[0] + kx0 - nx, r[1] + ky0 - ny, 0},
+                           .dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1}, .dstOffset = {r[0] + kx0, r[1] + ky0, 0}, .extent = {(uint32_t)(kx1 - kx0), (uint32_t)(ky1 - ky0), 1}};
+    vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    g.s.copies++; gq.s.copies++;
+    return 0;
+}
+// One draw of an observed caster: 0 = fine for a layer, else ST_W_* + 1 (*unk: not known yet - the verdict stays as it was).
+static int st_classify(const vkn_draw_in *in, const vkn_fx_ctx *ctx, const int32_t rect[4], int exact, const vkn_shs_b *bp, int bwhy, uint64_t *sig, int *unk) {
+    const stq *q = &gq.q[gq.cur]; const vkn_shader *sh = ctx->shader;
+    *unk = 0;
+    for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) if (ctx->color[i]) return ST_W_COLOUR + 1;
+    if (!exact || memcmp(rect, q->rect, sizeof q->rect)) return ST_W_TILE + 1;
+    if (in->scissor[0] > rect[0] || in->scissor[1] > rect[1] || in->scissor[0] + in->scissor[2] < rect[0] + rect[2] || in->scissor[1] + in->scissor[3] < rect[1] + rect[3]) return ST_W_SCISSOR + 1;
+    {   // order-freedom (nr_sort.h nrs_why), as draw_one
+        nrs_in ni; memset(&ni, 0, sizeof ni); ni.depth_att = 1; ni.depth_fixed = 1;
+        const VkPipelineDepthStencilStateCreateInfo *ds = ctx->ds ? vkn_ds_info(ctx->ds) : NULL;
+        if (ds) { ni.dt = (uint8_t)!!ds->depthTestEnable; ni.dw = (uint8_t)!!ds->depthWriteEnable; ni.op = (uint8_t)ds->depthCompareOp; ni.st = (uint8_t)!!ds->stencilTestEnable; ni.bounds = (uint8_t)!!ds->depthBoundsTestEnable; }
+        for (uint32_t i = 0; sh && i < sh->nbind; i++) {
+            const vkn_bind *b = &sh->bind[i];
+            if (b->kind == VKN_BK_IMAGE || b->kind == VKN_BK_STORAGE) return ST_W_BIND + 1;
+            if (b->kind != VKN_BK_TEXTURE) continue;
+            const int st = stage_src(b->stage);
+            for (uint32_t e = 0; st >= 0 && e < b->count; e++) {
+                const uint32_t slot = (uint32_t)b->slot + e; if (slot >= VKN_TEX_SLOTS) continue;
+                const int32_t id = in->tex[st] ? in->tex[st][slot] : -1;
+                if (id < 0) continue;
+                vkn_tex *tx = NULL; (void)vkn_tex_view_by_id((uint32_t)id, &tx);
+                if (tx && tx == g.atlas) ni.feedback = 1;
+            }
+        }
+        if (nrs_why(&ni) != NRS_OK) return ni.feedback ? ST_W_BIND + 1 : ST_W_ORDER + 1;
+    }
+    if (!bp) { if (bwhy == VKN_SHS_BUDGET || bwhy == VKN_SHS_VERSION) *unk = 1; return ST_W_BOUNDS + 1; }
+    if (!(gs.t_nofs ? gs.t_nofs(sh) : vkn_mat_peek ? vkn_mat_peek(in, ctx) : 0)) return ST_W_FS + 1;
+    // the signature: what the depth of the draw is made of besides the cascade's per-view block (the camera is the engine side's check)
+    uint64_t h = nrshc_mix(0x53545331, (uint64_t)sh->id | (uint64_t)vkn_h_idx(sh->handle) << 32);
+    h = nrshc_mix(h, sh->handle);
+    h = nrshc_mix(h, (uint64_t)ctx->blend | (uint64_t)ctx->ds << 16 | (uint64_t)ctx->raster << 32 | (uint64_t)ctx->vfmt << 48);
+    h = nrshc_mix(h, (uint64_t)in->prim | (uint64_t)ctx->indexed << 16); h = nrshc_mix(h, (uint64_t)ctx->first | (uint64_t)ctx->count << 32); h = nrshc_mix(h, ctx->instances);
+    const vkn_draw_ver *pv = vkn_draw_rt_ver && vkn_draw_rt_in == in && vkn_draw_rt_ver->ok ? vkn_draw_rt_ver : NULL;
+    const vkn_vfmt *vf = ctx->vfmt ? vkn_vfmt_info(ctx->vfmt) : NULL;
+    for (uint32_t i = 0; vf && i < vf->nbind; i++) {
+        const uint32_t st = vf->bind[i].binding; if (st >= 3) continue;
+        int none = 1; const uint64_t v = pv ? (none = pv->vnone >> st & 1, pv->vb[st]) : vkn_buf_version(VKN_BUF_VB, in->vb[st], &none);
+        if (none) return ST_W_VERSION + 1;
+        h = nrshc_mix(nrshc_mix(nrshc_mix(h, in->vb[st]), (uint64_t)in->vb_off[st] | (uint64_t)st << 32), v);
+        gq.q[gq.cur].gsv = nrshc_mix(gq.q[gq.cur].gsv, v);
+    }
+    if (ctx->indexed) {
+        int none = 1; const uint64_t v = pv ? (none = pv->inone, pv->ib) : vkn_buf_version(VKN_BUF_IB, in->ib, &none);
+        if (none) return ST_W_VERSION + 1;
+        h = nrshc_mix(nrshc_mix(h, in->ib), v); gq.q[gq.cur].gsv = nrshc_mix(gq.q[gq.cur].gsv, v);
+    }
+    *sig = nrshc_mix(nrshc_mix(*sig, h), bp->pio);
+    return 0;
+}
+// The observed caster's draws are over: its verdict.
+static void st_group_end(int k) {
+    stq *q = &gq.q[k];
+    if (!q->gon) return;
+    q->gon = 0; gq.s.groups++;
+    if (!gq.vt || q->gslot >= ST_VT) return;
+    const size_t i = (size_t)k * ST_VT + q->gslot;
+    const uint64_t old = __atomic_load_n(&gq.vt[i], __ATOMIC_RELAXED);
+    const int same = (uint32_t)(old >> 32) == q->gtag, os = same ? (int)(old & 0xff) : NRST_V_UNKNOWN;
+    int v;
+    if (!q->gok && q->gunk) v = os;                       // not known yet (bounds over the budget, a version that moved): as it was
+    else if (!q->gok) { v = NRST_V_NOT; gq.s.not_why[q->gwhy]++; }
+    else if (!q->gnd) { v = os; gq.s.v_empty++; }       // no draw at all: nothing learnt
+    else if ((os == NRST_V_ONCE || os == NRST_V_OK) && gq.sig[i] == q->gsig && (gq.vfr[i] != (uint32_t)q->frame || os == NRST_V_OK)) v = NRST_V_OK;
+    else if ((os == NRST_V_ONCE || os == NRST_V_OK) && gq.vfr[i] != (uint32_t)q->frame) {
+        // [fix2] (G06: "once" 2829-2902 per 10 s - the same casters observed again every frame) another signature than the last
+        // observation's: its mesh is written again or its own position words move - not static; observed again after the re-observe time
+        v = NRST_V_NOT; gq.s.not_why[gq.sigv[i] != q->gsv ? ST_W_SIGV : ST_W_SIG]++;
+    } else v = NRST_V_ONCE;
+    if (q->gok && q->gnd) { gq.sig[i] = q->gsig; gq.sigv[i] = q->gsv; gq.vfr[i] = (uint32_t)q->frame; }
+    gq.s.v[v]++;
+    if (q->phase == 1 && v != NRST_V_OK) q->bad_members++;   // a member of the layer being built is not (or no longer) fine
+    __atomic_store_n(&gq.vt[i], (uint64_t)q->gtag << 32 | (uint64_t)v, __ATOMIC_RELEASE);
+}
+// The per-view block of the draw in hand against the layer's: the layer's camera shifted by exactly (nx, ny) texels (0 = consistent).
+static int st_xcheck(int k, const stq *q) {   // 0 = the same camera (shifted by n), -1 = not, 1 = no proof (nothing to compare)
+    const float *ref = q->dref;
+    if (!q->lref_ok || !q->dref_ok) return 1;
+    gq.s.xchk++;
+    const int lin = ref[0] == q->lref[0] && ref[1] == q->lref[1] && ref[2] == q->lref[2] && ref[4] == q->lref[4] && ref[5] == q->lref[5] && ref[6] == q->lref[6] &&
+                    ref[8] == q->lref[8] && ref[9] == q->lref[9] && ref[10] == q->lref[10] && ref[11] == q->lref[11];
+    int32_t nx = 0, ny = 0; double err = 0;
+    const int sh = nr_ss_shift((double)ref[3] - (double)q->lref[3], (double)ref[7] - (double)q->lref[7], q->rect[2], q->rect[3], gs.eps > 0 ? gs.eps : 1.0 / 64.0, &nx, &ny, &err);
+    if (lin && sh && nx == q->nx && ny == q->ny && (nx || ny || (ref[3] == q->lref[3] && ref[7] == q->lref[7]))) return 0;
+    gq.s.xchk_bad++;
+    if (gq.dumps < 8) {   // [fix2] both blocks (the ViewProjection rows: x y z coefficients + translation each), the engine's shift and ours
+        gq.dumps++;
+        uint32_t a[12], b[12]; memcpy(a, q->lref, 48); memcpy(b, ref, 48);
+        vkn_logf("shcache eng static: cascade %d epoch %u act %d: per-view mismatch - layer rows %08x %08x %08x %08x | %08x %08x %08x %08x | %08x %08x %08x %08x; "
+                 "now %08x %08x %08x %08x | %08x %08x %08x %08x | %08x %08x %08x %08x (now - layer translation x %.9g y %.9g z %.9g); engine shift %d %d, "
+                 "from the blocks %d %d (whole texels %d, %.6f px off), linear part %s", k, q->epoch, q->act, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11],
+                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], (double)ref[3] - (double)q->lref[3], (double)ref[7] - (double)q->lref[7],
+                 (double)ref[11] - (double)q->lref[11], q->nx, q->ny, nx, ny, sh, err, lin ? "equal" : "DIFFERENT");
+    }
+    return -1;
+}
+static int st_reads_view(const vkn_shader *sh) {   // the vertex stage reads the per-view block (vkn_shs_cam_block's slot)
+    for (uint32_t i = 0; sh && gs.cam && i < sh->nbind; i++) { const vkn_bind *b = &sh->bind[i]; if (b->kind == VKN_BK_UNIFORM && stage_src(b->stage) == 0 && gs.cam_slot >= b->slot && gs.cam_slot < (uint32_t)b->slot + b->count) return 1; }
+    return 0;
+}
+static void st_ack(int k, uint32_t epoch, unsigned st) { __atomic_store_n(&g_st_ack[k], (uint64_t)epoch << 8 | st, __ATOMIC_RELEASE); }
+static void st_put_layer(int k);
+// An atlas draw while a cascade is owned (between START and END): 1 = owned (the cache above leaves it alone).
+// 2 = owned and skipped (a member of the SKIP span while the layer is in the tile).
+static int st_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, const int32_t rect[4], int exact, const vkn_shs_b *bp, int bwhy) {
+    stq *q = &gq.q[gq.cur]; const int k = gq.cur;
+    if (!q->rk && exact && rect[2] == q->rect[2] && rect[3] == q->rect[3] && q->act != NRST_A_REUSE) {   // the first draw: the tile is where it draws
+        memcpy(q->rect, rect, sizeof q->rect); memcpy(q->trect, rect, sizeof q->trect); q->rk = 2;
+    }
+    if (!exact || memcmp(rect, q->rect, sizeof q->rect)) {   // the cascade's draws are not where its tile is
+        gq.s.stray++;
+        if (q->act == NRST_A_REUSE || q->act == NRST_A_BUILD) { if (q->act == NRST_A_BUILD) q->bad_members++; else st_bad(gq.cur, "a draw of the cascade outside the tile the engine named"); }
+        q->act = NRST_A_OFF;   // (the rest of the cascade as the engine asks; a BUILD's ack will be bad)
+    }
+    q->nd++;
+    const int rv = st_reads_view(ctx->shader);
+    if (rv) { uint32_t off = 0, size = 0; q->dref_ok = ref_read(q->dref, &off, &size); }   // [fix2] this cascade's per-view block
+    if (q->xchk && (rv || q->pend)) {   // the layer's camera against this frame's, before the layer is used
+        q->xchk = 0;
+        const int r = rv ? st_xcheck(k, q) : 1;   // (1: not compared - the first draw reads no per-view block)
+        if (!r && !q->conf && q->lok && q->lepoch == q->epoch) { q->conf = 1; st_ack(k, q->epoch, 1); }   // confirmed: its camera is what the engine's words say
+        if (r < 0) {   // the layer's camera is not this frame's: the engine side builds again (frames already planned are checked one by one)
+            if (q->lok && q->lepoch == q->epoch) st_ack(k, q->epoch, 2);
+            if (q->pend) { q->pend = 0; if (gq.safe) gq.s.fallback++; else st_bad(k, "the first draw's per-view block is not the layer's camera shifted by the engine's shift"); }
+            else gq.s.wbad++;
+        } else if (q->pend) {   // compared and equal (or no proof possible: then only a confirmed layer, and never under SAFE)
+            q->pend = 0;
+            if (r == 0 || (q->conf && !gq.safe)) st_put_layer(k);
+            else if (gq.safe) gq.s.fallback++;
+            else st_bad(k, "no per-view block to compare and the layer not confirmed");
+        }
+    }
+    if (q->skip) { if (q->use) { gq.s.skipped_members++; return 2; } gq.s.drawn_members++; }
+    if (q->gon && q->gok) {
+        int unk = 0; const int w = st_classify(in, ctx, rect, exact, bp, bwhy, &q->gsig, &unk);
+        if (w) { q->gok = 0; q->gunk = unk; q->gwhy = w - 1; } else q->gnd++;
+    } else if (q->gon) q->gnd++;
+    return 1;
+}
+// mode 2: min(tile after V1, layer shifted) against the tile at the end; the strips: no fragment between V1 and V2 (the left-out members)
+typedef struct stjob { vkn_block a, b, c, l; uint32_t w, h, bpp; int32_t nx, ny; uint8_t x8; } stjob;
+static void st_verify_done(void *ctx) {
+    stjob *j = (stjob *)ctx;
+    const uint8_t *A = (const uint8_t *)j->a.cpu, *B = (const uint8_t *)j->b.cpu, *C = (const uint8_t *)j->c.cpu, *L = (const uint8_t *)j->l.cpu;
+    if (A && B && C && L) {
+        const uint32_t mask = j->x8 ? 0xffffffu : 0xffffffffu;
+        uint64_t k1 = 0, kn = 0, st = 0; uint32_t mx = 0;
+        for (uint32_t y = 0; y < j->h; y++) for (uint32_t x = 0; x < j->w; x++) {
+            const size_t o = ((size_t)y * j->w + x) * j->bpp;
+            uint32_t a = 0, b = 0, c = 0; memcpy(&a, A + o, j->bpp); memcpy(&b, B + o, j->bpp); memcpy(&c, C + o, j->bpp); a &= mask; b &= mask; c &= mask;
+            const int32_t sx = (int32_t)x - j->nx, sy = (int32_t)y - j->ny;
+            if (sx >= 0 && sy >= 0 && sx < (int32_t)j->w && sy < (int32_t)j->h) {
+                uint32_t l = 0; memcpy(&l, L + ((size_t)sy * j->w + (size_t)sx) * j->bpp, j->bpp); l &= mask;
+                const uint32_t m = a < l ? a : l;
+                if (m != c) { const uint32_t d = m > c ? m - c : c - m; if (d == 1) k1++; else kn++; if (d > mx) mx = d; }
+            } else if (a != b) st++;
+        }
+        gq.s.vcmp++; gq.s.vall += (uint64_t)j->w * j->h; gq.s.vk1 += k1; gq.s.vkn += kn; gq.s.vstrip += st; if (mx > gq.s.vmax) gq.s.vmax = mx;
+        if (!k1 && !kn && !st) gq.s.veq++;
+    } else gq.s.vskip++;
+    vkn_block_free(&j->a); vkn_block_free(&j->b); vkn_block_free(&j->c); vkn_block_free(&j->l); free(j);
+}
+static void st_verify_drop(stq *q) {
+    if (q->vha) vkn_retire_block(&q->va);
+    if (q->vhb) vkn_retire_block(&q->vb);
+    q->vha = q->vhb = 0; q->vcmp = 0;
+}
+static void st_verify_end(int k) {
+    stq *q = &gq.q[k];
+    stjob *j = q->vha && q->vhb && gq.E && g.atlas ? (stjob *)calloc(1, sizeof *j) : NULL;
+    if (!j) { gq.s.vskip++; st_verify_drop(q); return; }
+    j->a = q->va; j->b = q->vb; q->vha = q->vhb = 0; q->vcmp = 0;
+    if (read_tile(g.atlas, q->rect, &j->c)) { vkn_retire_block(&j->a); vkn_retire_block(&j->b); free(j); gq.s.vskip++; return; }
+    if (read_tile(gq.E, q->rect, &j->l)) { vkn_retire_block(&j->a); vkn_retire_block(&j->b); vkn_retire_block(&j->c); free(j); gq.s.vskip++; return; }
+    const VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(vkn_cb(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    j->w = (uint32_t)q->rect[2]; j->h = (uint32_t)q->rect[3]; j->bpp = depth_bpp(g.atlas->format); j->x8 = g.atlas->format == VK_FORMAT_X8_D24_UNORM_PACK32; j->nx = q->nx; j->ny = q->ny;
+    vkn_retire(st_verify_done, j);
+}
+// [fix2] The layer into the cleared tile (mode 3: every poison_n-th one left out) - at the cascade's first draw, its camera compared.
+static void st_put_layer(int k) {
+    stq *q = &gq.q[k];
+    if (gq.mode == 3 && gq.poison_n && ++q->pcount % gq.poison_n == 0) { gq.s.poisoned++; q->use = 1; return; }   // (poison: the members skipped all the same)
+    if (st_copy(gq.E, g.atlas, q->rect, q->nx, q->ny)) { if (gq.safe) gq.s.fallback++; else st_bad(k, "the layer copy could not be recorded"); return; }
+    q->use = 1; gq.s.reused++;
+}
+// START of a REUSE: can the layer be taken? (then pend: it goes in at the first draw)
+static void st_reuse(int k) {
+    stq *q = &gq.q[k];
+    const int clear_ok = g.clear_seen && g.clear_frame == g.frame && g.frame == vkn_frame();
+    if (!q->lok && q->llost && q->lepoch == q->epoch) { gq.s.lost++; if (!gq.safe) ST_RED("cascade %d: the layer of epoch %u went with the atlas: one frame without its static shadows", k, q->epoch); return; }
+    const char *why = !q->lok ? "no layer" : q->lepoch != q->epoch ? "the layer is of another epoch" : !g.atlas || g.atlas_gen != q->lgen ? "another atlas" :
+                      memcmp(q->rect, q->lrect, sizeof q->rect) ? "another tile" : !clear_ok ? "the atlas was not cleared in this frame (before the cascade)" :
+                      g.clear_bits != q->lbits ? "another clear value" : !gq.E ? "no layer image" : NULL;
+    if (why) { if (gq.safe) gq.s.fallback++; else st_bad(k, why); return; }
+    q->pend = 1;
+}
+static void st_mid(int k) {
+    stq *q = &gq.q[k];
+    q->phase = 2;
+    const int clear_ok = g.clear_seen && g.clear_frame == g.frame && g.frame == vkn_frame();
+    int ok = q->act == NRST_A_BUILD && !q->bad_members && g.atlas && clear_ok && q->rk && q->dref_ok;   // [fix2] (dref: a draw of this cascade read its per-view block)
+    if (ok && !gq.E && !(gq.E = img_make("shc eng layer"))) ok = 0;
+    if (ok && st_copy(g.atlas, gq.E, q->rect, 0, 0)) ok = 0;
+    q->lok = ok; q->llost = 0; q->lepoch = q->epoch; memcpy(q->lrect, q->rect, sizeof q->lrect); q->lbits = g.clear_bits; q->lgen = g.atlas_gen; q->ldraws = q->nd;
+    memcpy(q->lref, q->dref, sizeof q->lref); q->lref_ok = ok; q->conf = 0;   // [fix2] the camera of the members' draws, not "the last announcement"
+    if (ok) { gq.s.built[k]++; gq.s.layer_draws[k] += q->nd; } else gq.s.built_bad[k]++;
+    st_ack(k, q->epoch, ok ? 3u : 2u);   // [fix2] 3: built, its camera not yet confirmed by a later frame (1)
+}
+static void st_end(int k) {
+    stq *q = &gq.q[k];
+    st_group_end(k);
+    if (q->pend) {   // [fix2] no draw came: nothing to compare - a confirmed layer goes in (never under SAFE: its members were drawn)
+        q->pend = 0;
+        if (q->conf && !gq.safe) st_put_layer(k); else if (gq.safe) gq.s.fallback++; else st_bad(k, "a reuse without any draw and the layer not confirmed");
+    }
+    if (q->vcmp) st_verify_end(k);
+    if (q->act == NRST_A_BUILD && q->phase == 1) st_mid(k);   // (a BUILD without its MID: the layer as far as it went - bad ack)
+    if (q->act >= 0 && q->act < 5) gq.s.draws[k][q->act] += q->nd;
+    gq.cur = -1;
+}
+void vkn_shc_eng_st(const vkn_shst_mark *m) {
+    if (!gq.mode || !m || m->magic != VKN_SHST_MAGIC || m->k >= NRSHC_CAS) return;
+    const int k = (int)m->k; stq *q = &gq.q[k];
+    if (m->kind == VKN_SHST_START) {
+        if (gq.cur >= 0) { gq.s.unterminated++; st_end(gq.cur); }
+        if (g.live) end_range(END_NEXT);   // (a cascade of the cache above ends here: the owned one does not continue it)
+        if (g.pend) run_pending();
+        gq.cur = k;
+        q->frame = vkn_frame(); q->act = m->act < 5 ? (int)m->act : NRST_A_OFF; q->epoch = m->epoch; q->nx = m->nx; q->ny = m->ny;
+        // the tile: the one its draws went to (the engine's own coordinates may have another origin); for a REUSE the layer's
+        if (q->act == NRST_A_REUSE || q->act == NRST_A_VERIFY) { memcpy(q->rect, q->lrect, sizeof q->rect); q->rk = 1; }
+        else if (q->trect[2] && q->trect[2] == m->rect[2] && q->trect[3] == m->rect[3]) { memcpy(q->rect, q->trect, sizeof q->rect); q->rk = 1; }
+        else { memcpy(q->rect, m->rect, sizeof q->rect); q->rk = 0; }
+        q->phase = q->act == NRST_A_BUILD ? 1 : 0; q->nd = 0; q->bad_members = 0; q->gon = 0; q->dref_ok = 0; q->pend = q->use = q->skip = 0;
+        // the layer's camera is compared in every frame that may use or confirm it (REUSE / VERIFY / HOLD of its epoch)
+        q->xchk = (q->act == NRST_A_REUSE || q->act == NRST_A_VERIFY || q->act == NRST_A_HOLD) && q->lok && q->lepoch == q->epoch;
+        if (q->vha || q->vhb) st_verify_drop(q);
+        gq.s.starts[k][q->act]++;
+        if (q->act == NRST_A_REUSE) st_reuse(k);
+        if (q->act == NRST_A_VERIFY) q->vcmp = gq.verify_n && q->lok && q->lepoch == q->epoch && ++q->vcount % gq.verify_n == 0;
+        if (q->act == NRST_A_VERIFY && !q->vcmp && !(q->lok && q->lepoch == q->epoch)) gq.s.vskip++;
+        return;
+    }
+    if (gq.cur != k) { gq.s.stray++; return; }   // (a marker of a cascade that did not start)
+    switch (m->kind) {
+    case VKN_SHST_OBJ: st_group_end(k); q->gon = 1; q->gok = 1; q->gunk = 0; q->gwhy = 0; q->gslot = m->slot; q->gtag = m->tag; q->gnd = 0; q->gsig = 0x5349474eu; q->gsv = 0x53495356u; break;
+    case VKN_SHST_SKIP0: st_group_end(k); q->skip = 1; break;   // [fix2] SAFE: the members (skipped when the layer is in the tile)
+    case VKN_SHST_SKIP1: q->skip = 0; break;
+    case VKN_SHST_NONE: st_group_end(k); break;
+    case VKN_SHST_MID: st_group_end(k); if (q->phase == 1) st_mid(k); break;
+    case VKN_SHST_V1: st_group_end(k); if (q->vcmp && g.atlas) q->vha = !read_tile(g.atlas, q->rect, &q->va); break;
+    case VKN_SHST_V2: st_group_end(k); if (q->vcmp && g.atlas) q->vhb = !read_tile(g.atlas, q->rect, &q->vb); break;
+    case VKN_SHST_END: st_end(k); break;
+    default: break;
+    }
+}
+static void st_close(void) {   // the recording ends (a cascade without its END: counted)
+    if (gq.cur >= 0) { gq.s.unterminated++; st_end(gq.cur); }
+}
+
 // ---- the atlas ----
 static void on_watch(vkn_tex *t, int ev, float depth);
 static void atlas_drop(void) {
@@ -1233,6 +1580,7 @@ static void on_close(void) {
     if (g.live) end_range(END_CLOSE);
     pend_lost(END_CLOSE); pre_lost(END_CLOSE);
     scroll_jobs_lost();   // [VK-SHADOWS-MOVING] strips that were never drawn: those layers are not whole
+    st_close();           // [eng I1a]
 }
 
 // ---- the chain function ----
@@ -1288,8 +1636,10 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     }
     // [VK-SHADOWS-MOVING] the bounds of the caster on the CPU: one that cannot touch viewport and scissor rasterises nothing (culled
     // before it is hashed or recorded); the cache uses the bounds for its scrolled layer
-    vkn_shs_b bb; const vkn_shs_b *bp = NULL;
-    if ((gs.cull || (gs.scroll && g.mode)) && exact && vkn_shs_bounds(in, ctx, &bb) == VKN_SHS_OK) bp = &bb;
+    vkn_shs_b bb; const vkn_shs_b *bp = NULL; int bwhy = VKN_SHS_NOPROG;
+    const int own = gq.mode && gq.cur >= 0;   // [eng I1a] the cascade belongs to the engine side's layer: observed, never cached here
+    if ((gs.cull || (gs.scroll && g.mode) || (own && gq.q[gq.cur].gon)) && exact && (bwhy = vkn_shs_bounds(in, ctx, &bb)) == VKN_SHS_OK) bp = &bb;
+    if (own && st_draw(in, ctx, rect, exact, bp, bwhy) == 2) { out->skip = 1; return; }   // [fix2] a member under the layer (SAFE)
     if (gs.cull && bp) {
         const int32_t m = gs.cull == 3 ? 64 : 0;   // (poison: the tile shrunk)
         nr_ss_rect vis = {rect[0] + m, rect[1] + m, rect[0] + rect[2] - m, rect[1] + rect[3] - m};
@@ -1303,7 +1653,7 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
             else { gs.c.culled++; out->skip = 1; return; }
         }
     }
-    if (!g.mode) return;
+    if (!g.mode || own) return;
     if (!g.live) start_range(rect, exact);
     if (g.R.refused || g.rg->blind) return;
     draw_one(in, ctx, out, bp);
@@ -1369,6 +1719,23 @@ void vkn_shc_install(void) {
              g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, g.par.diag, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
              from == 'v' ? "env" : from == 'e' ? "DM_HACK_SHFAR" : from == 't' ? "DM_HACK_TIER" : "default");
     if (g.e_mode) g.inst = 1;   // [eng I1b] (the far tile is kept by this chain function)
+    {   // [eng I1a] DM_VK_ENG_SHSTATIC (vkn_shc.h; the host side dm/host/hle_dos2_vkn_eng.c reads the same switch and plans with nr_shst.h)
+        const char *q = getenv("DM_VK_ENG_SHSTATIC"); int sm = q && *q ? atoi(q) : 0;
+        if (sm < 0 || sm > 3) { vkn_logf(RED "shcache: DM_VK_ENG_SHSTATIC=%s is not 0-3: 0", q); sm = 0; }
+        gq.from = (int)num("DM_VK_ENG_SHSTATIC_FROM", 1, 1, NRSHC_CAS - 1); gq.verify_n = num("DM_VK_ENG_SHSTATIC_VERIFY", 4, 1, 100000); gq.poison_n = num("DM_VK_ENG_SHSTATIC_POISON", 6, 2, 100000);
+        gq.safe = (int)num("DM_VK_ENG_SHSTATIC_SAFE", 1, 0, 1);   // [fix2] the one reader of the switch (the engine side asks vkn_shc_eng_st_safe)
+        if (sm && !(gq.vt = (uint64_t *)calloc((size_t)NRSHC_CAS * ST_VT, 8)) + !(gq.sig = (uint64_t *)calloc((size_t)NRSHC_CAS * ST_VT, 8)) + !(gq.sigv = (uint64_t *)calloc((size_t)NRSHC_CAS * ST_VT, 8)) +
+                  !(gq.vfr = (uint32_t *)calloc((size_t)NRSHC_CAS * ST_VT, 4))) {
+            vkn_logf(RED "shcache: DM_VK_ENG_SHSTATIC=%d: no memory for the verdict tables: 0", sm); free(gq.vt); free(gq.sig); free(gq.sigv); free(gq.vfr); gq.vt = gq.sig = gq.sigv = NULL; gq.vfr = NULL; sm = 0;
+        }
+        gq.mode = sm; gq.cur = -1; g.st = sm;
+        if (sm) g.inst = 1;
+        vkn_logf("shcache: DM_VK_ENG_SHSTATIC=%d (VK-ENGINE-SIDE I1a: %s) from cascade %d, verify every %u, poison every %u, DM_VK_ENG_SHSTATIC_SAFE=%d (%s)", sm,
+                 sm == 1 ? "the engine leaves the static casters of a cascade out while its layer holds, the backend puts the layer into the tile" :
+                 sm == 2 ? "verify - the engine draws everything, would-be reused tiles composed and compared" : sm == 3 ? "POISON - every few reuses keep the cleared tile: static shadows blink" : "off",
+                 gq.from, gq.verify_n, gq.poison_n, gq.safe, gq.safe ? "the members are still given to the draw build and skipped here when the layer's camera matched: never a tile without them" :
+                 "the members are left out of the draw build - a layer is used only after a frame confirmed its camera");
+    }
     if (!g.inst) return;
     if (vkn_fx_register("shcache", shc_fx, NULL, 100)) { vkn_logf(RED "shcache: the draw-effect chain refused the function: off"); g.inst = 0; return; }
     vkn_rec_on_close(on_close);
@@ -1475,6 +1842,33 @@ void vkn_shc_census(void) {
                  e->drawn ? (double)e->drawn_draws / (double)e->drawn : 0.0, (ull)e->empty, (ull)e->skipped, (ull)e->restored, (ull)e->poisoned, (ull)e->empty_kept, (ull)e->missing,
                  (ull)e->would, e->would ? (double)e->would_draws / (double)e->would : 0.0, (ull)e->saved, (ull)e->unsaved, (ull)e->lost, (ull)e->bad, vkn_shc_eng_far_bad());
         const uint64_t reds = g.es.reds; memset(&g.es, 0, sizeof g.es); g.es.reds = reds;
+    }
+    if (gq.mode) {   // [eng I1a]
+        const vkn_shc_st_stats *e = &gq.s;
+        txt t; t.k = 0; t.b[0] = 0;
+        put(&t, "shcache eng static (DM_VK_ENG_SHSTATIC=%d, last 10 s):", gq.mode);
+        for (int k = gq.from; k < NRSHC_CAS; k++) {
+            const uint64_t *a = e->starts[k], fr = a[0] + a[1] + a[2] + a[3] + a[4]; if (!fr) continue;
+            const uint64_t full = a[NRST_A_OFF] + a[NRST_A_HOLD] + a[NRST_A_BUILD];
+            const double dfull = full ? (double)(e->draws[k][NRST_A_OFF] + e->draws[k][NRST_A_HOLD] + e->draws[k][NRST_A_BUILD]) / (double)full : 0.0,
+                         dre = a[NRST_A_REUSE] ? (double)e->draws[k][NRST_A_REUSE] / (double)a[NRST_A_REUSE] : 0.0;
+            put(&t, " c%d [frames off %llu, hold %llu, build %llu, reuse %llu, verify %llu; draws a frame: drawing all %.0f, reuse %.0f (saved ~%.0f); layers made %llu (bad %llu, draws in a layer %.0f)];", k,
+                (ull)a[NRST_A_OFF], (ull)a[NRST_A_HOLD], (ull)a[NRST_A_BUILD], (ull)a[NRST_A_REUSE], (ull)a[NRST_A_VERIFY], dfull, dre, a[NRST_A_REUSE] && full ? dfull - dre : 0.0,
+                (ull)e->built[k], (ull)e->built_bad[k], e->built[k] ? (double)e->layer_draws[k] / (double)e->built[k] : 0.0);
+        }
+        vkn_logf("%s", t.b); t.k = 0; t.b[0] = 0;   // (vkn_logf keeps 1024 bytes: a second line)
+        put(&t, "shcache eng static why: verdicts of %llu observed casters: ok %llu, once %llu, not %llu [", (ull)e->groups, (ull)e->v[NRST_V_OK], (ull)e->v[NRST_V_ONCE], (ull)e->v[NRST_V_NOT]);
+        for (int i = 0, n = 0; i < ST_W_N; i++) if (e->not_why[i]) put(&t, "%s%s %llu", n++ ? ", " : "", k_st_w[i], (ull)e->not_why[i]);
+        put(&t, "], unknown %llu, no draw %llu; reuses %llu (copies %llu, poisoned %llu), per-view cross-checks %llu (bad %llu), members skipped %llu / drawn (SAFE fallback) %llu, fallbacks %llu, "
+            "would be bad %llu, lost with the atlas %llu, stray %llu, unterminated %llu, BAD %llu (session %d)",
+            (ull)e->v[NRST_V_UNKNOWN], (ull)e->v_empty, (ull)e->reused, (ull)e->copies, (ull)e->poisoned, (ull)e->xchk, (ull)e->xchk_bad, (ull)e->skipped_members, (ull)e->drawn_members,
+            (ull)e->fallback, (ull)e->wbad, (ull)e->lost, (ull)e->stray, (ull)e->unterminated, (ull)e->bad, vkn_shc_eng_st_bad());
+        if (gq.mode == 2) put(&t, "; verify: tiles %llu (equal %llu, skipped %llu), texels differing 1 step %.4f %%, more %.4f %% (max %u steps), strip texels the left-out members drew %.4f %%",
+                              (ull)e->vcmp, (ull)e->veq, (ull)e->vskip, e->vall ? 100.0 * (double)e->vk1 / (double)e->vall : 0.0, e->vall ? 100.0 * (double)e->vkn / (double)e->vall : 0.0, (unsigned)e->vmax,
+                              e->vall ? 100.0 * (double)e->vstrip / (double)e->vall : 0.0);
+        put(&t, "; layer image %.1f MB", st_img_bytes() / 1048576.0);
+        vkn_logf("%s", t.b);
+        memset(&gq.s, 0, sizeof gq.s);
     }
     const uint64_t mb = s->model_bytes;
     memset(s, 0, sizeof *s); s->model_bytes = mb;
