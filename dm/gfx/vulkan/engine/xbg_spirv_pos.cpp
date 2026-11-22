@@ -23,7 +23,10 @@ struct Vec { int n = 0; int c[4] = {-1, -1, -1, -1}; };                         
 struct Chain { uint32_t base = 0; std::vector<uint32_t> idx; bool bad = false; };     // constant indices, base = a variable
 }
 
-void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char **why) {
+// [P10] target < 0: gl_Position (four components). target >= 0: the Output variable decorated Location target (no BuiltIn, no Component
+// decoration; a float vector of 2..4 components): out[0], out[1] = its x, y; out[2], out[3] = its z, w where the variable has them and
+// they are followed, else a copy of out[0]. ClipDistance writes do not matter to a varying.
+static void out_prog(const uint32_t *in, size_t n, int target, nr_cv_prog *pr, const char **why) {
     const char *dummy; if (!why) why = &dummy;
     memset(pr, 0, sizeof *pr); *why = "module";
     if (!in || n < 5 || in[0] != 0x07230203u) return;
@@ -91,6 +94,17 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
     if (functions != 1 || labels != 1) { *why = "more than one block"; return; }
     // The position: an Output variable that is BuiltIn Position, or an Output block with such a member.
     int pvar = -1, pmem = -1; std::vector<uint8_t> clipvar(bound, 0);
+    int pn = 4;   // components of the target
+    if (target >= 0) {
+        for (uint32_t v = 0; v < bound; ++v) if (var_sc[v] == int(ScOutput) && loc[v] == target && builtin[v] < 0) {
+            if (pvar >= 0 || has_comp[v]) { *why = "two outputs at the location / a Component decoration"; return; }
+            pvar = int(v);
+        }
+        if (pvar < 0) { *why = "no output at the location"; return; }
+        const uint32_t t = var_type[pvar];
+        if (t >= bound || type[t].kind != OpTypeVector || type[t].n < 2 || type[t].n > 4 || type[t].elem >= bound || type[type[t].elem].kind != OpTypeFloat) { *why = "the output is not a float vector"; return; }
+        pn = int(type[t].n);
+    } else
     for (uint32_t v = 0; v < bound; ++v) if (var_sc[v] == int(ScOutput)) {
         if (builtin[v] == int(BuiltInPosition)) { if (pvar >= 0) { *why = "two positions"; return; } pvar = int(v); pmem = -1; }
         if (builtin[v] == int(BuiltInClipDistance) || builtin[v] == int(BuiltInCullDistance)) clipvar[v] = 1;
@@ -102,6 +116,7 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
     }
     if (pvar < 0) { *why = "no position output"; return; }
     auto is_clip = [&](uint32_t v, const std::vector<uint32_t> &idx) {
+        if (target >= 0) return false;
         if (clipvar[v]) return true;
         const uint32_t t = var_type[v];
         if (t < bound && type[t].kind == OpTypeStruct) {
@@ -114,7 +129,7 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
     };
     std::vector<Chain> chain(bound); std::vector<uint8_t> is_chain(bound, 0);
     std::map<uint32_t, Vec> cell;        // Function / Private variables of float / float-vector type: the value stored last
-    Vec pos; pos.n = 4;
+    Vec pos; pos.n = pn;
     auto fvec = [&](uint32_t t) -> int { if (t >= bound) return 0; if (type[t].kind == OpTypeFloat) return 1;
         if (type[t].kind == OpTypeVector && type[t].n >= 2 && type[t].n <= 4 && type[t].elem < bound && type[type[t].elem].kind == OpTypeFloat) return int(type[t].n);
         return 0; };
@@ -139,7 +154,7 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
             std::vector<uint32_t> idx = c.idx;
             if (pmem >= 0) { if (idx.empty() || int(idx[0]) != pmem) return r; idx.erase(idx.begin()); }
             if (idx.empty()) return pos;
-            if (idx.size() == 1 && idx[0] < 4) { r.n = 1; r.c[0] = pos.c[idx[0]]; }
+            if (idx.size() == 1 && int(idx[0]) < pn) { r.n = 1; r.c[0] = pos.c[idx[0]]; }
             return r;
         }
         if (sc == int(ScUniform)) {
@@ -187,8 +202,8 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
                 if (c.bad) return;
                 std::vector<uint32_t> idx = c.idx;
                 if (pmem >= 0) { if (idx.empty()) return; if (int(idx[0]) != pmem) break; idx.erase(idx.begin()); }
-                if (idx.empty()) { for (int k = 0; k < 4; k++) pos.c[k] = x.n == 4 ? x.c[k] : -1; }
-                else if (idx.size() == 1 && idx[0] < 4) pos.c[idx[0]] = x.n == 1 ? x.c[0] : -1;
+                if (idx.empty()) { for (int k = 0; k < pn; k++) pos.c[k] = x.n == pn ? x.c[k] : -1; }
+                else if (idx.size() == 1 && int(idx[0]) < pn) pos.c[idx[0]] = x.n == 1 ? x.c[0] : -1;
                 else return;
             } } break;
         case OpFNegate: if (wc == 4 && a[1] < bound) { Vec x = V(a[2]), r; r.n = x.n && x.n == rtype_n() ? x.n : 0; for (int k = 0; k < r.n; k++) r.c[k] = mk(NR_CV_NEG, x.c[k]); val[a[1]] = r; } break;
@@ -222,6 +237,10 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
         }
         i += wc;
     }
+    if (target >= 0) {   // x, y must be followed; z, w fall back to x
+        for (int k = 0; k < 2; k++) if (pos.c[k] < 0) { *why = "x / y of the output is not a float expression of constants / inputs / uniforms"; return; }
+        for (int k = 2; k < 4; k++) if (k >= pn || pos.c[k] < 0) pos.c[k] = pos.c[0];
+    }
     for (int k = 0; k < 4; k++) if (pos.c[k] < 0) { *why = "a position component is not a float expression of constants / inputs / uniforms"; return; }
     // Renumber what the four components need (operands always precede their users).
     std::vector<int> need(ins.size(), 0), renum(ins.size(), -1);
@@ -251,4 +270,10 @@ void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char
     pr->n = uint8_t(m); pr->exact = 1;
     for (int k = 0; k < 4; k++) { pr->out[k] = uint8_t(renum[size_t(pos.c[k])]); if (pr->ins[pr->out[k]].op > NR_CV_INPUT) pr->exact = 0; }
     pr->ok = 1; *why = "ok";
+}
+
+void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char **why) { out_prog(in, n, -1, pr, why); }
+void xbg_spirv_out_prog(const uint32_t *in, size_t n, uint32_t location, nr_cv_prog *pr, const char **why) {
+    if (location >= 32) { const char *d; if (!why) why = &d; memset(pr, 0, sizeof *pr); *why = "location"; return; }
+    out_prog(in, n, int(location), pr, why);
 }

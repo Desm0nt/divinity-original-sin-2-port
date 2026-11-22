@@ -175,6 +175,9 @@ int vkn_shlib_vs_vindex(const void *shader);
 struct nr_cv_prog;
 const struct nr_cv_prog *vkn_shlib_vs_pos(const void *shader);
 int64_t vkn_shlib_fs_outputs(const void *shader);
+// [P10] A vertex shader object: the program of its output at `location` (xbg_spirv_out_prog of the final words, which are read again from
+// the bundle unless kept: call once and keep the answer; the loader's stack rule). 0 = *out filled, 1 = no such program. Any thread.
+int vkn_shlib_out_prog(const void *shader, uint32_t location, struct nr_cv_prog *out);
 int vkn_shlib_policy(void);
 
 // ==== [DOS2] VK-NATIVE stage 5.2 B5 / B4 (dm/gfx/vkn/vkn_mat.c MAT + XLQ, vkn_prepass.c): the library's steps for a technique's module ====

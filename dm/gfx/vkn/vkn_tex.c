@@ -1487,7 +1487,8 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
     if (!dv || !w || !h || !fmt_is_depth(fmt)) return NULL;
     vkn_tex *t = (vkn_tex *)calloc(1, sizeof *t);
     if (!t) return NULL;
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // [VK-SHADOWS-MOVING] + SAMPLED: the shadow cache's layer is read by the scroll piece (vkn_shs.c) through its attachment view
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     const VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = {w, h, 1}, .mipLevels = 1,
         .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
@@ -1498,6 +1499,8 @@ vkn_tex *vkn_tex_private_depth(VkFormat fmt, uint32_t w, uint32_t h, const char 
     if (vkCreateImage(dv->dev, &ci, NULL, &t->image) != VK_SUCCESS) { t->image = VK_NULL_HANDLE; tex_free(t); return NULL; }
     if (vkn_image_mem(t->image, &t->mem, &t->bytes)) { tex_free(t); return NULL; }
     if (!(t->att = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, t->aspect, 0, 1, 0, 1, (VkComponentMapping){0}))) { tex_free(t); return NULL; }
+    // [VK-SHADOWS-MOVING] the view a piece samples the depth through (vkn_pass_sample keeps the layout of an image that has one)
+    t->view = make_view(dv->dev, t, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1, (VkComponentMapping){0});
     t->shc_up = __atomic_add_fetch(&g_up_serial, 1, __ATOMIC_RELAXED);
     t->refs = 1;
     return t;

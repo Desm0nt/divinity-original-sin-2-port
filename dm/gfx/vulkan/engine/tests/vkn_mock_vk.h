@@ -57,8 +57,10 @@ enum { MK_MAX_OBJ = 1 << 16 };
 #define MK_STEP 0x10ull
 
 typedef struct mk_rp {   // a render pass create info, deep
-    uint32_t natt; VkAttachmentDescription att[9];
-    uint32_t ncolor; VkAttachmentReference color[8]; int has_depth; VkAttachmentReference depth;
+    uint32_t natt; VkAttachmentDescription att[12];
+    uint32_t ncolor; VkAttachmentReference color[8]; int has_depth; VkAttachmentReference depth;   // the subpass a validator looks at (subpass 0 of the object)
+    // [P10] every subpass (a one-subpass pass: sub[0] = the fields above)
+    uint32_t nsub; struct { uint32_t ncolor; VkAttachmentReference color[8]; int has_depth; VkAttachmentReference depth; uint32_t ninput; VkAttachmentReference input[16]; } sub[6];
     uint32_t ndep; VkSubpassDependency dep[4];
 } mk_rp;
 typedef struct mk_gp {   // a graphics pipeline create info, deep
@@ -83,7 +85,7 @@ typedef struct mk_obj {
     uint32_t nb; VkDescriptorSetLayoutBinding b[64];              // set layout
     uint32_t nset; VkDescriptorSetLayout set0;                    // pipeline layout
     mk_rp rp;
-    VkRenderPass fb_pass; uint32_t fb_n, fb_w, fb_h, fb_layers; VkImageView fb_view[9];
+    VkRenderPass fb_pass; uint32_t fb_n, fb_w, fb_h, fb_layers; VkImageView fb_view[12];
     int compute; mk_gp gp; VkShaderModule cs_module; VkPipelineLayout cs_layout;
     int cb_state; uint32_t pool_family;                           // command buffer: 0 initial, 1 recording, 2 executable
     int signaled;                                                 // fence
@@ -135,13 +137,15 @@ enum { MK_E_BEGIN_CB = 1, MK_E_END_CB, MK_E_SUBMIT, MK_E_PRESENT, MK_E_PRESENT_W
        MK_E_BEGIN_Q, MK_E_END_Q, MK_E_COPY_Q, MK_E_BEGIN_COND, MK_E_END_COND,   // [stage 4: queries]
        MK_E_COPY_BUF, MK_E_PUSH,                                                 // [stage 4: GPU BC route] buffer copies, push constants
        MK_E_COPY_IMG_BUF,                                                        // [stage 5.1 A5] image -> buffer copies (logged with mk_depth_on only)
+       MK_E_NEXT_SUBPASS, MK_E_EXECUTE,                                          // [P10] a[0] of EXECUTE: one secondary buffer (an entry each)
        MK_E_N };
 static const char *const mk_ev_name[MK_E_N] MK_U = {"?", "begin", "end", "submit", "present", "present-wait", "barrier", "copy-buf-img", "copy-img",
     "blit", "clear-color-img", "clear-ds-img", "begin-rp", "end-rp", "clear-att", "bind-pipe", "bind-sets", "bind-vb", "bind-ib", "viewport",
     "scissor", "draw", "draw-idx", "dispatch", "reset-qp", "timestamp", "fence-wait",
     "begin-query", "end-query", "copy-query", "begin-cond", "end-cond",   // [stage 4: queries]
     "copy-buf", "push",                                                  // [stage 4: GPU BC route]
-    "copy-img-buf"};                                                     // [stage 5.1 A5]
+    "copy-img-buf",                                                      // [stage 5.1 A5]
+    "next-subpass", "execute"};                                          // [P10]
 typedef struct mk_ev {
     int op; VkCommandBuffer cb; uint64_t seq;
     uint64_t a[4];                 // handles (image / buffer / pipeline / set / pass / framebuffer / fence), by op
@@ -151,7 +155,7 @@ typedef struct mk_ev {
     VkImageSubresourceRange r;     // barrier / clear-image range
     VkRect2D rect; VkViewport vp;  // render area / scissor; viewport
     uint32_t n;                    // count of the arrays below in use
-    VkClearValue cv[9];            // begin-rp clear values; clear-image value (cv[0])
+    VkClearValue cv[12];           // begin-rp clear values; clear-image value (cv[0])
     VkClearAttachment ca[4]; VkClearRect cr[2];
     uint32_t dyn[16];              // bind-sets dynamic offsets
     VkDeviceSize off[4];           // bind-vb offsets, bind-ib offset
@@ -271,7 +275,7 @@ void vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice p, VkPhysicalDeviceMem
 void vkGetPhysicalDeviceProperties(VkPhysicalDevice p, VkPhysicalDeviceProperties *o) {
     (void)p; memset(o, 0, sizeof *o);
     o->apiVersion = VK_API_VERSION_1_1; o->vendorID = 0x5143; o->driverVersion = 1; strcpy(o->deviceName, "mock GPU");
-    o->limits.maxSamplerAnisotropy = 16.0f; o->limits.maxDescriptorSetUniformBuffersDynamic = mk_dyn_limit; o->limits.minUniformBufferOffsetAlignment = 64;
+    o->limits.maxSamplerAnisotropy = 16.0f; o->limits.maxDescriptorSetUniformBuffersDynamic = mk_dyn_limit; o->limits.minUniformBufferOffsetAlignment = 64; o->limits.maxPerStageDescriptorInputAttachments = 8; o->limits.maxDescriptorSetInputAttachments = 8;   /* [P10] */
 }
 // [stage 5 A0] vkn_prof.c: 4 queue families (the tests' device uses family 2), each graphics + compute with 64 valid timestamp bits
 static uint32_t mk_ts_bits = 64;
@@ -408,12 +412,36 @@ VkResult vkCreatePipelineLayout(VkDevice d, const VkPipelineLayoutCreateInfo *ci
 void vkDestroyPipelineLayout(VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)a; (void)d; mk_del((uint64_t)(uintptr_t)l, MK_PL); }
 VkResult vkCreateRenderPass(VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
     (void)a; mk_dev_check(d, "vkCreateRenderPass");
-    if (ci->subpassCount != 1 || ci->attachmentCount > 9) mk_err("render pass: %u subpasses, %u attachments", ci->subpassCount, ci->attachmentCount);
+    if (ci->subpassCount < 1 || ci->subpassCount > 6 || ci->attachmentCount > 12) mk_err("render pass: %u subpasses, %u attachments", ci->subpassCount, ci->attachmentCount);
     pthread_mutex_lock(&mk_mu); mk_obj *o; const uint64_t h = mk_new(MK_RP, &o); mk_rp *r = &o->rp;
     r->natt = ci->attachmentCount; if (r->natt) memcpy(r->att, ci->pAttachments, sizeof *r->att * r->natt);
     const VkSubpassDescription *s = ci->pSubpasses;
     r->ncolor = s->colorAttachmentCount; if (r->ncolor) memcpy(r->color, s->pColorAttachments, sizeof *r->color * r->ncolor);
     r->has_depth = s->pDepthStencilAttachment != NULL; if (r->has_depth) r->depth = *s->pDepthStencilAttachment;
+    r->nsub = ci->subpassCount > 6 ? 6 : ci->subpassCount;
+    for (uint32_t k = 0; k < r->nsub; k++) {   // [P10]
+        const VkSubpassDescription *q = &ci->pSubpasses[k];
+        r->sub[k].ncolor = q->colorAttachmentCount > 8 ? 8 : q->colorAttachmentCount; if (r->sub[k].ncolor) memcpy(r->sub[k].color, q->pColorAttachments, sizeof *r->color * r->sub[k].ncolor);
+        r->sub[k].has_depth = q->pDepthStencilAttachment != NULL; if (r->sub[k].has_depth) r->sub[k].depth = *q->pDepthStencilAttachment;
+        r->sub[k].ninput = q->inputAttachmentCount > 16 ? 16 : q->inputAttachmentCount; if (r->sub[k].ninput) memcpy(r->sub[k].input, q->pInputAttachments, sizeof *r->color * r->sub[k].ninput);
+        for (uint32_t i = 0; i < r->sub[k].ninput; i++) {
+            const VkAttachmentReference *x = &r->sub[k].input[i]; if (x->attachment == VK_ATTACHMENT_UNUSED) continue;
+            if (x->attachment >= r->natt) { mk_err("render pass: input reference out of range"); continue; }
+            for (uint32_t c = 0; c < r->sub[k].ncolor; c++) if (r->sub[k].color[c].attachment == x->attachment) mk_err("render pass: subpass %u reads attachment %u as input and writes it as colour", k, x->attachment);
+            if (r->sub[k].has_depth && r->sub[k].depth.attachment == x->attachment) mk_err("render pass: subpass %u reads its own depth attachment as input", k);
+            int before = 0; for (uint32_t j = 0; j < k; j++) { for (uint32_t c = 0; c < r->sub[j].ncolor; c++) before |= r->sub[j].color[c].attachment == x->attachment; before |= r->sub[j].has_depth && r->sub[j].depth.attachment == x->attachment; }
+            if (!before && r->att[x->attachment].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) mk_err("render pass: subpass %u reads attachment %u that nothing wrote or loaded", k, x->attachment);
+        }
+        // preserved: an attachment used before k and after k must be used or preserved in k
+        for (uint32_t a = 0; a < r->natt && k > 0; a++) {
+            int used = 0, pres = 0; for (uint32_t c = 0; c < r->sub[k].ncolor; c++) used |= r->sub[k].color[c].attachment == a;
+            used |= r->sub[k].has_depth && r->sub[k].depth.attachment == a; for (uint32_t i = 0; i < r->sub[k].ninput; i++) used |= r->sub[k].input[i].attachment == a;
+            for (uint32_t i = 0; i < q->preserveAttachmentCount; i++) pres |= q->pPreserveAttachments[i] == a;
+            if (used && pres) mk_err("render pass: subpass %u uses and preserves attachment %u", k, a);
+            int before = 0; for (uint32_t j = 0; j < k; j++) { for (uint32_t c = 0; c < r->sub[j].ncolor; c++) before |= r->sub[j].color[c].attachment == a; before |= r->sub[j].has_depth && r->sub[j].depth.attachment == a; for (uint32_t i = 0; i < r->sub[j].ninput; i++) before |= r->sub[j].input[i].attachment == a; }
+            if (before && !used && !pres) mk_err("render pass: attachment %u is neither used nor preserved in subpass %u", a, k);
+        }
+    }
     r->ndep = ci->dependencyCount > 4 ? 4 : ci->dependencyCount; if (r->ndep) memcpy(r->dep, ci->pDependencies, sizeof *r->dep * r->ndep);
     for (uint32_t i = 0; i < r->ncolor; i++) if (r->color[i].attachment != VK_ATTACHMENT_UNUSED && r->color[i].attachment >= r->natt) mk_err("render pass: colour reference out of range");
     pthread_mutex_unlock(&mk_mu);
@@ -427,7 +455,7 @@ VkResult vkCreateFramebuffer(VkDevice d, const VkFramebufferCreateInfo *ci, cons
     else if (rp->rp.natt != ci->attachmentCount) mk_err("framebuffer: %u views for a pass of %u attachments", ci->attachmentCount, rp->rp.natt);
     for (uint32_t i = 0; i < ci->attachmentCount; i++) if (!mk_find((uint64_t)(uintptr_t)ci->pAttachments[i], MK_VIEW)) mk_err("framebuffer: view %u is not a live view", i);
     mk_obj *o; const uint64_t h = mk_new(MK_FB, &o);
-    o->fb_pass = ci->renderPass; o->fb_n = ci->attachmentCount > 9 ? 9 : ci->attachmentCount; o->fb_w = ci->width; o->fb_h = ci->height; o->fb_layers = ci->layers;
+    o->fb_pass = ci->renderPass; o->fb_n = ci->attachmentCount > 12 ? 12 : ci->attachmentCount; o->fb_w = ci->width; o->fb_h = ci->height; o->fb_layers = ci->layers;
     if (o->fb_n) memcpy(o->fb_view, ci->pAttachments, sizeof *o->fb_view * o->fb_n);
     pthread_mutex_unlock(&mk_mu);
     *out = (VkFramebuffer)(uintptr_t)h; return VK_SUCCESS;
@@ -558,7 +586,7 @@ void vkDestroyFence(VkDevice d, VkFence f, const VkAllocationCallbacks *a) {
     pthread_mutex_unlock(&mk_mu);
     mk_del((uint64_t)(uintptr_t)f, MK_FENCE);
 }
-static void mk_replay(mk_obj *cbo, VkCommandBuffer cb);
+static void mk_replay(mk_obj *cbo, VkCommandBuffer cb); static mk_obj mk_subview;
 static void mk_jr_submit(mk_obj *cbo, VkCommandBuffer cb, const mk_ev *sub);   // [stage 5.5]
 static VkCommandBuffer mk_last_submitted;
 VkResult vkQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence fence) {
@@ -643,10 +671,22 @@ static mk_ev *mk_cmd(VkCommandBuffer cb, const char *fn, int op) {   // under mk
 void vkCmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo *bi, VkSubpassContents c) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdBeginRenderPass", MK_E_BEGIN_RP);
     e->a[0] = MK_H(bi->renderPass); e->a[1] = MK_H(bi->framebuffer); e->rect = bi->renderArea; e->u[0] = (uint32_t)c; e->u[1] = bi->clearValueCount;
-    e->n = bi->clearValueCount > 9 ? 9 : bi->clearValueCount; if (e->n) memcpy(e->cv, bi->pClearValues, sizeof *e->cv * e->n);
+    e->n = bi->clearValueCount > 12 ? 12 : bi->clearValueCount; if (e->n) memcpy(e->cv, bi->pClearValues, sizeof *e->cv * e->n);
     pthread_mutex_unlock(&mk_mu);
 }
 void vkCmdEndRenderPass(VkCommandBuffer cb) { pthread_mutex_lock(&mk_mu); mk_cmd(cb, "vkCmdEndRenderPass", MK_E_END_RP); pthread_mutex_unlock(&mk_mu); }
+// [P10]
+static uint64_t mk_next_subpasses, mk_executes;
+void vkCmdNextSubpass(VkCommandBuffer cb, VkSubpassContents c) { pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdNextSubpass", MK_E_NEXT_SUBPASS); e->u[0] = (uint32_t)c; mk_next_subpasses++; pthread_mutex_unlock(&mk_mu); }
+void vkCmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer *list) {
+    pthread_mutex_lock(&mk_mu);
+    for (uint32_t i = 0; i < n; i++) {
+        mk_obj *o = mk_find((uint64_t)(uintptr_t)list[i], MK_CB);
+        if (!o || o->cb_state != 2) mk_err("vkCmdExecuteCommands of a buffer that is not live and ended");
+        mk_ev *e = mk_cmd(cb, "vkCmdExecuteCommands", MK_E_EXECUTE); e->a[0] = (uint64_t)(uintptr_t)list[i]; mk_executes++;
+    }
+    pthread_mutex_unlock(&mk_mu);
+}
 void vkCmdClearAttachments(VkCommandBuffer cb, uint32_t n, const VkClearAttachment *ca, uint32_t nr, const VkClearRect *cr) {
     pthread_mutex_lock(&mk_mu); mk_ev *e = mk_cmd(cb, "vkCmdClearAttachments", MK_E_CLEAR_ATT);
     e->n = n > 4 ? 4 : n; memcpy(e->ca, ca, sizeof *ca * e->n); e->u[0] = nr; memcpy(e->cr, cr, sizeof *cr * (nr > 2 ? 2 : nr));
@@ -871,10 +911,10 @@ VkResult vkAllocateDescriptorSets(VkDevice d, const VkDescriptorSetAllocateInfo 
     }
     pthread_mutex_unlock(&mk_mu); return r;
 }
-static int mk_is_img_desc(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || t == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; }
+static int mk_is_img_desc(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || t == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || t == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
 static int mk_is_buf_desc(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC; }
 static int mk_is_dyn_desc(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC; }
-static uint64_t mk_desc_writes;
+static uint64_t mk_desc_writes, mk_input_reads;   // [P10] input-attachment descriptors seen by the validator at draws
 void vkUpdateDescriptorSets(VkDevice d, uint32_t n, const VkWriteDescriptorSet *w, uint32_t nc, const VkCopyDescriptorSet *c) {
     (void)c; mk_dev_check(d, "vkUpdateDescriptorSets"); pthread_mutex_lock(&mk_mu);
     if (nc) mk_err("vkUpdateDescriptorSets: copies are not modelled");
@@ -939,17 +979,23 @@ static VkImageAspectFlags mk_fmt_aspects(VkFormat f) {
     default: return VK_IMAGE_ASPECT_COLOR_BIT;
     }
 }
-static int mk_rp_compat(const mk_rp *a, const mk_rp *b) {
-    if (a->natt != b->natt || a->ncolor != b->ncolor || a->has_depth != b->has_depth) return 0;
+static int mk_rp_compat(const mk_rp *a, const mk_rp *b) {   // (Vulkan: equal but for load / store ops and layouts; [P10] every subpass)
+    if (a->natt != b->natt || a->nsub != b->nsub) return 0;
     for (uint32_t i = 0; i < a->natt; i++) if (a->att[i].format != b->att[i].format || a->att[i].samples != b->att[i].samples) return 0;
-    for (uint32_t i = 0; i < a->ncolor; i++) if (a->color[i].attachment != b->color[i].attachment) return 0;
-    return !a->has_depth || a->depth.attachment == b->depth.attachment;
+    for (uint32_t k = 0; k < a->nsub; k++) {
+        if (a->sub[k].ncolor != b->sub[k].ncolor || a->sub[k].has_depth != b->sub[k].has_depth || a->sub[k].ninput != b->sub[k].ninput) return 0;
+        for (uint32_t i = 0; i < a->sub[k].ncolor; i++) if (a->sub[k].color[i].attachment != b->sub[k].color[i].attachment) return 0;
+        for (uint32_t i = 0; i < a->sub[k].ninput; i++) if (a->sub[k].input[i].attachment != b->sub[k].input[i].attachment) return 0;
+        if (a->sub[k].has_depth && a->sub[k].depth.attachment != b->sub[k].depth.attachment) return 0;
+    }
+    return 1;
 }
 static uint32_t mk_mipdim(uint32_t s, uint32_t l) { s >>= l; return s ? s : 1; }
 static uint64_t mk_view_image(uint64_t v) { mk_obj *o = mk_any(v); return o && o->kind == MK_VIEW ? MK_H(o->vci.image) : 0; }
 
 typedef struct mk_vstate {
-    int in; mk_obj *rp, *fb; VkRect2D area; uint64_t att_img[9];
+    int in; mk_obj *rp, *fb; VkRect2D area; uint64_t att_img[12];
+    uint32_t sub, contents; mk_obj *rp_real;   // [P10] the current subpass, VkSubpassContents, the pass object itself (rp: its view of this subpass)
     uint64_t gpipe, cpipe, gset, cset, glayout, clayout; uint32_t gndyn, cndyn, gdyn[16], cdyn[16];
     uint64_t vb[8]; VkDeviceSize vboff[8]; uint64_t ib; VkDeviceSize iboff; uint32_t itype;
     int vp, sc; VkRect2D scr; VkViewport vpv;
@@ -996,9 +1042,17 @@ static void mk_v_set(mk_obj *cbo, const mk_vstate *st, uint64_t set, uint64_t pl
                 mk_use(cbo, MK_H(w->view)); mk_use(cbo, MK_H(w->smp));
                 const uint64_t img = mk_view_image(MK_H(w->view)); mk_obj *im = mk_v_img(cbo, img); if (!im) continue;
                 const VkImageLayout want = w->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                if (w->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {   // [P10] an input of the current subpass, in the layout its reference says
+                    int ok = 0; mk_input_reads++;
+                    if (st->in && st->rp_real) { const mk_rp *r = &st->rp_real->rp;
+                        for (uint32_t x = 0; x < r->sub[st->sub].ninput; x++) { const VkAttachmentReference *ar = &r->sub[st->sub].input[x]; if (ar->attachment < 12 && st->att_img[ar->attachment] == img && ar->layout == w->layout) ok = 1; } }
+                    if (!ok) MK_V("binding %u: input attachment descriptor of image %#llx (layout %d) is not an input of subpass %u", lb->binding, (unsigned long long)img, (int)w->layout, st->sub);
+                    if (im->gpu_layout != w->layout) MK_V("binding %u: input image %#llx is in layout %d, the descriptor says %d", lb->binding, (unsigned long long)img, (int)im->gpu_layout, (int)w->layout);
+                    continue;
+                }
                 if (w->layout != want && !(w->layout == VK_IMAGE_LAYOUT_GENERAL)) MK_V("binding %u: descriptor layout %d", lb->binding, (int)w->layout);
                 if (im->gpu_layout != w->layout) MK_V("binding %u: image %#llx is in layout %d, the descriptor says %d", lb->binding, (unsigned long long)img, (int)im->gpu_layout, (int)w->layout);
-                if (st->in) for (int a = 0; a < 9; a++) if (st->att_img[a] == img) MK_V("binding %u: image %#llx is sampled while it is an attachment of the render pass (feedback loop)", lb->binding, (unsigned long long)img);
+                if (st->in) for (int a = 0; a < 12; a++) if (st->att_img[a] == img) MK_V("binding %u: image %#llx is sampled while it is an attachment of the render pass (feedback loop)", lb->binding, (unsigned long long)img);
             } else if (mk_is_buf_desc(w->type)) {
                 mk_obj *b = mk_find(MK_H(w->buf), MK_BUFFER); if (!b) { MK_V("binding %u: buffer is dead", lb->binding); continue; }
                 mk_use(cbo, MK_H(w->buf));
@@ -1064,6 +1118,112 @@ static int mk_dcmp(VkCompareOp op, uint16_t z, uint16_t d) {
     default: return 1;
     }
 }
+// ---- [VK-SHADOWS-MOVING] a GEOMETRIC model for two kinds of draws (mk_geo_on; vkn_stage3_test's "moving" block): the hash model above
+// puts a draw's rectangle anywhere in its viewport, which says nothing about a scrolled layer. With mk_geo_on:
+//   - a draw whose vertex module is mk_geo_vs is a flat box: its vertices (float3 at offset 0 of binding 0, through the index buffer)
+//     go through World (the first 4 rows of the buffer descriptor at binding mk_geo_bw: x y z coefficients + translation each) and
+//     ViewProjection (4 rows at byte 128 of the descriptor at binding mk_geo_bp), then the viewport transform; it writes ONE z (the
+//     smallest clip z of its vertices) over the pixel rectangle [round(min), round(max)) of its vertices, cut by scissor / render area /
+//     image, with the pipeline's depth test. The test's numbers are whole pixels and binary fractions: exact in floats.
+//   - the scroll piece (vkn_shs.c: a 3-vertex non-indexed draw whose set has a 48-byte uniform block at binding 0 and a D16 image at
+//     binding 1): for every pixel of viewport and scissor it reads the layer texel at tile origin + (pixel - tile origin + offset) mod
+//     tile size, discards the clear value, and writes texel + par.x with the depth test - the fragment shader's text.
+static int mk_geo_on; static VkShaderModule mk_geo_vs; static uint32_t mk_geo_bw, mk_geo_bp; static uint64_t mk_geo_boxes, mk_geo_layers;
+static const uint8_t *mk_dbuf(const mk_vstate *st, mk_obj *p, uint32_t binding, uint64_t *avail, VkImageView *view) {
+    mk_obj *pl = mk_any(MK_H(p->gp.layout)); mk_obj *sl = pl && pl->nset ? mk_any(MK_H(pl->set0)) : NULL; mk_obj *s = st->gset ? mk_any(st->gset) : NULL;
+    if (!sl || !s || s->kind != MK_DSET) return NULL;
+    uint32_t order[64], n = sl->nb < 64 ? sl->nb : 64, kd = 0;
+    for (uint32_t i = 0; i < n; i++) order[i] = i;
+    for (uint32_t i = 1; i < n; i++) for (uint32_t j = i; j > 0 && sl->b[order[j]].binding < sl->b[order[j - 1]].binding; j--) { const uint32_t t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    for (uint32_t i = 0; i < n; i++) {
+        const VkDescriptorSetLayoutBinding *lb = &sl->b[order[i]];
+        const mk_dw *w = NULL; for (uint32_t j = 0; j < s->ndw; j++) if (s->dw[j].binding == lb->binding && s->dw[j].elem == 0) w = &s->dw[j];
+        if (mk_is_buf_desc(lb->descriptorType)) {
+            uint64_t d = 0; if (mk_is_dyn_desc(lb->descriptorType)) { if (kd < st->gndyn) d = st->gdyn[kd]; kd++; }
+            if (lb->binding != binding) continue;
+            mk_obj *b = w ? mk_any(MK_H(w->buf)) : NULL;
+            if (!b || b->kind != MK_BUFFER || !b->cpu || w->off + d >= b->size) return NULL;
+            *avail = b->size - (w->off + d);
+            return (const uint8_t *)b->cpu + w->off + d;
+        } else if (lb->binding == binding) { if (w && view) *view = w->view; return NULL; }
+    }
+    return NULL;
+}
+// 1 = the draw was one of the two kinds (handled here); 0 = the hash model
+static int mk_dgeo(const mk_vstate *st, const mk_ev *e, mk_obj *im, uint16_t *px, mk_obj *p) {
+    if (!mk_geo_on) return 0;
+    const int idx = e->op == MK_E_DRAW_IDX;
+    const double vpx = st->vpv.x, vpy = st->vpv.y, vpw = st->vpv.width, vph = st->vpv.height;
+    int64_t cx0 = st->area.offset.x, cy0 = st->area.offset.y, cx1 = (int64_t)st->area.offset.x + st->area.extent.width, cy1 = (int64_t)st->area.offset.y + st->area.extent.height;
+    if (st->sc) {
+        if (cx0 < st->scr.offset.x) cx0 = st->scr.offset.x;
+        if (cy0 < st->scr.offset.y) cy0 = st->scr.offset.y;
+        if (cx1 > (int64_t)st->scr.offset.x + st->scr.extent.width) cx1 = (int64_t)st->scr.offset.x + st->scr.extent.width;
+        if (cy1 > (int64_t)st->scr.offset.y + st->scr.extent.height) cy1 = (int64_t)st->scr.offset.y + st->scr.extent.height;
+    }
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 > (int64_t)im->ici.extent.width) cx1 = im->ici.extent.width;
+    if (cy1 > (int64_t)im->ici.extent.height) cy1 = im->ici.extent.height;
+    const int64_t W = im->ici.extent.width; const VkCompareOp op = p->gp.ds.depthCompareOp; const int wr = p->gp.ds.depthWriteEnable != 0;
+    if (!idx && e->u[0] == 3) {   // the scroll piece?
+        uint64_t av = 0; VkImageView view = VK_NULL_HANDLE;
+        const uint8_t *u = mk_dbuf(st, p, 0, &av, NULL); (void)mk_dbuf(st, p, 1, &av, &view);
+        mk_obj *lim = view ? mk_find(mk_view_image(MK_H(view)), MK_IMAGE) : NULL; const uint16_t *lp = lim ? mk_dpx(lim) : NULL;
+        if (!u || !lp || lim == im) return 0;
+        int32_t iv[8]; float fv[4]; memcpy(iv, u, 32); memcpy(fv, u + 32, 16);
+        const int64_t vx0 = (int64_t)vpx, vy0 = (int64_t)(vph < 0 ? vpy + vph : vpy), vx1 = vx0 + (int64_t)vpw, vy1 = vy0 + (int64_t)(vph < 0 ? -vph : vph);
+        const int64_t LW = lim->ici.extent.width, LH = lim->ici.extent.height;
+        for (int64_t j = cy0 > vy0 ? cy0 : vy0; j < (cy1 < vy1 ? cy1 : vy1); j++) for (int64_t i = cx0 > vx0 ? cx0 : vx0; i < (cx1 < vx1 ? cx1 : vx1); i++) {
+            int64_t qx = i - iv[0] + iv[4], qy = j - iv[1] + iv[5];
+            if (qx >= iv[2]) qx -= iv[2];
+            if (qy >= iv[3]) qy -= iv[3];
+            const int64_t lx = iv[0] + qx, ly = iv[1] + qy;
+            if (lx < 0 || ly < 0 || lx >= LW || ly >= LH) { mk_err("scroll piece: layer texel (%lld, %lld) outside the layer", (long long)lx, (long long)ly); continue; }
+            const float d = (float)lp[ly * LW + lx] / 65535.0f;
+            if (d >= fv[1]) continue;
+            const uint16_t z = mk_q16(d + fv[0]); uint16_t *t = &px[j * W + i];
+            if (mk_dcmp(op, z, *t) && wr) *t = z;
+        }
+        mk_geo_layers++; mk_depth_draws++;
+        return 1;
+    }
+    if (!mk_geo_vs || p->gp.module[0] != mk_geo_vs) return 0;
+    uint64_t aw = 0, ap = 0;
+    const uint8_t *wb = mk_dbuf(st, p, mk_geo_bw, &aw, NULL), *pb = mk_dbuf(st, p, mk_geo_bp, &ap, NULL);
+    if (!wb || !pb || aw < 64 || ap < 192) { mk_err("geometric draw: World / per-view block missing"); return 1; }
+    float wm[16], vm[16]; memcpy(wm, wb, 64); memcpy(vm, pb + 128, 64);
+    uint32_t stride = 0; for (uint32_t i = 0; i < p->gp.nbind; i++) if (p->gp.bind[i].binding == 0) stride = p->gp.bind[i].stride;
+    mk_obj *vbo = mk_any(st->vb[0]), *ibo = idx ? mk_any(st->ib) : NULL;
+    const uint32_t cnt = e->u[0]; const int64_t vo = idx ? (int32_t)e->u[3] : (int64_t)e->u[2];
+    if (!stride || !vbo || !vbo->cpu || (idx && (!ibo || !ibo->cpu)) || !cnt || cnt > 64) { mk_err("geometric draw: buffers"); return 1; }
+    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, zmin = 1e30;
+    for (uint32_t k = 0; k < cnt; k++) {
+        int64_t v;
+        if (idx) {
+            const uint64_t isz = st->itype == VK_INDEX_TYPE_UINT32 ? 4 : 2, at = st->iboff + ((uint64_t)e->u[2] + k) * isz;
+            if (at + isz > ibo->size) { mk_err("geometric draw: index past the buffer"); return 1; }
+            if (isz == 2) { uint16_t q; memcpy(&q, (const uint8_t *)ibo->cpu + at, 2); v = q; } else { uint32_t q; memcpy(&q, (const uint8_t *)ibo->cpu + at, 4); v = q; }
+        } else v = k;
+        const int64_t at = (int64_t)st->vboff[0] + (v + vo) * (int64_t)stride;
+        if (at < 0 || (uint64_t)at + 12 > vbo->size) { mk_err("geometric draw: vertex past the buffer"); return 1; }
+        float pt[3]; memcpy(pt, (const uint8_t *)vbo->cpu + at, 12);
+        float wp[4], cl[4];
+        for (int r = 0; r < 4; r++) wp[r] = pt[0] * wm[4 * r] + pt[1] * wm[4 * r + 1] + pt[2] * wm[4 * r + 2] + wm[4 * r + 3];
+        for (int r = 0; r < 4; r++) cl[r] = wp[0] * vm[4 * r] + wp[1] * vm[4 * r + 1] + wp[2] * vm[4 * r + 2] + wp[3] * vm[4 * r + 3];
+        const double xf = 0.5 * vpw * (double)cl[0] + (vpx + 0.5 * vpw), yf = 0.5 * vph * (double)cl[1] + (vpy + 0.5 * vph);
+        if (xf < x0) x0 = xf;
+        if (xf > x1) x1 = xf;
+        if (yf < y0) y0 = yf;
+        if (yf > y1) y1 = yf;
+        if (cl[2] < zmin) zmin = cl[2];
+    }
+    const int64_t rx0 = (int64_t)floor(x0 + 0.5), ry0 = (int64_t)floor(y0 + 0.5), rx1 = (int64_t)floor(x1 + 0.5), ry1 = (int64_t)floor(y1 + 0.5);
+    const uint16_t z = mk_q16((float)zmin);
+    for (int64_t j = ry0 > cy0 ? ry0 : cy0; j < (ry1 < cy1 ? ry1 : cy1); j++) for (int64_t i = rx0 > cx0 ? rx0 : cx0; i < (rx1 < cx1 ? rx1 : cx1); i++) { uint16_t *t = &px[j * W + i]; if (mk_dcmp(op, z, *t) && wr) *t = z; }
+    mk_geo_boxes++; mk_depth_draws++;
+    return 1;
+}
 // The z and rectangle of a draw (identity hash above). 0 = the draw writes nothing.
 static int mk_dmodel_draw(const mk_vstate *st, const mk_ev *e) {
     if (!mk_depth_on || !st->in || !st->rp || !st->rp->rp.has_depth || e->u[7]) return 0;
@@ -1071,6 +1231,7 @@ static int mk_dmodel_draw(const mk_vstate *st, const mk_ev *e) {
     mk_obj *im = st->att_img[da] ? mk_find(st->att_img[da], MK_IMAGE) : NULL; uint16_t *px = mk_dpx(im);
     mk_obj *p = st->gpipe ? mk_find(st->gpipe, MK_PIPE) : NULL;
     if (!px || !p || p->compute || p->gp.rs.rasterizerDiscardEnable || !p->gp.has_ds || !p->gp.ds.depthTestEnable) return 0;
+    if (mk_dgeo(st, e, im, px, p)) return 1;   // [VK-SHADOWS-MOVING] the geometric model (mk_geo_on)
     const int idx = e->op == MK_E_DRAW_IDX;
     uint64_t h = mk_hmix(0xD3, (uint64_t)e->u[0] | (uint64_t)e->u[1] << 32);
     const int64_t vo = idx ? (int32_t)e->u[3] : (int64_t)e->u[2];
@@ -1181,25 +1342,58 @@ static MK_U const uint16_t *mk_depth_px(VkImage img, uint32_t *w, uint32_t *h) {
     pthread_mutex_unlock(&mk_mu); return p;
 }
 
-static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
-    cbo->nuses = 0; mk_v_cb = cb;
+static void mk_replay_x(mk_obj *cbo, mk_obj *src, VkCommandBuffer cb, mk_vstate *stp);
+static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) { cbo->nuses = 0; mk_replay_x(cbo, cbo, cb, NULL); }
+// cbo: the submitted buffer (owner of the uses); src / cb: the buffer whose log is replayed (a secondary one inside vkCmdExecuteCommands:
+// stp = the caller's state - the pass, the subpass and the attachments are inherited, nothing bound is)
+static void mk_replay_x(mk_obj *cbo, mk_obj *src, VkCommandBuffer cb, mk_vstate *stp) {
+    const VkCommandBuffer cb_up = mk_v_cb; mk_v_cb = cb;
     static const mk_ev nil = {0}; mk_v_ev = &nil;
-    if (!cbo->began || cbo->ev_first < mk_ev_base) { MK_V("the log of this recording was reset before its submit"); return; }
+    if (!src->began || src->ev_first < mk_ev_base) { MK_V("the log of this recording was reset before its submit"); mk_v_cb = cb_up; return; }
     mk_vstate st; memset(&st, 0, sizeof st);
-    for (uint64_t seq = cbo->ev_first + 1; seq < mk_seq; seq++) {
+    if (stp) { st.in = stp->in; st.rp = stp->rp; st.fb = stp->fb; st.area = stp->area; memcpy(st.att_img, stp->att_img, sizeof st.att_img); st.sub = stp->sub; st.rp_real = stp->rp_real; st.contents = 0; }
+    for (uint64_t seq = src->ev_first + 1; seq < mk_seq; seq++) {
         const mk_ev *e = mk_ev_at(seq);
         if (e->cb != cb) continue;
         mk_v_ev = e;
-        if (e->op == MK_E_END_CB) { if (st.in) MK_V("command buffer ended inside a render pass"); if (st.qon || st.condon) MK_V("command buffer ended with a query / conditional block active"); break; }
+        if (e->op == MK_E_END_CB) { if (st.in && !stp) MK_V("command buffer ended inside a render pass"); if (st.qon || st.condon) MK_V("command buffer ended with a query / conditional block active"); break; }
         if (e->op == MK_E_SUBMIT || e->op == MK_E_BEGIN_CB) { MK_V("recording without its end"); break; }
         const int outside = e->op == MK_E_BARRIER || e->op == MK_E_COPY_BUF_IMG || e->op == MK_E_COPY_IMG || e->op == MK_E_BLIT_IMG || e->op == MK_E_CLEAR_COLOR_IMG ||
                             e->op == MK_E_CLEAR_DS_IMG || e->op == MK_E_DISPATCH || e->op == MK_E_RESET_QP || e->op == MK_E_BEGIN_RP || e->op == MK_E_COPY_Q ||
                             e->op == MK_E_COPY_IMG_BUF;   // [stage 5.1 A5]
         if (outside && st.in) MK_V("not allowed inside a render pass");
         const int inside = e->op == MK_E_END_RP || e->op == MK_E_CLEAR_ATT || e->op == MK_E_DRAW || e->op == MK_E_DRAW_IDX ||
-                           e->op == MK_E_BEGIN_Q || e->op == MK_E_END_Q || e->op == MK_E_BEGIN_COND || e->op == MK_E_END_COND;   // [stage 4: queries] (the port's rule)
+                           e->op == MK_E_BEGIN_Q || e->op == MK_E_END_Q || e->op == MK_E_BEGIN_COND || e->op == MK_E_END_COND ||   // [stage 4: queries] (the port's rule)
+                           e->op == MK_E_NEXT_SUBPASS || e->op == MK_E_EXECUTE;   // [P10]
         if (inside && !st.in) MK_V("allowed only inside a render pass");
+        if (stp && (e->op == MK_E_BEGIN_RP || e->op == MK_E_END_RP || e->op == MK_E_NEXT_SUBPASS || e->op == MK_E_EXECUTE)) MK_V("not allowed in a secondary command buffer");
+        if (!stp && st.in && st.contents == 1 && e->op != MK_E_EXECUTE && e->op != MK_E_NEXT_SUBPASS && e->op != MK_E_END_RP && e->op != MK_E_TIMESTAMP) MK_V("inline command in a subpass whose contents are secondary command buffers");
+        if (!stp && st.in && st.contents == 0 && e->op == MK_E_EXECUTE) MK_V("vkCmdExecuteCommands in a subpass with inline contents");
         switch (e->op) {
+        case MK_E_NEXT_SUBPASS: {   // [P10] the next subpass: its view of the pass, the layouts of what it references
+            if (!st.rp_real) break;
+            const mk_rp *r = &st.rp_real->rp;
+            if (st.qon || st.condon) MK_V("subpass ended with a query / conditional block active");
+            if (st.sub + 1 >= r->nsub) { MK_V("vkCmdNextSubpass beyond the pass's %u subpasses", r->nsub); break; }
+            st.sub++; st.contents = e->u[0];
+            mk_subview = *st.rp_real; mk_subview.rp.ncolor = r->sub[st.sub].ncolor; memcpy(mk_subview.rp.color, r->sub[st.sub].color, sizeof mk_subview.rp.color);
+            mk_subview.rp.has_depth = r->sub[st.sub].has_depth; mk_subview.rp.depth = r->sub[st.sub].depth; st.rp = &mk_subview;
+            for (uint32_t i = 0; i < r->natt && i < 12; i++) {
+                mk_obj *im = st.att_img[i] ? mk_find(st.att_img[i], MK_IMAGE) : NULL; if (!im) continue;
+                for (uint32_t c = 0; c < r->sub[st.sub].ncolor; c++) if (r->sub[st.sub].color[c].attachment == i) im->gpu_layout = r->sub[st.sub].color[c].layout;
+                if (r->sub[st.sub].has_depth && r->sub[st.sub].depth.attachment == i) im->gpu_layout = r->sub[st.sub].depth.layout;
+                for (uint32_t c = 0; c < r->sub[st.sub].ninput; c++) if (r->sub[st.sub].input[c].attachment == i) im->gpu_layout = r->sub[st.sub].input[c].layout;
+            }
+            st.gpipe = 0; st.gset = 0; memset(st.vb, 0, sizeof st.vb); st.ib = 0; st.vp = st.sc = 0;
+            break;
+        }
+        case MK_E_EXECUTE: {
+            mk_obj *so = mk_find(e->a[0], MK_CB);
+            if (!so) { MK_V("executed secondary buffer is dead"); break; }
+            { const mk_ev *keep = mk_v_ev; mk_replay_x(cbo, so, (VkCommandBuffer)(uintptr_t)e->a[0], &st); mk_v_ev = keep; }
+            st.gpipe = 0; st.gset = 0; memset(st.vb, 0, sizeof st.vb); st.ib = 0; st.vp = st.sc = 0;   // (nothing bound survives vkCmdExecuteCommands)
+            break;
+        }
         case MK_E_BARRIER: {
             if (!e->a[0]) break;
             mk_obj *im = mk_v_img(cbo, e->a[0]); if (!im) break;
@@ -1259,7 +1453,7 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
             if (fb->fb_n != rp->rp.natt) MK_V("framebuffer with %u views, pass with %u attachments", fb->fb_n, rp->rp.natt);
             if (e->rect.offset.x < 0 || e->rect.offset.y < 0 || e->rect.offset.x + e->rect.extent.width > fb->fb_w || e->rect.offset.y + e->rect.extent.height > fb->fb_h || !e->rect.extent.width || !e->rect.extent.height)
                 MK_V("render area %d,%d %ux%u outside the %ux%u framebuffer", e->rect.offset.x, e->rect.offset.y, e->rect.extent.width, e->rect.extent.height, fb->fb_w, fb->fb_h);
-            st.in = 1; st.rp = rp; st.fb = fb; st.area = e->rect; memset(st.att_img, 0, sizeof st.att_img);
+            st.in = 1; st.rp = rp; st.fb = fb; st.area = e->rect; memset(st.att_img, 0, sizeof st.att_img); st.sub = 0; st.rp_real = rp; st.contents = e->u[0];   // [P10]
             for (uint32_t i = 0; i < rp->rp.natt && i < fb->fb_n; i++) {
                 const VkAttachmentDescription *ad = &rp->rp.att[i];
                 mk_obj *v = mk_find(MK_H(fb->fb_view[i]), MK_VIEW); if (!v) { MK_V("attachment %u: dead view", i); continue; }
@@ -1286,8 +1480,9 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
         case MK_E_END_RP:
             if (st.qon) MK_V("render pass ended with an active query");
             if (st.condon) MK_V("render pass ended inside a conditional block");
-            if (st.rp && st.fb) for (uint32_t i = 0; i < st.rp->rp.natt && i < 9; i++) { mk_obj *im = st.att_img[i] ? mk_find(st.att_img[i], MK_IMAGE) : NULL; if (im) im->gpu_layout = st.rp->rp.att[i].finalLayout; }
-            st.in = 0; st.rp = st.fb = NULL; memset(st.att_img, 0, sizeof st.att_img);
+            if (st.rp_real && st.sub + 1 != st.rp_real->rp.nsub) MK_V("render pass ended in subpass %u of %u", st.sub, st.rp_real->rp.nsub);   // [P10]
+            if (st.rp && st.fb) for (uint32_t i = 0; i < st.rp->rp.natt && i < 12; i++) { mk_obj *im = st.att_img[i] ? mk_find(st.att_img[i], MK_IMAGE) : NULL; if (im) im->gpu_layout = st.rp->rp.att[i].finalLayout; }
+            st.in = 0; st.rp = st.fb = NULL; st.rp_real = NULL; st.sub = 0; st.contents = 0; memset(st.att_img, 0, sizeof st.att_img);
             break;
         case MK_E_CLEAR_ATT:
             if (!st.rp) break;
@@ -1331,7 +1526,7 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
             if (!p || p->compute) { MK_V("draw without a graphics pipeline"); break; }
             mk_obj *prp = mk_any(MK_H(p->gp.pass));
             if (!prp || !mk_rp_compat(&prp->rp, &st.rp->rp)) MK_V("pipeline built for a render pass incompatible with the open one");
-            if (p->gp.subpass) MK_V("pipeline of subpass %u", p->gp.subpass);
+            if (p->gp.subpass != st.sub) MK_V("pipeline of subpass %u drawn in subpass %u", p->gp.subpass, st.sub);   // [P10]
             int dvp = 0, dsc = 0; for (uint32_t i = 0; i < p->gp.ndyn; i++) { dvp |= p->gp.dyn[i] == VK_DYNAMIC_STATE_VIEWPORT; dsc |= p->gp.dyn[i] == VK_DYNAMIC_STATE_SCISSOR; }
             if (dvp && !st.vp) MK_V("draw without a viewport");
             if (dsc && !st.sc) MK_V("draw without a scissor");
@@ -1362,6 +1557,8 @@ static void mk_replay(mk_obj *cbo, VkCommandBuffer cb) {
         }
         mk_dmodel(&st, e);   // [stage 5.1 A5] the depth content model (mk_depth_on only)
     }
+    if (stp) { stp->qon = st.qon; stp->condon = st.condon; }
+    mk_v_cb = cb_up;
 }
 
 // ---------------------------------------------------------------- the shader loader of mode 1 (vkn_shlib.h; it took over the translator's doors)
@@ -1416,10 +1613,14 @@ VkShaderModule vkn_shlib_retype_module(void *shader, uint64_t code) {
     if (!pthread_equal(pthread_self(), mk_main_thread)) mk_variant_off_main++;
     return (VkShaderModule)(uintptr_t)(0x7b00000ull + (code & 0xffff));
 }
+// [P10 fix 2] the render-scale floats sb._m5[i] at byte 192 + 16 i (std140 float array: stride 16), as xbg_vulkan.cpp writes them (the
+// mock wrote them in a row before, which hid the stride bug of the tile pass's check); mk_support_m5_1: the value of _m5[1] (a test sets
+// it to something else than 1 to see the tile pass refuse)
+static float mk_support_m5_1 = 1.0f;
 void xbg_support_defaults(void *bytes1392, float width, float height) {   // the layout of vkn_shader.h's comment (xbg_vulkan.cpp)
     float *f = (float *)bytes1392; memset(bytes1392, 0, 1392);
     f[144 / 4] = 1.0f / width; f[148 / 4] = 1.0f / height; f[160 / 4] = width; f[164 / 4] = height;
-    for (int i = 0; i < 73; i++) f[192 / 4 + i] = 1.0f;
+    for (int i = 0; i < 73; i++) f[192 / 4 + 4 * i] = i == 1 ? mk_support_m5_1 : 1.0f;
 }
 // ---------------------------------------------------------------- [stage 5.5] the canonical journal (mk_jr_on; test_rt)
 typedef struct mk_jr_rec { uint64_t h; uint32_t nev, ndraw; } mk_jr_rec;

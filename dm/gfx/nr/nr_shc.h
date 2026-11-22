@@ -345,6 +345,13 @@ static inline int nrshc_draw(nrshc_cas *c, const nrshc_par *p, nrshc_range *r, u
     }
     return 0;
 }
+// [VK-SHADOWS-MOVING] `units` of member h leave the layer's member multiset (a member whose texels scrolled out of the tile: nr_shs.h).
+// 1 = done; 0 = h is no member with that many units (nothing changed).
+static inline int nrshc_mem_drop(nrshc_cas *c, uint64_t h, uint32_t units) {
+    const int i = nrshc_tab_at(&c->mem, h, 0);
+    if (i < 0 || c->mem.e[i].val < units || c->nmem < units) return 0;
+    c->mem.e[i].val -= units; c->nmem -= units; return 1;
+}
 // The end of execution 1. simple: the range can be executed again (it lies in one command handle, the backend has its start state).
 // Returns NRSHC_E_*; for BUILD the layer's members are taken from the ordinals drawn in execution 1.
 static inline int nrshc_end(nrshc_cas *c, const nrshc_par *p, nrshc_range *r, uint64_t atlas, const int32_t rect[4], uint32_t clear_bits,

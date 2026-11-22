@@ -2353,8 +2353,14 @@ static nr_sb_prog *mv_make_prog(uint32_t bw, uint32_t bp) {
 static uint32_t g_mv_rng;
 static uint32_t mv_rnd(void) { g_mv_rng = g_mv_rng * 1664525u + 1013904223u; return g_mv_rng >> 8; }
 typedef struct mv_box { int32_t x, y, w, h, z; int alive; } mv_box;
+// [VK-SHADOWS-MOVING fix 22.11] MV_HARD=1 (a test variable of the child): the numbers of the phone, not exact binary steps - the light's
+// z translation moves by 3.3 D16 steps a frame and the z scale is 16.3 steps a world unit (every box has its own fraction of a step), and
+// boxes 5, 13, 21, 29, 37 of every cascade sit 127/256 px from a pixel border and move by 2/256 px (inside the 1/64 px instance
+// tolerance) every other frame while the camera walks: objects whose constants changed although their place relative to the cascade
+// "stayed" (the phone's "changed while the cascade stood" casters, met while it moves).
 static void mv_scn(mv_res *r) {
     mk_depth_on = 1; mk_geo_on = 1;
+    const char *hv = getenv("MV_HARD"); const int hard = hv && *hv == '1';
     pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);   // (the command log starts again between recordings: 64 frames do not fit otherwise)
     const int v0 = mk_val_errors, e0 = mk_errors;
     vkn_shs_cam_block(12, 128, 0); vkn_shs_test_prog(mv_prog); vkn_shc_test_nofs(mv_nofs);
@@ -2380,12 +2386,12 @@ static void mv_scn(mv_res *r) {
         b->x = 1000 * k - 60 + (int32_t)(mv_rnd() % 520); b->y = -60 + (int32_t)(mv_rnd() % 520); b->w = 8 + (int32_t)(mv_rnd() % 52); b->h = 8 + (int32_t)(mv_rnd() % 52);
         b->z = 100 + (int32_t)(mv_rnd() % 3000); b->alive = 1;
     }
-    double cx = 100, cy = 100, sxk = 1.0; int32_t m = 40;
+    double cx = 100, cy = 100, sxk = 1.0; float m = 40.0f;
     const uint64_t md0 = mk_depth_draws; vkn_draw_stats d0; vkn_draw_stats_get(&d0);
     for (int f = 0; f < MV_F; f++) {
         // the camera
         if ((f >= 12 && f < 36) || f >= 51) { cx += (double)((int32_t)(mv_rnd() % 19) - 9); cy += (double)((int32_t)(mv_rnd() % 19) - 9); }
-        if (f >= 20 && f < 28) m += 3;                       // the light's z moves
+        if (f >= 20 && f < 28) m += hard ? 3.3f : 3.0f;      // the light's z moves
         if (f == 42) cx += 0.5;                              // half a texel
         if (f == 43) cx -= 0.5;
         sxk = f == 46 ? 1.0009765625 : 1.0;                  // a turned / scaled projection for one frame
@@ -2405,7 +2411,7 @@ static void mv_scn(mv_res *r) {
             {   // the per-view block: View rows at 0, ViewProjection rows at 128 (x y z coefficients + translation)
                 uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(192, &off), 0);
                 float pv[48]; memset(pv, 0, sizeof pv);
-                const float s = 2.0f / MV_T, vp[16] = {(float)(s * sxk), 0, 0, (float)(-camx * s * sxk - 1.0), 0, -s, 0, (float)(1.0 + camy * s), 0, 0, 16.0f / 65535.0f, (float)m / 65535.0f, 0, 0, 0, 1};
+                const float s = 2.0f / MV_T, vp[16] = {(float)(s * sxk), 0, 0, (float)(-camx * s * sxk - 1.0), 0, -s, 0, (float)(1.0 + camy * s), 0, 0, (hard ? 16.3f : 16.0f) / 65535.0f, m / 65535.0f, 0, 0, 0, 1};
                 memcpy(pv, vp, sizeof vp); memcpy(pv + 32, vp, sizeof vp);
                 memcpy((uint8_t *)vkn_ring_cpu() + off, pv, 192); vkn_draw_ubo(0, 12, off, 192);
                 // (the fragment block: other bytes every frame of 6..11 - the camera stands, a constant no position reads changes: the
@@ -2420,7 +2426,9 @@ static void mv_scn(mv_res *r) {
                 const int touches = b->x + b->w > camx - 6 && b->x < camx + MV_T + 6 && b->y + b->h > camy - 6 && b->y < camy + MV_T + 6;
                 if (!touches && (i >= MV_N || i % 7)) continue;   // the engine's own culling (every 7th box is submitted anyway)
                 uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
-                const float w[16] = {(float)b->w, 0, 0, (float)b->x, 0, (float)b->h, 0, (float)b->y, 0, 0, 1, (float)b->z, 0, 0, 0, 1};
+                const int walk = (f >= 12 && f < 36) || f >= 51;
+                const float jx = hard && i < MV_N && i % 8 == 5 ? (walk && (f & 1) ? 129.0f / 256.0f : 127.0f / 256.0f) : 0.0f;   // (MV_HARD: boxes 5, 13, 21, ...)
+                const float w[16] = {(float)b->w, 0, 0, (float)b->x + jx, 0, (float)b->h, 0, (float)b->y, 0, 0, 1, (float)b->z, 0, 0, 0, 1};
                 memcpy((uint8_t *)vkn_ring_cpu() + off, w, 64); vkn_draw_ubo(0, 0, off, 64);
                 CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
                 CHECK(vkn_pass_depth() == A); CHECK(vkn_pass_color(0) == NULL);
@@ -2502,7 +2510,9 @@ static void test_moving(void) {
                (unsigned long long)s->touched, (unsigned long long)s->absent_out, (unsigned long long)s->absent_in, (unsigned long long)s->drop_shift, (unsigned long long)s->drop_lin, (unsigned long long)s->drop_big,
                (unsigned long long)s->drop_fmem, (unsigned long long)s->builds, (unsigned long long)s->refresh, (unsigned long long)s->jobs, (unsigned long long)s->job_pieces, (unsigned long long)s->job_draws,
                (unsigned long long)s->job_fail, (unsigned long long)c->st.recover, (unsigned long long)s->culled);
-        CHECK(s->plain_ranges >= 20); CHECK(s->scroll_ranges > 60); CHECK(s->moved_ranges > 40); CHECK(s->dz_ranges > 10);
+        // [fix 22.11] the 8 frames of z motion drop the layer ("z moved") and hold its builds until z stood 3 ranges
+        CHECK(s->plain_ranges >= 20); CHECK(s->scroll_ranges > 60); CHECK(s->moved_ranges > 40); CHECK_EQ(s->dz_ranges, 0); CHECK(s->drop_z >= 1); CHECK(s->build_held >= 3);
+        CHECK(s->zstep >= 8); CHECK(s->zcmp > s->zstep); CHECK_EQ(s->epoch_obj, 0);
         CHECK(s->skipped > 4 * s->touched); CHECK(s->touched > 0); CHECK(s->absent_out > 0); CHECK(s->absent_in >= 1);
         CHECK(s->drop_shift >= 1); CHECK(s->drop_lin >= 1); CHECK(s->drop_big >= 1);
         CHECK(s->jobs > 40); CHECK_EQ(s->job_fail, 0); CHECK_EQ(s->job_lost, 0); CHECK_EQ(s->job_full, 0); CHECK_EQ(s->patch_bad, 0); CHECK_EQ(s->zguard, 0); CHECK_EQ(s->f_member, 0);
@@ -2519,10 +2529,51 @@ static void test_moving(void) {
                (unsigned long long)s->sv_eq, (unsigned long long)s->sv_px, (unsigned long long)s->sv_all, (unsigned)s->sv_max, (unsigned long long)C3.st.verify_eq, (unsigned long long)C3.st.verify_ne,
                (unsigned long long)C3.st.verify_skip, (unsigned long long)s->skipped);
         CHECK(s->sv_cmp > 40); CHECK_EQ(s->sv_px, 0); CHECK_EQ(s->sv_eq, s->sv_cmp); CHECK_EQ(C3.st.verify_ne, 0); CHECK(s->skipped > 0); CHECK_EQ(s->quad, 0);
+        CHECK_EQ(s->svc_cmp[0], s->sv_cmp); CHECK_EQ(s->svc_eq[0], s->sv_cmp); CHECK_EQ(s->svc_cmp[1], 0);   // [fix 22.11] by case: x / y only
         CHECK_EQ(C3.recorded >= T.recorded, 1);
     }
     CHECK(K1.sc.culled > 100); CHECK(K1.recorded + K1.sc.culled == T.recorded); CHECK_EQ(K2.sc.culled, 0); CHECK_EQ(K2.sc.cull_would, K1.sc.culled); CHECK_EQ(K2.recorded, T.recorded);
     CHECK(K3.sc.culled > K1.sc.culled);
+    // [VK-SHADOWS-MOVING fix 22.11] SHSCROLL_Z=1 (the old z path) in the binary scenario: z in whole D16 steps, exact here as before
+    static const char *const e_zold[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", "1"}, {"DM_HACK_SHFAR", NULL},
+                                             {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}};
+    static mv_res CZ; mv_child(e_zold, mv_scn, &CZ);
+    { int bad = 0; for (int f = 0; f < MV_F; f++) bad += CZ.h[f] != T.h[f];
+      CHECK_EQ(bad, 0); CHECK(CZ.sc.dz_ranges > 10); CHECK_EQ(CZ.sc.drop_z, 0); CHECK_EQ(CZ.sc.build_held, 0); CHECK(CZ.sc.scroll_ranges > C2.sc.scroll_ranges); }
+    // The phone's numbers (MV_HARD, mv_scn): the truth; the default scroll (exact: z moved refused, an object whose own constants changed
+    // is another object); its verify; and the old z path (SHSCROLL_Z=1) with its verify - inexact, one D16 step in the kept part
+    // (M09's 12-31 %). Before the fix (22.11, the default children here): 31 of 64 frames differed from frame 13 on (the boxes moved
+    // inside the tolerance), the verify 65 of 101 tiles, 2.1 % of the texels, up to 55226 steps.
+#define MV_HARD_BASE {"MV_HARD", "1"}, {"DM_HACK_SHFAR", NULL}, {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}
+    static const char *const h_truth[][2] = {{"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHSCROLL", "0"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", NULL}, MV_HARD_BASE};
+    static const char *const h_scr[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, {"DM_VK_NATIVE_SHSCROLL_Z", NULL}, MV_HARD_BASE};
+    static const char *const h_ver[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "2"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", NULL}, MV_HARD_BASE};
+    static const char *const h_zold[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", "1"}, MV_HARD_BASE};
+    static const char *const h_zver[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "2"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", "1"}, MV_HARD_BASE};
+#undef MV_HARD_BASE
+    static mv_res HT, HS, HV, HZ, HZV;
+    mv_child(h_truth, mv_scn, &HT); mv_child(h_scr, mv_scn, &HS); mv_child(h_ver, mv_scn, &HV); mv_child(h_zold, mv_scn, &HZ); mv_child(h_zver, mv_scn, &HZV);
+    {
+        int hd = 0; for (int f = 0; f < MV_F; f++) hd += HT.h[f] != T.h[f];
+        CHECK(hd > 40);   // (the hard scene is another scene)
+        int bad = 0, first = -1; for (int f = 0; f < MV_F; f++) if (HS.h[f] != HT.h[f]) { bad++; if (first < 0) first = f; }
+        int zbad = 0, zfirst = -1; for (int f = 0; f < MV_F; f++) if (HZ.h[f] != HT.h[f]) { zbad++; if (zfirst < 0) zfirst = f; }
+        const vkn_shc_scroll_stats *s = &HS.sc, *v = &HV.sc, *z = &HZ.sc, *zv = &HZV.sc;
+        printf("  moving hard SHSCROLL=1 SHCULL=1: frames differing %d (first %d); scrolled %llu (z moved %llu), skipped %llu, dropped z moved %llu, builds held %llu, own constants changed %llu; "
+               "verify: tiles %llu (equal %llu), texels differing %llu of %llu (max %u steps)\n",
+               bad, first, (unsigned long long)s->scroll_ranges, (unsigned long long)s->dz_ranges, (unsigned long long)s->skipped, (unsigned long long)s->drop_z, (unsigned long long)s->build_held,
+               (unsigned long long)s->epoch_obj, (unsigned long long)v->sv_cmp, (unsigned long long)v->sv_eq, (unsigned long long)v->sv_px, (unsigned long long)v->sv_all, (unsigned)v->sv_max);
+        printf("  moving hard SHSCROLL_Z=1 (old z path): frames differing %d (first %d); scrolled %llu (z moved %llu); verify x / y: tiles %llu (equal %llu); z: tiles %llu (equal %llu), "
+               "kept 1 step %llu, kept more %llu, strips %llu of %llu texels (max %u)\n", zbad, zfirst, (unsigned long long)z->scroll_ranges, (unsigned long long)z->dz_ranges,
+               (unsigned long long)zv->svc_cmp[0], (unsigned long long)zv->svc_eq[0], (unsigned long long)zv->svc_cmp[1], (unsigned long long)zv->svc_eq[1], (unsigned long long)zv->svc_k1[1],
+               (unsigned long long)zv->svc_kn[1], (unsigned long long)zv->svc_st[1], (unsigned long long)zv->svc_all[1], (unsigned)zv->svc_max[1]);
+        CHECK_EQ(bad, 0); CHECK(s->scroll_ranges > 30); CHECK(s->skipped > 100); CHECK(s->drop_z >= 1); CHECK(s->epoch_obj > 10); CHECK_EQ(s->dz_ranges, 0);
+        CHECK(v->sv_cmp > 15); CHECK_EQ(v->sv_px, 0); CHECK_EQ(v->sv_eq, v->sv_cmp); CHECK_EQ(v->svc_cmp[1], 0); CHECK_EQ(v->svc_eq[0], v->svc_cmp[0]);
+        // the old z path: frames differ while z is off the build's (from frame 20), by one D16 step in the kept part only
+        CHECK(zbad > 0); CHECK(zfirst >= 20); CHECK(z->dz_ranges > 5);
+        CHECK(zv->svc_cmp[1] > 3); CHECK(zv->svc_k1[1] > 0); CHECK_EQ(zv->svc_kn[1], 0); CHECK_EQ(zv->svc_st[1], 0); CHECK_EQ(zv->svc_eq[0], zv->svc_cmp[0]);
+        CHECK(zv->svc_eq[1] < zv->svc_cmp[1]); CHECK_EQ(zv->svc_max[1], 1);
+    }
 }
 // ================================================================================================ [rt2 R7] DM_VK_NATIVE_SORT (vkn_sort.c)
 // A depth-only pass of a D16 target (the mock's depth content model: a draw writes one z over one rectangle, both from what it reads, by

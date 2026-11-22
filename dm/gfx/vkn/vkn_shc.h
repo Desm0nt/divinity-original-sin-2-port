@@ -100,6 +100,63 @@ struct vkn_shader;
 uint64_t vkn_shc_masked_hash(const uint8_t *p, uint32_t n, const uint64_t *bits, uint32_t nwords, uint32_t *hashed);   // (the masked hash: tests)
 // Host tests: the read-mask lookup (vkn_shlib_read_mask's contract); NULL = the library's.
 void vkn_shc_test_mask(int (*fn)(const struct vkn_shader *s, int src, uint32_t binding, const uint64_t **bits, uint32_t *nwords));
+// ==== [VK-SHADOWS-MOVING] (docs/dos2/nr/VK-SHADOWS-MOVING.md; switches and bounds: vkn_shs.h; rules and proofs: dm/gfx/nr/nr_shs.h) ====
+// DM_VK_NATIVE_SHCULL: a caster whose CPU bounds do not touch its viewport and scissor is skipped before it is hashed or recorded.
+// DM_VK_NATIVE_SHSCROLL: the layer follows a cascade whose projection only translates by whole texels.
+//   T caster     a draw with bounds whose fragment stage provably does nothing (the verdict of MAT, vkn_mat_peek), whose scissor covers
+//                the tile and whose per-view block is the one of the range. The model (nr_shc.h) gets hash(structure, linear part of
+//                its clip transform, instance id) instead of the hash of its bytes; the instance = its clip translation relative to the
+//                reference translation of the cascade (the ViewProjection translation words of the per-view block), found again within
+//                1 / 64 px (nr_shs.h registry). While the cascade stands (reference bit-equal to that of the previous range) an
+//                instance gets another id when a constant its position reads changed (vkn_shs_b.pih): standing, a member has bit-equal
+//                position inputs, the same mesh bytes and no acting fragment stage - its depth is bit for bit the same (exact; and
+//                a caster whose OTHER constants change every frame, e.g. the time in a block its position does not read, stays one).
+//   anchor       at the BUILD of a layer: the reference rows, offset 0. A later HIT with the same rows = the cache as before (copy / precopy).
+//   scrolled hit the linear part bit-equal, the translation moved by whole texels (within the tolerance) from the anchor, the shift of
+//                this frame under half a tile, every member a T caster, D16 atlas cleared to 1.0. Then: the layer piece draws the kept
+//                part of the tile from the layer (toroidal offset, + the z translation since the anchor) inside the pass of the engine; a
+//                member whose bounds do not touch the exposed strips is skipped; one that does is drawn as the engine asks and kept;
+//                a member that does not come must have its bounds outside the tile (it leaves the member set), else RECOVER. At the
+//                first draw of the frame outside the atlas the exposed strips of every scrolled layer are cleared and drawn by the kept
+//                touchers in ONE pass of the layer image (viewport moved to the place of the strip in the layer, scissor = the strip,
+//                the per-view block with the z-translation words of the anchor: the layer stays in the z frame of its build - checked
+//                by numbers for every toucher).
+//   refresh      casters that came into the cascade since the build are drawn every frame; when the stable ones reach a quarter of the
+//                members the layer is dropped and built again (4 frames of full draws).
+//   verify       DM_VK_NATIVE_SHSCROLL=2: as mode 2 of the cache; for a scrolled range the side image gets the cleared tile, the layer
+//                piece and the drawn casters, compared with the tile the engine drew: "scroll verify ... texels differing (max steps)".
+// Not bit-exact by construction (the vertex shader rounds a translated position differently in the last float bit, the z of the layer is
+// re-added in one float op): the verify line measures it. Lines: "[vkn] shcache moving ..." / "... moving why ..." in the census.
+// [fix 22.11] (phone M09: every verified scrolled tile differed, 12-31 % of the texels, up to 7673 steps; host test MV_HARD) two causes:
+//   z            the layer's depths are D16 steps already; a z shift that is not a whole step rounds a second time (about 31 % of the
+//                covered texels one step off). Now a layer whose cascade's z words are not those of its build is dropped ("z moved"),
+//                and none is built while they changed within the last `stable` ranges ("builds held"). DM_VK_NATIVE_SHSCROLL_Z=1: the
+//                old path, measured (vkn_shs.h).
+//   identity     a caster whose own position constants changed (World) by less than the instance tolerance kept its id while the
+//                cascade moved (the standing rule above only acts while it stands): its old shadow stayed in the layer (large steps at
+//                its edges). Now an instance gets a new id whenever the words of its own blocks (vkn_shs_b.pio: all but the per-view
+//                block) differ from its last draw, standing or moving: a member has bit-equal own inputs in every frame.
+//   The verify line counts by case (x / y only, z) and by kind (kept part 1 step / more, inside the exposed strips).
+typedef struct vkn_shc_scroll_stats {
+    uint64_t plain_ranges, scroll_ranges, moved_ranges, dz_ranges;       // hits as before; scrolled hits (with a shift / with a z move)
+    uint64_t drop_ref, drop_lin, drop_shift, drop_big, drop_fmem, drop_fmt, job_late;   // layers dropped at a hit, by reason
+    uint64_t t_draws, t_fs, t_full, epoch;                                // T casters; refused: fragment stage / registry full; ids renewed
+    uint64_t skipped, touched, absent_out, absent_in, zguard, f_member;  // members of scrolled hits: skipped / drawn into strips / ...
+    uint64_t builds, build_t, build_f, refresh;
+    uint64_t jobs, job_pieces, job_draws, job_fail, job_lost, job_full, patch_bad;
+    uint64_t quad, quad_fail;                                             // the layer piece drawn into a tile
+    uint64_t cull_seen, culled, cull_would;
+    uint64_t sv_cmp, sv_eq, sv_all, sv_px; uint32_t sv_max, n_max; double err_max;
+    // [fix 22.11] the verify by case (0: the layer moved only in x / y since its build; 1: in z too - DM_VK_NATIVE_SHSCROLL_Z=1 only):
+    // tiles compared / equal / texels, texels differing in the kept part by one D16 step / by more, texels differing inside this
+    // frame's exposed strips (there the side image has only the drawn casters: a difference = a member's bounds missed a strip)
+    uint64_t svc_cmp[2], svc_eq[2], svc_all[2], svc_k1[2], svc_kn[2], svc_st[2]; uint32_t svc_max[2];
+    uint64_t drop_z, build_held, epoch_obj, zcmp, zstep;   // layers dropped: z moved; builds held (z moving); ids renewed: the object's
+                                                           // own position words changed; ranges compared with the slot's previous / z moved
+} vkn_shc_scroll_stats;
+void vkn_shc_scroll_stats_get(vkn_shc_scroll_stats *s);   // the current window
+struct vkn_shader;
+void vkn_shc_test_nofs(int (*fn)(const struct vkn_shader *s));   // host tests: "the fragment stage does nothing" (NULL = vkn_mat_peek)
 // [rt P4] DM_VK_NATIVE_SHC_EHASH (vkn_rt.h): the engine thread's block hashes taken / compared (mode 2) / different (totals)
 void vkn_shc_ehash_stats(uint64_t *used, uint64_t *verified, uint64_t *differ);
 #ifdef __cplusplus

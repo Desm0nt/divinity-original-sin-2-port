@@ -115,6 +115,7 @@ void dm_vkn_buf_register(void) __attribute__((weak));      // hle_dos2_vkn_buf.c
 void dm_vkn_tex_register(void) __attribute__((weak));      // hle_dos2_vkn_tex.c: textures, targets, samplers
 void dm_vkn_shader_register(void) __attribute__((weak));   // hle_dos2_vkn_shader.c: shaders
 void dm_vkn_state_register(void) __attribute__((weak));    // hle_dos2_vkn_state.c: state objects, vertex formats
+void vkn_shs_cam_block(uint32_t slot, uint32_t vp_off, uint32_t view_off) __attribute__((weak));   // [VK-SHADOWS-MOVING] dm/gfx/vkn/vkn_shs.c
 void vkn_shc_install(void) __attribute__((weak)); int vkn_shc_active(void) __attribute__((weak)); void vkn_shc_census(void) __attribute__((weak));   // [stage 5 A3] dm/gfx/vkn/vkn_shc.c
 void vkn_lf_install(void) __attribute__((weak)); int vkn_lf_active(void) __attribute__((weak)); void vkn_lf_census(void) __attribute__((weak));   // [stage 5.1 A4] dm/gfx/vkn/vkn_lightfuse.c
 
@@ -143,6 +144,9 @@ void dm_dos2_vkn_install(void) {
     if (dm_vkn_ui_register) dm_vkn_ui_register();
     if (dm_vkn_cmd_register) dm_vkn_cmd_register();
     { extern void dm_vkn_occ_register(void) __attribute__((weak)); if (dm_vkn_occ_register) dm_vkn_occ_register(); }   // [stage 5 technique A] hle_dos2_vkn_occ.c
+    // [VK-SHADOWS-MOVING] the per-view block of a shadow cascade for the scrolling layer: PerView = vertex uniform slot 12, ViewProjection rows
+    // at byte 128, View rows at byte 0 (tools/dos2_nx_headers/Shaders/GlobalConstants_NX.shdh; dm/host/hle_dos2_vkn_occ.c has the same fact)
+    if (mode == VKN_NATIVE && vkn_shs_cam_block) vkn_shs_cam_block(12, 128, 0);
     if (mode == VKN_NATIVE && vkn_shc_install && vkn_shc_active) { vkn_shc_install(); if (vkn_shc_active()) dm_vkn_census(vkn_shc_census); }   // [stage 5 A3] the static shadow cache
     if (mode == VKN_NATIVE && vkn_lf_install && vkn_lf_active) { vkn_lf_install(); if (vkn_lf_active()) dm_vkn_census(vkn_lf_census); }   // [stage 5.1 A4] LIGHTFUSE + FOG
     int in = 0, want = 0;

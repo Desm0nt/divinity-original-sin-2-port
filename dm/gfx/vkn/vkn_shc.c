@@ -22,6 +22,8 @@
 #include "../nr/nr_hacks.h"
 #include "vkn_mat.h"   // [stage 5.2 B5 fixpp] vkn_mat_apply: the MAT decision for a replayed caster
 #include "vkn_drv.h"   // [stage 5.3 V2] DM_GFX_CLEAR_REBIND after vkCmdClearAttachments
+#include "vkn_shs.h"   // [VK-SHADOWS-MOVING] caster bounds, the scroll piece
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,14 +42,17 @@ typedef struct sdraw {
     uint32_t first, count, instances;
     uint8_t indexed, ntex, nubo, ok, vread;   // ok: complete (replayable); vread: bit st = vertex stream st is read
     struct { uint8_t st, slot; int32_t id, sid; } tx[SV_TEX];
-    struct { uint8_t st, slot; uint32_t off, size; } ub[SV_UBO];
+    vkn_shs_ub ub[SV_UBO];
     uint64_t vver[3], iver;                   // buffer versions at the draw (a replay with other bytes would not be this draw)
+    // [VK-SHADOWS-MOVING] tcls: a translation-invariant caster - inst its instance (nr_shs.h registry of the slot), mh the hash the model
+    // got, lb its tile-local pixel bounds, z0 / z1 its clip z range; touch: a member that touches an exposed strip (drawn, kept for the layer)
+    int32_t inst; uint8_t tcls, touch; nr_ss_rect lb; float z0, z1; uint64_t mh;
 } sdraw;
 
 enum { END_NEXT, END_CLEAR, END_READ, END_USE, END_CLOSE };   // why a cascade ended (END_NEXT: at a draw = the safe point)
 enum { P_NONE, P_BUILD, P_RECOVER, P_VERIFY };                // work left for the next safe point
 enum { RP_ALL, RP_DRAWN, RP_NONE };                           // replay: every kept draw / the ordinals the model marked drawn / none (a clear only)
-enum { R_ALLOC, R_ATLAS, R_IMG, R_BUILD, R_RECOVER, R_LOST, R_STALE, R_VERIFY, R_UBO, R_SAVE, R_PRE, R_N };
+enum { R_ALLOC, R_ATLAS, R_IMG, R_BUILD, R_RECOVER, R_LOST, R_STALE, R_VERIFY, R_UBO, R_SAVE, R_PRE, R_SCROLL, R_N };
 
 static struct {
     // switches
@@ -140,7 +145,9 @@ fail:
     SHC_RED(R_ALLOC, "no memory for the model (%zu bytes): the cache stays off", NRSHC_CAS * sizeof(nrshc_cas) + sizeof(nrshc_range) + NRSHC_DRAWS * sizeof(sdraw));
     return -1;
 }
+static void scroll_reset_all(void);   // [VK-SHADOWS-MOVING]
 static void layers_drop(void) {
+    scroll_reset_all();
     for (int i = 0; i < NRSHC_CAS; i++) { if (g.cas[i]) g.cas[i]->layer = 0; g.slot_has[i] = g.slot_real[i] = 0; }
 }
 
@@ -190,6 +197,331 @@ static int mat_replay(const vkn_draw_in *in, vkn_tex *dst, const struct sdraw *s
     memset(mo, 0, sizeof *mo);
     return vkn_mat_apply(in, &c, mo);
 }
+// ================================================================================================ [VK-SHADOWS-MOVING]
+// The scrolling layer and the caster culling (vkn_shc.h block "VK-SHADOWS-MOVING"; the rules and proofs: dm/gfx/nr/nr_shs.h; the bounds,
+// the switches and the layer piece: vkn_shs.c). State of this block: gs. Everything on the recording thread.
+enum { SJ_TV = 768 };
+#define SJ_ZG 1e-4f   /* a member's clip z must stay this far inside (0, 1), in the frame's z frame and in the layer's */
+typedef struct sslot {
+    int anch;                     // the layer has an anchor: the cascade's reference rows at its build
+    int plain;                    // never scrolled since the build (offset 0, the build's z frame): the cache as before
+    int32_t O[2], sh[2];          // the layer's toroidal offset; the shift since the build (px)
+    float lin[9], t[3];           // the anchor: linear part and translation of the reference rows
+    uint32_t zw[2];               // the anchor's raw z-translation words (View, ViewProjection): the layer's z frame
+    float last[12]; int last_ok;  // the reference of the slot's previous range
+    uint32_t lzw[2], zrun;        // [fix 22.11] the z words of the slot's previous range; ranges in a row with the z words unchanged
+    uint32_t nmem, fmem;          // members with an instance (mem / mh), other members (the layer cannot scroll while it has one)
+    uint16_t mem[NRSHC_DRAWS]; uint64_t mh[NRSHC_DRAWS];
+} sslot;
+typedef struct sjob { int on; int32_t rect[4]; int ne; nr_ss_rect e[2]; int32_t O[2]; uint32_t t0, t1, cam_from, cam_to; } sjob;
+static struct {
+    int scroll, cull, cam; uint32_t cam_slot, vp_off, view_off; double eps;
+    sslot *sl; nr_ss_reg *reg[NRSHC_CAS]; sdraw *tv; uint32_t ntv; uint64_t tv_frame;
+    // the range: have - the reference rows are known; same_prev - they are the previous range's bit for bit; on - the scroll path
+    struct { int have, same_prev, on, k, zmv; float ref[12]; uint32_t cam_off, cam_size, serial, fresh; int32_t n[2], O2[2]; nr_ss_rect e[2], keep; int ne; float dz; } R;
+    struct { int on, cz; nr_ss_rect keep; int32_t O[2]; float dz; } V;   // the ended range, for its verify (cz: its layer moved in z)
+    int zok;                                                           // [fix 22.11] DM_VK_NATIVE_SHSCROLL_Z=1
+    sjob job[NRSHC_CAS]; int njob, rp_comp;
+    const vkn_draw_in *cur_in;
+    int (*t_nofs)(const vkn_shader *s);
+    vkn_shc_scroll_stats c;
+} gs;
+extern int vkn_mat_peek(const vkn_draw_in *in, const vkn_fx_ctx *ctx) __attribute__((weak));
+void vkn_shc_scroll_stats_get(vkn_shc_scroll_stats *s) { if (s) *s = gs.c; }
+void vkn_shc_test_nofs(int (*fn)(const vkn_shader *s)) { gs.t_nofs = fn; }
+
+static int scroll_alloc(void) {
+    if (gs.sl) return 0;
+    gs.sl = (sslot *)calloc(NRSHC_CAS, sizeof *gs.sl); gs.tv = (sdraw *)calloc(SJ_TV, sizeof *gs.tv);
+    if (!gs.sl || !gs.tv) { free(gs.sl); free(gs.tv); gs.sl = NULL; gs.tv = NULL; gs.scroll = 0; SHC_RED(R_ALLOC, "no memory for the scroll state: DM_VK_NATIVE_SHSCROLL off"); return -1; }
+    return 0;
+}
+static nr_ss_reg *scroll_reg(int k) {
+    if (!gs.reg[k] && (gs.reg[k] = (nr_ss_reg *)malloc(sizeof(nr_ss_reg)))) nr_ss_reg_init(gs.reg[k], gs.eps, 4e-6);
+    return gs.reg[k];
+}
+static uint64_t scroll_bytes(void) {
+    uint64_t n = gs.sl ? NRSHC_CAS * sizeof(sslot) + (uint64_t)SJ_TV * sizeof(sdraw) : 0;
+    for (int i = 0; i < NRSHC_CAS; i++) if (gs.reg[i]) n += sizeof(nr_ss_reg);
+    return n;
+}
+// The slot's layer is gone (or about to be made again): no member, no anchor, no strip work.
+static void scroll_slot_reset(int k) {
+    if (!gs.sl) return;
+    sslot *q = &gs.sl[k]; nr_ss_reg *rg = gs.reg[k];
+    for (uint32_t i = 0; rg && i < q->nmem; i++) rg->in[q->mem[i]].mem = 0;
+    q->nmem = q->fmem = 0; q->anch = 0; q->plain = 0; q->O[0] = q->O[1] = q->sh[0] = q->sh[1] = 0;
+    if (gs.job[k].on) { gs.job[k].on = 0; gs.njob--; gs.c.job_lost++; }
+}
+static void scroll_drop(int k) { if (g.cas[k]) g.cas[k]->layer = 0; g.slot_real[k] = 0; scroll_slot_reset(k); }
+static void scroll_reset_all(void) { for (int k = 0; gs.sl && k < NRSHC_CAS; k++) { scroll_slot_reset(k); gs.sl[k].last_ok = 0; } gs.R.on = 0; gs.V.on = 0; }
+// The cascade's reference: rows 0..2 of the ViewProjection the announced per-view block holds (x y z coefficients + translation each).
+static int ref_read(float ref[12], uint32_t *off, uint32_t *size) {
+    uint32_t o = 0, z = 0;
+    if (!gs.cam || vkn_draw_ubo_get(0, gs.cam_slot, &o, &z) || z < gs.vp_off + 48 || z < gs.view_off + 48) return 0;
+    if (!g.ring) g.ring = (const uint8_t *)vkn_ring_cpu();
+    if (!g.ring || (uint64_t)o + z > VKN_RING_BYTES) return 0;
+    memcpy(ref, g.ring + o + gs.vp_off, 48);
+    for (int i = 0; i < 12; i++) if (!(ref[i] == ref[i]) || ref[i] > 1e30f || ref[i] < -1e30f) return 0;
+    *off = o; *size = z;
+    return 1;
+}
+static int scroll_can(void) { return g.S && g.atlas && g.atlas->format == VK_FORMAT_D16_UNORM && g.clear_bits == 0x3f800000u; }
+// At the first draw of a range, after the model's decision *act: the reference, and for a HIT whether the layer is taken as before
+// (the cascade did not move since its build), scrolled, or dropped.
+static void scroll_arm(int k, const int32_t rect[4], int *act, int *why) {
+    memset(&gs.R, 0, sizeof gs.R); gs.R.k = k;
+    if (!gs.scroll || scroll_alloc()) return;
+    sslot *q = &gs.sl[k]; nrshc_cas *c = g.cas[k];
+    gs.R.serial = (uint32_t)c->ranges + 1;
+    gs.R.have = ref_read(gs.R.ref, &gs.R.cam_off, &gs.R.cam_size);
+    gs.R.same_prev = gs.R.have && q->last_ok && !memcmp(gs.R.ref, q->last, sizeof q->last);
+    // [fix 22.11] the z frame of the cascade: the raw z-translation words (View, ViewProjection); how long they stood
+    uint32_t zw[2] = {0, 0};
+    if (gs.R.have) { memcpy(&zw[0], g.ring + gs.R.cam_off + gs.view_off + 44, 4); memcpy(&zw[1], g.ring + gs.R.cam_off + gs.vp_off + 44, 4); }
+    if (gs.R.have && q->last_ok) {
+        gs.c.zcmp++;
+        if (zw[0] != q->lzw[0] || zw[1] != q->lzw[1]) { gs.c.zstep++; q->zrun = 0; } else if (q->zrun < 100000) q->zrun++;
+    } else q->zrun = 0;
+    q->lzw[0] = zw[0]; q->lzw[1] = zw[1];
+    q->last_ok = gs.R.have; if (gs.R.have) memcpy(q->last, gs.R.ref, sizeof q->last);
+    // [fix 22.11] a layer built while the z frame moves would be dropped at its next hit (a replay of every member for nothing): held
+    // until the z words stood `stable` ranges in a row (standing - the cache as before - builds as soon as the model wants)
+    if (*act == NRSHC_A_BUILD && !gs.zok && gs.R.have && q->zrun + 1 < g.par.stable) { gs.c.build_held++; *act = NRSHC_A_NORMAL; *why = NRSHC_W_OFF; return; }
+    if (*act != NRSHC_A_HIT || !q->anch) return;   // (a layer without an anchor: the model's hashes alone, as before)
+    gs.R.zmv = zw[0] != q->zw[0] || zw[1] != q->zw[1];
+    const float *r = gs.R.ref; uint64_t *drop = NULL;
+    const float lin[9] = {r[0], r[1], r[2], r[4], r[5], r[6], r[8], r[9], r[10]}, t[3] = {r[3], r[7], r[11]};
+    int32_t nx = 0, ny = 0; double err = 0;
+    if (gs.job[k].on) drop = &gs.c.job_late;   // (the strips of the frame before were never drawn)
+    else if (!gs.R.have) drop = &gs.c.drop_ref;
+    else if (memcmp(lin, q->lin, sizeof lin)) drop = &gs.c.drop_lin;
+    else if (q->plain && !memcmp(t, q->t, sizeof t)) { gs.c.plain_ranges++; return; }
+    else if (gs.R.zmv && !gs.zok) drop = &gs.c.drop_z;   // [fix 22.11] the layer's depths cannot follow a z shift exactly
+    else if (!nr_ss_shift((double)t[0] - (double)q->t[0], (double)t[1] - (double)q->t[1], rect[2], rect[3], gs.eps, &nx, &ny, &err)) drop = &gs.c.drop_shift;
+    else if (abs(nx - q->sh[0]) >= rect[2] / 2 || abs(ny - q->sh[1]) >= rect[3] / 2) drop = &gs.c.drop_big;
+    else if (q->fmem) drop = &gs.c.drop_fmem;
+    else if (!scroll_can()) drop = &gs.c.drop_fmt;
+    if (drop) { ++*drop; scroll_drop(k); *act = NRSHC_A_NORMAL; *why = NRSHC_W_LAYER; return; }
+    const int32_t W = rect[2], H = rect[3];
+    gs.R.on = 1; gs.R.n[0] = nx - q->sh[0]; gs.R.n[1] = ny - q->sh[1];
+    gs.R.O2[0] = q->O[0]; gs.R.O2[1] = q->O[1]; nr_ss_scroll(W, H, gs.R.O2, gs.R.n[0], gs.R.n[1]);
+    gs.R.ne = nr_ss_exposed(W, H, gs.R.n[0], gs.R.n[1], gs.R.e);
+    gs.R.keep.x0 = gs.R.n[0] > 0 ? gs.R.n[0] : 0; gs.R.keep.x1 = gs.R.n[0] < 0 ? W + gs.R.n[0] : W;
+    gs.R.keep.y0 = gs.R.n[1] > 0 ? gs.R.n[1] : 0; gs.R.keep.y1 = gs.R.n[1] < 0 ? H + gs.R.n[1] : H;
+    gs.R.dz = t[2] - q->t[2];
+    gs.c.scroll_ranges++;
+    if (gs.R.n[0] | gs.R.n[1]) gs.c.moved_ranges++;
+    if (gs.R.dz != 0.0f) gs.c.dz_ranges++;
+    if (err > gs.c.err_max) gs.c.err_max = err;
+    { const uint32_t m = (uint32_t)(abs(gs.R.n[0]) > abs(gs.R.n[1]) ? abs(gs.R.n[0]) : abs(gs.R.n[1])); if (m > gs.c.n_max) gs.c.n_max = m; }
+}
+// The scrolled layer into the tile of the current target set (the engine's atlas pass, or the verify image inside a replay).
+static int scroll_comp(const int32_t rect[4], const nr_ss_rect *keep, const int32_t O[2], float dz) {
+    const nr_ss_rect fb = {rect[0] + keep->x0, rect[1] + keep->y0, rect[0] + keep->x1, rect[1] + keep->y1};
+    if (nr_ss_empty(&fb)) return 0;
+    vkn_fx_out chain_keep; if (g_chain_out) chain_keep = *g_chain_out;   // (a forced draw overwrites the chain's output: vkn_fx.h)
+    const int self = g.self; g.self = 1;
+    const int rc = vkn_shs_composite(gs.cur_in, g.S, rect, &fb, O, dz + 0.25f / 65535.0f, 1.0f);
+    g.self = self;
+    if (g_chain_out) *g_chain_out = chain_keep;
+    return rc;
+}
+// A draw of an armed range that has bounds: is it a translation-invariant caster ("T")? Then *hfin = its hash for the model (structure +
+// instance id) and *inst its instance.
+static int scroll_tdraw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, const vkn_shs_b *b, uint64_t h0, uint64_t vj, uint64_t *hfin, int32_t *inst) {
+    uint32_t o = 0, z = 0;
+    if (vkn_draw_ubo_get(0, gs.cam_slot, &o, &z) || o != gs.R.cam_off) return 0;   // another per-view block than the range's
+    const int32_t *rc = g.R.rect;
+    if (in->scissor[0] > rc[0] || in->scissor[1] > rc[1] || in->scissor[0] + in->scissor[2] < rc[0] + rc[2] || in->scissor[1] + in->scissor[3] < rc[1] + rc[3]) return 0;
+    if (!(gs.t_nofs ? gs.t_nofs(ctx->shader) : vkn_mat_peek ? vkn_mat_peek(in, ctx) : 0)) { gs.c.t_fs++; return 0; }   // (its fragment stage may kill / write depth)
+    nr_ss_reg *rg = scroll_reg(g.R.k); if (!rg) return 0;
+    const float *r = gs.R.ref;
+    const double u[3] = {((double)b->f[0].c[0] - (double)r[3]) * 0.5 * rc[2], -((double)b->f[1].c[0] - (double)r[7]) * 0.5 * rc[3], (double)b->f[2].c[0] - (double)r[11]};
+    uint64_t hs = nrshc_mix(nrshc_mix(h0, vj), 0x54434c53);
+    for (int c = 0; c < 3; c++) hs = nrshc_bytes(hs, &b->f[c].c[1], 12);
+    const int i = nr_ss_reg_get(rg, hs, u, gs.R.serial);
+    if (i < 0) { gs.c.t_full++; return 0; }
+    nr_ss_inst *I = &rg->in[i];
+    if (I->bad) return 0;
+    // the cascade did not move since the previous range, yet a constant this caster's position reads did (it moved by less than the
+    // tolerance): another object for the cache - while the cascade stands a member is one only with bit-equal position inputs (exact:
+    // the position of every vertex is a function of the mesh and those words, and no fragment stage acts)
+    // [fix 22.11] standing or moving: an object whose own position words (World: every block but the per-view one) are not those of its
+    // last draw is another object (phone M09: "changed while the cascade stood" 637 in 10 s - while the cascade moved such a caster kept
+    // its id when it moved by less than the tolerance, and its old shadow stayed in the scrolled layer)
+    if (I->ho_ok && I->ho != b->pio) { I->id = nr_ss_mix(I->id, 0x4F424A43) | 1u; gs.c.epoch_obj++; }
+    else if (gs.R.same_prev && I->prev + 1 == gs.R.serial && I->hf != b->pih) { I->id = nr_ss_mix(I->id, 0x45504f43) | 1u; gs.c.epoch++; }
+    I->hf = b->pih; I->ho = b->pio; I->ho_ok = 1;
+    *hfin = nrshc_mix(hs, I->id); *inst = i;
+    gs.c.t_draws++;
+    return 1;
+}
+// A member of a HIT range came (the model wants it skipped): 1 = skip it, 0 = draw it (a strip toucher, or the range is broken).
+static int scroll_member(sdraw *sd, const vkn_shs_b *b, nrshc_range *r) {
+    if (!sd->tcls) {   // a member without an instance cannot have come under a moved projection: never trusted
+        if (gs.R.on) { r->tainted = 1; gs.c.f_member++; return 0; }
+        return 1;
+    }
+    nr_ss_inst *I = &gs.reg[g.R.k]->in[sd->inst];
+    if (I->cstamp != gs.R.serial) { I->cstamp = gs.R.serial; I->cons = 0; }
+    I->cons++;
+    if (!gs.R.on) return 1;
+    if (!(b->z0 > SJ_ZG && b->z1 < 1.0f - SJ_ZG && b->z0 - gs.R.dz > SJ_ZG && b->z1 - gs.R.dz < 1.0f - SJ_ZG)) { I->bad = 1; r->tainted = 1; gs.c.zguard++; return 0; }
+    if (nr_ss_touch(&sd->lb, gs.R.e, gs.R.ne)) { sd->touch = 1; gs.c.touched++; return 0; }
+    gs.c.skipped++;
+    return 1;
+}
+// Before the model ends a scrolled HIT: every member that did not come must have left the tile (then it leaves the layer's members);
+// one that did not come inside the tile breaks the range (RECOVER).
+static void scroll_absent(int k, nrshc_range *r) {
+    sslot *q = &gs.sl[k]; nr_ss_reg *rg = gs.reg[k]; nrshc_cas *c = g.cas[k];
+    const int32_t sx = q->sh[0] + gs.R.n[0], sy = q->sh[1] + gs.R.n[1];
+    const nr_ss_rect tile = {0, 0, g.R.rect[2], g.R.rect[3]};
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < q->nmem; i++) {
+        nr_ss_inst *I = &rg->in[q->mem[i]];
+        int keep = 1;
+        if (I->cstamp == gs.R.serial && I->cons) I->cons--;   // (one unit a member entry)
+        else {
+            const nr_ss_rect now = {I->bb.x0 + sx, I->bb.y0 + sy, I->bb.x1 + sx, I->bb.y1 + sy};
+            if (r->tainted) { }
+            else if (nr_ss_isect(&now, &tile)) { r->tainted = 1; gs.c.absent_in++; }
+            else if (nrshc_mem_drop(c, q->mh[i], 1)) { keep = 0; if (I->mem) I->mem--; gs.c.absent_out++; }
+            else { r->tainted = 1; gs.c.absent_in++; }
+        }
+        if (keep) { q->mem[w] = q->mem[i]; q->mh[w] = q->mh[i]; w++; }
+    }
+    q->nmem = w;
+}
+// A BUILD ended with a layer: its members, its anchor.
+static void scroll_built(int k, const nrshc_range *r) {
+    scroll_slot_reset(k);
+    sslot *q = &gs.sl[k]; nr_ss_reg *rg = gs.reg[k];
+    const uint32_t n = r->ndraw < NRSHC_DRAWS ? r->ndraw : NRSHC_DRAWS;
+    for (uint32_t o = 0; o < n; o++) {
+        if (r->f[o] != NRSHC_F_DRAWN) continue;
+        const sdraw *sd = &g.sv[o];
+        if (!sd->tcls || !rg || q->nmem >= NRSHC_DRAWS) { q->fmem++; continue; }
+        nr_ss_inst *I = &rg->in[sd->inst];
+        if (!(sd->z0 > SJ_ZG && sd->z1 < 1.0f - SJ_ZG)) { I->bad = 1; q->fmem++; gs.c.zguard++; continue; }
+        q->mem[q->nmem] = (uint16_t)sd->inst; q->mh[q->nmem] = sd->mh; q->nmem++;
+        if (!I->mem) I->bb = sd->lb;
+        I->mem++;
+    }
+    if (gs.R.have) {
+        const float *x = gs.R.ref;
+        const float lin[9] = {x[0], x[1], x[2], x[4], x[5], x[6], x[8], x[9], x[10]};
+        memcpy(q->lin, lin, sizeof lin); q->t[0] = x[3]; q->t[1] = x[7]; q->t[2] = x[11];
+        memcpy(&q->zw[0], g.ring + gs.R.cam_off + gs.view_off + 44, 4); memcpy(&q->zw[1], g.ring + gs.R.cam_off + gs.vp_off + 44, 4);
+        q->anch = 1; q->plain = 1;
+    }
+    if (rg) nr_ss_reg_sweep(rg, gs.R.serial, 600);
+    gs.c.builds++; gs.c.build_t += q->nmem; gs.c.build_f += q->fmem;
+}
+// A scrolled HIT ended well: the layer's offset moves, its exposed strips are cleared and drawn (by the touchers) at the frame's safe
+// point. 0 = ok; -1 = the layer cannot be kept (dropped).
+static int scroll_commit(int k, const nrshc_range *r) {
+    sslot *q = &gs.sl[k]; sjob *j = &gs.job[k];
+    q->O[0] = gs.R.O2[0]; q->O[1] = gs.R.O2[1]; q->sh[0] += gs.R.n[0]; q->sh[1] += gs.R.n[1]; q->plain = 0;
+    gs.V.on = 1; gs.V.keep = gs.R.keep; gs.V.O[0] = q->O[0]; gs.V.O[1] = q->O[1]; gs.V.dz = gs.R.dz; gs.V.cz = gs.R.zmv || gs.R.dz != 0.0f;
+    if (j->on) { scroll_drop(k); return -1; }   // (the strips of the frame before were never drawn: its layer is not whole)
+    if (!gs.R.ne) return 0;
+    if (gs.tv_frame != g.frame) { gs.tv_frame = g.frame; gs.ntv = 0; }
+    memset(j, 0, sizeof *j);
+    memcpy(j->rect, g.R.rect, sizeof j->rect); j->ne = gs.R.ne; j->e[0] = gs.R.e[0]; j->e[1] = gs.R.e[1]; j->O[0] = q->O[0]; j->O[1] = q->O[1];
+    j->t0 = gs.ntv; j->cam_from = j->cam_to = gs.R.cam_off;
+    // the layer's z frame: the frame's per-view block with the anchor's z-translation words (checked by numbers for every toucher below)
+    uint32_t zw[2]; memcpy(&zw[0], g.ring + gs.R.cam_off + gs.view_off + 44, 4); memcpy(&zw[1], g.ring + gs.R.cam_off + gs.vp_off + 44, 4);
+    const int same_z = zw[0] == q->zw[0] && zw[1] == q->zw[1];
+    const uint32_t n = r->ndraw < NRSHC_DRAWS ? r->ndraw : NRSHC_DRAWS;
+    int bad = 0;
+    for (uint32_t o = 0; o < n && !bad; o++) {
+        const sdraw *sd = &g.sv[o];
+        if (!sd->touch) continue;
+        if (gs.ntv >= SJ_TV) { bad = 1; gs.c.job_full++; break; }
+        if (!same_z) {
+            if (j->cam_to == j->cam_from) {
+                uint32_t off = 0;
+                if (vkn_ring_alloc(gs.R.cam_size, &off)) { bad = 1; break; }
+                uint8_t *p = (uint8_t *)vkn_ring_cpu() + off;
+                memcpy(p, g.ring + gs.R.cam_off, gs.R.cam_size); memcpy(p + gs.view_off + 44, &q->zw[0], 4); memcpy(p + gs.vp_off + 44, &q->zw[1], 4);
+                j->cam_to = off;
+            }
+            const vkn_shader *sh = vkn_shader_get(sd->in.shader); nr_sb_form a[4], b[4];
+            if (!sh || !vkn_shs_forms_kept(sh, sd->ub, sd->nubo, -1, 0, 0, a) || !vkn_shs_forms_kept(sh, sd->ub, sd->nubo, (int)gs.cam_slot, j->cam_from, j->cam_to, b) ||
+                memcmp(&a[0], &b[0], sizeof a[0]) || memcmp(&a[1], &b[1], sizeof a[1]) || memcmp(&a[2].c[1], &b[2].c[1], 12) || memcmp(&a[3], &b[3], sizeof a[3]) ||
+                !(fabsf((a[2].c[0] - b[2].c[0]) - gs.R.dz) <= 2e-6f * (1.0f + fabsf(a[2].c[0])))) { bad = 1; gs.c.patch_bad++; break; }
+        }
+        gs.tv[gs.ntv++] = *sd;
+    }
+    if (bad) { gs.ntv = j->t0; scroll_drop(k); return -1; }
+    j->t1 = gs.ntv; j->on = 1; gs.njob++;
+    return 0;
+}
+// The frame's safe point (a draw outside the atlas): the strips of every scrolled layer, in one pass of the layer image.
+static void scroll_jobs_run(void) {
+    if (!gs.njob) return;
+    vkn_fx_out chain_keep; if (g_chain_out) chain_keep = *g_chain_out;
+    uint32_t n0 = 0, lay[VKN_PASS_COLORS], mip[VKN_PASS_COLORS]; vkn_tex *col[VKN_PASS_COLORS], *dep = NULL, *held[VKN_PASS_COLORS + 1];
+    vkn_pass_cur_get(&n0, col, lay, mip, &dep);
+    for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) { vkn_tex *t = i < VKN_PASS_COLORS ? col[i] : dep; held[i] = t && vkn_tex_ref(t) ? t : NULL; }
+    struct { uint32_t off, size; int ok; } ub0[2][VKN_UBO_SLOTS];
+    for (int st = 0; st < 2; st++) for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) ub0[st][sl].ok = !vkn_draw_ubo_get(st, sl, &ub0[st][sl].off, &ub0[st][sl].size);
+    g.self = 1; vkn_fx_bypass(1);
+    if (g.S) vkn_pass_targets(0, NULL, NULL, NULL, g.S);
+    vkn_pass_info pi; const int nopass = !g.S || vkn_pass_ready(&pi) || !vkn_cb();
+    for (int k = 0; k < NRSHC_CAS; k++) {
+        sjob *j = &gs.job[k];
+        if (!j->on) continue;
+        j->on = 0; gs.njob--;
+        int bad = nopass || gs.tv_frame != g.frame;
+        for (int ei = 0; ei < j->ne && !bad; ei++) {
+            nr_ss_piece pc[4]; const int np = nr_ss_pieces(j->rect[2], j->rect[3], j->O, &j->e[ei], pc);
+            for (int p = 0; p < np && !bad; p++) {
+                const int32_t ox = j->rect[0] + pc[p].dx, oy = j->rect[1] + pc[p].dy;
+                const VkClearAttachment ca = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .clearValue.depthStencil = {1.0f, 0}};
+                const VkClearRect cr = {{{ox + pc[p].r.x0, oy + pc[p].r.y0}, {(uint32_t)(pc[p].r.x1 - pc[p].r.x0), (uint32_t)(pc[p].r.y1 - pc[p].r.y0)}}, 0, 1};
+                if (vkn_pass_ready(&pi) || !vkn_cb()) { bad = 1; break; }
+                vkCmdClearAttachments(vkn_cb(), 1, &ca, 1, &cr);
+                vkn_drv_cleared(); g.s.tile_clears++; gs.c.job_pieces++;
+                for (uint32_t t = j->t0; t < j->t1 && !bad; t++) {
+                    sdraw *sd = &gs.tv[t];
+                    if (!nr_ss_isect(&sd->lb, &pc[p].r)) continue;   // (its bounds do not reach this piece: no fragment there)
+                    int stale = sd->indexed && vkn_buf_version(VKN_BUF_IB, sd->in.ib, NULL) != sd->iver;
+                    for (int st = 0; st < 3; st++) if ((sd->vread >> st & 1) && vkn_buf_version(VKN_BUF_VB, sd->in.vb[st], NULL) != sd->vver[st]) stale = 1;
+                    if (stale) { bad = 1; g.s.replay_stale++; break; }
+                    int32_t tex[2][VKN_TEX_SLOTS], smp[2][VKN_TEX_SLOTS];
+                    memset(tex, 0xff, sizeof tex); memset(smp, 0xff, sizeof smp);
+                    for (uint32_t i = 0; i < sd->ntex; i++) { tex[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].id; smp[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].sid; }
+                    vkn_draw_in in = sd->in;
+                    in.tex[0] = tex[0]; in.tex[1] = tex[1]; in.tex[2] = NULL; in.smp[0] = smp[0]; in.smp[1] = smp[1]; in.smp[2] = NULL;
+                    in.viewport[0] = (float)ox; in.viewport[1] = (float)oy;   // (the tile's size stays: the same texel grid, moved)
+                    in.scissor[0] = ox + pc[p].r.x0; in.scissor[1] = oy + pc[p].r.y0; in.scissor[2] = pc[p].r.x1 - pc[p].r.x0; in.scissor[3] = pc[p].r.y1 - pc[p].r.y0;
+                    for (uint32_t i = 0; i < sd->nubo; i++) {
+                        const uint32_t off = sd->ub[i].st == 0 && sd->ub[i].slot == gs.cam_slot && sd->ub[i].off == j->cam_from ? j->cam_to : sd->ub[i].off;
+                        vkn_draw_ubo(sd->ub[i].st, sd->ub[i].slot, off, sd->ub[i].size);
+                    }
+                    vkn_fx_out mo; const int forced = mat_replay(&in, g.S, sd, &mo);
+                    if (forced) vkn_fx_force(&mo);
+                    const int rc = sd->indexed ? vkn_draw_indexed(&in, sd->first, sd->count, sd->instances) : vkn_draw_arrays(&in, sd->first, sd->count);
+                    if (forced) vkn_fx_force(NULL);
+                    if (rc) { bad = 1; g.s.replay_drop++; } else { g.s.replayed++; gs.c.job_draws++; }
+                }
+            }
+        }
+        if (bad) { gs.c.job_fail++; scroll_drop(k); SHC_RED(R_SCROLL, "cascade %d: the scrolled layer's strips could not be drawn: the layer is dropped (drawn in full next frame)", k); }
+        else gs.c.jobs++;
+    }
+    for (int st = 0; st < 2; st++) for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) if (ub0[st][sl].ok) vkn_draw_ubo(st, sl, ub0[st][sl].off, ub0[st][sl].size);
+    vkn_pass_targets(n0, col, lay, mip, dep);
+    if (g.S) (void)vkn_pass_sample(g.S);   // readable for the tiles of the next frame now: no pass of the engine is open here, none is broken there
+    for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) if (held[i]) vkn_tex_unref(held[i]);
+    vkn_fx_bypass(0); g.self = 0;
+    if (g_chain_out) *g_chain_out = chain_keep;
+}
+static void scroll_jobs_lost(void) { for (int k = 0; k < NRSHC_CAS; k++) if (gs.job[k].on) scroll_drop(k); }
+
 static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, int filter) {
     vkn_fx_out chain_keep; if (g_chain_out) chain_keep = *g_chain_out;   // [fixpp]
     uint32_t n0 = 0, lay[VKN_PASS_COLORS], mip[VKN_PASS_COLORS]; vkn_tex *col[VKN_PASS_COLORS], *dep = NULL, *held[VKN_PASS_COLORS + 1];
@@ -212,6 +544,7 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
             g.s.tile_clears++;
         }
     }
+    if (bad >= 0 && gs.rp_comp && clear_rect && scroll_comp(clear_rect, &gs.V.keep, gs.V.O, gs.V.dz)) bad = -1;   // [VK-SHADOWS-MOVING] verify: the scrolled layer first
     const uint32_t n = g.rg->ndraw < NRSHC_DRAWS ? g.rg->ndraw : NRSHC_DRAWS;
     for (uint32_t o = 0; bad >= 0 && o < n; o++) {
         if (filter == RP_NONE) break;
@@ -245,13 +578,26 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
 }
 
 // ---- mode 2: the would-be hit compared with the truth (at retire: the GPU is done) ----
-typedef struct vjob { vkn_block a, b; uint64_t n; uint32_t w, bpp; int k; uint64_t frame; uint8_t x8; } vjob;   // x8: an X8_D24 atlas ([VK-DRV])
+typedef struct vjob { vkn_block a, b; uint64_t n; uint32_t w, bpp; int k; uint64_t frame; uint8_t x8, tol, cz; nr_ss_rect keep; } vjob;   // tol: [VK-SHADOWS-MOVING] a scrolled range (counted, not byte-equal)   // x8: an X8_D24 atlas ([VK-DRV])
 static void verify_done(void *ctx) {
     vjob *j = (vjob *)ctx;
     const uint8_t *x = (const uint8_t *)j->a.cpu, *y = (const uint8_t *)j->b.cpu;
     // X8_D24: the top byte of each 32-bit texel of a buffer copy is not defined by Vulkan - compared without it
     if (x && y && j->x8) for (uint64_t q = 0; q + 4 <= j->n; q += 4) { ((uint8_t *)j->a.cpu)[q + 3] = 0; ((uint8_t *)j->b.cpu)[q + 3] = 0; }
-    if (x && y && !memcmp(x, y, j->n)) g.s.verify_eq++;
+    if (x && y && j->tol) {   // [VK-SHADOWS-MOVING] the scrolled tile against the drawn one: texels differing, the largest depth step
+        uint64_t px = 0, k1 = 0, kn = 0, st = 0; uint32_t mx = 0;
+        for (uint64_t q = 0; q + j->bpp <= j->n; q += j->bpp) {
+            uint32_t u = 0, v = 0; memcpy(&u, x + q, j->bpp); memcpy(&v, y + q, j->bpp);
+            if (u != v) {
+                px++; const uint32_t d = u > v ? u - v : v - u; if (d > mx) mx = d;
+                const uint64_t i = q / j->bpp; const int32_t tx = (int32_t)(i % j->w), ty = (int32_t)(i / j->w);   // [fix 22.11] by kind
+                if (tx >= j->keep.x0 && tx < j->keep.x1 && ty >= j->keep.y0 && ty < j->keep.y1) { if (d == 1) k1++; else kn++; } else st++;
+            }
+        }
+        gs.c.sv_cmp++; gs.c.sv_all += j->n / j->bpp; gs.c.sv_px += px; if (mx > gs.c.sv_max) gs.c.sv_max = mx;
+        { const int c = j->cz ? 1 : 0; gs.c.svc_cmp[c]++; gs.c.svc_all[c] += j->n / j->bpp; gs.c.svc_k1[c] += k1; gs.c.svc_kn[c] += kn; gs.c.svc_st[c] += st; if (!px) gs.c.svc_eq[c]++; if (mx > gs.c.svc_max[c]) gs.c.svc_max[c] = mx; }
+        if (!px) { g.s.verify_eq++; gs.c.sv_eq++; }
+    } else if (x && y && !memcmp(x, y, j->n)) g.s.verify_eq++;
     else if (x && y) {
         g.s.verify_ne++;
         uint64_t i = 0, bad = 0; while (i < j->n && x[i] == y[i]) i++;
@@ -264,8 +610,10 @@ static void verify_done(void *ctx) {
 }
 static void verify_run(int k, const int32_t r[4]) {
     g.vnext[k] = g.frame + g.verify_every; g.s.verify_runs++;
-    if ((!g.X && !(g.X = img_make("shc verify"))) || copy_tile(g.S, g.X, r)) { g.s.verify_skip++; return; }
-    if (replay(g.X, NULL, 0, RP_DRAWN)) { g.s.verify_skip++; return; }
+    const int scr = gs.V.on;   // [VK-SHADOWS-MOVING] a scrolled range: the tile cleared, the scrolled layer, then the drawn casters
+    if (!g.X && !(g.X = img_make("shc verify"))) { g.s.verify_skip++; return; }
+    if (scr) { gs.rp_comp = 1; const int b = replay(g.X, r, g.P.bits, RP_DRAWN); gs.rp_comp = 0; if (b) { g.s.verify_skip++; return; } }
+    else if (copy_tile(g.S, g.X, r) || replay(g.X, NULL, 0, RP_DRAWN)) { g.s.verify_skip++; return; }
     vjob *j = (vjob *)calloc(1, sizeof *j);
     if (!j) { g.s.verify_skip++; return; }
     if (read_tile(g.atlas, r, &j->a)) { free(j); g.s.verify_skip++; return; }
@@ -273,6 +621,7 @@ static void verify_run(int k, const int32_t r[4]) {
     const VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(vkn_cb(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     j->bpp = depth_bpp(g.atlas->format); j->x8 = g.atlas->format == VK_FORMAT_X8_D24_UNORM_PACK32; j->n = (uint64_t)r[2] * (uint64_t)r[3] * j->bpp; j->w = (uint32_t)r[2]; j->k = k; j->frame = g.frame;
+    j->tol = (uint8_t)scr; j->cz = (uint8_t)gs.V.cz; j->keep = gs.V.keep;
     vkn_retire(verify_done, j);
 }
 
@@ -318,6 +667,8 @@ static void end_range(int why) {
     if (g.R.refused || g.R.k < 0 || !r || !r->live) return;
     const int k = g.R.k; nrshc_cas *c = g.cas[k];
     if (why == END_CLEAR) r->tainted = 1;   // a clear inside a cascade (as the old path: never cached)
+    gs.V.on = 0;
+    if (gs.R.on && r->action == NRSHC_A_HIT) scroll_absent(k, r);   // [VK-SHADOWS-MOVING] members that did not come: gone with the scroll, or the range is broken
     const int broke = r->tainted || r->overflow, act = r->action;
     if (broke) g.s.tranges++;
     g.slot_unrep[k] = g.R.unrep;
@@ -329,6 +680,19 @@ static void end_range(int why) {
     if (e == NRSHC_E_BUILD) g.s.build++;
     if (e == NRSHC_E_REST) g.s.rest++;
     if (e == NRSHC_E_RECOVER || e == NRSHC_E_BUILD) g.slot_real[k] = 0;
+    if (gs.scroll && gs.sl) {   // [VK-SHADOWS-MOVING] the slot's members and anchor; a scrolled hit's strips; the refresh rule
+        if (e == NRSHC_E_BUILD) scroll_built(k, r);
+        else if (e == NRSHC_E_RECOVER || e == NRSHC_E_REST) scroll_slot_reset(k);
+        else if (e == NRSHC_E_NONE && act == NRSHC_A_HIT && gs.R.on) {
+            // casters that came into the cascade since the build and stayed are drawn every frame until they are members: when they are
+            // a quarter of the layer (at least the model's minimum), the layer is built again
+            const uint32_t lim = c->nmem / 4 > g.par.min_static ? c->nmem / 4 : g.par.min_static;
+            if (!scroll_commit(k, r) && gs.R.fresh >= lim) {
+                if (gs.job[k].on) { gs.job[k].on = 0; gs.njob--; }   // (its strips are not needed: the layer is made again)
+                scroll_drop(k); gs.c.refresh++;
+            }
+        }
+    }
     if (e == NRSHC_E_BUILD) {   // the members were drawn into the atlas in the engine's order: now into S
         pend(P_BUILD);
         if (why == END_CLOSE) pend_lost(END_CLOSE);
@@ -404,6 +768,7 @@ static void precopy(void) {
     for (int j = 0; j < NRSHC_CAS; j++) {
         const nrshc_cas *c = g.cas[j]; const int32_t *r = c->rect;
         if (!c->layer || !g.slot_real[j] || g.slot_unrep[j] || !c->ranges || !c->prev_ok || c->atlas != g.atlas_gen || c->clear_bits != g.clear_bits || c->layer_ranges >= g.par.max_age) continue;
+        if (gs.sl && gs.sl[j].anch && !gs.sl[j].plain) continue;   // [VK-SHADOWS-MOVING] a scrolled layer is drawn by the piece, never copied
         if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 || (uint64_t)r[0] + (uint64_t)r[2] > g.atlas->w || (uint64_t)r[1] + (uint64_t)r[3] > g.atlas->h) continue;
         // [stage 5.1 A5 fix] the slot's last cascade was another tile (a cascade split by a clear / read took this slot for the rest of
         // another tile, keeping the layer): nrshc_pick_slot gives this tile to the slot that last drew it, so the copy would be put back
@@ -465,17 +830,27 @@ static void start_range(const int32_t rect[4], int exact) {
     int act = nrshc_arm(c, &g.par, g.atlas_gen, rect, clear_ok, g.R.clear_bits, g.dirty || ov, rect_ok, backend_ok, &why);
     // no layer drawn for it; or its last cascade had a draw this module cannot draw again (a RECOVER would lose it): no hit
     if (act == NRSHC_A_HIT && (!g.S || !g.slot_real[k] || g.slot_unrep[k])) { c->layer = 0; act = NRSHC_A_NORMAL; why = NRSHC_W_OFF; }
+    scroll_arm(k, rect, &act, &why);   // [VK-SHADOWS-MOVING] the reference of the cascade; a hit as before / scrolled / dropped
     g.s.armed++; g.s.act[act]++; g.s.why[why]++;
     nrshc_begin(c, &g.par, g.rg, act, why);
     if (g.rg->blind) g.s.blind++;
     g.R.save = act == NRSHC_A_BUILD || (act == NRSHC_A_HIT && g.mode != NRSHC_CHECK);
     g.R.verify = act == NRSHC_A_HIT && g.mode == NRSHC_CHECK && g.verify_every && g.frame >= g.vnext[k];
     if (g.R.verify) g.R.save = 1;
+    if (gs.R.on) g.R.save = 1;   // [VK-SHADOWS-MOVING] (the strip touchers are kept draws)
     const uint32_t kb = 1u << k;
     const int taken = act == NRSHC_A_HIT && g.mode == NRSHC_ON && (g.pre & kb) && !memcmp(g.pre_rect[k], rect, sizeof g.pre_rect[k]);
     if (taken) { g.pre &= ~kb; g.s.pre_hit++; }   // its layer is in the tile already
     if (g.pre) pre_undo_overlapping(rect);
-    if (act == NRSHC_A_HIT && g.mode == NRSHC_ON && !taken && copy_tile(g.S, g.atlas, rect)) {   // mode 3 (poison): the cleared tile stays
+    if (gs.R.on) {   // [VK-SHADOWS-MOVING] the scrolled layer is drawn into the tile inside the pass of the engine (no copy, no pass break)
+        if (taken) clear_in_pass(rect);   // (the precopied tile holds the layer as it lay before this shift)
+        if (g.mode == NRSHC_ON && gs.scroll == 1) {   // (mode 2: nothing is skipped; scroll 3, poison: the kept part stays clear)
+            if (scroll_comp(rect, &gs.R.keep, gs.R.O2, gs.R.dz)) {
+                g.rg->action = NRSHC_A_NORMAL; scroll_drop(k); g.R.save = 0; gs.R.on = 0; gs.c.quad_fail++;
+                SHC_RED(R_SCROLL, "cascade %d: the scrolled layer could not be drawn into the tile: drawn as the engine asks", k);
+            } else gs.c.quad++;
+        }
+    } else if (act == NRSHC_A_HIT && g.mode == NRSHC_ON && !taken && copy_tile(g.S, g.atlas, rect)) {   // mode 3 (poison): the cleared tile stays
         // no copy: nothing may be skipped (the frame stays exact); the model sees a normal range
         g.rg->action = NRSHC_A_NORMAL; c->layer = 0; g.slot_real[k] = 0; g.R.save = 0;
         SHC_RED(R_IMG, "cascade %d: the layer copy could not be recorded: drawn as the engine asks", k);
@@ -485,7 +860,7 @@ static void start_range(const int32_t rect[4], int exact) {
     // drew: F's tile goes into the atlas and every draw of the cascade is skipped (kept: a RECOVER draws them all)
     g.R.far = g.cur_far;
     if (g.cur_far && g.rate >= 2) {
-        const int can = g.rg->action == NRSHC_A_HIT && g.F && g.f_ok && g.f_frame + 1 == g.frame && g.f_gen == g.atlas_gen &&
+        const int can = g.rg->action == NRSHC_A_HIT && !gs.R.on && g.F && g.f_ok && g.f_frame + 1 == g.frame && g.f_gen == g.atlas_gen &&
                         g.f_bits == g.R.clear_bits && !memcmp(g.f_rect, rect, sizeof g.f_rect);
         if (can && g.rate == 2 && g.mode == NRSHC_ON && g.R.save) {
             if (!copy_tile(g.F, g.atlas, rect)) g.R.reuse = 1;
@@ -567,7 +942,7 @@ static uint64_t ubo_hash(int st, uint32_t slot, uint32_t off, uint32_t n, uint32
 }
 extern const vkn_draw_in *vkn_draw_rt_in;   // [rt2 F1] vkn_draw.c (the draw the record executes now)
 static struct { uint64_t used, checked, moved; } g_vs;   // [rt2 F1] versions from the record: used / checked (EHASH=2) / the table had moved on
-static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out) {
+static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, const vkn_shs_b *bp) {
     const vkn_shader *sh = ctx->shader; nrshc_range *r = g.rg; const int k = g.R.k;
     int tw = NRSHC_T_OK, nw = NRS_OK, salt = 0;
 #define TAINT(w) do { if (!tw) tw = (w); } while (0)
@@ -603,6 +978,7 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
         h = nrshc_mix(h, in->ib); vj = nrshc_mix(vj, t.iver); salt |= none;
     }
     if (in->prim == 2 || in->prim == 4 || in->prim == 7) t.ok = 0;   // fan / quads / loop: the draw path rewrites its indices (not replayed)
+    const uint64_t h0 = h;   // [VK-SHADOWS-MOVING] the structure without bindings: shader, states, draw arguments, viewport, scissor, streams
     // what the shader reads: constant blocks by content, textures by pool id + object + upload number, samplers by object
     int feedback = 0;
     for (uint32_t i = 0; i < sh->nbind; i++) {
@@ -659,8 +1035,18 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (salt) g.s.salted++;
     if (tw != NRSHC_T_OK) { g.s.tainted++; g.s.tw[tw]++; if (tw == NRSHC_T_ORDER) g.s.nrs[nw]++; }
     const uint32_t o = r->ndraw;
-    const int skip = nrshc_draw(g.cas[k], &g.par, r, hf, hs, hn, nrshc_vtag(vj, 0, vt), v, tw == NRSHC_T_OK);
+    // [VK-SHADOWS-MOVING] a caster whose depth depends only on its mesh and its affine clip transform, with no fragment stage that
+    // matters: the model gets structure + instance instead of the bytes (the instance is the same under a moved projection)
+    uint64_t hm = hf; t.inst = -1; t.tcls = t.touch = 0; t.mh = 0; memset(&t.lb, 0, sizeof t.lb); t.z0 = t.z1 = 0.0f;
+    if (gs.scroll && bp && gs.R.have && t.ok && tw == NRSHC_T_OK && !salt && scroll_tdraw(in, ctx, bp, h0, vj, &hm, &t.inst)) {
+        t.tcls = 1; t.mh = hm; t.z0 = bp->z0; t.z1 = bp->z1;
+        t.lb.x0 = bp->px.x0 - g.R.rect[0]; t.lb.x1 = bp->px.x1 - g.R.rect[0]; t.lb.y0 = bp->px.y0 - g.R.rect[1]; t.lb.y1 = bp->px.y1 - g.R.rect[1];
+    }
+    const uint32_t streak0 = gs.R.on ? nrshc_tab_get(&g.cas[k]->hist[g.cas[k]->hc], hm) : 0;
+    int skip = nrshc_draw(g.cas[k], &g.par, r, hm, hs, hn, nrshc_vtag(vj, 0, vt), v, tw == NRSHC_T_OK);
     g.s.draws++; g.s.cdraws[k]++;
+    if (gs.R.on && !skip && tw == NRSHC_T_OK && streak0 + 1 >= g.par.stable) gs.R.fresh++;
+    if (gs.scroll && r->action == NRSHC_A_HIT && skip && !scroll_member(&t, bp, r)) { skip = 0; if (o < NRSHC_DRAWS) r->f[o] = NRSHC_F_DRAWN; }
     if (g.R.save && o < NRSHC_DRAWS) {
         sdraw *sd = &g.sv[o];
         *sd = t; sd->in = *in; sd->first = ctx->first; sd->count = ctx->count; sd->instances = ctx->instances; sd->indexed = ctx->indexed;
@@ -731,22 +1117,24 @@ static void on_watch(vkn_tex *t, int ev, float depth) {
 static void on_close(void) {
     if (g.live) end_range(END_CLOSE);
     pend_lost(END_CLOSE); pre_lost(END_CLOSE);
+    scroll_jobs_lost();   // [VK-SHADOWS-MOVING] strips that were never drawn: those layers are not whole
 }
 
 // ---- the chain function ----
 static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);
 static void shc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {   // [fixpp] g_chain_out around the body
-    g_chain_out = out; shc_fx_draw(in, ctx, out, user); g_chain_out = NULL;
+    g_chain_out = out; gs.cur_in = in; shc_fx_draw(in, ctx, out, user); g_chain_out = NULL; gs.cur_in = NULL;
 }
 static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
     (void)user;
     vkn_tex *d = ctx->depth;
     if (d != g.atlas) {                       // every draw that is not into the atlas
-        if (g.live | g.pend | (int)g.pre | g.f_pend) {  // the cascade drawn before ends here: the safe point for its work
+        if (g.live | g.pend | (int)g.pre | g.f_pend | gs.njob) {  // the cascade drawn before ends here: the safe point for its work
             if (g.live) end_range(END_NEXT);
             if (g.pend) run_pending();
             if (g.pre) pre_undo_all();
             if (g.f_pend) far_save();   // [gpu2 P8] (after a RECOVER's replay: the repaired tile)
+            if (gs.njob) scroll_jobs_run();   // [VK-SHADOWS-MOVING] the strips of the scrolled layers: one pass of the layer image a frame
         }
         if (d == g.rej || !d) return;
         if (!adopt(ctx, d)) return;
@@ -777,10 +1165,27 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
             if (g.far == 1) { out->skip = 1; g.s.far_skipped++; return; }
         }
     }
+    // [VK-SHADOWS-MOVING] the bounds of the caster on the CPU: one that cannot touch viewport and scissor rasterises nothing (culled
+    // before it is hashed or recorded); the cache uses the bounds for its scrolled layer
+    vkn_shs_b bb; const vkn_shs_b *bp = NULL;
+    if ((gs.cull || (gs.scroll && g.mode)) && exact && vkn_shs_bounds(in, ctx, &bb) == VKN_SHS_OK) bp = &bb;
+    if (gs.cull && bp) {
+        const int32_t m = gs.cull == 3 ? 64 : 0;   // (poison: the tile shrunk)
+        nr_ss_rect vis = {rect[0] + m, rect[1] + m, rect[0] + rect[2] - m, rect[1] + rect[3] - m};
+        if (vis.x0 < in->scissor[0]) vis.x0 = in->scissor[0];
+        if (vis.y0 < in->scissor[1]) vis.y0 = in->scissor[1];
+        if (vis.x1 > in->scissor[0] + in->scissor[2]) vis.x1 = in->scissor[0] + in->scissor[2];
+        if (vis.y1 > in->scissor[1] + in->scissor[3]) vis.y1 = in->scissor[1] + in->scissor[3];
+        gs.c.cull_seen++;
+        if (!nr_ss_isect(&bp->px, &vis)) {
+            if (gs.cull == 2) gs.c.cull_would++;
+            else { gs.c.culled++; out->skip = 1; return; }
+        }
+    }
     if (!g.mode) return;
     if (!g.live) start_range(rect, exact);
     if (g.R.refused || g.rg->blind) return;
-    draw_one(in, ctx, out);
+    draw_one(in, ctx, out, bp);
 }
 
 // ---- install, census ----
@@ -803,7 +1208,18 @@ void vkn_shc_install(void) {
     int fr = f && *f ? atoi(f) : nrh_value(NRH_SHFAR, &from);
     if (f && *f) from = 'v';
     if (fr < 0 || fr > 2) fr = 0;
-    g.mode = m; g.far = fr; g.inst = m || fr; g_far_read = 1;
+    {   // [VK-SHADOWS-MOVING] DM_VK_NATIVE_SHCULL / DM_VK_NATIVE_SHSCROLL (vkn_shs.h)
+        vkn_shs_install();
+        gs.cull = vkn_shs_cull(); gs.scroll = vkn_shs_scroll(); gs.eps = vkn_shs_eps(); gs.cam = vkn_shs_cam(&gs.cam_slot, &gs.vp_off, &gs.view_off); gs.zok = vkn_shs_scroll_z();
+        if (gs.scroll && m != NRSHC_ON && m != NRSHC_CHECK) { vkn_logf("shcache: DM_VK_NATIVE_SHSCROLL=%d needs DM_VK_NATIVE_SHCACHE=1 (it is %d): 0", gs.scroll, m); gs.scroll = 0; }
+        if (gs.scroll && !gs.cam) {   // [22.11] default 1: red only when the switch was set explicitly (the default quietly falls back)
+            const char *se = getenv("DM_VK_NATIVE_SHSCROLL");
+            if (se && *se) vkn_logf(RED "shcache: DM_VK_NATIVE_SHSCROLL=%d without the per-view block (vkn_shs_cam_block): 0", gs.scroll);
+            else vkn_logf("shcache: DM_VK_NATIVE_SHSCROLL default 1 without the per-view block (vkn_shs_cam_block): 0");
+            gs.scroll = 0; }
+        if (gs.scroll == 2 && m == NRSHC_ON) { m = NRSHC_CHECK; vkn_logf("shcache: DM_VK_NATIVE_SHSCROLL=2 (verify): DM_VK_NATIVE_SHCACHE=2 for this run"); }
+    }
+    g.mode = m; g.far = fr; g.inst = m || fr || gs.cull; g_far_read = 1;
     {   // [gpu2 P8] DM_VK_NATIVE_SHRATE (vkn_shc.h): 1 every frame (default), 2 the far cascade every second frame, 3 verify (drawn, compared)
         const char *q = getenv("DM_VK_NATIVE_SHRATE"); int rt = q && *q ? atoi(q) : 1;
         if (rt < 1 || rt > 3) { vkn_logf(RED "shcache: DM_VK_NATIVE_SHRATE=%s is not 1 / 2 / 3: 1", q); rt = 1; }
@@ -882,6 +1298,41 @@ void vkn_shc_census(void) {
             put(&w, " c%d (%llu) %.0f/%.0f/%.0f/%.0f/%.0f", i, (ull)s->cranges[i], s->known[i] / rr, s->newu[i] / rr, s->newo[i] / rr, s->ncont[i] / rr, s->unc[i] / rr);
         }
         vkn_logf("%s", w.b);
+    }
+    if (gs.scroll || gs.cull) {   // [VK-SHADOWS-MOVING]
+        const vkn_shc_scroll_stats *q = &gs.c; vkn_shs_stats b; vkn_shs_stats_get(&b);
+        txt m; m.k = 0; m.b[0] = 0;
+        put(&m, "shcache moving (DM_VK_NATIVE_SHSCROLL=%d, DM_VK_NATIVE_SHCULL=%d, last 10 s): hits as before %llu, scrolled %llu (shifted %llu, z moved %llu; largest shift %u px, worst distance from whole texels %.4f px); "
+            "dropped [reference %llu, projection turned %llu, z moved %llu, not whole texels %llu, shift too big %llu, members without an instance %llu, format / clear %llu, strips late %llu]; builds held (z moving) %llu; "
+            "a scrolled hit: members %s %.0f, drawn into strips %.0f; members gone with the scroll %llu, missing inside the tile %llu, clip-range guard %llu, member without an instance met %llu; "
+            "layers built %llu (members with an instance %.0f, without %.0f), refreshed %llu; strips: done %llu, pieces %llu, draws %llu, failed %llu, lost %llu, store full %llu, z patch refused %llu; layer drawn into tiles %llu (failed %llu)",
+            gs.scroll, gs.cull, (ull)q->plain_ranges, (ull)q->scroll_ranges, (ull)q->moved_ranges, (ull)q->dz_ranges, (unsigned)q->n_max, q->err_max,
+            (ull)q->drop_ref, (ull)q->drop_lin, (ull)q->drop_z, (ull)q->drop_shift, (ull)q->drop_big, (ull)q->drop_fmem, (ull)q->drop_fmt, (ull)q->job_late, (ull)q->build_held,
+            g.mode == NRSHC_CHECK ? "would skip" : "skipped", q->scroll_ranges ? (double)q->skipped / (double)q->scroll_ranges : 0.0, q->scroll_ranges ? (double)q->touched / (double)q->scroll_ranges : 0.0,
+            (ull)q->absent_out, (ull)q->absent_in, (ull)q->zguard, (ull)q->f_member,
+            (ull)q->builds, q->builds ? (double)q->build_t / (double)q->builds : 0.0, q->builds ? (double)q->build_f / (double)q->builds : 0.0, (ull)q->refresh,
+            (ull)q->jobs, (ull)q->job_pieces, (ull)q->job_draws, (ull)q->job_fail, (ull)q->job_lost, (ull)q->job_full, (ull)q->patch_bad, (ull)q->quad, (ull)q->quad_fail);
+        vkn_logf("%s", m.b);
+        m.k = 0; m.b[0] = 0;
+        put(&m, "shcache moving why: casters with an instance %.0f a frame (fragment stage may matter %.0f, registry full %.0f, changed while the cascade stood %llu, own constants changed %llu); "
+            "the cascade's z moved in %llu of %llu ranges; scroll verify: tiles %llu (equal %llu), texels differing %.4f %% (max %u steps)",
+            q->t_draws / fr, q->t_fs / fr, q->t_full / fr, (ull)q->epoch, (ull)q->epoch_obj, (ull)q->zstep, (ull)q->zcmp, (ull)q->sv_cmp, (ull)q->sv_eq,
+            q->sv_all ? 100.0 * (double)q->sv_px / (double)q->sv_all : 0.0, (unsigned)q->sv_max);
+        put(&m, "; culling: casters with bounds %.0f a frame, %s %.0f; bounds asked %.0f a frame:", q->cull_seen / fr, gs.cull == 2 ? "would cull" : "culled", (gs.cull == 2 ? q->cull_would : q->culled) / fr, b.asked / fr);
+        for (int i = 0; i < VKN_SHS_N; i++) if (b.why[i]) put(&m, " %s %.0f", vkn_shs_why_name(i), b.why[i] / fr);
+        put(&m, "; boxes from the table %.0f, scanned %llu (%llu indices); memory: scroll state %.2f MB, box table %.2f MB", b.box_hit / fr, (ull)b.box_scan, (ull)b.box_idx, scroll_bytes() / 1048576.0, b.box_bytes / 1048576.0);
+        vkn_logf("%s", m.b);
+        if (gs.scroll == 2 || q->svc_cmp[0] || q->svc_cmp[1]) {   // [fix 22.11] the verify by case and kind (a line of its own: vkn_logf keeps 1024 bytes)
+            m.k = 0; m.b[0] = 0;
+            put(&m, "shcache moving verify (last 10 s; DM_VK_NATIVE_SHSCROLL_Z=%d):", gs.zok);
+            for (int c = 0; c < 2; c++) {
+                const double a = q->svc_all[c] ? 100.0 / (double)q->svc_all[c] : 0.0;
+                put(&m, "%s %s: tiles %llu (equal %llu), texels differing - kept part 1 step %.4f %%, kept part more %.4f %%, exposed strips %.4f %% (max %u steps)", c ? ";" : "",
+                    c ? "layer moved in z" : "layer moved in x / y only", (ull)q->svc_cmp[c], (ull)q->svc_eq[c], (double)q->svc_k1[c] * a, (double)q->svc_kn[c] * a, (double)q->svc_st[c] * a, (unsigned)q->svc_max[c]);
+            }
+            vkn_logf("%s", m.b);
+        }
+        memset(&gs.c, 0, sizeof gs.c); vkn_shs_stats_reset();
     }
     const uint64_t mb = s->model_bytes;
     memset(s, 0, sizeof *s); s->model_bytes = mb;

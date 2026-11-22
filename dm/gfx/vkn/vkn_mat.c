@@ -428,6 +428,16 @@ int vkn_mat_apply(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out)
     if (!g.inst || !in || !ctx || !ctx->shader || !out) return 0;
     return decide(in, ctx, out);
 }
+// [VK-SHADOWS-MOVING] (vkn_shc.c) would MAT drop the fragment stage of this depth-only draw: 1 = the fragment stage provably has no
+// effect on it (mat_depth's verdict, whatever the mode draws), 0 = no / MAT is off. The census counters stay as they were.
+int vkn_mat_peek(const vkn_draw_in *in, const vkn_fx_ctx *ctx) {
+    if (!g.inst || !g.mode || !in || !ctx || !ctx->shader || !ctx->depth) return 0;
+    const __typeof__(g.s) keep = g.s; vkn_fx_out o; memset(&o, 0, sizeof o);
+    const int was = g.mode; if (was == 3) g.mode = 1;
+    const int r = mat_depth(in, ctx, &o) && o.no_fs;
+    g.mode = was; g.s = keep;
+    return r;
+}
 
 // ---------------------------------------------------------------- install, census
 int vkn_mat_mode(void) { return g.inst ? g.mode : 0; }

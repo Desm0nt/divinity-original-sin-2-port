@@ -66,6 +66,8 @@ int vkn_mat_mode(void), vkn_mat_xlq(void);  // in effect (0 = off / not installe
 // The chain's decision for a draw that does not pass the chain (a piece's replay). Fills *out as the chain function would (no_fs,
 // shader, ubo[0..1]); 1 = something set. Recording thread; the draw's constant blocks must be announced (vkn_draw_ubo) before.
 int vkn_mat_apply(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out);
+// [VK-SHADOWS-MOVING] the verdict alone (1 = MAT would drop the fragment stage of this depth-only draw), counters untouched
+int vkn_mat_peek(const vkn_draw_in *in, const vkn_fx_ctx *ctx);
 
 enum { VKN_MAT_W_FACTS, VKN_MAT_W_NOLIB, VKN_MAT_W_GATE, VKN_MAT_W_ALPHA, VKN_MAT_W_KILL, VKN_MAT_W_PENDING, VKN_MAT_W_NOTENG, VKN_MAT_W_N };
 enum { VKN_MAT_V_NOTHING, VKN_MAT_V_CHECK, VKN_MAT_V_TABLE, VKN_MAT_V_MODULE, VKN_MAT_V_CODES, VKN_MAT_V_WORDS, VKN_MAT_V_KIND, VKN_MAT_V_VIN, VKN_MAT_V_N };
