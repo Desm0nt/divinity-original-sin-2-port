@@ -77,6 +77,7 @@ struct Cfg {
          f2i_notrunc = false, texcoord_unguard = false, alpha = true, serial = false, retype_keep = false;
     int ubovec = 0, idvs = 0, early_z = 1, invariant = 0, gscull = 0x61, gather_snap = 1, spv_opt = 0, warp_mode = 1;
     int ubd_mode = 0; bool ubd_ro = false, ubd_scan = false;   // NR-08b (nrubd::init)
+    bool posl_on = false;  // [VK-SHADOWS-MOVING] DM_VK_NATIVE_SHCULL / _SHSCROLL non-zero: long position programs (nr_shs.h) built at load
     bool pos_on = false;   // [stage 5.2 B1] DM_VK_NATIVE_LOAD != 0 for the policy family: position programs / output masks built at load
     uint32_t pos_drv = 0;  // [frame F0] the driverID that decision used (vkn_policy_tile_pass)
     bool noout = false;    // [stage 5.3 V2] DM_GFX_NOOUT_MASK for the policy family (vkn_drv.c): the "no colour output" fact built at load
@@ -577,6 +578,8 @@ struct Sh {
     int32_t fs_facts = -1;         // [DOS2] stage 5.1 O2: fragment: fs_facts_of(final words), set once at load; -1 = other stage
     int32_t vs_vindex = -1;        // [DOS2] stage 5.1 G: vertex: vs_vindex_of(final words), set once at load; -1 = other stage
     std::vector<uint32_t> words;   // vertex: the final words while DM_GFX_VTX_RETYPE is on (the "#vi" variants start from them)
+    struct FreeDel { void operator()(void *q) const { free(q); } };
+    std::unique_ptr<nr_sb_prog, FreeDel> posl;   // [VK-SHADOWS-MOVING] vertex, g.posl_on: the long position program, only when affine in Location 0
     std::unique_ptr<nr_cv_prog> pos;   // [stage 5.2 B1] vertex, g.pos_on: the position program of the final words (only when ok)
     int64_t fs_out = -1;               // [stage 5.2 B1] fragment, g.pos_on: Output locations of the final words (bit = location), -1 = not built
     int8_t fs_noout = -1;              // [stage 5.3 V2] fragment, g.noout: 1 = no colour output and no sample-mask write (xbg_game.cpp draw's
@@ -656,6 +659,7 @@ Sh *load(const std::string &key, const void *control, const void *code) {
     if (h.stage == 0) p->vs_vindex = int32_t(vs_vindex_of(words));
     // [stage 5.2 B1] DM_VK_NATIVE_LOAD (vkn_pass.c, the cover proof of a pass's first draw): the position program of the final words
     // (xbg_spirv_pos_prog, NR-10b: 117 of DOS2's vertex shaders have one) and the fragment output locations (xbg_spirv_raster_facts)
+    if (g.posl_on && h.stage == 0) { nr_sb_prog *lp = xbg_spirv_pos_long(words.data(), words.size()); if (lp && lp->affine) p->posl.reset(lp); else free(lp); }   // [VK-SHADOWS-MOVING]
     if (g.pos_on && h.stage == 0) { nr_cv_prog pr; xbg_spirv_pos_prog(words.data(), words.size(), &pr); if (pr.ok) p->pos.reset(new nr_cv_prog(pr)); }
     if ((g.pos_on || g.noout) && h.stage == 4) {   // [stage 5.3 V2] one scan for both facts (built only where a switch asks: never on Adreno)
         const XbgRasterFacts rf = xbg_spirv_raster_facts(words.data(), words.size(), 4);
@@ -822,6 +826,8 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
     { const char *e = getenv("DM_GFX_WARP_MODE"); g.warp_mode = e && !strcmp(e, "native") ? 0 : e && !strcmp(e, "lone") ? 1 : g.subgroup.subgroupSize == 32 ? 0 : 1; }
     { const char *e = getenv("DM_GFX_VTX_RETYPE"); g.retype_keep = e && *e ? atoi(e) != 0 : g.props.vendorID != 0x5143; }
     { const char *e = getenv("DM_GFX_SPV_OPT"); g.spv_opt = e && *e ? atoi(e) : 0; if (g.spv_opt > 0) xbg_spvopt_init((g.base + "/spvopt").c_str(), g.spv_opt); }
+    { const char *a = getenv("DM_VK_NATIVE_SHCULL"), *b = getenv("DM_VK_NATIVE_SHSCROLL"), *c = getenv("DM_VK_ENG_SHSTATIC");   // [fix2] + the engine's static layer (its verdicts need the bounds)
+      g.posl_on = (a && *a ? atoi(a) > 0 : true) || (b && *b ? atoi(b) > 0 : true) || (c && *c && atoi(c) > 0); }   // [22.11] both default 1   // [VK-SHADOWS-MOVING] (vkn_shs.c reads the same switches)
     {   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with) [frame F0] ... and the same FAMILY: the render-pass tilers of
         // vkn_policy_tile_pass (Maleoon, Adreno on Qualcomm's own driver, driverID 8) get LOAD=1 by default in vkn_pass.c's pol_resolve, so
         // the position programs its proofs read must be built for them too. Before: the stock-Qualcomm capture of 22.11 refused every
@@ -901,6 +907,11 @@ extern "C" int vkn_shlib_out_prog(const void *shader, uint32_t location, nr_cv_p
     nr_cv_prog pr; xbg_spirv_out_prog(w.data(), w.size(), location, &pr);
     if (!pr.ok) return 1;
     *out = pr; return 0;
+}
+// [VK-SHADOWS-MOVING] the long position program of a vertex shader object (affine in Location 0), NULL = none / not built
+extern "C" const nr_sb_prog *vkn_shlib_vs_posl(const void *shader) {
+    const Sh *s = static_cast<const Sh *>(shader);
+    return s && s->stage == 0 ? s->posl.get() : nullptr;
 }
 extern "C" int64_t vkn_shlib_fs_outputs(const void *shader) {
     const Sh *s = static_cast<const Sh *>(shader);

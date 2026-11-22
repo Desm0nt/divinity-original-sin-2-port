@@ -863,9 +863,13 @@ static void ui_pass_census(void) {
     // made (never used) / made at first use; region epochs whose DS writes are dead after them (DS draws clipped)
     vkn_logf("ui runs 3 (mgpu P7c): a presented frame: segments started at a reuse %.2f | filter cache pages %llu (%.1f MB alive), hits by a page %.2f (verified ones then read from it %.2f), page regions made "
              "real %.3f, pages off by a self-check %llu (total) | pushed bindings never made %.2f, made at first use %.2f | region epochs with a DS use: dead after %.2f, "
-             "not %.2f; DS draws clipped %.2f | regions grown by the guard band %.2f, self-check differences only at the edge %llu (total)",
+             "not %.2f; DS draws clipped %.2f | regions grown by the guard band %.2f, self-check differences only at the edge %llu (total) ",
              D(lh_seg_reuse), (unsigned long long)a.fc_pages, (double)a.fc_page_bytes / mb, D(fc_rd_hits), D(fc_rd_verify), D(fc_rd_real), (unsigned long long)a.fc_page_off, D(lh_lazy_skipped),
              D(lh_lazy_bound), D(lh_dsclip), D(lh_dsclip_no), D(region_dsclip), D(fc_guard), (unsigned long long)a.fc_diff_edge);
+    // [mgpu P7g] the filter cache's inputs and its verify
+    vkn_logf("ui filter cache (mgpu P7g): a presented frame: inputs changed between the key and the draw %.3f (entries dropped / not stored %.3f), entries refused for "
+             "their inputs %.3f, engine draws into UI targets %.2f, page verifies in the scratch %.2f, compares %.2f (without a slot %.3f), differ %llu (total)",
+             D(fc_unstable), D(fc_unstable_drop), D(fc_iv_refused), D(fc_engine_writes), D(fc_rd_verify), D(fc_verify), D(fc_cmp_skip), (unsigned long long)a.fc_differ);
 #undef D
     g_ups0 = a; g_ups_frame0 = fr;
 }

@@ -166,7 +166,7 @@ typedef struct mk_ev {
 static int mk_jr_on;   // [stage 5.5]
 static int mk_jr_recording(void);
 static uint64_t mk_jr_draw(VkCommandBuffer cb, const mk_ev *e, int indexed);
-enum { MK_EVS = 1 << 14 };
+enum { MK_EVS = 1 << 15 };   // ([P10 merge] the main process never restarts its log: test_p10 + the frame / fsr / shadow blocks together passed 16384)
 static mk_ev *mk_evs; static uint64_t mk_seq, mk_ev_base;   // entries [mk_ev_base, mk_seq) are in mk_evs[seq - mk_ev_base]
 static int mk_validate_on, mk_val_errors, mk_fence_hold, mk_fence_stuck;
 static uint64_t mk_sub_seq;                                    // submissions so far

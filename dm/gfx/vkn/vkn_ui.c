@@ -479,13 +479,14 @@ enum { FC_N = 128, FC_AW = 2560, FC_AH = 1024, FC_MAXD = 48, FC_MAXB = 256 * 102
 enum { FCR_NOREG, FCR_DRAW, FCR_TEX, FCR_MANY, FCR_DS, FCR_FULL, FCR_OTHER };
 enum { FCF_TARGETS, FCF_FENCE, FCF_ENGINE, FCF_CLOSE, FCF_OTHER };
 enum { FCE_VP = 1, FCE_SC, FCE_CLR, FCE_DRAW };
-typedef struct fc_ent { uint64_t key; uint16_t x, y, w, h; uint32_t frame; uint8_t live; int8_t page; } fc_ent;   // page: [mgpu P7c] -1 = the atlas slot (x, y), else a page at the region's own place
+typedef struct fc_ent { uint64_t key, iv; uint16_t x, y, w, h; uint32_t frame, sf; uint8_t live; int8_t page; } fc_ent;   // sf: [mgpu P7g] the frame it was stored   // iv: [mgpu P7g] the inputs' versions it was drawn from   // page: [mgpu P7c] -1 = the atlas slot (x, y), else a page at the region's own place
 typedef struct fc_ct { const vkn_tex *t; VkImage img; uint64_t key; uint8_t valid; } fc_ct;
-typedef struct fc_cmp { int live, page; uint64_t frame, key; vkn_block b; uint32_t bytes; int32_t r[4]; char desc[640]; } fc_cmp;   // page: [mgpu P7d] the entry was a page's; desc: [mgpu P7e] its draws
+typedef struct fc_cmp { int live, page, scratch; uint64_t frame, key; vkn_block b; uint32_t bytes, age; int32_t r[4]; char desc[640]; } fc_cmp;   // page: [mgpu P7d] the entry was a page's; desc: [mgpu P7e] its draws
 typedef struct fc_hdr { uint32_t size; uint8_t kind, pad[3]; } fc_hdr;
-typedef struct fc_draw { fc_hdr h; vkn_ui_draw_in in; vkn_block vb; uint32_t o_vsc, o_fsc, o_fsc1, o_verts, o_idx; uint8_t has_vb, pad[3]; } fc_draw;
+typedef struct fc_draw { fc_hdr h; vkn_ui_draw_in in; vkn_block vb; uint32_t o_vsc, o_fsc, o_fsc1, o_verts, o_idx; uint8_t has_vb, pad[3];
+                         uint64_t kv[VKN_UI_UNITS]; uint8_t krd; } fc_draw;   // [mgpu P7g] the units' versions in the key; units read from a page then
 static struct {
-    int req, mode, init; uint8_t hold, replay, bad, nreg;
+    int req, mode, init; uint8_t hold, replay, bad, nreg, unstable; uint64_t iv;   // unstable: [mgpu P7g] an input's version changed between the key and the draw
     vkn_tex *t, *d; int32_t rect[4]; uint64_t key; uint32_t ndraws, nents, first;
     uint8_t *buf; uint32_t n, cap;
     fc_ent e[FC_N]; vkn_tex *atlas; uint32_t ax, ay, arow, afmt;
@@ -555,11 +556,13 @@ static fc_ct *fc_ct_get(const vkn_tex *t, int create) {
     memset(fr, 0, sizeof *fr); fr->t = t;
     return fr;
 }
+static void fc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user);   // [mgpu P7g]
 static int fc_on(void) {
     if (!g_fc.init) {
         const vkn_dev *d = vkn_device(); if (!d) return 0;
         g_fc.init = 1; g_fc.mode = g_fc.req < 0 ? 1 : g_fc.req; g_ups.fc_mode = g_fc.mode;
         vkn_pass_on_write(ui_on_write);   // [mgpu P7] (one listener for both pieces)
+        { static int fx; if (!fx) fx = !vkn_fx_register("ui-fc-write", fc_fx, NULL, 2); }   // [mgpu P7g] (after "ui-layer" 0 and "ui-pass-fence" 1)
         vkn_logf("ui filter cache (mgpu P2): DM_VK_NATIVE_UIFC=%d (%s; %s); atlas %ux%u, %u entries, at most %u draws an epoch", g_fc.mode, g_fc.req < 0 ? "default" : "env",
                  g_fc.mode == 0 ? "off" : g_fc.mode == 1 ? "on, every 128th hit drawn and compared" : g_fc.mode == 2 ? "verify: every hit drawn and compared" : "poison: 1 + a hit magenta one frame in 64",
                  FC_AW, FC_AH, FC_N, FC_MAXD);
@@ -585,6 +588,7 @@ static void *fc_put(uint8_t kind, uint32_t bytes) {
     g_fc.n += bytes; g_fc.nents++;
     return h;
 }
+static vkn_tex *g_fcv_from, *g_fcv_to, *g_fcv_tex;   // [mgpu P7g] the scratch verify (below)
 static void fc_replay(void);
 static void fc_stop(void) { g_fc.hold = 0; g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; vkn_pass_before(NULL); }
 // held calls run as recorded (an end that is not the clean one, or an overflow): nothing stored
@@ -606,7 +610,7 @@ static void fc_begin(vkn_tex *t, const int32_t rect[4]) {
     if (!((rect[2] <= FC_AW / 2 && rect[3] <= FC_AH / 2) || (rect[2] <= FC_AW && rect[3] <= FC_AH / 4))) { g_ups.fc_refused[FCR_OTHER]++; return; }
     g_fc.hold = 1; g_fc.bad = 0; g_fc.t = t; g_fc.d = g_depth; memcpy(g_fc.rect, rect, sizeof g_fc.rect);
     fc_lr_put(t, rect);   // [mgpu P7e]
-    g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.first = 1;
+    g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.first = 1; g_fc.unstable = 0; g_fc.iv = 0x1f;
     g_fc.key = fc_mix(fc_mix(fc_mix(0xf11ce, (uint64_t)t->format), (uint64_t)(uint32_t)rect[0] << 32 | (uint32_t)rect[1]), (uint64_t)(uint32_t)rect[2] << 32 | (uint32_t)rect[3]);
     vkn_pass_before(fc_before);
 }
@@ -653,7 +657,11 @@ static void fc_put_draw(const vkn_ui_draw_in *in) {
         k = fc_mix(k, (uint64_t)in->vfmt | (uint64_t)in->quads << 8 | (uint64_t)in->blend << 16 | (uint64_t)in->ds << 24 | (uint64_t)in->color_off << 32 |
                       (uint64_t)in->stencil_cmp << 40 | (uint64_t)in->stencil_write << 48);
         if (in->ds) { g_fc.bad |= 2; return; }   // a depth / stencil test or write: the DS is shared by every epoch
-        for (int u = 0; u < VKN_UI_UNITS; u++) { uint64_t v; if (fc_tex_ver(in->tex[u], &v)) { g_fc.bad |= 4; return; } k = fc_mix(k, v); }
+        for (int u = 0; u < VKN_UI_UNITS; u++) {
+            if (in->tex[u] && in->tex[u] == g_fc.d) { g_fc.bad |= 4; return; }   // [mgpu P7g] (the depth-stencil sampled: no version)
+            uint64_t v; if (fc_tex_ver(in->tex[u], &v)) { g_fc.bad |= 4; return; }
+            k = fc_mix(k, v); d->kv[u] = v; g_fc.iv = fc_mix(g_fc.iv, v); if (in->tex[u] && fc_rd(in->tex[u]) != in->tex[u]) d->krd |= (uint8_t)(1u << u);   // [mgpu P7g]
+        }
         k = fc_bytes(k, in->vsc, in->vsc_bytes); k = fc_bytes(k, in->fsc, in->fsc_bytes); k = fc_bytes(k, in->fsc1, in->fsc1 ? in->fsc1_bytes : 0);
         if (in->vb) {
             if (!in->vb->cpu || in->vb_off + (uint64_t)in->nverts * stride > in->vb->size || (!in->quads && in->ib_off + 2ull * in->nidx > in->vb->size)) { g_fc.bad |= 2; return; }
@@ -668,6 +676,8 @@ oom:
     g_fc.n = (uint32_t)((uint8_t *)d - g_fc.buf); g_fc.nents--;
     fc_flush(FCF_OTHER); ui_draw_x(in);
 }
+// [mgpu P7g] the scratch verify draws the epoch into a texture of its target's shape: units naming the real target name it there (they
+// read the target being drawn as in the real epoch)
 static void fc_replay(void) {
     g_fc.replay = 1;
     for (uint32_t at = 0; at < g_fc.n;) {
@@ -681,6 +691,10 @@ static void fc_replay(void) {
             fc_draw *d = (fc_draw *)(void *)h; vkn_ui_draw_in in = d->in; uint8_t *b = (uint8_t *)d;
             in.vsc = d->o_vsc ? b + d->o_vsc : NULL; in.fsc = d->o_fsc ? b + d->o_fsc : NULL; in.fsc1 = d->o_fsc1 ? b + d->o_fsc1 : NULL;
             if (d->has_vb) in.vb = &d->vb; else { in.verts = d->o_verts ? b + d->o_verts : NULL; in.idx = d->o_idx ? (const uint16_t *)(const void *)(b + d->o_idx) : NULL; }
+            if (g_fcv_from) for (int u = 0; u < VKN_UI_UNITS; u++) if (in.tex[u] == g_fcv_from) in.tex[u] = g_fcv_to;
+            if (!(g_fc.bad & 4)) for (int u = 0; u < VKN_UI_UNITS; u++) {   // [mgpu P7g] an input changed since the key: this epoch's content is not the key's
+                uint64_t v; if (fc_tex_ver(in.tex[u], &v) || v != d->kv[u]) { if (!g_fc.unstable) g_ups.fc_unstable++; g_fc.unstable = 1; }
+            }
             ui_draw_x(&in);
             break; }
         default: break;
@@ -712,6 +726,7 @@ static int fc_atlas(const vkn_tex *t) {   // the atlas in t's format (one format
     g_fc.afmt = t->nvn_fmt;
     return 0;
 }
+static void ui_targets_real(vkn_tex *color, vkn_tex *depth);   // [mgpu P7g] (the scratch verify)
 // [mgpu P7c] a page of t's shape with no live entry over r (made on first need, at most 4); -1 = none
 static uint8_t g_fcp_cookie[4];
 static int fc_page_for(const vkn_tex *t, const int32_t r[4]) {
@@ -786,6 +801,7 @@ static void fc_describe(char *o, size_t n) {
         }
         const vkn_tex *t0 = in->tex[0];
         const float tw = t0 ? (float)t0->w : 1.0f, th = t0 ? (float)t0->h : 1.0f;
+        if (!at) { char tn[32]; fc_tname(tn, sizeof tn, g_fc.t); at += (size_t)snprintf(o + at, n - at, "target %s%s; ", tn, g_fc.t == g_fcv_tex ? " (verify scratch)" : ""); }
         at += (size_t)snprintf(o + at, n - at, "%sdraw: fs %llx blend %u, box %.1f,%.1f-%.1f,%.1f uv texels %.1f,%.1f-%.1f,%.1f", at ? "; " : "",
                                (unsigned long long)(in->fs & 0xffffff), in->blend, x0, y0, x1, y1, u0 * tw, v0 * th, u1 * tw, v1 * th);
         if (in->fsc1 && d->o_fsc1) { const float *e4 = (const float *)(const void *)((const uint8_t *)d + d->o_fsc1); at += (size_t)snprintf(o + at, n - at, " block1 %.4g %.4g %.4g %.4g", e4[0], e4[1], e4[2], e4[3]); }
@@ -793,7 +809,8 @@ static void fc_describe(char *o, size_t n) {
             const vkn_tex *t = in->tex[u]; if (!t) continue;
             char nm[32]; fc_tname(nm, sizeof nm, t); uint64_t v = 0; const int ver = fc_tex_ver(t, &v);
             const vkn_tex *rd = fc_rd((vkn_tex *)(uintptr_t)t); const int32_t *lr = fc_lr_get(t);
-            at += (size_t)snprintf(o + at, n - at, " u%d %s %ux%u %s%s", u, nm, t->w, t->h, ver ? "no-version" : !t->pass_ever ? "cpu" : "cached", rd != t ? " (read from a page)" : "");
+            at += (size_t)snprintf(o + at, n - at, " u%d %s%s %ux%u %s%s key %s%s", u, nm, t == g_fc.t ? " (the target)" : "", t->w, t->h, ver ? "no-version" : !t->pass_ever ? "cpu" : "cached",
+                                   rd != t ? " (read from a page)" : "", ver ? "-" : v == d->kv[u] ? "same" : "OTHER", d->krd >> u & 1 ? " (a page at key time)" : "");
             if (lr) at += (size_t)snprintf(o + at, n - at, " region %d,%d %dx%d", lr[0], lr[1], lr[2], lr[3]);
         }
     }
@@ -801,9 +818,10 @@ static void fc_describe(char *o, size_t n) {
 static void fc_cmp_put(const fc_ent *e) {
     fc_cmp *c = NULL; for (int i = 0; i < FC_CMP && !c; i++) if (!g_fc.cmp[i].live) c = &g_fc.cmp[i];
     VkCommandBuffer cb = vkn_cb();
-    if (!c || !cb) return;
+    if (!c || !cb) { g_ups.fc_cmp_skip++; return; }   // [mgpu P7g] (counted: a would-hit not compared)
     const uint32_t bytes = (uint32_t)e->w * e->h * 4u;
     vkn_tex *src = e->page >= 0 ? g_fc.pg[e->page] : g_fc.atlas;   // [mgpu P7c]
+    c->age = (uint32_t)(vkn_frame() - e->sf); c->scratch = g_fc.t == g_fcv_tex;
     if (!src || src->dead) return;
     if (vkn_block_alloc(VKN_ARENA_STAGING, 2ull * bytes, 16, &c->b)) return;
     fc_describe(c->desc, sizeof c->desc);   // [mgpu P7e]
@@ -831,8 +849,8 @@ static void fc_cmp_check(int all) {
                 for (int q = 0; q < 4; q++) { const uint32_t dd = a[q] > b[q] ? (uint32_t)(a[q] - b[q]) : (uint32_t)(b[q] - a[q]); if (dd > md) md = dd; }
                 if (x < bx0) bx0 = x; if (y < by0) by0 = y; if (x > bx1) bx1 = x; if (y > by1) by1 = y;
             }
-            vkn_logf(RED "ui: filter cache self-check: %s entry %d,%d %dx%d key %016llx: %u of %d texels differ (%u within 3 of the edge), box %d,%d-%d,%d, largest step %u, first drawn %u %u %u %u / cached %u %u %u %u",
-                     c->page ? "page" : "atlas", c->r[0], c->r[1], W, H, (unsigned long long)c->key, nd, W * H, ne, bx0, by0, bx1, by1, md, sa[0], sa[1], sa[2], sa[3], sb[0], sb[1], sb[2], sb[3]);
+            vkn_logf(RED "ui: filter cache self-check (%s, entry stored %u frames ago): %s entry %d,%d %dx%d key %016llx: %u of %d texels differ (%u within 3 of the edge), box %d,%d-%d,%d, largest step %u, first drawn %u %u %u %u / cached %u %u %u %u",
+                     c->scratch ? "drawn into the verify scratch, the hit then served from the page" : "drawn into the target", c->age, c->page ? "page" : "atlas", c->r[0], c->r[1], W, H, (unsigned long long)c->key, nd, W * H, ne, bx0, by0, bx1, by1, md, sa[0], sa[1], sa[2], sa[3], sb[0], sb[1], sb[2], sb[3]);
             vkn_logf(RED "ui: filter cache self-check: the epoch: %s", c->desc);
             g_ups.fc_diff_edge += ne == nd;
         }
@@ -863,6 +881,39 @@ static int fc_hit_page(vkn_tex *t, const fc_ent *e) {
     g_ups.fc_rd_hits++;
     return 1;
 }
+// [mgpu P7g] the scratch texture of the page verify (t's shape, made on first use)
+static uint8_t g_fcv_cookie;
+static vkn_tex *fc_vscratch(const vkn_tex *t) {
+    vkn_tex *s = g_fcv_tex;
+    if (s && !s->dead && s->w == t->w && s->h == t->h && s->format == t->format && s->samples == t->samples) return s;
+    if (s && !s->dead) vkn_tex_destroy_cookie(s->cookie);
+    g_fcv_tex = NULL;
+    vkn_tex_desc d; memset(&d, 0, sizeof d);
+    d.nvn_fmt = t->nvn_fmt; d.efmt = t->efmt; d.nvn_target = 1; d.w = t->w; d.h = t->h; d.depth = d.mips = d.layers = d.samples = 1; d.cls = VKN_TC_COLOR;
+    d.pool_id = ~0u; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) d.layer_ids[i] = ~0u; d.sampler_id = ~0u; d.cookie = (uint64_t)(uintptr_t)&g_fcv_cookie;
+    const vkn_tex_src src = {.kind = VKN_SRC_NONE};
+    const char *why = NULL;
+    s = vkn_tex_create(1ull << 32 | 0xffffffffull, &d, &src, &why);
+    if (!s || s->format != t->format) { if (s) vkn_tex_destroy_cookie(d.cookie); return NULL; }
+    snprintf(s->sname, sizeof s->sname, "ui-filter-verify"); s->ui_tgt = 1; g_fcv_tex = s;
+    return s;
+}
+// 1 = verified that way (the compare queued, the hit served from the page); 0 = not possible (the old check: drawn into the target)
+static int fc_verify_page(vkn_tex *t, fc_ent *e) {
+    vkn_tex *sc = fc_vscratch(t);
+    if (!sc || !g_fc_pages || e->page < 0) return 0;
+    vkn_tex *d0 = g_fc.d;
+    if (g_pb.on) { g_pb.on = 0; g_pb.rq = 0; g_ups.lh_lazy_skipped++; }   // (the target's own binding: a hit never needs it)
+    g_fc.t = sc; g_fc.d = NULL; g_fcv_from = t; g_fcv_to = sc;
+    ui_targets_real(sc, NULL);
+    fc_replay();
+    g_fcv_from = g_fcv_to = NULL;
+    if (g_fc.unstable) { e->live = 0; g_ups.fc_unstable_drop++; }   // (inputs changed since the key: no compare, the entry goes)
+    else fc_cmp_put(e);
+    g_fc.t = t; g_fc.d = d0;
+    if (!g_fc.unstable && fc_hit_page(t, e)) { g_ups.fc_rd_verify++; g_ups.fc_rd_hits--; return 1; }
+    return -1;   // (no hit: the target drawn as recorded by the caller)
+}
 // the clean end (vkn_ui_targets of another set): hit or miss
 static void fc_end(void) {
     if (!g_fc.hold) return;
@@ -878,6 +929,7 @@ static void fc_end(void) {
     const uint64_t key = g_fc.key;
     fc_ent *e = why < 0 ? fc_find(key) : NULL;
     if (e && (e->w != w || e->h != h)) { e->live = 0; e = NULL; }
+    if (e && e->iv != g_fc.iv) { e->live = 0; e = NULL; g_ups.fc_iv_refused++; }   // [mgpu P7g] (the inputs it was drawn from are not these)
     const int check = e && (g_fc.mode == 2 || (g_fc.mode == 1 && (++g_fc.hits_all & 127) == 0));
     vkn_tex *t = g_fc.t;
     if (e && !check) {
@@ -894,20 +946,37 @@ static void fc_end(void) {
         g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.hold = 0;
         return;
     }
+    if (why < 0 && check && e->page >= 0) {   // [mgpu P7g] a page entry is verified in a scratch texture and then served as a hit
+        const int r = fc_verify_page(t, e);
+        if (r > 0) {
+            fc_state_only();
+            fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
+            g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.hold = 0;
+            return;
+        }
+        if (r < 0) { g_fc.unstable = 0; ui_targets_real(t, g_fc.d); fc_replay(); fc_state_only(); g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.hold = 0; return; }   // (drawn into the target, nothing stored)
+    }
     if (why >= 0) g_ups.fc_refused[why]++;
     fc_replay();
+    if (why < 0 && g_fc.unstable) {   // [mgpu P7g] an input changed between the key and its draw: nothing stored, the entry of that key goes
+        if (e) e->live = 0;
+        g_ups.fc_unstable_drop++;
+        g_fc.n = 0; g_fc.nents = 0; g_fc.ndraws = 0; g_fc.hold = 0;
+        return;
+    }
     if (why < 0 && check) {   // drawn; the drawn region is compared with the stored slot (the slot stays)
         fc_cmp_put(e);
         fc_ct *c = fc_ct_get(t, 1); if (c) { c->img = t->image; c->key = key; c->valid = 1; }
         // [mgpu P7e] and then read from the page as a hit would be (the verify exercises what mode 1 consumes: later steps and composites
         // read the cached content; the target holds the drawn one only for the compare)
-        if (e->page >= 0 && fc_hit_page(t, e)) { g_ups.fc_rd_verify++; g_ups.fc_rd_hits--; }   // (not counted as a hit)
+        (void)0;   // [mgpu P7g] (page entries: the scratch verify above)
     } else if (why < 0) {
         g_ups.fc_misses++;
         const int pgi = g_fc_pages ? fc_page_for(t, g_fc.rect) : -1;   // [mgpu P7c]
         int32_t gr[4]; fc_guard(g_fc.rect, t->w, t->h, gr);   // [mgpu P7d]
         if (pgi >= 0) { fc_rd_materialize(g_fc.pg[pgi], gr); e = fc_alloc_page(key, g_fc.rect, pgi); }
         else e = fc_alloc(key, w, h);
+        e->iv = g_fc.iv; e->sf = (uint32_t)vkn_frame();   // [mgpu P7g]
         if (e->page >= 0 ? !vkn_pass_copy_rect(g_fc.pg[e->page], gr[0], gr[1], t, gr[0], gr[1], (uint32_t)gr[2], (uint32_t)gr[3])
                          : !vkn_pass_copy_rect(g_fc.atlas, e->x, e->y, t, g_fc.rect[0], g_fc.rect[1], w, h)) {
             g_ups.fc_stored++;
@@ -956,7 +1025,7 @@ static void ui_targets_x(vkn_tex *color, vkn_tex *depth) {
 }
 static void ui_targets_real(vkn_tex *color, vkn_tex *depth) {
     int shared = 0;
-    if (up_on() && up_targets(color, depth, &shared)) { g_st.targets++; return; }   // [stage 5.2 B2]
+    if (up_on() && up_targets(color, depth, &shared)) { g_color = color; g_depth = depth; g_st.targets++; return; }   // ([mgpu P7f] g_color: a lazy binding dropped before this one left its target there)   // [stage 5.2 B2]
     vkn_tex *c[VKN_PASS_COLORS] = {color};
     const uint32_t zero[VKN_PASS_COLORS] = {0};
     vkn_pass_targets(1, c, zero, zero, depth);
@@ -1126,9 +1195,36 @@ static int ring_put(const void *src, uint32_t n, uint32_t pad, VkBuffer *buf, ui
 
 static int unit_of_slot(uint32_t slot) { return slot <= 2 ? (int)slot : slot == 7 ? 3 : -1; }
 
+// [mgpu P7f] a write this module records into t itself (a draw, a colour clear): t's content key goes. A draw can land in a pass that is
+// already open - no pass begin, so no vkn_pass_on_write: P7c's lazy bindings made that common (phone run I02: a pushed target bound
+// again after a nested filter kept the key of its filter epoch while more was drawn into it; a blur reading it was served a stale cached
+// glow). And a draw onto a target whose reads went to a page first gets that content back into the target (the draw adds to it); a clear
+// starts a new content (the page's is dropped).
+static void fc_own_write(vkn_tex *t, int draw) {
+    if (!t) return;
+    g_ups.fc_own_writes++;
+    for (uint32_t i = 0; i < g_fc.nrd; i++) {
+        if (g_fc.rd[i].t != t) continue;
+        vkn_tex *pg = g_fc.rd[i].p; int32_t r[4]; memcpy(r, g_fc.rd[i].r, sizeof r); const VkImage img = g_fc.rd[i].img;
+        fc_rd_del(i);
+        if (draw && t->image == img && pg && !pg->dead) { (void)vkn_pass_copy_rect(t, r[0], r[1], pg, r[0], r[1], (uint32_t)r[2], (uint32_t)r[3]); g_ups.fc_rd_real++; }
+        break;
+    }
+    fc_ct *c = fc_ct_get(t, 0); if (c) c->valid = 0;
+}
+// [mgpu P7g] the effect chain, every engine draw, before its pass is made ready: the colour targets of the set it draws into get the
+// module's write rule (a custom draw inside a filter draws into a pushed target - possibly into its already open pass, with no pass begin
+// to tell vkn_pass_on_write - and possibly onto content that lives in a page): the page content copied back first, the key dropped
+static void fc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, void *user) {
+    (void)in; (void)ctx; (void)out; (void)user;
+    if (!g_fc.init) return;
+    uint32_t n = 0; vkn_tex *c[VKN_PASS_COLORS], *d = NULL; vkn_pass_cur_get(&n, c, NULL, NULL, &d);
+    for (uint32_t i = 0; i < n; i++) if (c[i] && c[i]->ui_tgt) { fc_own_write(c[i], 1); g_ups.fc_engine_writes++; }
+}
 static int ui_draw_x(const vkn_ui_draw_in *in) {
     if (fc_holding()) { fc_put_draw(in); return 0; }   // [mgpu P2] held (drawn at the epoch's end, or replaced by the cached region)
     ui_bind_now();   // [mgpu P7c]
+    fc_own_write(g_color, 1);   // [mgpu P7f]
     VkCommandBuffer cb = vkn_cb();
     if (!cb) { g_st.drop_cb++; UI_RED(RR_CB, "a draw outside any recording: dropped"); return 1; }
     if (statics()) { g_st.drop_shader++; return 1; }
@@ -1335,6 +1431,7 @@ static void ui_clear_ds_x(int depth, uint8_t mask) {
 static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]) {
     if (fc_holding()) { if (fc_hold_clear(t, rect)) return; fc_flush(4); }   // [mgpu P2]
     ui_bind_now();   // [mgpu P7c]
+    fc_own_write(t, 0);   // [mgpu P7f]
     if (!t || t->dead) return;
     static const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     int region = 0;
@@ -1442,7 +1539,11 @@ static int lh_on(void) {
              g_lh.lmode == 2 ? "verify: hoisted / in order on alternate recordings, equal runs compared" : "poison: 1 + pushed targets magenta after a hoisted run",
              g_lh.cmode, g_lh.creq < 0 ? "family default" : "env", g_lh.cmode == 0 ? "off" : g_lh.cmode == 1 ? "an unchanged UI is not drawn again (every 256th hit drawn and compared)" :
              g_lh.cmode == 2 ? "verify: every would-hit drawn and compared" : "poison: 1 + a hit in 64 clears the layer magenta", g_lh.tile);
-    g_fc_pages = g_lh.lmode != 0;   // [mgpu P7c]
+    {   // [mgpu P7c] [23.11] the pages are opt-in (DM_VK_NATIVE_UIFC_PAGES=1): phone J02 (Mali model, 140 s) still had a page entry whose
+        // inputs carry no version differ from the drawn one (6094 texels, key 9d74399b780f871c, 1159,1008 381x72) - a stale glow risk.
+        const char *pe = getenv("DM_VK_NATIVE_UIFC_PAGES");
+        g_fc_pages = g_lh.lmode != 0 && (pe && *pe ? atoi(pe) > 0 : 1);   // [23.11] default on again: phone K01 (ui7, Mali model, 100 s, UIFC=2) 14 page verifies + 18 compares a frame, differ 0, pages off 0
+    }
     if (g_lh.lmode || g_lh.cmode) {
         vkn_pass_before_ev(lh_ev); vkn_pass_on_write(ui_on_write); vkn_pass_log_after(lh_rj_print);   // [mgpu P7b] (the run log)
         static int fx; if (!fx) fx = !vkn_fx_register("ui-layer", lh_fx, NULL, 0);   // (before "ui-pass-fence" at 1)

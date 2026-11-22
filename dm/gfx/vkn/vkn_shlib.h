@@ -178,6 +178,11 @@ int64_t vkn_shlib_fs_outputs(const void *shader);
 // [P10] A vertex shader object: the program of its output at `location` (xbg_spirv_out_prog of the final words, which are read again from
 // the bundle unless kept: call once and keep the answer; the loader's stack rule). 0 = *out filled, 1 = no such program. Any thread.
 int vkn_shlib_out_prog(const void *shader, uint32_t location, struct nr_cv_prog *out);
+// [VK-SHADOWS-MOVING] (vkn_shs.c) built at load while DM_VK_NATIVE_SHCULL or DM_VK_NATIVE_SHSCROLL is non-zero: the vertex shader's
+// position as a long program with degrees (dm/gfx/nr/nr_shs.h, xbg_spirv_pos_long of the final words), kept only when it is affine in
+// Location 0 x / y / z; NULL = none. Immutable after load: any thread.
+struct nr_sb_prog;
+const struct nr_sb_prog *vkn_shlib_vs_posl(const void *shader);
 int vkn_shlib_policy(void);
 
 // ==== [DOS2] VK-NATIVE stage 5.2 B5 / B4 (dm/gfx/vkn/vkn_mat.c MAT + XLQ, vkn_prepass.c): the library's steps for a technique's module ====

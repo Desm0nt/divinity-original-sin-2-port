@@ -26,7 +26,9 @@ struct Chain { uint32_t base = 0; std::vector<uint32_t> idx; bool bad = false; }
 // [P10] target < 0: gl_Position (four components). target >= 0: the Output variable decorated Location target (no BuiltIn, no Component
 // decoration; a float vector of 2..4 components): out[0], out[1] = its x, y; out[2], out[3] = its z, w where the variable has them and
 // they are followed, else a copy of out[0]. ClipDistance writes do not matter to a varying.
-static void out_prog(const uint32_t *in, size_t n, int target, nr_cv_prog *pr, const char **why) {
+// The walk. lins == NULL: the short program *pr (nr_cover.h). Else: the instructions the position needs, renumbered, with no length limit
+// but the walk's own, into *lins and lout[4] ([VK-SHADOWS-MOVING] xbg_spirv_pos_long below); *pr is scratch then.
+static void pos_walk(const uint32_t *in, size_t n, int target, nr_cv_prog *pr, const char **why, std::vector<nr_cv_ins> *lins, int *lout) {
     const char *dummy; if (!why) why = &dummy;
     memset(pr, 0, sizeof *pr); *why = "module";
     if (!in || n < 5 || in[0] != 0x07230203u) return;
@@ -251,6 +253,20 @@ static void out_prog(const uint32_t *in, size_t n, int target, nr_cv_prog *pr, c
         if (x.op == NR_CV_FMA) need[x.c] = 1;
     }
     unsigned cnt = 0; for (size_t i = 0; i < ins.size(); i++) if (need[i]) ++cnt;
+    if (lins) {   // [VK-SHADOWS-MOVING] the long form: every needed instruction, operands renumbered
+        unsigned m = 0;
+        for (size_t i = 0; i < ins.size(); i++) if (need[i]) {
+            nr_cv_ins x = ins[i];
+            if (x.op > NR_CV_UBO) {
+                x.a = uint16_t(renum[x.a]);
+                x.b = x.op != NR_CV_NEG && x.op != NR_CV_ABS ? uint16_t(renum[x.b]) : 0;
+                x.c = x.op == NR_CV_FMA ? uint16_t(renum[x.c]) : 0;
+            }
+            renum[i] = int(m++); lins->push_back(x);
+        }
+        for (int k = 0; k < 4; k++) lout[k] = renum[size_t(pos.c[k])];
+        *why = "ok"; return;
+    }
     if (cnt > NR_CV_MAX_INS) { *why = "position expression too long"; return; }
     unsigned m = 0;
     for (size_t i = 0; i < ins.size(); i++) if (need[i]) {
@@ -271,9 +287,34 @@ static void out_prog(const uint32_t *in, size_t n, int target, nr_cv_prog *pr, c
     for (int k = 0; k < 4; k++) { pr->out[k] = uint8_t(renum[size_t(pos.c[k])]); if (pr->ins[pr->out[k]].op > NR_CV_INPUT) pr->exact = 0; }
     pr->ok = 1; *why = "ok";
 }
-
-void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char **why) { out_prog(in, n, -1, pr, why); }
+void xbg_spirv_pos_prog(const uint32_t *in, size_t n, nr_cv_prog *pr, const char **why) { pos_walk(in, n, -1, pr, why, nullptr, nullptr); }
 void xbg_spirv_out_prog(const uint32_t *in, size_t n, uint32_t location, nr_cv_prog *pr, const char **why) {
     if (location >= 32) { const char *d; if (!why) why = &d; memset(pr, 0, sizeof *pr); *why = "location"; return; }
-    out_prog(in, n, int(location), pr, why);
+    pos_walk(in, n, int(location), pr, why, nullptr, nullptr);
+}
+
+// [VK-SHADOWS-MOVING] The long form (dm/gfx/nr/nr_shs.h nr_sb_prog): the same walk, up to NR_SB_MAX_INS instructions and NR_SB_MAX_UBO
+// blocks, with the degree of every value in Location 0 x / y / z. NULL = no program (why); else a malloc'ed program (free()).
+nr_sb_prog *xbg_spirv_pos_long(const uint32_t *in, size_t n, const char **why) {
+    const char *dummy; if (!why) why = &dummy;
+    nr_cv_prog scratch; std::vector<nr_cv_ins> li; int lo[4] = {-1, -1, -1, -1};
+    pos_walk(in, n, -1, &scratch, why, &li, lo);
+    if (strcmp(*why, "ok")) return nullptr;
+    if (li.empty() || li.size() > NR_SB_MAX_INS) { *why = "position expression too long"; return nullptr; }
+    nr_sb_prog *pr = static_cast<nr_sb_prog *>(calloc(1, nr_sb_prog_bytes(unsigned(li.size()))));
+    if (!pr) { *why = "memory"; return nullptr; }
+    pr->n = uint16_t(li.size());
+    for (size_t i = 0; i < li.size(); i++) {
+        const nr_cv_ins &x = li[i]; pr->ins[i] = x; pr->ins[i].pad = 0;
+        if (x.op == NR_CV_INPUT) { if (x.a < 32) pr->in_mask |= 1u << x.a; else pr->in_mask |= 0x80000000u; }
+        else if (x.op == NR_CV_UBO) {
+            unsigned u = 0; while (u < pr->nubo && pr->ubo[u] != x.a) u++;
+            if (u == pr->nubo) { if (u >= NR_SB_MAX_UBO) { *why = "too many uniform blocks"; free(pr); return nullptr; } pr->ubo[u] = x.a; pr->nubo++; }
+            if (uint32_t(x.b) + 4 > pr->ubo_bytes[u]) pr->ubo_bytes[u] = uint32_t(x.b) + 4;
+        }
+    }
+    for (int k = 0; k < 4; k++) { if (lo[k] < 0) { *why = "position"; free(pr); return nullptr; } pr->out[k] = uint16_t(lo[k]); }
+    pr->ok = 1; nr_sb_degrees(pr);
+    *why = pr->affine ? "ok" : "not affine in Location 0";
+    return pr;
 }

@@ -37,7 +37,7 @@
 //       dm/gfx/vulkan/engine/tests/vkn_stage3_test.c dm/gfx/vkn/vkn_core.c dm/gfx/vkn/vkn_buf.c dm/gfx/vkn/vkn_tex.c dm/gfx/vkn/vkn_shader.c
 //       dm/gfx/vkn/vkn_state.c dm/gfx/vkn/vkn_astc.c dm/gfx/vkn/vkn_bcgpu.c dm/gfx/vkn/vkn_frame.c dm/gfx/vkn/vkn_pass.c dm/gfx/vkn/vkn_draw.c dm/gfx/vkn/vkn_fx.c dm/gfx/vkn/vkn_ui.c dm/gfx/vkn/vkn_query.c dm/gfx/vkn/vkn_prof.c dm/gfx/vkn/vkn_shc.c dm/gfx/vkn/vkn_lightfuse.c
 //       dm/gfx/vkn/vkn_post.c dm/gfx/vkn/vkn_rt.c dm/gfx/vkn/vkn_sort.c dm/gfx/nb/nb_plan.c dm/gfx/vkn/vkn_mat.c dm/gfx/nr/nr_mat.c dm/gfx/vkn/vkn_prepass.c
-//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_occz.c dm/gfx/vkn/vkn_occz_model.c dm/gfx/vkn/vkn_hacks.c dm/gfx/vkn/vkn_shs.c
+//       dm/gfx/nvn/nvn_tex.c dm/gfx/vkn/vkn_occ.c dm/gfx/vkn/vkn_drv.c dm/gfx/vkn/vkn_preskin.c dm/gfx/vkn/vkn_occb.c dm/gfx/vkn/vkn_occz.c dm/gfx/vkn/vkn_occz_model.c dm/gfx/vkn/vkn_hacks.c dm/gfx/vkn/vkn_fsr.c dm/gfx/vkn/vkn_shs.c dm/gfx/vkn/vkn_eng.c dm/gfx/vkn/vkn_eocc.c dm/gfx/vkn/vkn_eocc_model.c
 //       dm/gfx/tex/nvn_deswizzle.c dm/gfx/tex/nvn_bcdec.c dm/gfx/nr/nr_reg.c dm/gfx/nr/nr_sh.c -lpthread -lm && wsl /tmp/vkn_stage3_test
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -98,18 +98,25 @@ int dm_present_last_error(void) { return pr_err; }
 static uint64_t mark(void) { return mk_seq; }
 static int skip_op(int op) { return op == MK_E_RESET_QP || op == MK_E_TIMESTAMP; }
 // Entries since `from` of command buffer cb (VK_NULL_HANDLE = every entry) and op (0 = any; timestamps skipped).
+// [P10 fix 6] a recording split by vkn_rec_split is three primary buffers submitted [head, mid, tail]: a recording's buffer `cb` means
+// all three, in that (execution) order
+static int parts(VkCommandBuffer cb, VkCommandBuffer p[3]) { p[0] = cb; return cb && !vkn_rec_split_parts(cb, &p[1], &p[2]) ? 3 : 1; }
 static int cnt(uint64_t from, VkCommandBuffer cb, int op) {
-    int n = 0;
-    for (uint64_t s = from; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == cb) && (op ? e->op == op : !skip_op(e->op))) n++; }
+    int n = 0; VkCommandBuffer p[3]; const int np = parts(cb, p);
+    for (int i = 0; i < np; i++)
+        for (uint64_t s = from; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == p[i]) && (op ? e->op == op : !skip_op(e->op))) n++; }
     return n;
 }
 static const mk_ev *nth(uint64_t from, VkCommandBuffer cb, int op, int k) {
-    for (uint64_t s = from; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == cb) && e->op == op && !k--) return e; }
+    VkCommandBuffer p[3]; const int np = parts(cb, p);
+    for (int i = 0; i < np; i++)
+        for (uint64_t s = from; s < mk_seq; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == p[i]) && e->op == op && !k--) return e; }
     return NULL;
 }
 static int ops(uint64_t from, VkCommandBuffer cb, int *o, int max) {   // the op sequence (timestamps skipped)
-    int n = 0;
-    for (uint64_t s = from; s < mk_seq && n < max; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == cb) && !skip_op(e->op)) o[n++] = e->op; }
+    int n = 0; VkCommandBuffer p[3]; const int np = parts(cb, p);
+    for (int i = 0; i < np; i++)
+        for (uint64_t s = from; s < mk_seq && n < max; s++) { const mk_ev *e = mk_ev_at(s); if (e && (!cb || e->cb == p[i]) && !skip_op(e->op)) o[n++] = e->op; }
     return n;
 }
 static int ops_are(uint64_t from, VkCommandBuffer cb, const int *want, int n) {
@@ -3587,6 +3594,16 @@ static void test_v1_preskin(void);   // [stage 5.3 V1] PRESKIN (end of file)
 static void test_occ_b(void);     // [stage 5] technique B (end of file)
 static void test_occ_z(void);     // [stage 5] technique Z (end of file)
 static void test_g_hacks(void);   // [stage 5.4] the DM_HACK_* settings in mode 1 (end of file)
+static void test_mgpu(void);   // [mgpu] (end of file)
+static void test_p10(void);    // [P10] (end of file)
+static void test_p7(void);     // [mgpu P7] (end of file)
+static void test_p7b(void);    // [mgpu P7b] (end of file)
+static void test_fsr(void);    // [VK-DRS-FSR] fsr-aa (end of file)
+static void test_post_part(void);   // [VK-LOWRES] (end of file)
+static void test_frame(void);  // [frame F1 / F2] (end of file)
+static void test_eng4(void);   // [eng4] (end of file)
+static void test_eng(void);    // [VK-ENGINE-SIDE] I1b far rate, merge census (end of file)
+static void test_eocc(void);   // [VK-ENGINE-SIDE I2] occlusion in the main-view receiver (end of file)
 // ================================================================================================================ [stage 5.2 B2] UI pass
 // DM_VK_NATIVE_UIPASS (vkn_ui.h "the UI pass on tile GPUs"): level 1 draws a GDraw epoch whose pass start never used its depth-stencil
 // without it (render pass of one attachment), re-attaches it for the first draw that tests depth (LOAD of the colour drawn so far), keeps
@@ -4017,7 +4034,9 @@ static void test_b4_prepass(void) {
         rt[0] = 334; rs[0] = 10;
         // case 0: the twin never comes, then a draw into Dz in another colour pass; case 1: then a draw that samples Dz; case 2: the twin comes
         // with other per-object bytes (the mesh twin)
-        for (int cs = 0; cs < 3 && Dz && Cz && Fz && Lz; cs++) {
+        // [eng4] case 3 (phone H10 / H12: 32 bad keys "unsafe ... other-pass 32" a frame): the G-buffer is interrupted by another colour pass
+        // on the depth and resumes with the twin - the repair at the interruption covers the skip, the late claim finds the depth whole
+        for (int cs = 0; cs < 4 && Dz && Cz && Fz && Lz; cs++) {
             uint64_t truth = 0, got = 0; int gw = -1;
             for (int mode = 0; mode < 2; mode++) {
                 vkn_prepass_test_setup(mode ? 1 : 0, b4_facts);
@@ -4027,8 +4046,9 @@ static void test_b4_prepass(void) {
                     vkn_draw_ubo(0, 0, b4w[0], 64); vkn_draw_indexed(&pre, 3, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1);   // X (first), P
                     targets(Cz, NULL, Dz);
                     vkn_draw_in r9 = gb; vkn_draw_indexed(&r9, 9, 3, 1);   // another G-buffer draw (the pass begins)
-                    if (!odd || cs == 2) { vkn_draw_ubo(0, 0, odd ? b4w[1] : b4w[0], 64); vkn_draw_indexed(&gb, 0, 3, 1);
-                        if (odd) { const mk_gp *p = b5_pipe(cb); gw = p && p->has_ds ? (int)p->ds.depthWriteEnable * 10 + (int)p->ds.depthCompareOp : -1; } }
+                    if (odd && cs == 3) { targets(Fz, NULL, Dz); vkn_draw_in fw = gb; vkn_draw_indexed(&fw, 15, 3, 1); targets(Cz, NULL, Dz); }   // (the interruption)
+                    if (!odd || cs >= 2) { vkn_draw_ubo(0, 0, (odd && cs == 2) ? b4w[1] : b4w[0], 64); vkn_draw_indexed(&gb, 0, 3, 1);
+                        if (odd && cs == 2) { const mk_gp *p = b5_pipe(cb); gw = p && p->has_ds ? (int)p->ds.depthWriteEnable * 10 + (int)p->ds.depthCompareOp : -1; } }
                     vkn_draw_ubo(0, 0, b4w[0], 64);
                     if (cs == 1) { targets(Lz, NULL, NULL); vkn_draw_in rd = g_in; rd.tex[1] = rt; rd.smp[1] = rs; vkn_draw_indexed(&rd, 0, 3, 1); }
                     else { targets(Fz, NULL, Dz); vkn_draw_in fw = gb; vkn_draw_indexed(&fw, 12, 3, 1); }   // another colour pass on Dz
@@ -4039,12 +4059,12 @@ static void test_b4_prepass(void) {
                 if (mode) {
                     const prepass_result *r = (const prepass_result *)vkn_prepass_test_last();   // frame 3's table (retired by the frame after)
                     CHECK(r && r->bad_keys == 0 && r->unmatched == 0 && r->unsafe == 0);
-                    if (r && cs < 2) CHECK_EQ(r->repaired, 1);
+                    if (r && cs != 2) CHECK_EQ(r->repaired, 1);
                 }
             }
             vkn_prepass_stats ps; vkn_prepass_stats_get(&ps);
             if (cs < 2) { CHECK(got == truth); CHECK(ps.repaired >= 1); }
-            else { CHECK_EQ(gw, 10 + VK_COMPARE_OP_LESS_OR_EQUAL); CHECK(ps.twin_mesh >= 1); }
+            else if (cs == 2) { CHECK_EQ(gw, 10 + VK_COMPARE_OP_LESS_OR_EQUAL); CHECK(ps.twin_mesh >= 1); }
             printf("  prepass eng3 case %d: depth %s the truth, repaired %llu, mesh twins %llu, bad frames %llu\n", cs, got == truth ? "equals" : "DIFFERS from",
                    (unsigned long long)ps.repaired, (unsigned long long)ps.twin_mesh, (unsigned long long)ps.bad_frames);
         }
@@ -4063,7 +4083,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mk_main_thread = pthread_self();
     mk_validate_on = 1; mk_blit = 1;
-    setenv("DM_VK_NATIVE_TILELIGHT", "0", 0); setenv("DM_VK_ENG_FARRATE", "0", 0);   /* [23.11] default 1 now; the shadow-cache tests keep their frames */   // [23.11] P10 is on by default on the mock's Adreno now; the other tests keep their frames (test_p10 sets its mode itself)
+    setenv("DM_VK_NATIVE_TILELIGHT", "0", 0); setenv("DM_VK_ENG_FARRATE", "0", 0); setenv("DM_VK_NATIVE_UIFC_PAGES", "1", 0);   /* [23.11] pages opt-in on the phone; the host tests keep testing them */   /* [23.11] default 1 now; the shadow-cache tests keep their frames */   // [23.11] P10 is on by default on the mock's Adreno now; the other tests keep their frames (test_p10 sets its mode itself)
     vkn_set_mode(VKN_NATIVE);
     // install order of the host: the modules' listeners first, then the test's own
     vkn_pass_init(); vkn_draw_install(); vkn_tex_update_init();
@@ -4099,11 +4119,18 @@ int main(void) {
     test_moving();      // [VK-SHADOWS-MOVING] the scrolling layer and the caster culling (forked children; the geometric depth model)
     test_eng_static();  // [eng I1a] the engine-driven static-caster layer (forked children; the geometric depth model; after test_moving: its shader)
     test_sort();        // [rt2 R7] DM_VK_NATIVE_SORT (forked children; the depth content model)
+    test_frame();       // [frame F1 / F2] the frame area, the waiting region clear, the draw merge (forked children; after test_sort: its depth states)
+    test_eng();         // [VK-ENGINE-SIDE] DM_VK_ENG_FARRATE (the far tile kept / put back) and the merge census (forked children)
+    test_eocc();        // [VK-ENGINE-SIDE I2] DM_VK_ENG_OCC 0 / 1 / 2 / 3 end to end (forked children)
     test_a5_fx();
     test_a5_oracle();
     test_post();   // [stage 5.2 B3] it installs the post effect for the rest of the process
     test_b1_pass();   // [stage 5.2 B1] render-pass load / store policy (forked child)
     test_b2_uipass();   // [stage 5.2 B2] DM_VK_NATIVE_UIPASS
+    test_mgpu();   // [mgpu] VK-MOBILE-GPU-PLAN П0 П1 П2 П6
+    test_p10();    // [P10] the merged tile pass
+    test_p7();     // [mgpu P7] the UI layer hold: one layer pass, the whole-UI cache
+    test_p7b();    // [mgpu P7b] renames, the pushed-DS check, runs with the layer alone, the run's DS / area, the engine's draw next
     test_b5_mat();   // [stage 5.2 B5] MAT + XLQ (vkn_mat.c)
     test_b4_prepass();   // [stage 5.2 B4] the pre-pass hybrid (vkn_prepass.c)
     test_v2_drv();   // [stage 5.3 V2] driver corrections (vkn_drv.c)
@@ -4111,6 +4138,9 @@ int main(void) {
     test_occ_z();  // [stage 5] technique Z (vkn_occz.c, DM_VK_NATIVE_COND 10 / 12 / 13 through the vkn_rt.c taps in RT=0; forked children)
     test_occ_b();  // [stage 5] technique B (vkn_occb.c, DM_VK_NATIVE_COND 7 / 8; forked children, the chain cleared of the earlier tests' functions)
     test_g_hacks();   // [stage 5.4] sampler hack twins (live), the DRS signals, the hacks lines, targets re-made at another size (forked)
+    test_fsr();       // [VK-DRS-FSR] the pre pass before EASU (vkn_fsr.c; forked children)
+    test_post_part(); // [VK-LOWRES] the post fusion at a part (vkn_post.c DM_VK_NATIVE_POST_PART + vkn_fsr.c; forked children)
+    test_eng4();   // [eng4] the pre-pass hybrid with the merged tile pass and a foreign atlas use (forked children)
     test_rt();     // [stage 5.5] last (forked children: the recording thread's modes; its warm-up changes this process's state)
     CHECK_EQ(mk_val_errors, 0);
     CHECK_EQ(mk_errors, 0);
@@ -5912,4 +5942,1664 @@ static void test_occ_z(void) {
         CHECK(any);                        // far cells: the trusted objects are visible -> poison skips them
         CHECK_EQ(R.cond[OZ_F - 1], 3);     // near cells: hidden, poison leaves them
     }
+}
+#include "../../../vkn/vkn_policy.h"
+
+// ================================================================================================================ [mgpu] VK-MOBILE-GPU-PLAN
+// П0  the pass journal: every pass end counted by its reason (targets / sample / copy ...) with its model bytes and draws;
+// П1  DM_VK_NATIVE_UIREGION: a named Iggy target's epoch begins with its region as render area, a colour draw with the full scissor
+//     is clipped to it (no restart), a depth-stencil draw drops the rule (the level-2 restart: the rest full area);
+// П2  DM_VK_NATIVE_UIFC: a named epoch's calls are held; the first time drawn and its region copied into the atlas (miss), the same
+//     epoch the next frame is one copy from the atlas (hit: no pass on the target); a changed vertex byte / constant misses; a texture
+//     without a version (a GPU-written target never cached) refuses; a fence / an engine call in between runs the held calls as recorded;
+// П6  the pass join: a depth-only pass followed by the same colour set on the same depth for 2 frames begins as that set's pass when its
+//     colours have remembered clears (one pass, the depth-only draw with write masks 0); the set coming = hit (pass stays open), another
+//     set = miss (pass ends); the dependency / initial-layout rules of the passes (pure). Exact = the validator is clean.
+static void mg_quad(int32_t sx, int32_t sy, int32_t sw, int32_t sh, vkn_tex *t0, float v0) {
+    float verts[16] = {0, 0, 0, 0,  64, 0, 1, 0,  64, 32, 1, 1,  0, 32, 0, 1}; verts[0] = v0;
+    static float vsc[32] = {1}, fsc[12] = {1};
+    vkn_ui_scissor(sx, sy, sw, sh);
+    vkn_ui_draw_in d; memset(&d, 0, sizeof d);
+    d.vs = 0xA1; d.fs = 0xA2; d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.blend = 1;
+    d.tex[0] = t0; d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.verts = verts; d.nverts = 4;
+    CHECK_EQ(vkn_ui_draw(&d), 0);
+}
+static const mk_ev *mg_last(uint64_t m, VkCommandBuffer cb, int op) { const mk_ev *r = NULL; for (int k = 0; nth(m, cb, op, k); k++) r = nth(m, cb, op, k); return r; }
+static void test_mgpu(void) {
+    vkn_tex *C = mktex(980, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 980, 0), *C2 = mktex(981, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 981, 0);
+    vkn_tex *L = mktex(983, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 983, 0), *UD = mktex(982, EF_D24S8, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 982, 0);
+    CHECK(C && C2 && L && UD && g_t0); if (!C || !C2 || !L || !UD || !g_t0) return;
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    // ---- П6 pure: dependency after a pass, initial layouts
+    CHECK(!(vkn_rp_dep_after(1) & (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)));
+    CHECK((vkn_rp_dep_after(1) & (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)) ==
+          (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
+    CHECK((vkn_rp_dep_after(0) & (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)) == (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    CHECK_EQ(vkn_rp_initial(0, 0, 0), VK_IMAGE_LAYOUT_UNDEFINED); CHECK_EQ(vkn_rp_initial(0, 1, 0), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    CHECK_EQ(vkn_rp_initial(1, 0, 1), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL); CHECK_EQ(vkn_rp_initial(0, 1, 1), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    CHECK_EQ(vkn_policy_tile_pass(VKN_FAM_ADRENO, VKN_DRVID_QUALCOMM_PROPRIETARY), 1); CHECK_EQ(vkn_policy_tile_pass(VKN_FAM_ADRENO, VKN_DRVID_MESA_TURNIP), 0);
+    CHECK_EQ(vkn_policy_tile_pass(VKN_FAM_MALEOON, 0), 1); CHECK_EQ(vkn_policy_tile_pass(VKN_FAM_XCLIPSE, 0), 0); CHECK_EQ(vkn_policy_tile_pass(VKN_FAM_MALI, 0), 1);
+    // ---- П0: the journal's reasons
+    {
+        vkn_pass_stats4 a, b; vkn_pass_stats4_get(&a);
+        fbegin(1); targets(C, NULL, NULL); vkn_pass_clear_color(C, 0, (const float[4]){0, 0, 0, 0}, (const int32_t[4]){0, 0, 8, 8});   // (a region clear: a pass)
+        targets(C2, NULL, NULL); vkn_pass_clear_color(C2, 0, (const float[4]){0, 0, 0, 0}, (const int32_t[4]){0, 0, 8, 8});
+        vkn_pass_copy(L, C);   // (ends C2's pass: copy)
+        fsubmit(0);
+        vkn_pass_stats4_get(&b);
+        CHECK_EQ(b.ended[VKN_PE_TARGETS] - a.ended[VKN_PE_TARGETS], 1); CHECK_EQ(b.ended[VKN_PE_COPY] - a.ended[VKN_PE_COPY], 1); CHECK_EQ(b.passes - a.passes, 2);
+        CHECK_EQ(b.ended_bytes[VKN_PE_TARGETS] - a.ended_bytes[VKN_PE_TARGETS], 2u * 64 * 32 * 4);   // (C: LOAD + STORE of 64x32 RGBA8)
+        CHECK(!strcmp(vkn_pass_end_name(VKN_PE_COPY), "copy"));
+        targets(NULL, NULL, NULL);
+    }
+    // ---- П1: the region epoch (UIPASS 1 = epochs + DS detach, UIREGION 1)
+    vkn_ui_fc_config(1);   // (П2 below; read at its first use)
+    vkn_ui_region_config(1); vkn_ui_pass_config(1, 0, 0, 0);
+    {
+        vkn_ui_pass_stats s0, s1; vkn_ui_pass_stats_get(&s0);
+        VkCommandBuffer cb = fbegin(1); uint64_t m = mark();
+        vkn_ui_targets(C, UD); vkn_ui_viewport(0, 0, 64, 32); vkn_ui_scissor(0, 0, 64, 32);
+        const int32_t rg[4] = {8, 4, 16, 8};
+        vkn_ui_region(C, rg); vkn_ui_clear_color(C, rg);
+        mg_quad(0, 0, 64, 32, NULL, 0.0f);   // full scissor: clipped to the region
+        vkn_ui_pass_fence();                 // (the held calls run as recorded: the epoch is not a clean end)
+        fsubmit(0);
+        vkn_ui_pass_stats_get(&s1);
+        CHECK_EQ(s1.region_mode, 1); CHECK_EQ(s1.region_epochs - s0.region_epochs, 1); CHECK_EQ(s1.region_clipped - s0.region_clipped, 1);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
+        { const mk_ev *r = nth(m, cb, MK_E_BEGIN_RP, 0); CHECK(r && r->rect.offset.x == 8 && r->rect.offset.y == 4 && r->rect.extent.width == 16 && r->rect.extent.height == 8); }
+        { const mk_ev *sc = mg_last(m, cb, MK_E_SCISSOR); CHECK(sc && sc->rect.offset.x == 8 && sc->rect.offset.y == 4 && sc->rect.extent.width == 16 && sc->rect.extent.height == 8); }
+        CHECK_EQ(s1.fc_flush[1] - s0.fc_flush[1], 1);   // (the fence ended the held epoch)
+        // a depth-tested draw in a region epoch: the rule drops, the narrowed pass ends, the rest full area
+        s0 = s1; cb = fbegin(1); m = mark();
+        vkn_ui_targets(C, UD); vkn_ui_viewport(0, 0, 64, 32); vkn_ui_scissor(0, 0, 64, 32);
+        vkn_ui_region(C, rg); vkn_ui_clear_color(C, rg);
+        mg_quad(0, 0, 64, 32, NULL, 0.0f);
+        { static float verts[16] = {0, 0, 0, 0,  64, 0, 1, 0,  64, 32, 1, 1,  0, 32, 0, 1}; static float vsc[32] = {1}, fsc[12] = {1};
+          vkn_ui_draw_in d; memset(&d, 0, sizeof d); d.vs = 0xA1; d.fs = 0xA2; d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.blend = 1; d.ds = 2;
+          d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.verts = verts; d.nverts = 4; CHECK_EQ(vkn_ui_draw(&d), 0); }
+        vkn_ui_pass_fence();
+        fsubmit(0);
+        vkn_ui_pass_stats_get(&s1);
+        CHECK_EQ(s1.region_dropped - s0.region_dropped, 1);
+        { const mk_ev *r = mg_last(m, cb, MK_E_BEGIN_RP); CHECK(r && r->rect.extent.width == 64 && r->rect.extent.height == 32); }
+        targets(NULL, NULL, NULL);
+    }
+    vkn_ui_region_config(0); vkn_ui_pass_config(0, 0, 0, 0);   // (П2 alone: no UI pass, as on Adreno)
+    // ---- П2: the filter cache
+    {
+        const int32_t rg[4] = {0, 0, 32, 16};
+        vkn_ui_pass_stats s0, s1;
+        for (int f = 0; f < 6; f++) {
+            vkn_ui_pass_stats_get(&s0);
+            VkCommandBuffer cb = fbegin(1); uint64_t m = mark();
+            vkn_ui_targets(L, NULL); vkn_ui_viewport(0, 0, 64, 32); vkn_ui_scissor(0, 0, 64, 32);
+            mg_quad(0, 0, 64, 32, NULL, 0.0f);   // (the parent's draw: not held)
+            vkn_ui_targets(C2, UD); vkn_ui_viewport(0, 0, 64, 32); vkn_ui_scissor(0, 0, 64, 32);
+            vkn_ui_region(C2, rg); vkn_ui_clear_color(C2, rg);
+            const float v0 = f < 2 ? 0.0f : f < 4 ? 1.0f : 0.0f;   // frames 2..3 another vertex byte; 4..5 a texture without a version
+            mg_quad(0, 0, 32, 16, f >= 4 ? C : g_t0, v0);
+            mg_quad(0, 0, 32, 16, g_t0, v0);
+            vkn_ui_targets(L, NULL);   // TextureDrawBufferEnd: the clean end
+            mg_quad(0, 0, 64, 32, C2, 0.0f);   // the parent reads the result
+            fsubmit(0);
+            vkn_ui_pass_stats_get(&s1);
+            CHECK_EQ(s1.fc_mode, 1); CHECK_EQ(s1.fc_epochs - s0.fc_epochs, 1);
+            if (f == 0 || f == 2) { CHECK_EQ(s1.fc_misses - s0.fc_misses, 1); CHECK_EQ(s1.fc_stored - s0.fc_stored, 1); CHECK_EQ(cnt(m, cb, MK_E_COPY_IMG), 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3); }
+            else if (f == 1 || f == 3) {
+                CHECK_EQ(s1.fc_hits - s0.fc_hits, 1); CHECK_EQ(s1.fc_draws_saved - s0.fc_draws_saved, 2); CHECK_EQ(cnt(m, cb, MK_E_COPY_IMG), 1);
+                CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2);   // the parent's two passes; none on the cached target
+                const mk_ev *cp = nth(m, cb, MK_E_COPY_IMG, 0); CHECK(cp && cp->a[1] == VH(C2->image));
+            } else { CHECK_EQ(s1.fc_refused[2] - s0.fc_refused[2], 1); CHECK_EQ(s1.fc_hits - s0.fc_hits, 0); CHECK_EQ(cnt(m, cb, MK_E_COPY_IMG), 0); }
+        }
+        // a fence in the middle of a held epoch: drawn as recorded
+        vkn_ui_pass_stats_get(&s0);
+        VkCommandBuffer cb = fbegin(1); uint64_t m = mark();
+        vkn_ui_targets(C2, UD); vkn_ui_viewport(0, 0, 64, 32); vkn_ui_region(C2, rg); vkn_ui_clear_color(C2, rg);
+        mg_quad(0, 0, 32, 16, g_t0, 0.0f);
+        { vkn_draw_in in = g_in; targets(L, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }   // the engine: the held calls run first
+        fsubmit(0);
+        vkn_ui_pass_stats_get(&s1);
+        CHECK_EQ(s1.fc_flush[2] - s0.fc_flush[2], 1); CHECK_EQ(s1.fc_hits - s0.fc_hits, 0); CHECK(cnt(m, cb, MK_E_BEGIN_RP) >= 2);
+        targets(NULL, NULL, NULL);
+    }
+    // ---- П6.1: the pass join (policy join 1; the rest as it was)
+    {
+        vkn_pass_policy p0, p1; int fam = 0; vkn_pass_policy_get(&p0, &fam); p1 = p0; p1.join = 1; vkn_pass_policy_set(&p1);
+        static const float z[4] = {0, 0, 0, 0};
+        vkn_pass_stats4 a, b;
+        for (int f = 0; f < 4; f++) {
+            vkn_pass_stats4_get(&a);
+            VkCommandBuffer cb = fbegin(1); uint64_t m = mark();
+            vkn_pass_clear_color(C, 0, z, NULL); vkn_pass_clear_color(C2, 0, z, NULL);   // remembered (not current)
+            vkn_pass_clear_depth(UD, 3, 1.0f, 0);
+            targets(NULL, NULL, UD);
+            { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+            if (f < 3) targets(C, C2, UD); else targets(C, NULL, UD);   // frame 3: another set (a miss)
+            { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+            targets(NULL, NULL, NULL);
+            fsubmit(0);
+            vkn_pass_stats4_get(&b);
+            if (f < 2) { CHECK_EQ(b.joined - a.joined, 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2); }
+            else if (f == 2) {
+                CHECK_EQ(b.joined - a.joined, 1); CHECK_EQ(b.join_hit - a.join_hit, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
+                const mk_ev *r = nth(m, cb, MK_E_BEGIN_RP, 0); const mk_rp *rp = rp_of(r);
+                CHECK(rp && rp->natt == 3 && att_of(r, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && att_of(r, 1)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+            } else { CHECK_EQ(b.joined - a.joined, 1); CHECK_EQ(b.join_miss - a.join_miss, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2); }
+        }
+        // no remembered clear on a colour: refused (it would have to LOAD) once the set is learned again
+        for (int f = 0; f < 3; f++) {
+            vkn_pass_stats4_get(&a);
+            fbegin(1); targets(NULL, NULL, UD); { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+            targets(C, C2, UD); { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); } targets(NULL, NULL, NULL); fsubmit(0);
+            vkn_pass_stats4_get(&b);
+            if (f == 2) { CHECK_EQ(b.join_refused[2] - a.join_refused[2], 1); CHECK_EQ(b.joined - a.joined, 0); }
+        }
+        vkn_pass_policy_set(&p0);
+    }
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    frames_n(4);
+}
+
+// ================================================================================================================ [mgpu P7] the UI layer hold
+// DM_VK_NATIVE_UILAYER / DM_VK_NATIVE_UICACHE (vkn_ui.c "mgpu P7"): a UI run (layer draws, two filter blocks into pushed targets with
+// their composites) held until the engine uses the layer; hoisted = the filter blocks first, the layer ONE pass (the journal's UI share:
+// 3 UI passes instead of 5); the same run the next recording = skipped (no UI pass, the layer's remembered frame clear taken); a changed
+// vertex byte misses; an engine write into the layer between recordings refuses (written since); a custom draw on GDraw's binding
+// flushes the run first and makes the recording multi-run (the next one refuses); a pushed target's depth-stencil draw or a layer read of
+// a pushed target before its block runs the run in order; the engine's own set is put back after a flush; verify draws and compares;
+// poison leaves the pushed targets magenta; the validator is clean throughout.
+static vkn_tex *g_p7L, *g_p7D, *g_p7F1, *g_p7F2, *g_p7C;
+// one recording: the engine clears the layer, the UI run, the engine's scene pass, the layer sampled (Combine); variant bits: 1 another
+// vertex byte in F1's block, 2 a custom draw after the first layer draw, 4 a depth-stencil draw in F2's block, 8 the layer reads F2 first
+static VkCommandBuffer p7_frame(int var, uint64_t *m) {
+    VkCommandBuffer cb = fbegin(1); *m = mark();
+    static const float z[4] = {0, 0, 0, 0};
+    const int32_t r1[4] = {2, 2, 16, 8}, r2[4] = {20, 4, 16, 8};
+    vkn_ui_layer(g_p7L);
+    vkn_ui_targets(g_p7L, g_p7D);
+    vkn_pass_clear_color(g_p7L, 0, z, NULL);   // the engine's frame clear while only state is held: remembered, no flush
+    vkn_ui_viewport(0, 0, 64, 32); vkn_ui_clear_ds(1, 0xff);
+    if (var & 8) mg_quad(0, 0, 64, 32, g_p7F2, 0.0f);
+    mg_quad(0, 0, 64, 32, g_t0, 0.0f);
+    if (var & 2) { vkn_ui_pass_fence(); vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }   // a custom draw on GDraw's binding
+    vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, r1); vkn_ui_clear_color(g_p7F1, r1); mg_quad(0, 0, 64, 32, g_t0, var & 1 ? 1.0f : 0.0f);
+    vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, 64, 32, g_p7F1, 0.0f);
+    vkn_ui_targets(g_p7F2, g_p7D); vkn_ui_region(g_p7F2, r2); vkn_ui_clear_color(g_p7F2, r2);
+    if (var & 4) {
+        static float verts[16] = {0, 0, 0, 0,  64, 0, 1, 0,  64, 32, 1, 1,  0, 32, 0, 1}; static float vsc[32] = {1}, fsc[12] = {1};
+        vkn_ui_draw_in d; memset(&d, 0, sizeof d); d.vs = 0xA1; d.fs = 0xA2; d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.blend = 1; d.ds = 2;
+        d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.verts = verts; d.nverts = 4; CHECK_EQ(vkn_ui_draw(&d), 0);
+    } else mg_quad(0, 0, 64, 32, g_t0, 0.0f);
+    vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, 64, 32, g_p7F2, 0.0f);
+    mg_quad(0, 0, 64, 32, g_t0, 0.0f);
+    vkn_ui_pass_fence();
+    targets(g_p7C, NULL, NULL);   // the engine's scene (no conflict: drawn while the run is held)
+    { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+    CHECK_EQ(vkn_pass_sample(g_p7L), 0);   // Combine reads the layer: the run is flushed first
+    { uint32_t n = 0; vkn_tex *c[VKN_PASS_COLORS], *d = NULL; vkn_pass_cur_get(&n, c, NULL, NULL, &d); CHECK(n == 1 && c[0] == g_p7C && !d); }   // the engine's set back
+    return cb;
+}
+static void test_p7(void) {
+    g_p7L = mktex(990, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 990, 0); g_p7D = mktex(991, EF_D24S8, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 991, 0);
+    g_p7F1 = mktex(992, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 992, 0); g_p7F2 = mktex(993, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 993, 0);
+    g_p7C = mktex(994, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 994, 0);
+    CHECK(g_p7L && g_p7D && g_p7F1 && g_p7F2 && g_p7C); if (!g_p7L || !g_p7D || !g_p7F1 || !g_p7F2 || !g_p7C) return;
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    vkn_ui_pass_config(0, 0, 0, 0); vkn_ui_region_config(0); vkn_ui_fc_config(0);   // (the pass counts without the P2 copies)
+    vkn_ui_layer_config(1, 1);
+    vkn_ui_pass_stats s0, s1; vkn_pass_stats4 q0, q1; uint64_t m = 0;
+#define P7_RUN(var) do { vkn_ui_pass_stats_get(&s0); vkn_pass_stats4_get(&q0); cb = p7_frame((var), &m); fsubmit(0); vkn_ui_pass_stats_get(&s1); vkn_pass_stats4_get(&q1); } while (0)
+#define P7D(x) (s1.x - s0.x)
+#define P7Q (q1.ui_passes - q0.ui_passes)
+    VkCommandBuffer cb;
+    // 1. first recording: hoisted, one layer pass (+ the two filter passes); a candidate, nothing to compare with
+    P7_RUN(0);
+    CHECK_EQ(s1.layer_mode, 1); CHECK_EQ(s1.cache_mode, 1);
+    CHECK_EQ(P7D(lh_runs), 1); CHECK_EQ(P7D(lh_flush[VKN_UILF_LAYER]), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_ordered), 0);
+    CHECK_EQ(P7Q, 3);   // F1, F2, the layer (in order: layer, F1, layer, F2, layer = 5)
+    CHECK_EQ(P7D(uc_cand), 1); CHECK_EQ(P7D(uc_refused[VKN_UICR_FIRST]), 1);
+    CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 4);   // + the scene
+    // 2. the same run: skipped - no UI pass, the layer's remembered clear left the record, the scene pass stays
+    P7_RUN(0);
+    CHECK_EQ(P7D(uc_hits), 1); CHECK_EQ(P7D(uc_draws_saved), 6); CHECK_EQ(P7Q, 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 1);
+    CHECK_EQ(g_p7L->pass_nclr, 0);
+    // 3. a vertex byte in F1's block: another key (executed, hoisted), 4. that run again: a hit
+    P7_RUN(1); CHECK_EQ(P7D(uc_refused[VKN_UICR_KEY]), 1); CHECK_EQ(P7D(uc_hits), 0); CHECK_EQ(P7Q, 3);
+    P7_RUN(1); CHECK_EQ(P7D(uc_hits), 1);
+    // 5. the engine writes the layer between recordings (a region clear): refused "written since", executed; 6. a hit again
+    fbegin(1); { static const float z[4] = {0, 0, 0, 0}; const int32_t rr[4] = {0, 0, 8, 8}; vkn_pass_clear_color(g_p7L, 0, z, rr); } fsubmit(0);
+    P7_RUN(1); CHECK_EQ(P7D(uc_refused[VKN_UICR_DIRTY]), 1); CHECK_EQ(P7D(uc_hits), 0);
+    P7_RUN(1); CHECK_EQ(P7D(uc_hits), 1);
+    // 7. a custom draw on GDraw's binding: the run flushed before it, the rest a second run; 8. refused (the second run wrote the layer
+    // after the candidate), 9. a hit
+    P7_RUN(3); CHECK_EQ(P7D(lh_flush[VKN_UILF_BOUND]), 1); CHECK_EQ(P7D(lh_runs), 2); CHECK_EQ(P7D(uc_hits), 0);
+    P7_RUN(1); CHECK_EQ(P7D(uc_refused[VKN_UICR_DIRTY]), 1);
+    P7_RUN(1); CHECK_EQ(P7D(uc_hits), 1);
+    // 10. a depth-stencil draw in a pushed target (a depth test after the layer's depth clear): [mgpu P7b] F2's block starts a segment of
+    // its own - F1 hoisted before the first layer stretch, F2 before the second: 4 UI passes (in order 5)
+    vkn_ui_layer_config(1, 0);
+    P7_RUN(4); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_DS]), 0); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_segs), 1); CHECK_EQ(P7D(lh_seg_ds), 1); CHECK_EQ(P7Q, 4);
+    // 11. the layer reads F2 before F2's block: a reuse - [mgpu P7b] F2's new content goes to a spare (renamed), the run hoisted: F1, the
+    // spare, the layer = 3 UI passes
+    P7_RUN(8); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_REUSE]), 0); CHECK_EQ(P7D(lh_renamed), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7Q, 3);
+    // 12. UILAYER 0 (the hold only for the cache): in order, 5 UI passes
+    vkn_ui_layer_config(0, 1);
+    P7_RUN(0); CHECK_EQ(P7D(lh_ordered), 1); CHECK_EQ(P7D(lh_hoisted), 0); CHECK_EQ(P7Q, 5);
+    // 13. UICACHE 2: the would-hit is drawn and a band of the layer compared (differ 0 in the mock); UILAYER 2 alternates the order
+    vkn_ui_layer_config(2, 2);
+    P7_RUN(0); P7_RUN(0); CHECK_EQ(P7D(uc_would), 1); CHECK_EQ(P7D(uc_hits), 0); CHECK_EQ(P7D(uc_verify), 1);
+    P7_RUN(0); CHECK_EQ(P7D(uc_verify), 1); CHECK_EQ(P7D(lh_hoisted) + P7D(lh_ordered), 1);
+    frames_n(5); vkn_ui_pass_stats_get(&s1); CHECK_EQ(s1.uc_differ, 0);
+    // 14. UILAYER 3: the pushed targets of a hoisted run are left magenta (remembered clears)
+    vkn_ui_layer_config(3, 0);
+    P7_RUN(0); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_poison), 2); CHECK_EQ(g_p7F1->pass_nclr, 1);
+    // 15. off: nothing held, the stage-3 path
+    vkn_ui_layer_config(0, 0);
+    P7_RUN(0); CHECK_EQ(P7D(lh_runs), 0); CHECK_EQ(P7Q, 5);
+    CHECK(s1.ui_calls > s0.ui_calls);   // (the CPU time of the entry points is counted with the hold off too)
+#undef P7_RUN
+#undef P7D
+#undef P7Q
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    targets(NULL, NULL, NULL); frames_n(4);
+    vkn_ui_fc_config(1);
+}
+
+// ================================================================================================================ [P10] the merged tile pass
+#include "../../../vkn/vkn_shlib_named.h"   // vkn_tile_var
+// DM_VK_NATIVE_TILELIGHT (vkn_pass_tile.inc, docs/dos2/nr/VK-P10.md): a frame of the shape "pre-pass, G-buffer (2 colours + depth),
+// LinearizeDepth, the shadow atlas, CascadedPCF, light, a reader" drawn the classic way teaches the chain (2 frames), its subpass-0
+// pipelines are built ahead (1 frame), then the chain is ONE render pass of 4 subpasses whose full-screen draws read input attachments,
+// the atlas pass runs before it, stores are discarded by the history; a chain that does not complete (other targets, a foreign read of a
+// chain target, a draw whose twin does not fit) is written out with every attachment stored, in the engine's order; an input outside
+// the chain becomes a read-only attachment; LinearizeDepth's centre condition refuses a linear sampler and a shifted coordinate; poison
+// clears what was discarded; verify draws the full-screen draws once more and compares. The validator is clean throughout.
+static VkShaderModule g_p10_mod; static uint32_t g_p10_cond; static int g_p10_calls, g_p10_uv;
+static int p10_twin(const struct vkn_shader *base, char v, VkShaderModule *fs, uint64_t decl[4], struct vkn_tile_var *var) {
+    g_p10_calls++;
+    if (base != g_s1 || v) return 1;
+    *fs = g_p10_mod; decl[0] = decl[1] = decl[2] = decl[3] = 0;
+    memset(var, 0, sizeof *var); var->n = 1; var->index[0] = 0; var->cond = g_p10_cond; var->center_loc = 1;
+    for (uint32_t i = 0; i < base->nbind; i++) {   // every fragment binding declared; the input: the texture of slot 0
+        const vkn_bind *q = &base->bind[i]; if (q->bundle_stage != 4 || q->binding >= 256) continue;
+        decl[q->binding >> 6] |= 1ull << (q->binding & 63);
+        if (q->kind == VKN_BK_TEXTURE && q->slot == 0) var->binding[0] = (uint8_t)q->binding;
+    }
+    return 0;
+}
+static int p10_scale1(float w, float h) { (void)w; (void)h; return 0; }
+enum { P10_OK = 0, P10_OTHER, P10_FOREIGN_READ, P10_TWIN, P10_EXT, P10_RCLEAR, P10_LATE };   // P10_LATE: [P10 fix 6] a reader of G1 after the chain, now and then
+static vkn_tex *p10_G0, *p10_G1, *p10_D, *p10_LD, *p10_SM, *p10_Df, *p10_A, *p10_C, *p10_X;
+// [P10 fix] the draw effects of the phone frame (run M03): every draw gets a vertex module of its own (PRESKIN's consumer on the full-screen
+// draws, XLQ's trimmed module on the G-buffer's) - g_p10_fxm 1; 2 = 1 + CascadedPCF's draw has its fragment stage dropped. Alpha
+// references: g_p10_aref on the depth-target draws (the pre-pass, the G-buffer, the atlas), g_p10_aref_ld on LinearizeDepth's.
+static int32_t g_p10_t3 = -1;   // [P10 fix 3] a second texture of the full-screen draws (slot 3; -1 = 303 as every draw)
+static int g_p10_fxm; static VkShaderModule g_p10_vin; static uint16_t g_p10_vin_id; static float g_p10_aref = -1.0f, g_p10_aref_ld = -1.0f;
+static void p10_fx(const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_out *out, void *user) {
+    (void)c; (void)user;
+    if (!g_p10_fxm || in->shader != H(30, 1)) return;
+    out->vin.vs = g_p10_vin; out->vin.vs_id = g_p10_vin_id;
+    if (g_p10_fxm == 2 && in->tex[1] && in->tex[1][0] == 982) out->no_fs = 1;
+}
+static void p10_draw_sh(uint64_t shader, int32_t tex0, int32_t smp0) {
+    int32_t tx[VKN_TEX_SLOTS], sm[VKN_TEX_SLOTS];
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) tx[i] = sm[i] = -1;
+    tx[0] = tex0; sm[0] = smp0; tx[3] = 303; sm[3] = 13;
+    if (g_p10_t3 >= 0 && shader == H(30, 1) && (tex0 == 981 || tex0 == 982 || tex0 == 983)) tx[3] = g_p10_t3;   // [P10 fix 3] the full-screen draws sample it too
+    vkn_draw_in in = g_in; in.tex[1] = tx; in.smp[1] = sm; in.shader = shader;
+    if (shader == H(30, 1)) in.alpha_ref = tex0 == 300 ? g_p10_aref : tex0 == 981 ? g_p10_aref_ld : -1.0f;
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+}
+static void p10_draw(int32_t tex0, int32_t smp0) { p10_draw_sh(H(30, 1), tex0, smp0); }
+static VkCommandBuffer p10_frame(int what, uint64_t *m) {
+    static const float z[4] = {0, 0, 0, 0};
+    VkCommandBuffer cb = fbegin(1); *m = mark();
+    vkn_pass_clear_depth(p10_D, 3, 1.0f, 0);
+    targets(NULL, NULL, p10_D); p10_draw(300, 10);                                   // the depth pre-pass
+    vkn_pass_clear_color(p10_G0, 0, z, NULL); vkn_pass_clear_color(p10_G1, 0, z, NULL);
+    targets(p10_G0, p10_G1, p10_D);
+    if (what == P10_RCLEAR) vkn_pass_clear_color(p10_G0, 0, z, (const int32_t[4]){0, 0, 8, 8});   // a region clear of a chain target
+    p10_draw(300, 10); p10_draw(300, 10);                                            // the G-buffer
+    if (what == P10_OTHER) { targets(p10_C, NULL, NULL); p10_draw(300, 10); targets(NULL, NULL, NULL); fsubmit(0); return cb; }
+    targets(p10_LD, NULL, NULL); p10_draw(981, 13);                                  // LinearizeDepth reads the depth
+    if (what == P10_FOREIGN_READ) { targets(p10_C, NULL, NULL); p10_draw_sh(H(31, 1), 980, 10); }   // a plain draw reads G0
+    vkn_pass_clear_depth(p10_A, 1, 1.0f, 0);
+    targets(NULL, NULL, p10_A); p10_draw(300, 10);                                   // the shadow atlas: foreign
+    targets(p10_SM, NULL, NULL); p10_draw(982, 13);                                  // CascadedPCF reads the linear depth
+    vkn_pass_clear_color(p10_Df, 0, z, NULL);
+    targets(p10_Df, NULL, NULL); p10_draw(what == P10_TWIN ? 300 : what == P10_EXT ? 986 : 983, 13);   // light reads the shadow mask
+    targets(p10_C, NULL, NULL); p10_draw_sh(H(31, 1), 984, 10);                      // a reader of Df (a shader without a twin)
+    if (what == P10_LATE) p10_draw_sh(H(31, 1), 985, 10);                               // [P10 fix 6] a reader of G1 that comes only sometimes
+    targets(NULL, NULL, NULL);
+    fsubmit(0);
+    return cb;
+}
+static const mk_ev *p10_merged(uint64_t m, VkCommandBuffer cb, int *at) {   // the begin of the pass with more than one subpass
+    for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) { const mk_rp *r = rp_of(nth(m, cb, MK_E_BEGIN_RP, k)); if (r && r->nsub > 1) { if (at) *at = k; return nth(m, cb, MK_E_BEGIN_RP, k); } }
+    return NULL;
+}
+static void test_p10(void) {
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    vkn_pass_policy p0, p1; int fam = 0; vkn_pass_policy_get(&p0, &fam); p1 = p0; p1.join = 0; p1.store = 1; p1.store_frames = 2; p1.load = 0; vkn_pass_policy_set(&p1);
+    vkn_tile_mode_set(1); CHECK_EQ(vkn_tile_usage(), 1);
+    p10_G0 = mktex(980, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 980, 0); p10_G1 = mktex(985, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 985, 0);
+    p10_D = mktex(981, EF_D24S8, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 981, 0); p10_LD = mktex(982, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 982, 0);
+    p10_SM = mktex(983, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 983, 0); p10_Df = mktex(984, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 984, 0);
+    p10_X = mktex(986, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 986, 0); p10_C = mktex(987, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 987, 0);
+    p10_A = mktex(988, EF_D24S8, VKN_TC_DEPTH, 1, 32, 32, 1, 1, 988, 0);
+    CHECK(p10_G0 && p10_G1 && p10_D && p10_LD && p10_SM && p10_Df && p10_X && p10_C && p10_A && g_s1);
+    if (!p10_G0 || !p10_G1 || !p10_D || !p10_LD || !p10_SM || !p10_Df || !p10_X || !p10_C || !p10_A || !g_s1) return;
+    CHECK(p10_G0->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT); CHECK(p10_D->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+    g_p10_mod = mk_bundle_add("f3000000000t1le0", 4)->module; g_p10_cond = 0;
+    vkn_tile_twin_fn(p10_twin); vkn_tile_test_fns(NULL, p10_scale1);
+    vkn_pass_stats6 a, b; uint64_t m; VkCommandBuffer cb;
+    { fbegin(1); static const float z[4] = {0, 0, 0, 0}; vkn_pass_clear_color(p10_X, 0, z, (const int32_t[4]){0, 0, 8, 8}); fsubmit(0); }   // (X has content)
+    // ---- frames 0, 1: the classic frame, 7 passes; the chain is learned (streak 2)
+    for (int f = 0; f < 2; f++) {
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 7); CHECK_EQ(cnt(m, 0, MK_E_NEXT_SUBPASS), 0); CHECK_EQ(b.begun - a.begun, 0);
+        CHECK_EQ(b.streak, (uint32_t)f + 1); CHECK_EQ(b.nsub, 4); CHECK_EQ(b.natt, 6);
+    }
+    CHECK_EQ(b.learned, a.learned); CHECK(g_p10_calls >= 1);
+    // ---- frame 2: still classic, the two subpass-0 pipelines (pre-pass masks 0, G-buffer) are built ahead
+    vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+    CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 7); CHECK_EQ(b.begun - a.begun, 0); CHECK_EQ(b.primed_pipes - a.primed_pipes, 2); CHECK(b.refused[2] - a.refused[2] >= 1); CHECK_EQ(b.primed, 0);
+    // ---- frame 3: merged. The atlas pass first, then ONE pass of 4 subpasses (6 attachments), then the reader
+    {
+        const uint64_t in0 = mk_input_reads;
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 1); CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(b.primed, 1); CHECK_EQ(b.passes_saved - a.passes_saved, 4); CHECK_EQ(b.foreign - a.foreign, 1);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3); CHECK_EQ(cnt(m, cb, MK_E_NEXT_SUBPASS), 3); CHECK_EQ(cnt(m, cb, MK_E_EXECUTE), 5);
+        CHECK_EQ(cnt(m, cb, MK_E_DRAW_IDX), 2);   // (the atlas draw and the reader: the chain's 6 draws are in the subpass buffers)
+        CHECK_EQ(cnt(m, 0, MK_E_DRAW_IDX), 8);
+        CHECK_EQ(mk_input_reads - in0, 3);        // the three full-screen draws read an input attachment each
+        int at = -1; const mk_ev *e = p10_merged(m, cb, &at); const mk_rp *rp = rp_of(e);
+        CHECK(e && rp && at == 1);                // (pass 0 = the atlas, before the chain)
+        if (rp) {
+            CHECK_EQ(rp->nsub, 4); CHECK_EQ(rp->natt, 6); CHECK_EQ(e->u[0], (uint32_t)VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+            CHECK_EQ(rp->sub[0].ncolor, 2); CHECK(rp->sub[0].has_depth); CHECK_EQ(rp->sub[1].ninput, 1); CHECK_EQ(rp->sub[1].input[0].attachment, 2);   // LinearizeDepth <- the depth
+            CHECK_EQ(rp->sub[1].input[0].layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            CHECK_EQ(rp->sub[2].input[0].attachment, 3); CHECK_EQ(rp->sub[3].input[0].attachment, 4); CHECK_EQ(rp->sub[3].input[0].layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            CHECK_EQ(rp->att[0].loadOp, VK_ATTACHMENT_LOAD_OP_CLEAR); CHECK_EQ(rp->att[1].loadOp, VK_ATTACHMENT_LOAD_OP_CLEAR);   // the engine's clears, folded
+            CHECK_EQ(rp->att[2].loadOp, VK_ATTACHMENT_LOAD_OP_CLEAR); CHECK_EQ(rp->att[2].stencilLoadOp, VK_ATTACHMENT_LOAD_OP_CLEAR);
+            CHECK_EQ(rp->att[3].loadOp, VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(rp->att[5].loadOp, VK_ATTACHMENT_LOAD_OP_CLEAR);
+            for (uint32_t j = 0; j < 6; j++) CHECK_EQ(rp->att[j].storeOp, VK_ATTACHMENT_STORE_OP_STORE);   // (the history has seen no merged frame yet)
+        }
+        CHECK_EQ(cnt(m, 0, MK_E_CLEAR_ATT), 0);
+    }
+    // ---- frames 4..7: merged; from the third on the history discards what only the pass itself read (G0, G1, the depth). LD and SM are
+    // LOADed by the next frame's pass here (no cover proof in this test), so their stores stay; Df is read by the reader
+    for (int f = 4; f < 8; f++) {
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3);
+        const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp != NULL);
+        if (rp && f >= 6) {
+            for (uint32_t j = 0; j < 3; j++) CHECK_EQ(rp->att[j].storeOp, VK_ATTACHMENT_STORE_OP_DONT_CARE);
+            for (uint32_t j = 3; j < 6; j++) CHECK_EQ(rp->att[j].storeOp, VK_ATTACHMENT_STORE_OP_STORE);
+            CHECK_EQ(b.merged_bytes - a.merged_bytes, 5u * 64 * 32 * 4);   // the model: LD, SM loaded; LD, SM, Df stored
+            CHECK_EQ(b.base_bytes - a.base_bytes, 8u * 64 * 32 * 4);      // apart: 6 attachment stores + the depth stored and loaded once more
+            CHECK_EQ(b.saved_bytes - a.saved_bytes, 3u * 64 * 32 * 4);
+        }
+    }
+    // ---- a miss: other targets after the G-buffer, the recording ends: written out safe (everything stored), after the foreign pass
+    {
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OTHER, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 1); CHECK_EQ(b.hits - a.hits, 0); CHECK_EQ(b.miss[4] - a.miss[4], 1);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2); CHECK_EQ(cnt(m, cb, MK_E_NEXT_SUBPASS), 3); CHECK_EQ(cnt(m, cb, MK_E_EXECUTE), 2);
+        int at = -1; const mk_rp *rp = rp_of(p10_merged(m, cb, &at)); CHECK(rp && at == 1);
+        if (rp) { CHECK_EQ(rp->att[0].storeOp, VK_ATTACHMENT_STORE_OP_STORE); CHECK_EQ(rp->att[1].storeOp, VK_ATTACHMENT_STORE_OP_STORE); CHECK_EQ(rp->att[2].storeOp, VK_ATTACHMENT_STORE_OP_STORE); }
+        // the frame after a miss is classic (the observer looks at the frame again), the one after it merges
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 0); CHECK(b.refused[8] > a.refused[8]); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 7);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3);
+    }
+    // ---- a miss: a plain draw reads G0 while the chain waits: the chain is written out BEFORE that pass, the rest of the frame is classic
+    {
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_FOREIGN_READ, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 1); CHECK_EQ(b.hits - a.hits, 0); CHECK_EQ(b.miss[3] - a.miss[3], 1);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 6);   // merged (pre-pass + G-buffer + LD), C, atlas, SM, Df, reader
+        int at = -1; const mk_rp *rp = rp_of(p10_merged(m, cb, &at)); CHECK(rp && at == 0);
+        if (rp) for (uint32_t j = 0; j < 4; j++) CHECK_EQ(rp->att[j].storeOp, VK_ATTACHMENT_STORE_OP_STORE);
+        (void)p10_frame(P10_OK, &m);
+    }
+    // ---- a miss: the light draw reads a texture its twin cannot take (16x16): the chain ends before it, the draw is classic
+    {
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_TWIN, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 1); CHECK_EQ(b.hits - a.hits, 0); CHECK_EQ(b.miss[1] - a.miss[1], 1);
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 4);   // atlas, merged (3 subpasses drawn), Df, reader
+        CHECK_EQ(cnt(m, cb, MK_E_EXECUTE), 4);
+        (void)p10_frame(P10_OK, &m);
+    }
+    vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+    CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3);
+    // ---- poison (mode 3): what the pass did not store is magenta afterwards
+    {
+        vkn_tile_mode_set(3);
+        for (int f = 0; f < 4; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(cnt(m, cb, MK_E_CLEAR_COLOR_IMG), 2); CHECK_EQ(b.poison - a.poison, 2);   // G0, G1 (the depth is not poisoned)
+        vkn_tile_mode_set(1);
+    }
+    // ---- an input outside the chain: the light reads X (same size, has content). The learned chain misses once (another input), the
+    // next frames teach the new shape with X as a read-only attachment (classic, streak 2, pipelines checked), the fifth merges
+    {
+        const uint64_t l0 = b.learned;
+        for (int f = 0; f < 4; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_EXT, &m); vkn_pass_stats6_get(&b); if (!f) CHECK_EQ(b.miss[1] - a.miss[1], 1); }
+        CHECK_EQ(b.natt, 7); CHECK_EQ(b.nsub, 4); CHECK_EQ(b.learned - l0, 1);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_EXT, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1);
+        const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp != NULL);
+        if (rp) { CHECK_EQ(rp->natt, 7); CHECK_EQ(rp->att[6].loadOp, VK_ATTACHMENT_LOAD_OP_LOAD); CHECK_EQ(rp->att[6].storeOp, VK_ATTACHMENT_STORE_OP_STORE); CHECK_EQ(rp->sub[3].input[0].attachment, 6); }
+    }
+    // ---- LinearizeDepth's condition (the centre proof): without a vertex-output program there is nothing to stand on - the twin is
+    // refused, the armed chain misses once and no chain is learned from the classic frames that follow
+    {
+        g_p10_cond = VKN_TILE_C_CENTER; vkn_tile_twin_fn(p10_twin);   // (the twins are made again)
+        for (int f = 0; f < 4; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        CHECK_EQ(b.begun - a.begun, 0); CHECK_EQ(b.hits - a.hits, 0); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 7);
+        g_p10_cond = 0; vkn_tile_twin_fn(p10_twin);
+    }
+    // ---- verify (mode 2): learned again (new twins), then the chain with every attachment stored
+    {
+        vkn_tile_mode_set(2); vkn_tile_verify_every(1);
+        vkn_pass_stats6 v0; vkn_pass_stats6_get(&v0);
+        for (int f = 0; f < 6; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        CHECK_EQ(b.hits - a.hits, 1);
+        const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp != NULL);
+        if (rp) for (uint32_t j = 0; j < 6; j++) CHECK_EQ(rp->att[j].storeOp, VK_ATTACHMENT_STORE_OP_STORE);
+        // the light's target (begun with the engine's clear) is drawn once more the classic way into a scratch pass and compared; LD and
+        // SM are LOADed here, so they are not compared (skipped)
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 4);   // atlas, merged, the scratch pass, reader
+        CHECK_EQ(cnt(m, 0, MK_E_DRAW_IDX), 9);   // + the light's classic twin
+        CHECK(b.verify_skipped - a.verify_skipped == 2);
+        frames_n(6);
+        vkn_pass_stats6_get(&b);
+        CHECK(b.verify_targets > v0.verify_targets); CHECK(b.verify_bytes - v0.verify_bytes >= 64u * 32 * 4);   // (the mock copies nothing into the read-back blocks: the byte count of the comparison means nothing here)
+        vkn_tile_mode_set(1); vkn_tile_verify_every(16);
+    }
+    // ---- [frame F1] with DM_VK_NATIVE_FRAMEAREA and DM_VK_NATIVE_LAZYCLR on: the merged pass keeps the whole target as its render area
+    // (counted: the frame area is not applied to a chain); a region clear of a chain target while the chain records writes the chain
+    // out first (the pre-pass, everything stored) and the clear then waits for / runs in the classic G-buffer pass
+    {
+        vkn_pass_policy p2; vkn_pass_policy_get(&p2, &fam); p2.farea = 1; p2.lazyclr = 1; vkn_pass_policy_set(&p2);
+        for (int f = 0; f < 3; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(b.farea_full - a.farea_full, 1);
+        const mk_ev *e = p10_merged(m, cb, NULL); CHECK(e != NULL);
+        if (e) { CHECK_EQ(e->rect.offset.x, 0); CHECK_EQ(e->rect.offset.y, 0); CHECK_EQ(e->rect.extent.width, 64); CHECK_EQ(e->rect.extent.height, 32); }
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_RCLEAR, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.begun - a.begun, 1); CHECK_EQ(b.hits - a.hits, 0); CHECK_EQ(b.miss[2] - a.miss[2], 1);
+        int at = -1; const mk_rp *rp = rp_of(p10_merged(m, cb, &at)); CHECK(rp && at == 0);   // (the chain so far, before the G-buffer's classic pass)
+        CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 7); CHECK_EQ(cnt(m, cb, MK_E_CLEAR_ATT), 1);
+        (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1);
+        p2.farea = 0; p2.lazyclr = 0; vkn_pass_policy_set(&p2);
+    }
+    // ---- [P10 fix 22.11] the effects' vertex modules. Phone run M03 (Mali model): PRESKIN plans the vertex shaders of LinearizeDepth,
+    // CascadedPCF and the light, so each full-screen draw carries PRESKIN's consumer (vkn_fx_out.vin); the verdict refused every such
+    // draw and no chain was ever learned ("learned 0 times"). Now: every draw of the frame has a vertex module of its own and the
+    // pre-pass / G-buffer / atlas draws are alpha-tested too - the chain is learned, merges, and its three full-screen draws are drawn
+    // with the effect's vertex module and the twin's fragment module (the twin replaces the fragment stage only). An alpha test or a
+    // dropped fragment stage on a full-screen draw is still refused: the chain ends before that draw (a miss, then a shorter chain).
+    {
+        g_p10_vin = mk_bundle_add("v3000000000t1vi0", 0)->module; g_p10_vin_id = vkn_fx_vs_id(); CHECK(g_p10_vin && g_p10_vin_id);
+        CHECK_EQ(vkn_fx_register("p10-vin", p10_fx, NULL, 150), 0);
+        vkn_tile_twin_fn(p10_twin); g_p10_fxm = 1; g_p10_aref = 0.5f;
+        vkn_pass_stats6 v0; vkn_pass_stats6_get(&v0); const uint64_t l0 = v0.learned;
+        for (int f = 0; f < 6; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        CHECK_EQ(b.learned - l0, 1); CHECK_EQ(b.nsub, 4); CHECK_EQ(b.natt, 6); CHECK(b.hits > v0.hits);
+        const uint64_t in0 = mk_input_reads;
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3); CHECK_EQ(cnt(m, cb, MK_E_NEXT_SUBPASS), 3);
+        CHECK_EQ(mk_input_reads - in0, 3);
+        int tw = 0, tw_vin = 0, gb_at = 0;   // the twin's pipelines (fragment = the twin) and their vertex stage; the alpha-tested subpass-0 pipelines
+        for (int k = 0; nth(m, 0, MK_E_BIND_PIPE, k); k++) {
+            const mk_obj *po = pipe_of(nth(m, 0, MK_E_BIND_PIPE, k)); if (!po || po->gp.nst < 2) continue;
+            if (po->gp.module[1] == g_p10_mod) { tw++; tw_vin += po->gp.module[0] == g_p10_vin; }
+            else if (po->gp.module[0] == g_p10_vin && po->gp.module[1] != g_fs1_mod) gb_at++;
+        }
+        CHECK_EQ(tw, 3); CHECK_EQ(tw_vin, 3); CHECK(gb_at >= 1);
+        // an alpha test on LinearizeDepth's draw: the twin was proven against the base fragment module, the draw has the "#at" one ->
+        // refused; the armed chain misses there (written out safe) and no chain is learned from the classic frames
+        g_p10_aref_ld = 0.5f;
+        vkn_pass_stats6_get(&a); for (int f = 0; f < 4; f++) cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 0); CHECK(b.miss[1] - a.miss[1] >= 1); CHECK_EQ(b.learned, a.learned);
+        g_p10_aref_ld = -1.0f;
+        for (int f = 0; f < 4; f++) (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); CHECK_EQ(b.hits - a.hits, 1);
+        // CascadedPCF's fragment stage dropped by an effect: refused; the chain learned from the classic frames ends after LinearizeDepth
+        g_p10_fxm = 2;
+        vkn_pass_stats6_get(&a); for (int f = 0; f < 8; f++) cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK(b.miss[1] - a.miss[1] >= 1); CHECK_EQ(b.nsub, 2); CHECK(b.hits > a.hits);
+        { const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp && rp->nsub == 2); }
+        printf("  p10 fix: effect vertex modules on every draw -> merged, twins drawn with the effect's module %d / %d; PCF without fragment stage -> chain of %u subpasses\n", tw_vin, tw, b.nsub);
+        g_p10_fxm = 0; g_p10_aref = -1.0f; CHECK_EQ(vkn_fx_drop("p10-vin"), 1);
+        for (int f = 0; f < 2; f++) (void)p10_frame(P10_OK, &m);
+    }
+    // ---- [P10 fix 2, phone run C1] the render-scale condition with the REAL support block (no stand-in): the twins carry
+    // VKN_TILE_C_SCALE1, the verdict reads the block of the draw's viewport the way the draw path binds it. Before the fix the check read
+    // _m5 as 73 floats in a row (the std140 array has a stride of 16 bytes) and refused every draw at 3D 100 %. Now the chain learns and
+    // merges; a block whose _m5[1] is 0.9 (a render scale below 1) is refused: the armed chain misses there, no merged pass after it
+    {
+        vkn_tile_test_fns(NULL, NULL); g_p10_cond = VKN_TILE_C_SCALE1; vkn_tile_twin_fn(p10_twin);
+        for (int f = 0; f < 6; f++) (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 1); CHECK_EQ(b.nsub, 4); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 3);
+        mk_support_m5_1 = 0.9f;
+        vkn_pass_stats6_get(&a); for (int f = 0; f < 4; f++) cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        CHECK_EQ(b.hits - a.hits, 0); CHECK(b.miss[1] - a.miss[1] >= 1); CHECK(p10_merged(m, cb, NULL) == NULL || rp_of(p10_merged(m, cb, NULL))->nsub < 4);
+        mk_support_m5_1 = 1.0f;
+        for (int f = 0; f < 6; f++) (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); CHECK_EQ(b.hits - a.hits, 1);
+        printf("  p10 fix 2: the real support block at render scale 1 -> merged; _m5[1] = 0.9 -> refused (misses %llu)\n", (unsigned long long)b.miss[1]);
+        g_p10_cond = 0; vkn_tile_test_fns(NULL, p10_scale1);
+    }
+    // ---- [P10 fix 3, phone run D02: SIGSEGV in Turnip's draw, right after the chain armed] verify mode with the tile barriers on and
+    // the full-screen draws sampling a target written every frame (C, the reader's target; in the game: the shadow atlas, other
+    // targets). The twin's draw is fragment-only, so the read barrier of C goes before the merged pass fragment-only; the classic
+    // redraw of mode 2 passes no effect function (its effect output is forced), saw "not fragment-only", owed C a full barrier, and
+    // ended the open SUBPASS for it: the subpass buffer closed, the route back to the primary, and the redraw's draw was recorded into
+    // the primary outside any render pass (the driver: no subpass -> NULL). Now a barrier a chain draw needs goes into the recording
+    // before the merged pass (never ends a subpass), the redraw draws only into its scratch pass, and a subpass paused before its one
+    // draw is resumed. Validator: draws only inside a pass, secondary buffers executed in the subpass they inherit.
+    {
+        vkn_pass_policy pt; vkn_pass_policy_get(&pt, &fam); pt.tilebar = 1; vkn_pass_policy_set(&pt);
+        vkn_tile_mode_set(2); vkn_tile_verify_every(1); vkn_tile_twin_fn(p10_twin); g_p10_t3 = 987;
+        const int ve0 = mk_val_errors;
+        vkn_pass_stats6 v0; vkn_pass_stats6_get(&v0);
+        for (int f = 0; f < 8; f++) { vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); }
+        frames_n(4);
+        vkn_pass_stats6 v1; vkn_pass_stats6_get(&v1);
+        CHECK_EQ(mk_val_errors, ve0);
+        CHECK(v1.hits - v0.hits >= 2); CHECK_EQ(b.hits - a.hits, 1);
+        CHECK(v1.verify_targets > v0.verify_targets);   // the redraws reached their scratch passes and were compared
+        CHECK_EQ(v1.redraw_lost, v0.redraw_lost); CHECK(v1.verify_skipped - v0.verify_skipped < v1.verify_targets - v0.verify_targets + 8);
+        { const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp && rp->nsub == 4); }
+        vkn_pass_stats3 c3; vkn_pass_stats3_get(&c3);
+        printf("  p10 fix 3: verify + tile barriers + C sampled by the full-screen draws: merged %llu, compared targets %llu, validator clean %d\n",
+               (unsigned long long)(v1.hits - v0.hits), (unsigned long long)(v1.verify_targets - v0.verify_targets), mk_val_errors == ve0);
+        g_p10_t3 = -1; pt.tilebar = 0; vkn_pass_policy_set(&pt); vkn_tile_mode_set(1); vkn_tile_verify_every(16);
+        (void)c3;
+    }
+    // ---- [P10 fix 4, phone run F04: "model MB a frame: apart 78.1, merged 78.1, saved 0.0"] every 3D target of the game sits on the
+    // engine's shared render-target storage, and the store history took no such texture ("not eligible"): the merged pass stored all
+    // of its attachments. G1 on shared storage now: after the history's frames its store is DONT_CARE like the other unread ones
+    {
+        vkn_tex *g1 = p10_G1, *sg = shtex(989, 64, 32, 989, 0x40000, "GBuffer1"); CHECK(sg && sg->shared);
+        if (sg) {
+            p10_G1 = sg;
+            for (int f = 0; f < 8; f++) cb = p10_frame(P10_OK, &m);
+            vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+            CHECK_EQ(b.hits - a.hits, 1);
+            const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp != NULL);
+            int at = -1; if (rp) for (uint32_t j = 0; j < rp->natt; j++) if (rp->att[j].format == sg->format && j == 1) at = (int)j;
+            CHECK(rp && at == 1 && rp->att[1].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+            CHECK(b.saved_bytes > a.saved_bytes);
+            printf("  p10 fix 4: G1 on shared storage: store %s, model saved %llu bytes in the frame\n", rp && rp->att[1].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE ? "DONT_CARE" : "STORE",
+                   (unsigned long long)(b.saved_bytes - a.saved_bytes));
+            p10_G1 = g1;
+            for (int f = 0; f < 4; f++) (void)p10_frame(P10_OK, &m);
+        }
+    }
+    // ---- [P10 fix 6, phone run G01: "store DONT_CARE of ... DirectionalLightShadowRT ... is sampled in frame 5113: its content is
+    // undefined this frame"] the history discarded G1's store after frames without a reader; then a reader comes in one frame only. The
+    // merged pass is recorded at the submit (the recording split: [head, mid, tail]): the late read turns G1's store back to STORE before
+    // the pass is written - no violation, no ban, the reader sees the content; the frames after go back to the history's rule
+    {
+        vkn_pass_stats3 s3a, s3b; vkn_frame_xstats xa, xb;
+        vkn_tex *g1 = p10_G1, *ng = mktex(990, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 985, 0);   // (a G1 the earlier blocks' bans never saw; pool id of G1)
+        CHECK(ng != NULL); if (ng) p10_G1 = ng;
+        for (int f = 0; f < 8; f++) (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b);
+        const mk_rp *rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp && rp->att[1].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);   // (G1: dropped)
+        VkCommandBuffer mid = VK_NULL_HANDLE, tail = VK_NULL_HANDLE; CHECK_EQ(vkn_rec_split_parts(cb, &mid, &tail), 0);
+        CHECK(p10_merged(m, mid, NULL) != NULL);                                   // the merged pass is in the middle buffer
+        CHECK_EQ(b.deferred - a.deferred, 1);
+        vkn_pass_stats3_get(&s3a); vkn_frame_xstats_get(&xa);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_LATE, &m); vkn_pass_stats6_get(&b);
+        vkn_pass_stats3_get(&s3b); vkn_frame_xstats_get(&xb);
+        rp = rp_of(p10_merged(m, cb, NULL));
+        CHECK(rp && rp->att[1].storeOp == VK_ATTACHMENT_STORE_OP_STORE);           // kept for the late reader
+        CHECK_EQ(b.store_revoked - a.store_revoked, 1); CHECK_EQ(s3b.violations, s3a.violations); CHECK_EQ(s3b.bans, s3a.bans);
+        CHECK_EQ(xb.splits - xa.splits, 1); CHECK_EQ(b.hits - a.hits, 1);
+        {   // execution order: the atlas (head), the merged pass (mid), the readers (tail)
+            int at = -1; CHECK(p10_merged(m, cb, &at) != NULL && at == 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 4);   // (atlas, merged, the reader of Df, the late reader again after the barrier of G1)
+        }
+        for (int f = 0; f < 4; f++) (void)p10_frame(P10_OK, &m);
+        vkn_pass_stats6_get(&a); cb = p10_frame(P10_OK, &m); vkn_pass_stats6_get(&b); vkn_pass_stats3_get(&s3b);
+        rp = rp_of(p10_merged(m, cb, NULL)); CHECK(rp && rp->att[1].storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);   // the history again
+        CHECK_EQ(s3b.violations, s3a.violations);
+        p10_G1 = g1; for (int f = 0; f < 4; f++) (void)p10_frame(P10_OK, &m);
+        printf("  p10 fix 6: a late reader of a discarded store: kept (revoked %llu), violations %llu -> %llu\n", (unsigned long long)b.store_revoked,
+               (unsigned long long)s3a.violations, (unsigned long long)s3b.violations);
+    }
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    vkn_tile_twin_fn(NULL); vkn_tile_test_fns(NULL, NULL); vkn_tile_mode_set(0);
+    vkn_pass_policy_set(&p0);
+    frames_n(4);
+}
+
+// ================================================================================================================ [VK-DRS-FSR] fsr-aa
+// vkn_fsr.c (docs/dos2/nr/VK-DRS-FSR.md): the PPFXAA draw of the swapped FSR module (key 691768aa08545d95) at a stretch c3[0].xy < 1 gets
+// the pre pass (FXAA 1:1 at the render resolution) into a private copy of the source, clipped to the drawn part + 1 texel, then the
+// engine draw reads the copy (a twin: the source binding fed by the effect texture, C1 as an effect block); at 1:1 / out-of-range
+// stretch / a viewport that does not cover the target nothing changes; a source of another size makes another copy; mode 2 only counts.
+// In forked children (the mode is read once a process; test_post's "post" function, which classes this key as its AA step, is dropped).
+#include "../../../vkn/vkn_fsr.h"
+static const vkn_shader *g_fsr_s;
+static vkn_tex *g_fsr_src, *g_fsr_dst, *g_fsr_src2, *g_fsr_dst2;
+static int32_t g_fsr_tx[VKN_TEX_SLOTS], g_fsr_sm[VKN_TEX_SLOTS], g_fsr_tx2[VKN_TEX_SLOTS];
+static void fsr_setup(void) {   // in the parent: a forked child has no shader-creation worker thread (vkn_shader_get would wait for ever)
+    const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, CIS = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    static uint8_t c1[16]; const float k[2] = {1.0f / 12.0f, 0.5f}; const int32_t one = 1; memcpy(c1, k, 8); memcpy(c1 + 8, &one, 4);
+    xbg_vkn_stage *vs = mk_bundle_add("f5a0000000000001", 0);   // the PPFXAA vertex stage's table (28b24f7288e2abe4): support, vp_c15 (block 12), vp_c3 (block 0)
+    mk_bind(vs, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(vs, 6, UB, XBG_SOURCE_UNIFORM, 12, 224); mk_bind(vs, 12, UB, XBG_SOURCE_UNIFORM, 0, 16);
+    xbg_vkn_stage *fs = mk_bundle_add("691768aa08545d95", 4);   // PPFXAA: support 4, t_8 on 10 (slot 0), fp_c15 on 16 (block 12), C1 on 22
+    mk_bind(fs, 4, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(fs, 10, CIS, XBG_SOURCE_TEXTURE, 0, 0); mk_bind(fs, 16, UB, XBG_SOURCE_UNIFORM, 12, 224);
+    mk_bind(fs, 22, UB, XBG_SOURCE_C1, 0, 16); fs->c1 = c1; fs->c1_bytes = 16;
+    g_fsr_s = mkshader(H(140, 1), "f5a0000000000001", "691768aa08545d95", NULL);
+    CHECK(mkshader(H(141, 1), "f5a0000000000001", "f300000000000001", NULL) != NULL);   // another fragment key (left alone)
+    g_fsr_src = mktex(1400, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1400, 0); g_fsr_dst = mktex(1401, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1401, 0);
+    g_fsr_src2 = mktex(1402, EF_RGBA8, VKN_TC_COLOR, 1, 32, 16, 1, 1, 1402, 0); g_fsr_dst2 = mktex(1403, EF_RGBA8, VKN_TC_COLOR, 1, 32, 16, 1, 1, 1403, 0);
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) g_fsr_tx[i] = g_fsr_tx2[i] = g_fsr_sm[i] = -1;
+    g_fsr_tx[0] = 1400; g_fsr_tx2[0] = 1402; g_fsr_sm[0] = 10;
+}
+// one PPFXAA draw at stretch (sx, sy) into its target (64 x 32, or 32 x 16 with `small`); what the recording shows back
+typedef struct fsr_one { int draws, passes; VkImage img0, img1; VkImageView tex0, tex1; VkBuffer c1b0, c1b1; uint64_t pipe0, pipe1; VkRect2D sc0; } fsr_one;
+static fsr_one fsr_draw(float sx, float sy, int small, uint64_t shader, const float vp[4]) {
+    fsr_one o; memset(&o, 0, sizeof o);
+    VkCommandBuffer cb = fbegin(1); const uint64_t m = mark();
+    uint32_t oc3 = 0, oc15 = 0; CHECK_EQ(vkn_ring_alloc(16, &oc3), 0); CHECK_EQ(vkn_ring_alloc(256, &oc15), 0);
+    const float c3[4] = {sx, sy, 0, 0}; memcpy((uint8_t *)vkn_ring_cpu() + oc3, c3, 16); memset((uint8_t *)vkn_ring_cpu() + oc15, 0, 256);
+    vkn_draw_ubo(0, 0, oc3, 16); vkn_draw_ubo(0, 12, oc15, 224); vkn_draw_ubo(1, 12, oc15, 224);
+    vkn_draw_in in; memset(&in, 0, sizeof in); in.shader = shader; in.prim = 1; in.alpha_ref = -1.0f; in.tex[1] = small ? g_fsr_tx2 : g_fsr_tx; in.smp[1] = g_fsr_sm;
+    const float W = small ? 32.0f : 64.0f, Hh = small ? 16.0f : 32.0f;
+    if (vp) memcpy(in.viewport, vp, sizeof in.viewport); else { in.viewport[2] = W; in.viewport[3] = Hh; }
+    in.scissor[2] = (int32_t)W; in.scissor[3] = (int32_t)Hh;
+    targets(small ? g_fsr_dst2 : g_fsr_dst, NULL, NULL); CHECK_EQ(vkn_draw_arrays(&in, 0, 3), 0);
+    fsubmit(0);
+    o.draws = cnt(m, cb, MK_E_DRAW); o.passes = cnt(m, cb, MK_E_BEGIN_RP);
+    uint32_t btex = 0, bc1 = 0;   // the Vulkan bindings of the source texture / C1 (the mock numbers them its own way)
+    for (uint32_t i = 0; g_fsr_s && i < g_fsr_s->nbind; i++) { if (g_fsr_s->bind[i].kind == VKN_BK_TEXTURE) btex = g_fsr_s->bind[i].binding; if (g_fsr_s->bind[i].kind == VKN_BK_C1) bc1 = g_fsr_s->bind[i].binding; }
+    for (int k = 0; k < 2 && k < o.passes; k++) {
+        const mk_obj *fb = fb_of(nth(m, cb, MK_E_BEGIN_RP, k)); const mk_obj *v = fb && fb->fb_n >= 1 ? vobj(fb->fb_view[0]) : NULL;
+        const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, k); const mk_dw *t = dw_of(bs, btex), *c = dw_of(bs, bc1); const mk_ev *bp = nth(m, cb, MK_E_BIND_PIPE, k);
+        if (k == 0) { o.img0 = v ? v->vci.image : VK_NULL_HANDLE; o.tex0 = t ? t->view : VK_NULL_HANDLE; o.c1b0 = c ? c->buf : VK_NULL_HANDLE; o.pipe0 = bp ? bp->a[0] : 0; }
+        else { o.img1 = v ? v->vci.image : VK_NULL_HANDLE; o.tex1 = t ? t->view : VK_NULL_HANDLE; o.c1b1 = c ? c->buf : VK_NULL_HANDLE; o.pipe1 = bp ? bp->a[0] : 0; }
+    }
+    const mk_ev *sc = nth(m, cb, MK_E_SCISSOR, 0); if (sc) o.sc0 = sc->rect;
+    return o;
+}
+static void fsr_child(a5_res *r) {
+    (void)r;
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_fx_drop("post");
+    if (!g_fsr_s || !g_fsr_src || !g_fsr_dst || !g_fsr_src2 || !g_fsr_dst2) { CHECK(0); return; }
+    vkn_fsr_install(-1); CHECK_EQ(vkn_fsr_mode(), VKN_FSR_AA_ON);
+    vkn_fsr_install(VKN_FSR_AA_COUNT); CHECK_EQ(vkn_fsr_mode(), VKN_FSR_AA_ON);   // the first call's mode stays
+    vkn_fsr_stats a, b; vkn_fsr_stats_get(&a);
+    const VkImageView sv = vkn_tex_view_by_id(1400, NULL);
+    // ---- 75 %: the pre pass into the copy (scissor = the part + 1), then the engine draw reads the copy
+    fsr_one o = fsr_draw(0.75f, 0.75f, 0, H(140, 1), NULL);
+    vkn_fsr_stats_get(&b);
+    CHECK_EQ(o.draws, 2); CHECK_EQ(o.passes, 2);
+    CHECK(o.img0 && o.img0 != g_fsr_src->image && o.img0 != g_fsr_dst->image); CHECK(o.img1 == g_fsr_dst->image);
+    CHECK(o.tex0 == sv); CHECK(o.tex1 && o.tex1 != sv);
+    { const mk_obj *v = vobj(o.tex1); CHECK(v && v->vci.image == o.img0); }   // the EASU draw samples the copy the pre pass wrote
+    CHECK(o.c1b0 && o.c1b0 == g_fsr_s->c1[VKN_SRC_FS].buf && o.c1b1 == o.c1b0);    // C1 fed to both as an effect block
+    CHECK(o.pipe0 && o.pipe1 && o.pipe0 != o.pipe1);
+    CHECK(o.sc0.offset.x == 0 && o.sc0.offset.y == 0 && o.sc0.extent.width == 49 && o.sc0.extent.height == 25);
+    CHECK_EQ(b.pre, a.pre + 1); CHECK_EQ(b.scratch_made, a.scratch_made + 1); CHECK_EQ(b.draws, a.draws + 1); CHECK_EQ(b.last_w, 49); CHECK_EQ(b.last_h, 25);
+    const VkImage copy = o.img0;
+    // ---- 50 %, the same source: the same copy, a smaller part
+    o = fsr_draw(0.5f, 0.5f, 0, H(140, 1), NULL); vkn_fsr_stats_get(&a);
+    CHECK_EQ(o.draws, 2); CHECK(o.img0 == copy); CHECK(o.sc0.extent.width == 33 && o.sc0.extent.height == 17); CHECK_EQ(a.scratch_made, b.scratch_made);
+    // ---- 1:1 (the module's FXAA), a stretch out of range, a viewport that does not cover the target, another key: drawn as recorded
+    o = fsr_draw(1.0f, 1.0f, 0, H(140, 1), NULL); CHECK_EQ(o.draws, 1); CHECK(o.tex0 == sv); CHECK(o.img0 == g_fsr_dst->image);
+    o = fsr_draw(1.5f, 1.5f, 0, H(140, 1), NULL); CHECK_EQ(o.draws, 1); CHECK(o.tex0 == sv);
+    { const float vp[4] = {0, 0, 48, 24}; o = fsr_draw(0.75f, 0.75f, 0, H(140, 1), vp); CHECK_EQ(o.draws, 1); CHECK(o.tex0 == sv); }
+    { const float vp[4] = {0, 32, 64, -32}; o = fsr_draw(0.75f, 0.75f, 0, H(140, 1), vp); CHECK_EQ(o.draws, 2); }   // a flipped full viewport: covered
+    vkn_fsr_stats_get(&b);
+    CHECK_EQ(b.one_to_one, a.one_to_one + 1); CHECK_EQ(b.refused[VKN_FSR_R_SCALE], a.refused[VKN_FSR_R_SCALE] + 1);
+    CHECK_EQ(b.refused[VKN_FSR_R_VIEWPORT], a.refused[VKN_FSR_R_VIEWPORT] + 1); CHECK_EQ(b.pre, a.pre + 1);
+    o = fsr_draw(0.75f, 0.75f, 0, H(141, 1), NULL); CHECK_EQ(o.draws, 1);
+    vkn_fsr_stats_get(&a); CHECK_EQ(a.draws, b.draws);   // not counted at all
+    // ---- a source of another size: another copy (the old one let go)
+    o = fsr_draw(0.75f, 0.75f, 1, H(140, 1), NULL); vkn_fsr_stats_get(&b);
+    CHECK_EQ(o.draws, 2); CHECK(o.img0 && o.img0 != copy); CHECK_EQ(b.scratch_made, a.scratch_made + 1);
+    CHECK(o.sc0.extent.width == 25 && o.sc0.extent.height == 13);
+    frames_n(4);
+    vkn_fsr_census();
+    printf("  fsr-aa: 75 %% -> pre pass 49x25 into the copy + the EASU draw reading it; 1:1 / out of range / partial viewport / other key drawn as recorded; copies %llu\n",
+           (unsigned long long)b.scratch_made);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void fsr_count_child(a5_res *r) {
+    (void)r;
+    const int v0 = mk_val_errors;
+    vkn_fx_drop("post");
+    if (!g_fsr_s) { CHECK(0); return; }
+    vkn_fsr_install(-1); CHECK_EQ(vkn_fsr_mode(), VKN_FSR_AA_COUNT);
+    vkn_fsr_stats a, b; vkn_fsr_stats_get(&a);
+    fsr_one o = fsr_draw(0.75f, 0.75f, 0, H(140, 1), NULL);
+    vkn_fsr_stats_get(&b); CHECK_EQ(o.draws, 1); CHECK_EQ(b.would, a.would + 1); CHECK_EQ(b.pre, a.pre); CHECK_EQ(b.scratch_made, 0);
+    CHECK_EQ(mk_val_errors, v0);
+}
+static void test_fsr(void) {
+    static const char *const e_on[][2] = {{"DM_VK_NATIVE_FSR_AA", NULL}, {NULL, NULL}};
+    static const char *const e_cnt[][2] = {{"DM_VK_NATIVE_FSR_AA", "2"}, {NULL, NULL}};
+    static a5_res R;
+    fsr_setup();
+    a5_child(e_on, fsr_child, &R); a5_child(e_cnt, fsr_count_child, &R);
+}
+// ================================================================================================================ [frame F1 / F2]
+// docs/dos2/nr/VK-FRAME-WORK.md. Forked children (the pass policy and the sort window are per process):
+//   frame area   DM_VK_NATIVE_FRAMEAREA 0 / 1 / 2 / 3 over one scenario with the mock's depth content model (it honours the render area
+//                for CLEAR / DONT_CARE and cuts draws by it): a 256x256 colour + D16 set cleared whole every frame and drawn into a part
+//                (a "render scale" that shrinks, grows and comes back), a second pass on the same depth, a depth clear in the middle
+//                of a pass, one draw far outside the learned area. The depth texels of the WHOLE image must be equal in every frame
+//                for 0, 1 and 2; 1 narrows passes after the two learning frames, counts its one restart; 2 narrows nothing and counts
+//                what it would; 3 leaves the inside equal and poisons the outside of narrowed clears.
+//   lazy clear   DM_VK_NATIVE_LAZYCLR 0 / 1: a region clear of the current target followed by a draw that needs a texture transition:
+//                two passes (one empty) / one; the clear before the draw inside it; the targets change, a copy of the texture and the
+//                recording's close run a waiting clear first; a whole clear supersedes it.
+//   draw merge   DM_VK_NATIVE_DRAWMERGE 0 / 1 / 2 in a depth-only LESS window: adjacent index ranges under one state become one draw
+//                (the same first index, the summed count); other constants, a gap in the indices, an arrays draw end a run.
+enum { FR_F = 30 };
+static void fr_draw(vkn_draw_in *in, int k, int f, uint32_t w, uint32_t h, uint64_t ds) {
+    uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+    uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = (uint32_t)k; u[1] = (uint32_t)f; u[2] = 0x46524d45u;
+    vkn_draw_ubo(0, 2, off, 64);
+    *in = g_in; in->shader = H(30, 1); in->blend = 0; in->tex[2] = NULL; in->smp[2] = NULL; in->ds = ds; in->vb_off[0] = 16u * (uint32_t)(k % 7);
+    in->viewport[0] = 0; in->viewport[1] = 0; in->viewport[2] = (float)w; in->viewport[3] = (float)h;
+    in->scissor[0] = 0; in->scissor[1] = 0; in->scissor[2] = (int32_t)w; in->scissor[3] = (int32_t)h;
+}
+static void frame_scn(a5_res *r) {
+    mk_depth_on = 1;
+    const char *e = getenv("VKN_T_FA"); const int fa = e && *e ? atoi(e) : 0;
+    { vkn_pass_policy p; memset(&p, 0, sizeof p); p.fresh = 1; p.store_frames = 8; p.farea = (int8_t)fa; vkn_pass_policy_set(&p); }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_tex *D = mktex(540, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 256, 256, 1, 1, 540, 0), *C = mktex(541, EF_RGBA8, VKN_TC_COLOR, 1, 256, 256, 1, 1, 541, 0);
+    CHECK(D && C); if (!D || !C) return;
+    vkn_pass_stats5 s0, s1; vkn_pass_stats5_get(&s0);
+    const float sky[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+    for (int f = 0; f < FR_F; f++) {
+        const uint32_t sw = f < 8 ? 128 : f < 14 ? 96 : f < 20 ? 192 : 128, sh = f < 8 ? 128 : f < 14 ? 96 : f < 20 ? 160 : 128;
+        const VkCommandBuffer cb = fbegin(1); const uint64_t m = mark();
+        targets(C, NULL, D); vkn_pass_clear_color(C, 0, sky, NULL); vkn_pass_clear_depth(D, 1, 1.0f, 0);
+        for (int k = 0; k < 8; k++) {
+            vkn_draw_in in; fr_draw(&in, k, f, sw, sh, H(122, 1));
+            if (f == 22 && k == 5) { in.viewport[2] = 256; in.viewport[3] = 256; in.scissor[2] = 256; in.scissor[3] = 256; }   // far outside the learned area
+            if (f == 5 && k == 4) vkn_pass_clear_depth(D, 1, 1.0f, 0);                                                      // a clear in the middle of the pass
+            CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)(k % 10), 3, 1), 0);
+        }
+        targets(NULL, NULL, D);   // the same depth, loaded: LESS_OR_EQUAL draws
+        for (int k = 0; k < 4; k++) { vkn_draw_in in; fr_draw(&in, 100 + k, f, sw, sh, H(123, 1)); CHECK_EQ(vkn_draw_indexed(&in, 3u * (uint32_t)k, 3, 1), 0); }
+        fsubmit(0);
+        r->h[f] = a5_hash_rect(D, 0, 0, 256, 256, NULL);
+        r->th[f][0] = a5_hash_rect(D, 0, 0, (int32_t)sw, (int32_t)sh, NULL);
+        int narrow = 0; const int np = cnt(m, cb, MK_E_BEGIN_RP);
+        for (int i = 0; i < np; i++) { const mk_ev *b = nth(m, cb, MK_E_BEGIN_RP, i); if (b && (b->rect.extent.width < 256 || b->rect.extent.height < 256)) narrow++; }
+        r->cp[f] = (uint32_t)narrow; r->rp[f] = (uint32_t)np;
+        if (fa == 1 && f == 3) {   // a narrowed frame: both passes begin with the learned 128x128 box; the first clears colour and depth in it
+            const mk_ev *b0 = nth(m, cb, MK_E_BEGIN_RP, 0), *b1 = nth(m, cb, MK_E_BEGIN_RP, 1);
+            CHECK(b0 && b0->rect.offset.x == 0 && b0->rect.offset.y == 0 && b0->rect.extent.width == 128 && b0->rect.extent.height == 128);
+            CHECK(b1 && b1->rect.extent.width == 128 && b1->rect.extent.height == 128);
+            CHECK(att_of(b0, 1) && att_of(b0, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && att_of(b0, 1)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+            CHECK(att_of(b1, 0) && att_of(b1, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD);
+        }
+    }
+    frames_n(4); mk_gpu_finish_all(); frames_n(1);
+    vkn_pass_stats5_get(&s1);
+    r->sk[0] = (uint32_t)(s1.fa_passes - s0.fa_passes); r->sk[1] = (uint32_t)(s1.fa_would - s0.fa_would); r->sk[2] = (uint32_t)(s1.fa_restart_draw - s0.fa_restart_draw);
+    r->sk[3] = (uint32_t)(s1.fa_restart_unknown - s0.fa_restart_unknown); r->sk[4] = (uint32_t)(s1.fa_clears - s0.fa_clears); r->sk[5] = (uint32_t)(s1.fa_poisoned - s0.fa_poisoned);
+    r->sk[6] = (uint32_t)(s1.fa_would_restart - s0.fa_would_restart); r->sk[7] = (uint32_t)(s1.fa_why[VKN_FAR_HIST] - s0.fa_why[VKN_FAR_HIST]);
+    r->sk[8] = (uint32_t)(s1.fa_why[VKN_FAR_SMALL] - s0.fa_why[VKN_FAR_SMALL]); r->sk[9] = (uint32_t)(s1.fa_tried - s0.fa_tried);
+    r->sk[10] = (uint32_t)(s1.fa_why[VKN_FAR_CLR_STATE] - s0.fa_why[VKN_FAR_CLR_STATE]); r->sk[11] = (uint32_t)(s1.fa_why[VKN_FAR_RESTART] - s0.fa_why[VKN_FAR_RESTART]);
+    r->sk[12] = (uint32_t)((s1.fa_saved_bytes - s0.fa_saved_bytes) >> 10);
+    targets(NULL, NULL, NULL);
+    CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 540), 1); CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 541), 1);
+    vkn_pass_policy_set(NULL); mk_depth_on = 0;
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void lazy_scn(a5_res *r) {
+    const char *e = getenv("VKN_T_LC"); const int lc = e && *e ? atoi(e) : 0;
+    { vkn_pass_policy p; memset(&p, 0, sizeof p); p.fresh = 1; p.store_frames = 8; p.lazyclr = (int8_t)lc; vkn_pass_policy_set(&p); }
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_tex *F = mktex(543, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 543, 0), *G = mktex(544, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 544, 0);
+    CHECK(F && G); if (!F || !G) return;
+    vkn_pass_stats5 s0, s1; vkn_pass_stats5_get(&s0);
+    const float z[4] = {0, 0, 0, 0}, one[4] = {1, 1, 1, 1}; const int32_t rc[4] = {4, 4, 16, 8}, rc2[4] = {30, 10, 8, 8};
+    vkn_draw_in in = g_in; in.shader = H(30, 1); in.ib = H(52, 1); in.prim = 1;
+    VkCommandBuffer cb = fbegin(1);
+    targets(F, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); targets(G, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);   // both hold content
+    fsubmit(0);
+    // (a) the filter-epoch shape: a region clear of the current target, then a draw that samples a texture a pass just wrote
+    cb = fbegin(1);
+    targets(G, NULL, NULL); CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);   // G: an attachment (its layout must change before it is sampled)
+    targets(F, NULL, NULL);
+    uint64_t m = mark();
+    vkn_pass_clear_color(F, 0, z, rc);
+    g_ftex[0] = 544; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); g_ftex[0] = 300;
+    r->cp[0] = (uint32_t)cnt(m, cb, MK_E_BEGIN_RP); r->cp[1] = (uint32_t)cnt(m, cb, MK_E_CLEAR_ATT);
+    { const mk_ev *c = nth(m, cb, MK_E_CLEAR_ATT, 0), *d = nth(m, cb, MK_E_DRAW_IDX, 0); const mk_ev *b = NULL;
+      for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) b = nth(m, cb, MK_E_BEGIN_RP, k);
+      CHECK(c && d && b && c->seq < d->seq);
+      r->cp[2] = c && b && d && b->seq < c->seq && c->seq < d->seq;          // the clear and the draw in the LAST pass (lazy: the only one)
+      CHECK(c && c->cr[0].rect.offset.x == 4 && c->cr[0].rect.extent.width == 16 && c->cr[0].rect.extent.height == 8); }
+    // (b) two region clears while no pass is open, then the targets change: a pass of their own before the set changes
+    targets(G, NULL, NULL); targets(F, NULL, NULL);
+    m = mark();
+    vkn_pass_clear_color(F, 0, one, rc); vkn_pass_clear_color(F, 0, z, rc2);
+    r->cp[3] = (uint32_t)cnt(m, cb, MK_E_CLEAR_ATT);                          // lazy: nothing yet
+    targets(G, NULL, NULL);
+    r->cp[4] = (uint32_t)cnt(m, cb, MK_E_CLEAR_ATT);
+    // (c) a region clear waits, a whole clear of the same texture comes: the region clear is gone
+    targets(F, NULL, NULL);
+    m = mark();
+    vkn_pass_clear_color(F, 0, one, rc); vkn_pass_clear_color(F, 0, z, NULL);
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+    r->cp[5] = (uint32_t)cnt(m, cb, MK_E_CLEAR_ATT); r->cp[6] = (uint32_t)cnt(m, cb, MK_E_BEGIN_RP);
+    { const mk_ev *b = NULL; for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) b = nth(m, cb, MK_E_BEGIN_RP, k);
+      if (lc == 1) CHECK(b && att_of(b, 0) && att_of(b, 0)->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR); }
+    // (d) a region clear waits, the texture is copied from: the clear first
+    targets(G, NULL, NULL); targets(F, NULL, NULL);
+    m = mark();
+    vkn_pass_clear_color(F, 0, one, rc);
+    vkn_pass_copy(G, F);
+    { const mk_ev *c = nth(m, cb, MK_E_CLEAR_ATT, 0), *cp = nth(m, cb, MK_E_COPY_IMG, 0); CHECK(c && cp && c->seq < cp->seq); }
+    // (e) a region clear waits at the recording's close
+    m = mark();
+    vkn_pass_clear_color(F, 0, z, rc2);
+    fsubmit(0);
+    r->cp[7] = (uint32_t)cnt(m, cb, MK_E_CLEAR_ATT);
+    vkn_pass_stats5_get(&s1);
+    r->sk[0] = (uint32_t)(s1.lc_queued - s0.lc_queued); r->sk[1] = (uint32_t)(s1.lc_in_pass - s0.lc_in_pass); r->sk[2] = (uint32_t)(s1.lc_flushed - s0.lc_flushed);
+    r->sk[3] = (uint32_t)(s1.lc_superseded - s0.lc_superseded); r->sk[4] = (uint32_t)(s1.lc_breaks - s0.lc_breaks); r->sk[5] = (uint32_t)(s1.lc_would - s0.lc_would);
+    targets(NULL, NULL, NULL); frames_n(4);
+    CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 543), 1); CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 544), 1);
+    vkn_pass_policy_set(NULL);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void merge_scn(a5_res *r) {
+    const char *e = getenv("VKN_T_MG"); const int mg = e && *e ? atoi(e) : 0;
+    vkn_sort_mode_set(1); vkn_sort_merge_set(mg);
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_tex *D = mktex(545, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 256, 256, 1, 1, 545, 0);
+    CHECK(D != NULL); if (!D) return;
+    vkn_sort_stats s0, s1; vkn_sort_stats_get(&s0);
+    const VkCommandBuffer cb = fbegin(1); const uint64_t m = mark();
+    targets(NULL, NULL, D); vkn_pass_clear_depth(D, 1, 1.0f, 0);
+    vkn_draw_in in; fr_draw(&in, 1, 0, 256, 256, H(122, 1)); in.vb_off[0] = 16;
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);                                       // the pass's first draw: never in a window
+    for (uint32_t k = 1; k <= 9; k++) CHECK_EQ(vkn_draw_indexed(&in, 3 * k, 3, 1), 0);   // 3..29: one state, adjacent ranges
+    { uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0); memset((uint8_t *)vkn_ring_cpu() + off, 0x33, 64); vkn_draw_ubo(0, 2, off, 64); }   // other constants
+    for (uint32_t k = 10; k <= 12; k++) CHECK_EQ(vkn_draw_indexed(&in, 3 * k, 3, 1), 0); // 30..38: adjacent to the run before, but another block
+    CHECK_EQ(vkn_draw_indexed(&in, 45, 3, 1), 0);                                      // a gap
+    CHECK_EQ(vkn_draw_indexed(&in, 48, 6, 1), 0);                                      // adjacent again: joins the one before (45 + 3)
+    CHECK_EQ(vkn_draw_arrays(&in, 0, 3), 0);                                           // arrays: its own draw
+    CHECK_EQ(vkn_draw_indexed(&in, 54, 3, 1), 0);                                      // after the arrays draw: adjacent to 48 + 6, but not consecutive
+    fsubmit(0);
+    const int nd = cnt(m, cb, MK_E_DRAW_IDX);
+    r->cp[0] = (uint32_t)nd; r->cp[1] = (uint32_t)cnt(m, cb, MK_E_DRAW);
+    uint32_t sum = 0; const mk_ev *d0 = nth(m, cb, MK_E_DRAW_IDX, 0);
+    for (int i = 0; i < nd && i < 20; i++) { const mk_ev *d = nth(m, cb, MK_E_DRAW_IDX, i); sum += d->u[0]; r->rp[i] = d->u[0]; r->bo[i] = d0 ? d->u[2] - d0->u[2] : 0; }
+    r->cp[2] = sum;
+    vkn_sort_stats_get(&s1);
+    r->sk[0] = (uint32_t)(s1.merged - s0.merged); r->sk[1] = (uint32_t)(s1.merge_runs - s0.merge_runs); r->sk[2] = (uint32_t)(s1.merge_would - s0.merge_would);
+    vkn_sort_census();
+    frames_n(4);
+    targets(NULL, NULL, NULL);
+    CHECK_EQ(vkn_tex_destroy_cookie(0xC00000ull + 545), 1);
+    vkn_sort_merge_set(0); vkn_sort_mode_set(0);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_frame(void) {
+    static const char *const f0[][2] = {{"VKN_T_FA", "0"}, {NULL, NULL}}, *const f1[][2] = {{"VKN_T_FA", "1"}, {NULL, NULL}}, *const f2[][2] = {{"VKN_T_FA", "2"}, {NULL, NULL}},
+                      *const f3[][2] = {{"VKN_T_FA", "3"}, {NULL, NULL}};
+    static const char *const l0[][2] = {{"VKN_T_LC", "0"}, {NULL, NULL}}, *const l1[][2] = {{"VKN_T_LC", "1"}, {NULL, NULL}}, *const l2[][2] = {{"VKN_T_LC", "2"}, {NULL, NULL}};
+    static const char *const m0[][2] = {{"VKN_T_MG", "0"}, {NULL, NULL}}, *const m1[][2] = {{"VKN_T_MG", "1"}, {NULL, NULL}}, *const m2[][2] = {{"VKN_T_MG", "2"}, {NULL, NULL}};
+    {   // the pipelines of the scenarios exist before the children (a child has no shader worker)
+        static a5_res w; frame_scn(&w); frames_n(2); lazy_scn(&w); frames_n(2); merge_scn(&w); frames_n(2);
+    }
+    static a5_res R0, R1, R2, R3;
+    a5_child(f0, frame_scn, &R0); a5_child(f1, frame_scn, &R1); a5_child(f2, frame_scn, &R2); a5_child(f3, frame_scn, &R3);
+    if (R0.ran && R1.ran && R2.ran && R3.ran) {
+        int differ = 0, pdiff = 0, n1 = 0, n3 = 0;
+        for (int f = 1; f < FR_F; f++) differ += R0.h[f] != R0.h[f - 1];
+        CHECK(differ >= FR_F / 2);                                   // (the model drew: the frames differ)
+        for (int f = 0; f < FR_F; f++) {
+            CHECK_EQ(R1.h[f], R0.h[f]); CHECK_EQ(R2.h[f], R0.h[f]);   // the whole depth image: narrowed = full, every frame
+            CHECK_EQ(R3.th[f][0], R0.th[f][0]);                        // poison: the 3D part is untouched
+            pdiff += R3.h[f] != R0.h[f];
+            CHECK_EQ(R0.cp[f], 0); CHECK_EQ(R2.cp[f], 0);             // off / verify: every pass begins full
+            n1 += (int)R1.cp[f]; n3 += (int)R3.cp[f];
+        }
+        CHECK_EQ(R1.cp[0], 0); CHECK_EQ(R1.cp[1], 0);                 // two learning frames
+        CHECK_EQ(R1.cp[2], 2); CHECK_EQ(R1.cp[3], 2);                 // then both passes
+        CHECK_EQ(R1.cp[8], 2); CHECK_EQ(R1.cp[14], 2);                // the scale went down (the area stays), up (the area grows with the first draw)
+        CHECK(R1.cp[5] >= 2);                                         // the clear in the middle of the pass: the pass before it and the second one
+        CHECK_EQ(R1.rp[22], R0.rp[22] + 1);                           // the draw outside: one pass more (the restart)
+        CHECK_EQ(R1.sk[2], 1); CHECK_EQ(R1.sk[3], 0); CHECK_EQ(R1.sk[11], 1);
+        CHECK(n1 >= 2 * (FR_F - 12)); CHECK_EQ(R1.sk[0], (uint32_t)n1); CHECK(R1.sk[4] >= (uint32_t)(FR_F - 12)); CHECK(R1.sk[12] > 0);
+        CHECK_EQ(R2.sk[0], 0); CHECK(R2.sk[1] >= (uint32_t)(2 * (FR_F - 12))); CHECK_EQ(R2.sk[6], 1);   // verify: would narrow, would restart once
+        CHECK_EQ(R0.sk[9], 0);                                        // off: nothing is even tried
+        CHECK(pdiff >= 4); CHECK(R3.sk[5] >= 8); CHECK(n3 >= 8);      // poison: the outside differs in the narrowed-clear frames
+        printf("frame area: %d frames; FRAMEAREA=1: narrowed passes %u (clears %u, restarts %u, %u KB of the model left out), whole depth image equal to =0 in every frame; "
+               "=2: would narrow %u, would restart %u, equal; =3: outsides poisoned %u, the image differs in %d frames, the 3D part equal\n", FR_F, R1.sk[0], R1.sk[4], R1.sk[2],
+               R1.sk[12], R2.sk[1], R2.sk[6], R3.sk[5], pdiff);
+    }
+    static a5_res L0, L1, L2;
+    a5_child(l0, lazy_scn, &L0); a5_child(l1, lazy_scn, &L1); a5_child(l2, lazy_scn, &L2);
+    if (L0.ran && L1.ran && L2.ran) {
+        CHECK_EQ(L0.cp[0], 2); CHECK_EQ(L1.cp[0], 1); CHECK_EQ(L2.cp[0], 2);       // (a) passes: one empty + one / one
+        CHECK_EQ(L0.cp[1], 1); CHECK_EQ(L1.cp[1], 1); CHECK_EQ(L1.cp[2], 1);       // the clear once, in the draw's pass before the draw
+        CHECK_EQ(L0.cp[3], 2); CHECK_EQ(L1.cp[3], 0); CHECK_EQ(L0.cp[4], 2); CHECK_EQ(L1.cp[4], 2);   // (b) both clears by the time the set changes
+        CHECK_EQ(L1.cp[5], 0); CHECK_EQ(L1.cp[6], 1); CHECK_EQ(L0.cp[5], 2);       // (c) superseded (before: both ran as in-pass clears)
+        CHECK_EQ(L0.cp[7], 1); CHECK_EQ(L1.cp[7], 1);                              // (e) at the close
+        CHECK_EQ(L0.sk[0], 0); CHECK(L1.sk[0] >= 5); CHECK_EQ(L1.sk[3], 1); CHECK(L1.sk[1] >= 1); CHECK(L1.sk[2] >= 2); CHECK(L1.sk[4] >= 1); CHECK(L2.sk[5] >= 4);
+        printf("lazy clear: LAZYCLR=0: %u passes for a region clear + a draw that samples a fresh target, =1: %u; held %u, in the draw's pass %u, own pass %u, superseded %u\n",
+               L0.cp[0], L1.cp[0], L1.sk[0], L1.sk[1], L1.sk[2], L1.sk[3]);
+    }
+    static a5_res M0, M1, M2;
+    a5_child(m0, merge_scn, &M0); a5_child(m1, merge_scn, &M1); a5_child(m2, merge_scn, &M2);
+    if (M0.ran && M1.ran && M2.ran) {
+        CHECK_EQ(M0.cp[0], 16); CHECK_EQ(M2.cp[0], 16); CHECK_EQ(M1.cp[0], 5);    // indexed draws: 1 + 9 + 3 + 1 + 1 + 1 -> first, 3..29, 30..38, 45..53, 54
+        CHECK_EQ(M0.cp[1], 1); CHECK_EQ(M1.cp[1], 1);
+        CHECK_EQ(M1.cp[2], M0.cp[2]);                                              // the same number of indices drawn
+        CHECK_EQ(M1.rp[0], 3); CHECK_EQ(M1.bo[0], 0);
+        // (the window is emitted grouped by pipeline, one pipeline here: recorded order)
+        CHECK_EQ(M1.rp[1], 27); CHECK_EQ(M1.bo[1], 3); CHECK_EQ(M1.rp[2], 9); CHECK_EQ(M1.bo[2], 30); CHECK_EQ(M1.rp[3], 9); CHECK_EQ(M1.bo[3], 45);
+        CHECK_EQ(M1.rp[4], 3); CHECK_EQ(M1.bo[4], 54);
+        CHECK_EQ(M1.sk[0], 11); CHECK_EQ(M1.sk[1], 3); CHECK_EQ(M2.sk[2], 11); CHECK_EQ(M2.sk[0], 0); CHECK_EQ(M0.sk[0], 0);
+        printf("draw merge: DRAWMERGE=0: %u indexed draws, =1: %u (joined %u in %u runs, the same %u indices), =2: would join %u\n", M0.cp[0], M1.cp[0], M1.sk[0], M1.sk[1], M1.cp[2], M2.sk[2]);
+    }
+}
+
+// ================================================================================================================ [VK-LOWRES] post at a part
+// vkn_post.c DM_VK_NATIVE_POST_PART (docs/dos2/nr/VK-FRAME-WORK.md section 13): the game's tail at a 3D scale of 50 % - LUT (HDR -> O),
+// Sight (O -> S), EoCFog (S -> O), the AA step = the FSR stretch (O -> X, whole target, c3 = 0.5), CombineUI (X -> B); every draw before
+// the step draws the top-left 32x16 part of the 64x32 targets. Forked children (the module's switches set by vkn_post_test_switches):
+//   PART=1 FSR_AA=1  probation 6 draws (with the pre pass), then LUT skipped, Sight = F1A on the part, the fog carries it, the stretch
+//                    drawn without its pre pass: 4 draws; EoCFog's part write ends the LUT target's watch; nothing materialised
+//   PART=1 FSR_AA=0  route A refused (R_PART), F1 arms: 5 -> 4 draws (the LUT skipped), the console's stretch as recorded
+//   PART=0           as before this piece: the probe breaks on EoCFog's part write every frame, F1 never arms: 5 draws
+//   PART=2           (FSR_AA=1) the same chain as recorded, 6 draws; the part overwrites counted ("would")
+//   PART=1 VERIFY=2  poison: the skipped LUT target is cleared to magenta in its 32x16 part only
+static const char *const g_pp_fog = "e94ea226e689801c";
+static void pp_setup(void) {   // parent: shader objects (a child has no shader-creation worker)
+    xbg_vkn_stage *fog = mk_bundle_add(g_pp_fog, 4); mk_bind(fog, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, XBG_SOURCE_TEXTURE, 0, 0);
+    CHECK(mkshader(H(186, 1), "a0a0a0a000000001", g_pp_fog, NULL) != NULL);
+}
+static void pp_scn(a5_res *r) {
+    const char *e = getenv("VKN_T_PP"); int part = 1, verify = 0, nf = 24; if (e && *e) sscanf(e, "%d %d %d", &part, &verify, &nf);
+    vkn_post_test_switches(part, verify);
+    vkn_fsr_install(-1);
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_tex *hdr = mktex(1500, EF_RGBA16F, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1500, 0), *lt = mktex(1501, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 1501, 0);
+    vkn_tex *O = mktex(1502, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1502, 0), *S = mktex(1503, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1503, 0);
+    vkn_tex *X = mktex(1504, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1504, 0), *B = mktex(1505, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 1505, 0);
+    vkn_tex *ui = mktex(1506, EF_RGBA8, VKN_TC_SAMPLED, 1, 16, 16, 1, 1, 1506, 0);
+    CHECK(hdr && lt && O && S && X && B && ui && g_fsr_s); if (!hdr || !lt || !O || !S || !X || !B || !ui || !g_fsr_s) return;
+    static int32_t tl[VKN_TEX_SLOTS], ts[VKN_TEX_SLOTS], tf[VKN_TEX_SLOTS], tx[VKN_TEX_SLOTS], tc[VKN_TEX_SLOTS], sm[VKN_TEX_SLOTS];
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) tl[i] = ts[i] = tf[i] = tx[i] = tc[i] = sm[i] = -1;
+    tl[0] = 1500; tl[1] = 1501; ts[0] = 1502; tf[0] = 1503; tx[0] = 1502; tc[0] = 1504; tc[1] = 1506; sm[0] = sm[1] = 10;
+    const uint64_t sh[5] = {H(80, 1), H(81, 1), H(186, 1), H(140, 1), H(84, 1)}; int32_t *const tt[5] = {tl, ts, tf, tx, tc};
+    vkn_tex *const tgt[5] = {O, S, O, X, B};
+    vkn_draw_in in[5];
+    for (int k = 0; k < 5; k++) {
+        memset(&in[k], 0, sizeof in[k]); in[k].shader = sh[k]; in[k].prim = 1; in[k].alpha_ref = -1.0f; in[k].tex[1] = tt[k]; in[k].smp[1] = sm;
+        const int whole = k >= 3;
+        in[k].viewport[2] = whole ? 64 : 32; in[k].viewport[3] = whole ? 32 : 16; in[k].scissor[2] = 64; in[k].scissor[3] = 32;
+    }
+    vkn_post_stats a, b; vkn_post_stats_get(&a); vkn_fsr_stats fa, fb; vkn_fsr_stats_get(&fa);
+    int poison_part = 0, poison_whole = 0;
+    for (int f = 0; f < nf; f++) {
+        if (f >= A5_F) { pthread_mutex_lock(&mk_mu); if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu); }   // a long run: the log restarts (16384 entries)
+        VkCommandBuffer cb = fbegin(1); const uint64_t m = mark();
+        uint32_t off, oc3, oc15; CHECK_EQ(vkn_ring_alloc(64, &off), 0); CHECK_EQ(vkn_ring_alloc(16, &oc3), 0); CHECK_EQ(vkn_ring_alloc(256, &oc15), 0);
+        const float c3[4] = {0.5f, 0.5f, 0, 0}; memcpy((uint8_t *)vkn_ring_cpu() + oc3, c3, 16); memset((uint8_t *)vkn_ring_cpu() + oc15, 0, 256);
+        vkn_draw_ubo(1, 5, off, 64); vkn_draw_ubo(0, 0, oc3, 16); vkn_draw_ubo(0, 12, oc15, 224); vkn_draw_ubo(1, 12, oc15, 224);
+        static const float one[4] = {1, 1, 1, 1}; vkn_pass_clear_color(hdr, 0, one, NULL);
+        for (int k = 0; k < 5; k++) { targets(tgt[k], NULL, NULL); CHECK_EQ(vkn_draw_arrays(&in[k], 0, 3), 0); }
+        fsubmit(0);
+        if (f < A5_F) r->cp[f] = (uint32_t)cnt(m, cb, MK_E_DRAW);
+        else if (cnt(m, cb, MK_E_DRAW) != 4) r->cp[A5_F - 1]++;   // (a long run: frames past the record that are not 4 draws)
+        for (int k = 0; f < A5_F && nth(m, cb, MK_E_CLEAR_ATT, k); k++) {
+            const mk_ev *c = nth(m, cb, MK_E_CLEAR_ATT, k);
+            if (c->cr[0].rect.extent.width == 32 && c->cr[0].rect.extent.height == 16) poison_part++;
+            if (c->cr[0].rect.extent.width == 64 && c->cr[0].rect.extent.height == 32) poison_whole++;
+        }
+    }
+    vkn_post_stats_get(&b); vkn_fsr_stats_get(&fb);
+    r->sk[0] = (uint32_t)(b.skipped - a.skipped); r->sk[1] = (uint32_t)(b.fused[1] - a.fused[1]); r->sk[2] = (uint32_t)(b.fused[0] - a.fused[0]);
+    r->sk[3] = (uint32_t)(b.f1a_part - a.f1a_part); r->sk[4] = (uint32_t)(b.stretch_pre_skipped - a.stretch_pre_skipped);
+    r->sk[5] = (uint32_t)(b.overwritten_part - a.overwritten_part); r->sk[6] = (uint32_t)(b.part_would - a.part_would);
+    r->sk[7] = (uint32_t)(b.materialized - a.materialized); r->sk[8] = (uint32_t)(b.violations - a.violations);
+    r->sk[9] = (uint32_t)(fb.pre - fa.pre); r->sk[10] = (uint32_t)(fb.pre_f1a - fa.pre_f1a); r->sk[11] = (uint32_t)(b.recovered - a.recovered);
+    r->sk[12] = (uint32_t)(b.late_aa - a.late_aa); r->sk[13] = (uint32_t)poison_part; r->sk[14] = (uint32_t)poison_whole;
+    r->sk[15] = (uint32_t)(b.stretch_would - a.stretch_would); r->sk[16] = (uint32_t)(fb.scratch_freed - fa.scratch_freed);
+    vkn_post_census(); vkn_fsr_census();
+    targets(NULL, NULL, NULL); frames_n(4);
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_post_part(void) {
+    static const char *const e_a[][2] = {{"VKN_T_PP", "1 0 640"}, {"DM_VK_NATIVE_FSR_AA", "1"}, {NULL, NULL}};
+    static const char *const e_b[][2] = {{"VKN_T_PP", "1 0"}, {"DM_VK_NATIVE_FSR_AA", "0"}, {NULL, NULL}};
+    static const char *const e_c[][2] = {{"VKN_T_PP", "0 0"}, {"DM_VK_NATIVE_FSR_AA", "0"}, {NULL, NULL}};
+    static const char *const e_d[][2] = {{"VKN_T_PP", "2 0"}, {"DM_VK_NATIVE_FSR_AA", "1"}, {NULL, NULL}};
+    static const char *const e_e[][2] = {{"VKN_T_PP", "1 2"}, {"DM_VK_NATIVE_FSR_AA", "0"}, {NULL, NULL}};
+    static a5_res A, Bb, C, D, E;
+    pp_setup();
+    a5_child(e_a, pp_scn, &A); a5_child(e_b, pp_scn, &Bb); a5_child(e_c, pp_scn, &C); a5_child(e_d, pp_scn, &D); a5_child(e_e, pp_scn, &E);
+    printf("  post at a part: draws a frame (frames 0 / 8 / 9 / 12 / 23) PART=1 FSR_AA=1: %u %u %u %u %u; FSR_AA=0: %u %u %u %u %u; PART=0: %u %u; PART=2: %u %u\n",
+           A.cp[0], A.cp[8], A.cp[9], A.cp[12], A.cp[23], Bb.cp[0], Bb.cp[8], Bb.cp[9], Bb.cp[12], Bb.cp[23], C.cp[12], C.cp[23], D.cp[12], D.cp[23]);
+    printf("  post at a part: A skipped %u F1A %u (on a part %u) pre left out %u / fsr %u, pre drawn %u, part overwrites %u, materialised %u, violations %u, late AA %u; "
+           "B F1 %u skipped %u; C skipped %u; D skipped %u would %u stretch would %u; E poison part %u whole %u\n",
+           A.sk[0], A.sk[1], A.sk[3], A.sk[4], A.sk[10], A.sk[9], A.sk[5], A.sk[7], A.sk[8], A.sk[12], Bb.sk[2], Bb.sk[0], C.sk[0], D.sk[0], D.sk[6], D.sk[15], E.sk[13], E.sk[14]);
+    // PART=1, FSR_AA=1: probation with the pre pass, then 4 draws: Sight (F1A), fog, the stretch, Combine
+    for (int f = 0; f < 8; f++) CHECK_EQ(A.cp[f], 6);
+    for (int f = 10; f < A5_F - 1; f++) CHECK_EQ(A.cp[f], 4);
+    CHECK_EQ(A.cp[A5_F - 1], 4);   // (and no later frame other than 4 draws: the count of such frames is 0, the slot holds frame 43's draws)
+    CHECK_EQ(A.sk[16], 1);         // the FSR copy let go after 600 frames without a pre pass
+    CHECK(A.sk[0] >= 14); CHECK_EQ(A.sk[1], A.sk[0]); CHECK_EQ(A.sk[3], A.sk[1]); CHECK_EQ(A.sk[4], A.sk[1]); CHECK_EQ(A.sk[10], A.sk[4]);
+    CHECK_EQ(A.sk[9] + A.sk[10], 640);                       // every stretch: a pre pass or left out after F1A
+    CHECK(A.sk[5] >= 640); CHECK_EQ(A.sk[7], 0); CHECK_EQ(A.sk[8], 0); CHECK_EQ(A.sk[12], 0); CHECK_EQ(A.sk[11], 0);
+    // PART=1, FSR_AA=0: F1 only (route A needs the FSR stretch at a part)
+    for (int f = 0; f < 8; f++) CHECK_EQ(Bb.cp[f], 5);
+    for (int f = 10; f < 24; f++) CHECK_EQ(Bb.cp[f], 4);
+    CHECK(Bb.sk[2] >= 14); CHECK_EQ(Bb.sk[0], Bb.sk[2]); CHECK_EQ(Bb.sk[1], 0); CHECK_EQ(Bb.sk[7], 0); CHECK_EQ(Bb.sk[8], 0);
+    // PART=0 / 2: never armed (the probe's part write): 5 / 6 draws; 2 counts
+    for (int f = 0; f < 24; f++) { CHECK_EQ(C.cp[f], 5); CHECK_EQ(D.cp[f], 6); }
+    CHECK_EQ(C.sk[0], 0); CHECK_EQ(D.sk[0], 0); CHECK(D.sk[6] >= 24); CHECK_EQ(C.sk[6], 0); CHECK_EQ(C.sk[5], 0);
+    // VERIFY=2: the poison of the skipped LUT target covers its part only
+    CHECK(E.sk[0] >= 14); CHECK(E.sk[13] >= E.sk[0]); CHECK_EQ(E.sk[8], 0);
+}
+
+// ================================================================================================================ [mgpu P7b] the UI runs
+// vkn_ui.c "mgpu P7b": a run with the layer alone is hoisted (its RenderingEnd fence dropped: one pass; the DS detached because no
+// layer draw tests it); a pushed block that masks with its own stencil bit (cleared before and after) is hoisted (the symbolic check
+// finds the order free), without the clear after it is not; GDraw pushing a target again after the layer read it renames its new
+// content to a spare (the composites read the old target and the spare, in that order); the run's render area = the union of its
+// layer rects; a run flushed by the engine drawing into the layer keeps the DS the engine's set has and no area, and that draw lands in
+// the same pass; UILAYER=2 draws such a run twice (in order, hoisted) and compares. The validator stays clean.
+static int p7b_reads(const mk_ev *bs, const vkn_tex *t) {   // the draw's set binds t's view
+    if (!bs || !t) return 0;
+    for (uint32_t b = 0; b < 64; b++) { const mk_dw *w = dw_of(bs, b); if (w && w->view == t->view) return 1; }
+    return 0;
+}
+static int p7b_lpasses(uint64_t m, VkCommandBuffer cb) {   // passes of the recording with the layer as colour attachment 0
+    int n = 0;
+    for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) { mk_obj *fb = mk_find(nth(m, cb, MK_E_BEGIN_RP, k)->a[1], MK_FB); if (fb && fb->fb_n && MK_H(fb->fb_view[0]) == MK_H(g_p7L->att)) n++; }
+    return n;
+}
+static void p7b_dsq(uint8_t cmp, uint8_t wr, uint8_t coff) {   // a stencil draw over the target: test under cmp, REPLACE under wr
+    static float verts[16] = {0, 0, 0, 0,  64, 0, 1, 0,  64, 32, 1, 1,  0, 32, 0, 1}; static float vsc[32] = {1}, fsc[12] = {1};
+    vkn_ui_draw_in d; memset(&d, 0, sizeof d); d.vs = 0xA1; d.fs = 0xA2; d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.blend = 1; d.ds = 1;
+    d.stencil_cmp = cmp; d.stencil_write = wr; d.color_off = coff;
+    d.tex[0] = g_t0; d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc; d.verts = verts; d.nverts = 4; CHECK_EQ(vkn_ui_draw(&d), 0);
+}
+// var: 1 no engine clear of the layer, 2 a RenderingEnd fence between the layer draws, 4 F1's block masks with stencil bit 0 (cleared
+// before and after), 8 = 4 without the clear after, 16 F1 pushed again after its composite (GDraw's recycled handle), 32 the layer's draws
+// inside (0, 0, 16, 8), 64 the engine binds (L, D) and draws after F1's composite (a custom draw), 128 an F1 block + composite, 256 F1
+// bound again after its composite and drawn on (no clear), composited again
+static VkCommandBuffer p7b_frame(int var, uint64_t *m) {
+    VkCommandBuffer cb = fbegin(1); *m = mark();
+    static const float z[4] = {0, 0, 0, 0};
+    const int32_t r1[4] = {2, 2, 16, 8}, r2[4] = {20, 4, 16, 8};
+    const int32_t sw = var & 32 ? 16 : 64, sh = var & 32 ? 8 : 32;
+    vkn_ui_layer(g_p7L);
+    vkn_ui_targets(g_p7L, g_p7D);
+    if (!(var & 1)) vkn_pass_clear_color(g_p7L, 0, z, NULL);
+    vkn_ui_viewport(0, 0, 64, 32); vkn_ui_clear_ds(1, 0xff);
+    mg_quad(0, 0, sw, sh, g_t0, 0.0f);
+    if (var & 2048) { /* (placed after F1's composite below) */ }
+    if (var & 1024) { targets(g_p7L, NULL, g_p7D); vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); vkn_ui_targets(g_p7L, g_p7D); }   // [mgpu P7c] a custom draw first
+    if (var & 2) vkn_ui_pass_fence();
+    if (var & (128 | 16 | 4 | 8)) {
+        vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, r1); vkn_ui_clear_color(g_p7F1, r1);
+        if (var & (4 | 8)) { vkn_ui_clear_ds(0, 0x01); p7b_dsq(0, 0x01, 1); p7b_dsq(0x01, 0, 0); if (var & 4) vkn_ui_clear_ds(0, 0x01); }
+        else mg_quad(0, 0, 64, 32, g_t0, 0.0f);
+        vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F1, 0.0f);
+    }
+    if (var & 2048) vkn_ui_clear_ds(0, 0x01);   // [mgpu P7c] the layer clears stencil bit 0 after F1 (F1's mask bit dead)
+    if (var & 8192) {   // [mgpu P7g] F1's filter epoch, then a custom draw on GDraw's binding (into F1, on top of its filter content), then an
+        // epoch of F2 that reads F1, composited
+        const int32_t ra[4] = {2, 2, 16, 8}, rb[4] = {20, 20, 16, 8};
+        vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, ra); vkn_ui_clear_color(g_p7F1, ra); mg_quad(0, 0, 64, 32, g_t0, 0.25f);
+        vkn_ui_pass_fence(); { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+        vkn_ui_targets(g_p7F2, g_p7D); vkn_ui_region(g_p7F2, rb); vkn_ui_clear_color(g_p7F2, rb); mg_quad(0, 0, 64, 32, g_p7F1, 0.0f);
+        vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F2, 0.0f);
+    }
+    if (var & 4096) {   // [mgpu P7f] F1's filter epoch, F2's filter epoch, back to F1 and an animated draw on it (no clear: on top of F1's
+        // filter content), then an epoch of F2 that reads F1, composited: F1's key must not survive the animated draw
+        static int an; an++;
+        const int32_t ra[4] = {2, 2, 16, 8}, rx[4] = {40, 2, 16, 8}, rb[4] = {20, 20, 16, 8};
+        vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, ra); vkn_ui_clear_color(g_p7F1, ra); mg_quad(0, 0, 64, 32, g_t0, 0.25f);
+        vkn_ui_targets(g_p7F2, g_p7D); vkn_ui_region(g_p7F2, rx); vkn_ui_clear_color(g_p7F2, rx); mg_quad(0, 0, 64, 32, g_t0, 0.5f);
+        vkn_ui_targets(g_p7F1, g_p7D); mg_quad(0, 0, 64, 32, g_t0, (float)an);
+        vkn_ui_targets(g_p7F2, g_p7D); vkn_ui_region(g_p7F2, rb); vkn_ui_clear_color(g_p7F2, rb); mg_quad(0, 0, 64, 32, g_p7F1, 0.0f);
+        vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F2, 0.0f);
+    }
+    for (int k = 0; (var & 512) && k < 6; k++) {   // [mgpu P7c] F1 pushed again and again
+        const int32_t rk[4] = {2 + 4 * k, 2, 8, 8};
+        vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, rk); vkn_ui_clear_color(g_p7F1, rk); mg_quad(0, 0, 64, 32, g_t0, (float)k);
+        vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F1, 0.0f);
+    }
+    if (var & 256) { vkn_ui_targets(g_p7F1, g_p7D); mg_quad(0, 0, 64, 32, g_t0, 0.5f); vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F1, 0.0f); }   // F1 drawn on again (no clear)
+    if (var & 64) { targets(g_p7L, NULL, g_p7D); vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); vkn_ui_targets(g_p7L, g_p7D); }
+    if (var & 16) {
+        vkn_ui_targets(g_p7F1, g_p7D); vkn_ui_region(g_p7F1, r2); vkn_ui_clear_color(g_p7F1, r2); mg_quad(0, 0, 64, 32, g_t0, 1.0f);
+        vkn_ui_targets(g_p7L, g_p7D); mg_quad(0, 0, sw, sh, g_p7F1, 0.0f);
+    }
+    mg_quad(0, 0, sw, sh, g_t0, 0.0f);
+    vkn_ui_pass_fence();
+    targets(g_p7C, NULL, NULL);
+    { vkn_draw_in in = g_in; CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0); }
+    CHECK_EQ(vkn_pass_sample(g_p7L), 0);
+    return cb;
+}
+static void test_p7b(void) {
+    if (!g_p7L || !g_p7D || !g_p7F1 || !g_p7C) return;
+    const int val0 = mk_val_errors, err0 = mk_errors;
+    vkn_ui_pass_config(2, 0, 0, 1); vkn_ui_region_config(0); vkn_ui_fc_config(0);   // the UI pass on (DS detach + area), no P1 / P2
+    vkn_ui_fc_guard_config(0);   // [mgpu P7e] (its own test below)
+    vkn_ui_layer_config(1, 0);
+    vkn_ui_pass_stats s0, s1; vkn_pass_stats4 q0, q1; uint64_t m = 0; VkCommandBuffer cb;
+#define P7_RUN(var) do { vkn_ui_pass_stats_get(&s0); vkn_pass_stats4_get(&q0); cb = p7b_frame((var), &m); fsubmit(0); vkn_ui_pass_stats_get(&s1); vkn_pass_stats4_get(&q1); } while (0)
+#define P7D(x) (s1.x - s0.x)
+#define P7Q (q1.ui_passes - q0.ui_passes)
+    // 1. the layer alone with a fence between its draws: hoisted, one pass, the DS detached (no layer draw tests it)
+    for (int f = 0; f < 3; f++) P7_RUN(2);
+    CHECK_EQ(P7D(lh_runs), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_layer_only), 1); CHECK_EQ(P7D(lh_ordered), 0);
+    CHECK_EQ(P7Q, 1); CHECK_EQ(P7D(lh_g0_det), 1);
+    { const mk_ev *e = mg_last(m, cb, MK_E_BEGIN_RP); const mk_rp *r = rp_of(e); CHECK(r && r->natt == 1); CHECK_EQ(cnt(m, cb, MK_E_BEGIN_RP), 2); }   // (the scene, then the layer)
+    // (UILAYER 0: the same frame in order, the fence ends the DS-less pass: 2 UI passes)
+    vkn_ui_layer_config(0, 0); P7_RUN(2); CHECK(P7Q >= 2); vkn_ui_layer_config(1, 0);
+    // 2. F1 masks with stencil bit 0, cleared before and after: order-free, hoisted (F1 - its DS-less start, then with the DS for the mask -,
+    // the layer)
+    P7_RUN(128 | 4); CHECK_EQ(P7D(lh_ds_ok), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_DS]), 0); CHECK_EQ(P7Q, 3);
+    // 3. without the clear after: the layer's start clear would land after F1's mask - F1's block starts a segment of its own (the run's
+    // order: the layer, F1, the layer)
+    P7_RUN(128 | 8); CHECK_EQ(P7D(lh_ds_bad), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_segs), 1); CHECK_EQ(P7D(lh_seg_ds), 1); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_DS]), 0);
+    CHECK_EQ(P7Q, 4);
+    // ... and a second block (F1 again, renamed) after it joins F1's segment: one layer pass fewer than in order
+    { P7_RUN(128 | 8 | 16); CHECK_EQ(P7D(lh_segs), 1); CHECK_EQ(P7D(lh_renamed), 1); CHECK_EQ(p7b_lpasses(m, cb), 2);
+      vkn_ui_layer_config(0, 0); P7_RUN(128 | 8 | 16); CHECK_EQ(p7b_lpasses(m, cb), 3); vkn_ui_layer_config(1, 0); }
+    // 4. F1 pushed again after its composite: renamed to a spare, hoisted (F1, the spare, the layer); the first composite reads F1, the
+    // second the spare; the next recording renames again into the same spare
+    {
+        const uint64_t sp0 = s1.lh_spares;
+        P7_RUN(128 | 16); CHECK_EQ(P7D(lh_renamed), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(lh_rename_fail), 0); CHECK_EQ(P7Q, 3);
+        CHECK(s1.lh_spares >= sp0 && s1.lh_spares <= sp0 + 1);
+        const int nb = cnt(m, cb, MK_E_BIND_SETS);   // (the scene's first; the run: F1's draw, the spare's draw, then the layer's 4)
+        const mk_ev *c1 = nb >= 6 ? nth(m, cb, MK_E_BIND_SETS, nb - 3) : NULL, *c2 = nb >= 6 ? nth(m, cb, MK_E_BIND_SETS, nb - 2) : NULL;
+        CHECK(p7b_reads(c1, g_p7F1)); CHECK(c2 != NULL); CHECK(!p7b_reads(c2, g_p7F1)); CHECK(!p7b_reads(c2, g_t0)); CHECK(!p7b_reads(c2, g_p7L));
+        const uint64_t sp1 = s1.lh_spares;
+        P7_RUN(128 | 16); CHECK_EQ(P7D(lh_renamed), 1); CHECK_EQ(s1.lh_spares, sp1); CHECK_EQ(P7Q, 3);
+        // F1 bound again after its composite and drawn on without a clear (content on top of what the layer read): not renamed, in order
+        // [mgpu P7c] ... now that block starts a segment of its own (the first composite runs before it): hoisted in 2 segments
+        P7_RUN(128 | 256); CHECK_EQ(P7D(lh_renamed), 0); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_REUSE]), 0); CHECK_EQ(P7D(lh_seg_reuse), 1); CHECK_EQ(P7D(lh_hoisted), 1);
+        CHECK_EQ(P7D(lh_segs), 1); CHECK_EQ(p7b_lpasses(m, cb), 2);
+        // [mgpu P7c] F1 pushed 7 times in one run (each composited): F1 + 4 spares hold 5 contents, the 6th block starts a segment (its
+        // readers' textures are free again): hoisted, 2 layer passes (in order 8)
+        P7_RUN(128 | 512); CHECK_EQ(P7D(lh_unsafe[VKN_UILU_REUSE]), 0); CHECK_EQ(P7D(lh_seg_reuse), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(p7b_lpasses(m, cb), 2);
+        CHECK_EQ(P7D(lh_rename_fail), 1);
+    }
+    // 5. the layer's draws inside (0, 0, 16, 8), the layer not cleared by the engine (LOAD): the run's area is the pass's render area
+    P7_RUN(1 | 32); P7_RUN(1 | 32);
+    CHECK_EQ(P7D(lh_area), 1); CHECK_EQ(P7D(lh_area_restart), 0); CHECK_EQ(P7Q, 1);
+    { const mk_ev *e = mg_last(m, cb, MK_E_BEGIN_RP); CHECK(e != NULL); if (e) { CHECK_EQ(e->rect.offset.x, 0); CHECK_EQ(e->rect.offset.y, 0); CHECK_EQ(e->rect.extent.width, 16); CHECK_EQ(e->rect.extent.height, 8); } }
+    // 6. a custom draw after F1's composite: the engine binds (L, D) and draws - the run before it (F1, then the layer) keeps the DS the
+    // engine's set has, no area, and the engine's draw lands in the layer's pass: F1, the layer + the engine's draw, (the scene), the rest
+    // of the layer = 3 UI passes (detached it would be 4: the engine's set differs)
+    P7_RUN(64 | 128); P7_RUN(64 | 128);
+    CHECK_EQ(P7D(lh_runs), 2); CHECK_EQ(P7D(lh_cont), 1); CHECK_EQ(P7D(lh_fev[VKN_PBE_READY]) + P7D(lh_fev[VKN_PBE_DEPTH]), 1); CHECK_EQ(P7D(lh_ftex[VKN_UILT_LAYER]), 2);
+    CHECK_EQ(P7Q, 3);
+    // 6a. [mgpu P7c] F1's region epoch masks with stencil bit 0 (a DS use): with the layer clearing its DS later the mask bits are dead after
+    // F1 - the region rule stays (the DS draws clipped to it), F1's passes keep the region as their area; without that clear it is dropped
+    {
+        vkn_ui_region_config(1); vkn_ui_pass_config(2, 0, 0, 1); vkn_ui_layer_config(1, 0);
+        P7_RUN(128 | 4 | 2048); P7_RUN(128 | 4 | 2048);
+        CHECK_EQ(P7D(lh_dsclip), 1); CHECK(P7D(region_dsclip) >= 1); CHECK_EQ(P7D(region_dropped), 0); CHECK(P7D(region_epochs) >= 1);
+        int big = 0; for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) { const mk_ev *e = nth(m, cb, MK_E_BEGIN_RP, k); mk_obj *fb = mk_find(e->a[1], MK_FB);
+            if (fb && fb->fb_n && MK_H(fb->fb_view[0]) == MK_H(g_p7F1->att) && e->rect.extent.width == 64) big++; }
+        CHECK_EQ(big, 0);
+        P7_RUN(128 | 4); CHECK_EQ(P7D(lh_dsclip), 0); CHECK_EQ(P7D(region_dropped), 1);
+        vkn_ui_region_config(0); vkn_ui_pass_config(2, 0, 0, 1);
+    }
+    // 6c. [mgpu P7e] DM_VK_NATIVE_UIFC_GUARD=1: F1's region (2,2 16x8) and its clear grow by 16 texels (clipped): F1's pass begins with
+    // 0,0 34x26
+    {
+        vkn_ui_region_config(1); vkn_ui_pass_config(2, 0, 0, 1); vkn_ui_layer_config(1, 0); vkn_ui_fc_guard_config(1);
+        P7_RUN(128); P7_RUN(128);
+        CHECK(P7D(fc_guard) >= 1);
+        int g34 = 0; for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) { const mk_ev *e = nth(m, cb, MK_E_BEGIN_RP, k); mk_obj *fb = mk_find(e->a[1], MK_FB);
+            if (fb && fb->fb_n && MK_H(fb->fb_view[0]) == MK_H(g_p7F1->att) && e->rect.offset.x == 0 && e->rect.offset.y == 0 && e->rect.extent.width == 34 && e->rect.extent.height == 26) g34++; }
+        CHECK(g34 >= 1);
+        vkn_ui_fc_guard_config(0); vkn_ui_region_config(0); vkn_ui_pass_config(2, 0, 0, 1);
+    }
+    // 6b. [mgpu P7c] the filter cache with the hold: custom draw, F1's block + composite, custom draw. The first recording stores F1's region
+    // in a page (a miss: F1 drawn, the layer's pass broken); then a hit is a redirect - no copy, F1 never bound, the layer's pass open from
+    // the first custom draw through the second: 2 layer passes (the scene breaks the last), 3 before; the composite reads the page
+    {
+        vkn_ui_fc_config(1); vkn_ui_layer_config(1, 0);
+        P7_RUN(1024 | 128 | 64); const int lp_miss = p7b_lpasses(m, cb);
+        CHECK(s1.fc_pages >= 1); CHECK(P7D(fc_misses) + P7D(fc_hits) >= 1);
+        P7_RUN(1024 | 128 | 64); P7_RUN(1024 | 128 | 64);
+        CHECK_EQ(P7D(fc_rd_hits), 1); CHECK_EQ(P7D(fc_hits), 1); CHECK(P7D(lh_lazy_skipped) >= 1); CHECK_EQ(P7D(lh_cont), 2);
+        CHECK_EQ(p7b_lpasses(m, cb), 2); CHECK(lp_miss >= 3);
+        int pg_read = 0;   // the composite (a layer draw) binds a texture that is neither F1 nor the layer: the page
+        for (int k = 0; nth(m, cb, MK_E_BIND_SETS, k); k++) { const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, k); if (p7b_reads(bs, g_p7F1)) pg_read = -100; }
+        for (int k = 0; nth(m, cb, MK_E_BIND_SETS, k); k++) { const mk_ev *bs = nth(m, cb, MK_E_BIND_SETS, k); if (!p7b_reads(bs, g_t0) && !p7b_reads(bs, g_p7L)) pg_read++; }
+        CHECK(pg_read >= 1);
+        // UILAYER 2 (double run) and the filter cache's own verify 2 on the same frame: no difference
+        vkn_ui_layer_config(2, 0); vkn_ui_fc_config(2);
+        P7_RUN(1024 | 128 | 64); P7_RUN(1024 | 128 | 64);
+        CHECK(P7D(fc_verify) >= 1); CHECK(P7D(fc_rd_verify) >= 1);   // [mgpu P7e] every would-hit drawn, compared, then read from its page
+        {   // [mgpu P7g] the verify of a page entry draws into a scratch texture: F1 itself is never bound (as in mode 1), the composite reads the page
+            int f1 = 0; for (int k = 0; nth(m, cb, MK_E_BEGIN_RP, k); k++) { mk_obj *fb = mk_find(nth(m, cb, MK_E_BEGIN_RP, k)->a[1], MK_FB); if (fb && fb->fb_n && MK_H(fb->fb_view[0]) == MK_H(g_p7F1->att)) f1++; }
+            CHECK_EQ(f1, 0); CHECK_EQ(P7D(fc_unstable), 0);
+        }
+        frames_n(5); vkn_ui_pass_stats_get(&s1); CHECK_EQ(s1.fc_differ, 0); CHECK_EQ(s1.lh_vdiffer, 0);
+        vkn_ui_fc_config(0); vkn_ui_layer_config(1, 0);
+    }
+    // 6d. [mgpu P7f] an input that changes under the same filter key: F1's epoch and F2's (both cached), an animated draw onto F1 afterwards
+    // (on top of F1's filter content), an epoch of F2 reading F1. Every frame: the two epochs hit, the animated draw first gets F1's cached
+    // content back from its page (a copy), the reader is refused ("a texture without a version"); over 300 frames - the self-check every
+    // 128th hit draws F1's epoch into an open pass - the reader is never keyed and never hits
+    {
+        vkn_ui_region_config(1); vkn_ui_pass_config(2, 0, 0, 1); vkn_ui_layer_config(1, 0); vkn_ui_fc_config(1); vkn_ui_fc_guard_config(0);
+        for (int f = 0; f < 3; f++) P7_RUN(4096);
+        CHECK_EQ(P7D(fc_hits), 2); CHECK_EQ(P7D(fc_refused[2]), 1); CHECK_EQ(P7D(fc_rd_real), 1); CHECK_EQ(P7D(fc_rd_hits), 2);
+        uint64_t ref = 0, over = 0;
+        for (int f = 0; f < 300; f++) { mk_ev_base = mk_seq; P7_RUN(4096);   /* (the command log starts again between recordings) */ ref += P7D(fc_refused[2]); if (P7D(fc_hits) > 2) over++; }
+        CHECK_EQ(ref, 300); CHECK_EQ(over, 0);
+        // [mgpu P7g] an ENGINE draw into F1 (a custom draw on GDraw's binding) after F1's epoch was served from its page: the page content goes
+        // back into F1 before the draw, F1's key goes, the reader of F1 is refused every frame
+        for (int f = 0; f < 3; f++) P7_RUN(8192);
+        CHECK_EQ(P7D(fc_hits), 1); CHECK_EQ(P7D(fc_rd_hits), 1); CHECK(P7D(fc_engine_writes) >= 1); CHECK_EQ(P7D(fc_rd_real), 1); CHECK_EQ(P7D(fc_refused[2]), 1);
+        // the same two frames with UIFC=2: every would-hit verified in the scratch (F1 never bound by its epoch), nothing unstable, no differ
+        vkn_ui_fc_config(2);
+        for (int f = 0; f < 2; f++) { P7_RUN(4096); CHECK(P7D(fc_verify) >= 1); CHECK_EQ(P7D(fc_unstable), 0); }
+        for (int f = 0; f < 2; f++) { P7_RUN(8192); CHECK_EQ(P7D(fc_unstable), 0); }
+        frames_n(5); vkn_ui_pass_stats_get(&s1); CHECK_EQ(s1.fc_differ, 0);
+        vkn_ui_fc_config(0); vkn_ui_region_config(0); vkn_ui_pass_config(2, 0, 0, 1);
+    }
+    // 7. UILAYER 2: the first run (the layer begins with the engine's clear) is drawn twice - in order, then hoisted - and compared
+    vkn_ui_layer_config(2, 0);
+    P7_RUN(128 | 16); CHECK_EQ(P7D(lh_vdouble), 1); CHECK_EQ(P7D(lh_hoisted), 1); CHECK_EQ(P7D(uc_verify), 1);
+    P7_RUN(128 | 4); CHECK_EQ(P7D(lh_vdouble), 1);
+    frames_n(5); vkn_ui_pass_stats_get(&s1); CHECK_EQ(s1.lh_vdiffer, 0); CHECK_EQ(s1.uc_differ, 0);
+    printf("  p7b: layer-alone run 1 pass (DS detached), pushed stencil hoisted / refused, rename to a spare, run area 16x8, custom draw in the same pass, double run compared\n");
+#undef P7_RUN
+#undef P7D
+#undef P7Q
+    CHECK_EQ(mk_val_errors, val0); CHECK_EQ(mk_errors, err0);
+    vkn_ui_layer_config(0, 0); vkn_ui_pass_config(0, 0, 0, 0);
+    targets(NULL, NULL, NULL); frames_n(4);
+    vkn_ui_fc_config(1);
+}
+
+// ================================================================================================ [VK-ENGINE-SIDE] stage 1
+// DM_VK_ENG_FARRATE (vkn_shc.c, the backend half of I1b; docs/dos2/nr/VK-ENGINE-SIDE.md section 11) against the mock's depth content
+// model: 24 frames of a 1024x1024 D16 atlas (3 cascades of 512, 12 static + 2 moving casters each, then a draw outside and the lighting
+// draw sampling the atlas). The test plays the engine: each frame begins with the decision (vkn_shc_eng_far: 0 drawn / 1 left out /
+// 2 would), and in a left-out frame the far cascade (the third tile) gets no draw. Children: truth (off), on (SHCACHE 0), on with the
+// shadow cache, poison, count, and "bad" (a left-out frame that draws the far cascade anyway; an atlas sample before any outside draw).
+// Expected: in a left-out frame the far tile equals the truth's far tile of the frame before (the drawn one: static + the moving
+// casters as they were), the near and middle tiles equal this frame's truth; drawn frames equal the truth; poison leaves it clear; the
+// counts; no validation / mock error. Then the merge census (vkn_eng.c): groups of equal keys by pass class.
+#include "../../../vkn/vkn_eng.h"
+enum { EF_F = 24 };
+static int g_ef_mode, g_ef_bad;
+static void ef_scn(a5_res *r) {
+    mk_depth_on = 1;
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    { char m[8]; snprintf(m, sizeof m, "%d", g_ef_mode); setenv("DM_VK_ENG_FARRATE", m, 1); }   // (read by the install, as on the phone)
+    vkn_shc_install();
+    CHECK_EQ(vkn_shc_eng_far_mode(), g_ef_mode);
+    vkn_tex *A = mktex(520, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 1024, 1024, 1, 1, 520, 0);
+    CHECK(A != NULL); if (!A) return;
+    CHECK(vkn_ds_put(H(70, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);
+    { uint8_t pat[4096]; for (int i = 0; i < 4096; i++) pat[i] = (uint8_t)(i * 37 + (i >> 4) * 11 + 1);
+      CHECK(vkn_buf_update(VKN_BUF_VB, H(50, 1), 0, pat, 4096, NULL, NULL) >= 0);
+      for (int i = 0; i < 1024; i++) pat[i] = (uint8_t)((i & 1) ? 0 : (i / 2) % 7);
+      CHECK(vkn_buf_update(VKN_BUF_IB, H(52, 1), 0, pat, 1024, NULL, NULL) >= 0); }
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) g_a5_t0[i] = g_a5_tl[i] = g_a5_s[i] = -1;
+    g_a5_t0[3] = 303; g_a5_tl[0] = 520; g_a5_tl[3] = 303; g_a5_s[0] = 10; g_a5_s[3] = 13;
+    int last = 0;
+    for (int f = 0; f < EF_F; f++) {
+        const int dec = g_ef_mode == 0 ? -1 : f == 0 || last == 1 || last == 2 ? 0 : g_ef_mode == 2 ? 2 : 1;   // the engine: every second frame left out
+        last = dec;
+        if (dec >= 0) vkn_shc_eng_far(dec);
+        fbegin(1);
+        targets(NULL, NULL, A); vkn_pass_clear_depth(A, 1, 1.0f, 0);
+        const int32_t Q = 512, rect[3][2] = {{0, 0}, {Q, 0}, {0, Q}};
+        for (int k = 0; k < 3; k++) {
+            if (k == 2 && dec == 1 && !(g_ef_bad && f == 7)) continue;   // left out (the "bad" child draws it at frame 7 anyway)
+            vkn_draw_in in = g_in; in.shader = H(82, 1); in.tex[1] = g_a5_t0; in.smp[1] = g_a5_s; in.tex[2] = NULL; in.smp[2] = NULL;
+            in.viewport[0] = (float)rect[k][0]; in.viewport[1] = (float)rect[k][1]; in.viewport[2] = in.viewport[3] = (float)Q;
+            in.scissor[0] = rect[k][0]; in.scissor[1] = rect[k][1]; in.scissor[2] = in.scissor[3] = Q;
+            for (int i = 0; i < A5_N; i++) a5_cast(&in, A, k, i, 0, H(70, 1));
+            for (int j = 0; j < A5_DYN; j++) a5_cast(&in, A, k, A5_N + j, (uint32_t)f + 1, H(70, 1));   // moving casters
+        }
+        if (g_ef_bad && f == 13) (void)vkn_pass_sample(A);   // a read of the atlas before any draw outside it: no safe point
+        targets(g_a2, NULL, g_d3);
+        vkn_draw_in e = g_in; CHECK_EQ(vkn_draw_indexed(&e, 0, 3, 1), 0);   // the safe point
+        vkn_draw_in l = g_in; l.tex[1] = g_a5_tl; l.smp[1] = g_a5_s; CHECK_EQ(vkn_draw_indexed(&l, 0, 3, 1), 0);   // lighting samples the atlas
+        fsubmit(0);
+        int fc = 0;
+        for (int k = 0; k < 3; k++) r->th[f][k] = a5_hash_rect(A, rect[k][0], rect[k][1], Q, Q, k == 2 ? &fc : NULL);
+        r->far_clear[f] = (uint8_t)fc;
+        r->sk[f] = (uint32_t)(dec + 1);
+    }
+    frames_n(2); mk_gpu_finish_all(); frames_n(1);
+    vkn_shc_eng_stats es; vkn_shc_eng_stats_get(&es);
+    r->cp[0] = (uint32_t)es.restored; r->cp[1] = (uint32_t)es.saved; r->cp[2] = (uint32_t)es.poisoned; r->cp[3] = (uint32_t)es.would; r->cp[4] = (uint32_t)es.bad;
+    r->cp[5] = (uint32_t)es.missing; r->cp[6] = (uint32_t)es.lost; r->cp[7] = (uint32_t)es.skipped; r->cp[8] = (uint32_t)es.drawn; r->cp[9] = (uint32_t)vkn_shc_eng_far_bad();
+    r->cp[10] = (uint32_t)vkn_shc_eng_far_tile(); r->cp[11] = (uint32_t)es.would_draws;
+    vkn_shc_census();
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+// The merge census: 3 frames; per frame 4 equal pre-pass draws + 2 different, 3 equal G-buffer draws (4 colour targets), 2 equal
+// draws into each of two atlas tiles + one other; the constant blocks differ between equal draws (the World matrix is not in the key).
+static void ef_census(a5_res *r) {
+    vkn_eng_test_setup(2);
+    vkn_tex *A = mktex(521, 49, VKN_TC_DEPTH, 1, 1024, 1024, 1, 1, 521, 0);
+    vkn_tex *P = mktex(522, 49, VKN_TC_DEPTH, 1, 64, 32, 1, 1, 522, 0);
+    vkn_tex *c[4]; for (int i = 0; i < 4; i++) c[i] = mktex(523 + (uint32_t)i, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 523 + (uint32_t)i, 0);
+    CHECK(A && P && c[0] && c[3]); if (!A || !P || !c[0] || !c[3]) return;
+    CHECK(vkn_ds_put(H(70, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);
+    for (int f = 0; f < 3; f++) {
+        fbegin(1);
+        vkn_draw_in in = g_in; in.shader = H(82, 1); in.ds = H(70, 1);
+        targets(NULL, NULL, P);
+        for (int i = 0; i < 6; i++) {
+            uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0); memset((uint8_t *)vkn_ring_cpu() + off, i + 1, 64); vkn_draw_ubo(0, 2, off, 64);
+            CHECK_EQ(vkn_draw_indexed(&in, i < 4 ? 0u : 3u * (uint32_t)i, 3, 1), 0);
+        }
+        { vkn_tex *cc[VKN_PASS_COLORS] = {c[0], c[1], c[2], c[3]}; uint32_t l[VKN_PASS_COLORS] = {0}, m[VKN_PASS_COLORS] = {0}; vkn_pass_targets(4, cc, l, m, P); }
+        for (int i = 0; i < 3; i++) CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+        targets(NULL, NULL, A);
+        for (int k = 0; k < 2; k++) {
+            in.viewport[0] = (float)(k * 512); in.viewport[1] = 0; in.viewport[2] = in.viewport[3] = 512; in.scissor[0] = k * 512; in.scissor[1] = 0; in.scissor[2] = in.scissor[3] = 512;
+            for (int i = 0; i < 2; i++) CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+            CHECK_EQ(vkn_draw_indexed(&in, 9, 3, 1), 0);
+        }
+        fsubmit(0);
+    }
+    vkn_eng_stats s; vkn_eng_stats_get(&s);
+    r->sk[0] = (uint32_t)s.frames; r->sk[1] = (uint32_t)s.draws[VKN_ENG_PRE]; r->sk[2] = (uint32_t)s.g2[VKN_ENG_PRE]; r->sk[3] = (uint32_t)s.g4[VKN_ENG_PRE];
+    r->sk[4] = (uint32_t)s.keys[VKN_ENG_PRE]; r->sk[5] = (uint32_t)s.draws[VKN_ENG_GB]; r->sk[6] = (uint32_t)s.g2[VKN_ENG_GB]; r->sk[7] = (uint32_t)s.draws[VKN_ENG_C0];
+    r->sk[8] = (uint32_t)s.g2[VKN_ENG_C0]; r->sk[9] = (uint32_t)s.draws[VKN_ENG_C0 + 1]; r->sk[10] = (uint32_t)s.g2[VKN_ENG_C0 + 1]; r->sk[11] = (uint32_t)s.g8[VKN_ENG_PRE];
+    r->sk[12] = (uint32_t)s.full;
+    vkn_eng_census();
+    vkn_eng_test_setup(0);
+}
+static void test_eng(void) {
+    static const char *const e0[][2] = {{"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_HACK_SHFAR", NULL}, {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHRATE", NULL}, {NULL, NULL}};
+    static const char *const e1[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_HACK_SHFAR", NULL}, {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHRATE", NULL},
+                                        {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {NULL, NULL}};
+    static a5_res T, R1, R1c, R3, R2, RB, CS;
+    CHECK(mkshader(H(82, 1), "v300000000000001", "f300000000000001", NULL) != NULL);
+    g_ef_bad = 0;
+    g_ef_mode = 0; a5_child(e0, ef_scn, &T);
+    g_ef_mode = 1; a5_child(e0, ef_scn, &R1);
+    a5_child(e1, ef_scn, &R1c);
+    g_ef_mode = 3; a5_child(e0, ef_scn, &R3);
+    g_ef_mode = 2; a5_child(e0, ef_scn, &R2);
+    g_ef_mode = 1; g_ef_bad = 1; a5_child(e0, ef_scn, &RB); g_ef_bad = 0;
+    a5_child(e0, ef_census, &CS);
+    if (!T.ran || !R1.ran) return;
+    { int d = 0; for (int f = 1; f < EF_F; f++) d += T.th[f][2] != T.th[f - 1][2]; CHECK(d >= EF_F - 2); }   // the moving casters change the far tile every frame
+    const a5_res *on[2] = {&R1, &R1c};
+    for (int q = 0; q < 2; q++) {
+        const a5_res *R = on[q]; int bad = 0, left = 0;
+        if (!R->ran) continue;
+        for (int f = 0; f < EF_F; f++) {
+            const int lo = R->sk[f] == 2;   // decision 1
+            left += lo;
+            for (int k = 0; k < 2; k++) if (R->th[f][k] != T.th[f][k]) bad++;
+            // frame 1: the frame before (the atlas's first) could not be saved - its clear came before the atlas was known: no restore
+            // [eng4] frame 1 too: the tile of frame 0 (the frame the atlas was adopted in, its clear not seen) is saved and put back
+            if (R->th[f][2] != (lo ? T.th[f - 1][2] : T.th[f][2])) { bad++; if (bad < 6) printf("  eng far %s: frame %d far tile is not %s\n", q ? "+cache" : "on", f, lo ? "the frame before's" : "this frame's"); }
+        }
+        CHECK_EQ(bad, 0); CHECK(left >= EF_F / 2 - 1);
+        CHECK_EQ((int)R->cp[0], left); CHECK_EQ(R->cp[4], 0); CHECK_EQ(R->cp[5], 0); CHECK_EQ(R->cp[6], 0); CHECK_EQ((int)R->cp[1], EF_F - left); CHECK_EQ(R->cp[10], 512);
+        printf("  eng far %s: %d of %d frames left out, far tile put back %u, saved %u, bad %u\n", q ? "with the shadow cache" : "on", left, EF_F, R->cp[0], R->cp[1], R->cp[4]);
+    }
+    if (R3.ran) {   // poison: left out and not put back
+        int ok = 1; for (int f = 0; f < EF_F; f++) if (R3.sk[f] == 2 ? !R3.far_clear[f] : R3.th[f][2] != T.th[f][2]) ok = 0;
+        CHECK(ok); CHECK(R3.cp[2] >= EF_F / 2 - 1); CHECK_EQ(R3.cp[0], 0);
+    }
+    if (R2.ran) {   // count: everything drawn, as the truth
+        int ok = 1; for (int f = 0; f < EF_F; f++) for (int k = 0; k < 3; k++) if (R2.th[f][k] != T.th[f][k]) ok = 0;
+        CHECK(ok); CHECK(R2.cp[3] >= EF_F / 2 - 1); CHECK_EQ(R2.cp[11], R2.cp[3] * (A5_N + A5_DYN)); CHECK_EQ(R2.cp[0] + R2.cp[1] + R2.cp[2], 0);
+    }
+    if (RB.ran) {   // frame 7 drew the far cascade although left out (the tile stays this frame's: nothing restored over it); frame 13: no safe point
+        CHECK(RB.th[7][2] == T.th[7][2]); CHECK(RB.far_clear[13]);
+        CHECK_EQ(RB.cp[4], 2); CHECK_EQ(RB.cp[9], 2); CHECK_EQ(RB.cp[6], 1);
+        printf("  eng far bad: frames 7 (far drawn) and 13 (atlas sampled first): bad %u, lost %u\n", RB.cp[4], RB.cp[6]);
+    }
+    if (CS.ran) {   // merge census
+        CHECK_EQ(CS.sk[0], 3); CHECK_EQ(CS.sk[1], 18); CHECK_EQ(CS.sk[2], 12); CHECK_EQ(CS.sk[3], 12); CHECK_EQ(CS.sk[4], 9); CHECK_EQ(CS.sk[11], 0);
+        CHECK_EQ(CS.sk[5], 9); CHECK_EQ(CS.sk[6], 9); CHECK_EQ(CS.sk[7], 9); CHECK_EQ(CS.sk[8], 6); CHECK_EQ(CS.sk[9], 9); CHECK_EQ(CS.sk[10], 6); CHECK_EQ(CS.sk[12], 0);
+        printf("  eng merge census: pre-pass %u draws, %u in groups >= 2 (%u keys); G-buffer %u / %u; tiles %u / %u and %u / %u\n", CS.sk[1], CS.sk[2], CS.sk[4], CS.sk[5], CS.sk[6],
+               CS.sk[7], CS.sk[8], CS.sk[9], CS.sk[10]);
+    }
+}
+
+// ================================================================================================================ [VK-ENGINE-SIDE I2]
+// vkn_eocc.c (DM_VK_ENG_OCC, docs/dos2/nr/VK-ENGINE-SIDE.md section 12) end to end with DM_VK_NATIVE_RT=0: per engine frame E the host
+// hook's calls (vkn_eocc_obj / vkn_eocc_after for 3 objects of the main stage, identity camera: the box is its NDC, depth 0.5..0.6, and a
+// 4th one the flag filter refuses - always drawn, so every frame has a pre-pass),
+// then the frame's recording as the engine would encode it - tagged (vkn_eocc_enc_frame), 3 pre-pass draws on a 1280 x 720 depth-only
+// set, the G-buffer set (3 colours + that depth) with one conditional draw per object that went into the lists (its report pair =
+// the condition key), then a colour-only set (the snapshot point: one dispatch). A hidden object (mode 1) has no draws at all. The
+// mock runs no compute shader: the test writes the cells (0.3 = an occluder everywhere; from frame 12 on 1.0 = the depth opened).
+//   mode 0: nothing of it (no dispatch);
+//   mode 1: once a snapshot of an earlier frame is finished and the objects were seen 4 frames (the hold of new objects), all three
+//           are hidden: their pre-pass and G-buffer draws are gone; after the depth opens they come back, and the self-check of the
+//           frames decided on the old cells reports violations (those objects held drawn); one dispatch a frame; validator clean;
+//   mode 2: the same decisions counted ("would"), every draw recorded, the G-buffer draws of the would-hide objects recognised by their
+//           condition key on the recording thread;
+//   mode 3: as 2, those G-buffer draws drawn with the magenta twin (a twin shader made), validator clean.
+#include "../../../vkn/vkn_eocc.h"
+enum { EO_F = 18 };
+typedef struct eo_res { int checks, fails, ran; int pre[EO_F], gb[EO_F], disp[EO_F], hid[EO_F]; vkn_eocc_stats st; int val; } eo_res;
+static vkn_tex *g_eo_d, *g_eo_c[4];
+static void eo_fill(float v) { for (int i = 0; i < 8; i++) { float *p = vkn_eocc_test_slot(i, NULL, NULL); if (p) for (int k = 0; k < 2 * VKN_EO_GW * VKN_EO_GH; k++) p[k] = v; } }
+// [v2] the report pairs are real memory (the encoder reads entry + 8 = the cull frame); g_eo_lag = 1: the engine's frame counter at the
+// recording's begin is one past the cull frame of the lists it draws (it built them during the previous frame) - the label must follow
+// the pairs, not the counter
+static int g_eo_lag;
+static uint64_t g_eo_ent[2][16] __attribute__((aligned(16)));
+static void eo_frame(int f, eo_res *r) {
+    static const float vp[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const uint64_t E = 500 + (uint64_t)f, stage = 0x55000, base = (uint64_t)(uintptr_t)g_eo_ent[f & 1];
+    for (int i = 0; i < 4; i++) g_eo_ent[f & 1][2 * i + 1] = E;   // (entry + 8: the cull frame that allocated it)
+    int hide[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; i++) {   // the cull job (the host hook)
+        const float box[6] = {-0.9f + 0.6f * (float)i, -0.5f, 0.5f, -0.5f + 0.6f * (float)i, 0.5f, 0.6f};
+        int poison = 0;
+        hide[i] = vkn_eocc_obj(stage, 0x9200 + 16u * (uint64_t)i, E, vp, box, i < 3 ? VKN_EO_FL_OK : VKN_EO_FL_ALPHA, i < 3 ? 1u << 18 : 1u << 18 | 1u << 9, &poison);
+        if (!hide[i]) vkn_eocc_after(stage, 0x9200 + 16u * (uint64_t)i, E, 1, base + 16u * (uint64_t)i, poison);
+        r->hid[f] += hide[i];
+    }
+    if (0) { vkn_eocc_stats st; vkn_eocc_stats_get(&st); printf("dbg f%d:", f); for (int k = 0; k < VKN_EO_R_N; k++) if (st.why[k]) printf(" %s=%llu", vkn_eo_reason(k), (unsigned long long)st.why[k]); printf(" snaps %llu\n", (unsigned long long)st.snaps); }
+    vkn_rt_rec_begin(1);
+    vkn_eocc_enc_frame(E + (uint64_t)g_eo_lag);
+    VkCommandBuffer cb = vkn_cb();
+    const uint64_t m = mark();
+    vkn_tex *c[VKN_PASS_COLORS] = {0}; uint32_t l[VKN_PASS_COLORS] = {0}, mm[VKN_PASS_COLORS] = {0};
+    vkn_rt_pass_targets(0, c, l, mm, g_eo_d);
+    vkn_draw_in in = g_in; in.ds = H(97, 1); in.viewport[2] = 1280; in.viewport[3] = 720; in.scissor[2] = 1280; in.scissor[3] = 720;
+    for (int i = 0; i < 4; i++) if (!hide[i]) { vkn_eocc_enc_pair(base + 16u * (uint32_t)i); in.vb_off[0] = 16u * (uint32_t)i; CHECK_EQ(vkn_rt_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0); }
+    const uint64_t m2 = mark();
+    c[0] = g_eo_c[0]; c[1] = g_eo_c[1]; c[2] = g_eo_c[2];
+    vkn_rt_pass_targets(3, c, l, mm, g_eo_d);
+    in.ds = H(98, 1);
+    for (int i = 0; i < 4; i++) if (!hide[i]) { vkn_rt_query_cond(base + 16u * (uint32_t)i); in.vb_off[0] = 16u * (uint32_t)i; CHECK_EQ(vkn_rt_draw_indexed(&in, 3u * (uint32_t)i, 3, 1), 0); }
+    const uint64_t m3 = mark();
+    vkn_tex *c2[VKN_PASS_COLORS] = {g_eo_c[3]};
+    vkn_rt_pass_targets(1, c2, l, mm, NULL);   // the snapshot point
+    in.ds = 0; CHECK_EQ(vkn_rt_draw_indexed(&in, 0, 3, 1), 0);
+    r->pre[f] = cnt(m, cb, MK_E_DRAW_IDX) - cnt(m2, cb, MK_E_DRAW_IDX); r->gb[f] = cnt(m2, cb, MK_E_DRAW_IDX) - cnt(m3, cb, MK_E_DRAW_IDX); r->disp[f] = cnt(m, cb, MK_E_DISPATCH);
+    vkn_rt_rec_end(1, NULL, NULL, 0);
+}
+static void eo_run(int mode, eo_res *r) {
+    const int v0 = mk_val_errors;
+    vkn_rt_install(0, 1);
+    vkn_query_init(VKN_COND_OFF);
+    vkn_eocc_test_reset(mode);
+    for (int f = 0; f < EO_F; f++) {
+        if (f >= 1 && f < 12) eo_fill(0.3f);   // (the slots exist after the first dispatch; the mock's compute writes nothing)
+        if (f >= 12) eo_fill(1.0f);
+        eo_frame(f, r);
+    }
+    vkn_eocc_stats_get(&r->st);
+    vkn_eocc_census();
+    r->val = mk_val_errors - v0;
+}
+static int eo_child(int mode, eo_res *out) {
+    memset(out, 0, sizeof *out);
+    int pfd[2]; if (pipe(pfd)) return -1;
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]); alarm(300);
+        eo_res *r = (eo_res *)calloc(1, sizeof *r);
+        const int c0 = g_checks, f0 = g_fails;
+        eo_run(mode, r);
+        r->checks = g_checks - c0; r->fails = g_fails - f0; r->ran = 1;
+        const uint8_t *p = (const uint8_t *)r; size_t left = sizeof *r;
+        while (left) { const ssize_t w = write(pfd[1], p, left); if (w <= 0) break; p += w; left -= (size_t)w; }
+        close(pfd[1]); _exit(0);
+    }
+    close(pfd[1]);
+    uint8_t *p = (uint8_t *)out; size_t got = 0;
+    while (got < sizeof *out) { const ssize_t n = read(pfd[0], p + got, sizeof *out - got); if (n <= 0) break; got += (size_t)n; }
+    close(pfd[0]);
+    int status = 0; waitpid(pid, &status, 0);
+    const int ok = got == sizeof *out && WIFEXITED(status) && WEXITSTATUS(status) == 0 && out->ran;
+    g_checks += out->checks + 1; g_fails += out->fails;
+    if (!ok) { g_fails++; printf("FAIL %s:%d: eng occ child mode %d (status %#x)\n", __FILE__, __LINE__, mode, status); }
+    return ok ? 0 : -1;
+}
+static void eo_print(int mode, const eo_res *r) {
+    printf("  eng occ mode %d (pre-pass / G-buffer / dispatch / hidden):", mode);
+    for (int f = 0; f < EO_F; f++) printf(" %d:%d/%d/%d/%d", f, r->pre[f], r->gb[f], r->disp[f], r->hid[f]);
+    printf("; hidden %llu would %llu poison %llu, G-buffer draws of them %llu, twins %llu, violations %llu, snapshots %llu (failed %llu), validator %d\n",
+           (unsigned long long)r->st.hidden, (unsigned long long)r->st.would, (unsigned long long)r->st.poison, (unsigned long long)r->st.gb_would,
+           (unsigned long long)r->st.twins, (unsigned long long)r->st.violations, (unsigned long long)r->st.snaps, (unsigned long long)r->st.snap_fail, r->val);
+}
+static void test_eocc(void) {
+    if (!g_s1 || !g_in.shader) { CHECK(0); return; }
+    CHECK(vkn_ds_put(H(97, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);
+    CHECK(vkn_ds_put(H(98, 1), 1, 0, 2, 0, 0, 0, 0, 0) != 0);
+    g_eo_d = mktex(980, EF_D32F, VKN_TC_DEPTH, 1, 1280, 720, 1, 1, 980, 0);
+    for (int i = 0; i < 4; i++) g_eo_c[i] = mktex(981 + (uint32_t)i, EF_RGBA8, VKN_TC_COLOR, 1, 1280, 720, 1, 1, 981 + (uint32_t)i, 0);
+    CHECK(g_eo_d && g_eo_c[0] && g_eo_c[3]); if (!g_eo_d || !g_eo_c[3]) return;
+    static eo_res R;
+    if (!eo_child(0, &R)) {
+        eo_print(0, &R);
+        CHECK_EQ(R.val, 0);
+        for (int f = 0; f < EO_F; f++) { CHECK_EQ(R.pre[f], 4); CHECK_EQ(R.gb[f], 4); CHECK_EQ(R.disp[f], 0); CHECK_EQ(R.hid[f], 0); }
+    }
+    for (int lag = 0; lag < 2; lag++) if ((g_eo_lag = lag), !eo_child(1, &R)) {   // [v2] lag 1: the label from the pairs, not the counter
+        eo_print(1, &R);
+        CHECK_EQ(R.val, 0);
+        int first = -1;
+        for (int f = 0; f < 12; f++) { CHECK_EQ(R.pre[f], 4 - R.hid[f]); CHECK_EQ(R.gb[f], 4 - R.hid[f]); CHECK_EQ(R.disp[f], 1); if (R.hid[f] == 3 && first < 0) first = f; }
+        CHECK(first >= 4 && first <= 9);   // seen for the hold (4 frames), a snapshot finished (the mock's fences)
+        if (first >= 0) for (int f = first; f < 12; f++) CHECK_EQ(R.hid[f], 3);
+        int back = 0; for (int f = 14; f < EO_F; f++) back += R.hid[f] == 0;
+        CHECK_EQ(back, EO_F - 14);   // the opened depth: drawn again
+        CHECK(R.st.hidden >= 6); CHECK(R.st.violations > 0);   // the frames decided on the old cells, checked against the opened ones
+        CHECK(R.st.snaps >= 17);
+    }
+    g_eo_lag = 0;
+    if (!eo_child(2, &R)) {
+        eo_print(2, &R);
+        CHECK_EQ(R.val, 0);
+        for (int f = 0; f < EO_F; f++) { CHECK_EQ(R.pre[f], 4); CHECK_EQ(R.gb[f], 4); CHECK_EQ(R.hid[f], 0); }
+        CHECK(R.st.would >= 6); CHECK_EQ(R.st.hidden, 0); CHECK(R.st.gb_would + 3 >= R.st.would);
+        CHECK(R.st.violations > 0);   // (count mode: the objects are drawn, the opened cells are "far" at their place: flagged likewise)
+    }
+    if (!eo_child(3, &R)) {
+        eo_print(3, &R);
+        CHECK_EQ(R.val, 0);
+        for (int f = 0; f < EO_F; f++) { CHECK_EQ(R.pre[f], 4); CHECK_EQ(R.gb[f], 4); }
+        CHECK(R.st.poison >= 6); CHECK(R.st.gb_would >= 3); CHECK_EQ(R.st.twins, 1);
+    }
+}
+
+// ================================================================================================ [eng4] pre-pass hybrid x P10 chain
+// The phone H10 / H12 combination (TILELIGHT=1, FARRATE=1 ...): a frame of pre-pass, G-buffer, LinearizeDepth, atlas, CascadedPCF, light
+// and a forward pass on the scene depth, merged by P10 (4 subpasses), with the pre-pass hybrid on - and in the second child a write into
+// the atlas at CascadedPCF's draw every second frame (FARRATE's put-back). No bad key, skips made, chains merged.
+static vkn_tex *e4_G0, *e4_G1, *e4_D, *e4_LD, *e4_SM, *e4_Df, *e4_A, *e4_C;
+static int g_e4_foreign;   // 1: a copy into the atlas at CascadedPCF's draw (as DM_VK_ENG_FARRATE's put-back), every second frame
+static void e4_fs(uint64_t shader, int32_t tex0) {   // a full-screen draw (the twins' shader) reading tex0
+    int32_t tx[VKN_TEX_SLOTS], sm[VKN_TEX_SLOTS];
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) tx[i] = sm[i] = -1;
+    tx[0] = tex0; sm[0] = 13; tx[3] = 303; sm[3] = 13;
+    vkn_draw_in in = g_in; in.tex[1] = tx; in.smp[1] = sm; in.shader = shader; in.alpha_ref = -1.0f;
+    CHECK_EQ(vkn_draw_indexed(&in, 0, 3, 1), 0);
+}
+static void e4_frame(int f, vkn_draw_in *pre, vkn_draw_in *gb, uint32_t blk) {
+    static const float z[4] = {0, 0, 0, 0};
+    fbegin(1);
+    vkn_pass_clear_depth(e4_D, 3, 1.0f, 0);
+    targets(NULL, NULL, e4_D);
+    vkn_draw_ubo(0, 0, blk, 64); vkn_draw_indexed(pre, 3, 3, 1); vkn_draw_indexed(pre, 0, 3, 1); vkn_draw_indexed(pre, 6, 3, 1);
+    vkn_pass_clear_color(e4_G0, 0, z, NULL); vkn_pass_clear_color(e4_G1, 0, z, NULL);
+    targets(e4_G0, e4_G1, e4_D);
+    vkn_draw_indexed(gb, 9, 3, 1); vkn_draw_indexed(gb, 0, 3, 1); vkn_draw_indexed(gb, 6, 3, 1);
+    targets(e4_LD, NULL, NULL); e4_fs(H(30, 1), 991);   // LinearizeDepth reads the depth
+    vkn_pass_clear_depth(e4_A, 1, 1.0f, 0);
+    targets(NULL, NULL, e4_A); vkn_draw_indexed(pre, 0, 3, 1);   // the shadow atlas: foreign
+    if (g_e4_foreign && (f & 1)) { vkn_pass_layout(e4_A, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL); }   // (FARRATE's tile copy into the atlas)
+    targets(e4_SM, NULL, NULL); e4_fs(H(30, 1), 992);   // CascadedPCF reads the linear depth
+    vkn_pass_clear_color(e4_Df, 0, z, NULL);
+    targets(e4_Df, NULL, NULL); e4_fs(H(30, 1), 993);
+    targets(e4_C, NULL, e4_D); vkn_draw_indexed(gb, 12, 3, 1);   // forward: another colour pass on the scene depth
+    targets(NULL, NULL, NULL);
+    fsubmit(0);
+}
+static void e4_child(a5_res *r) {
+    vkn_pass_policy p0, p1; int fam = 0; vkn_pass_policy_get(&p0, &fam); p1 = p0; p1.join = 0; p1.store = 1; p1.store_frames = 2; p1.load = 0; vkn_pass_policy_set(&p1);
+    vkn_tile_mode_set(1);
+    e4_G0 = mktex(990, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 990, 0); e4_G1 = mktex(995, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 995, 0);
+    e4_D = mktex(991, EF_D24S8, VKN_TC_DEPTH, 1, 640, 360, 1, 1, 991, 0); e4_LD = mktex(992, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 992, 0);
+    e4_SM = mktex(993, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 993, 0); e4_Df = mktex(994, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 994, 0);
+    e4_A = mktex(996, EF_D24S8, VKN_TC_DEPTH, 1, 64, 64, 1, 1, 996, 0); e4_C = mktex(997, EF_RGBA8, VKN_TC_COLOR, 1, 640, 360, 1, 1, 997, 0);
+    if (!e4_G0 || !e4_G1 || !e4_D || !e4_LD || !e4_SM || !e4_Df || !e4_A || !e4_C) { CHECK(0); return; }
+    g_p10_mod = mk_bundle_add("f3000000000t1le9", 4)->module; g_p10_cond = 0;
+    vkn_tile_twin_fn(p10_twin); vkn_tile_test_fns(NULL, p10_scale1);
+    CHECK(vkn_ds_put(H(70, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0); CHECK(vkn_ds_put(H(71, 1), 1, 0, 2, 0, 0, 0, 0, 0) != 0);
+    vkn_draw_in pre = g_in, gb = g_in; pre.ds = H(70, 1); gb.ds = H(71, 1); pre.blend = gb.blend = 0; pre.alpha_ref = gb.alpha_ref = -1.0f; pre.shader = gb.shader = H(176, 1);
+    uint32_t blk = 0; CHECK_EQ(vkn_ring_alloc(64, &blk), 0); { float *m = (float *)((uint8_t *)vkn_ring_cpu() + blk); memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1.0f; }
+    g_b4_cls = 1; vkn_prepass_test_setup(1, b4_facts);
+    vkn_pass_stats6 a, b; vkn_pass_stats6_get(&a);
+    uint32_t bad = 0, skipped = 0;
+    for (int f = 0; f < 16; f++) {
+        e4_frame(f, &pre, &gb, blk);
+        const prepass_result *x = (const prepass_result *)vkn_prepass_test_last();
+        if (x && f >= 1) { bad += x->bad_keys; skipped += x->pre_skip; if (x->bad_keys && r->sk[0] < 4) printf("  eng4 frame %d: bad %u (unsafe %u unmatched %u; other-pass hazards %u read %u) skip %u override %u\n", f, x->bad_keys, x->unsafe, x->unmatched, x->hazard[PREPASS_H_PASS], x->hazard[PREPASS_H_READ], x->pre_skip, x->gb_override); }
+    }
+    vkn_pass_stats6_get(&b);
+    vkn_prepass_stats ps; vkn_prepass_stats_get(&ps);
+    r->sk[0] = bad; r->sk[1] = skipped; r->sk[2] = (uint32_t)(b.hits - a.hits); r->sk[3] = (uint32_t)ps.repaired;
+    printf("  eng4 P10 x pre-pass (foreign %d): bad keys %u, skipped %u, merged chains %u, repaired %u\n", g_e4_foreign, bad, skipped, r->sk[2], r->sk[3]);
+    CHECK_EQ(bad, 0); CHECK(skipped > 0); CHECK(r->sk[2] > 0);
+}
+static void test_eng4(void) {
+    static const char *const e0[][2] = {{NULL, NULL}};
+    static a5_res R0, R1;
+    g_e4_foreign = 0; a5_child(e0, e4_child, &R0);
+    g_e4_foreign = 1; a5_child(e0, e4_child, &R1);
 }

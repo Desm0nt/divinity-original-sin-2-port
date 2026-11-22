@@ -39,6 +39,20 @@ int vkn_rec_end_due(void);                     // vkn_frame.c
 uint64_t vkn_frame_gpu_done(int *any);         // vkn_frame.c: newest presented recording the GPU finished (its vkn_frame())
 void vkn_frame_wait_frame(uint64_t f);         // vkn_frame.c (the recording's owner): wait until the recording of frame f finished
 uint64_t vkn_ring_cum(void);                   // vkn_buf.c: ring bytes handed out so far
+// [stage 5 technique Z] the encoder's taps for dm/gfx/vkn/vkn_occz.c (engine thread; weak: a build without it keeps today's behaviour).
+// Each tap returns at once unless DM_VK_NATIVE_COND is 10..13. vkn_occz_wk_targets is the worker's side of a target change.
+extern int vkn_occz_enc_on __attribute__((weak));
+void vkn_occz_enc_rec_begin(int presented) __attribute__((weak));
+void vkn_occz_enc_rec_end(int present) __attribute__((weak));
+void vkn_occz_enc_targets(uint32_t n, vkn_tex *const *color, vkn_tex *depth) __attribute__((weak));
+void vkn_occz_enc_ubo(int stage, uint32_t slot, uint32_t off, uint32_t size) __attribute__((weak));
+void vkn_occz_enc_qbegin(uint64_t key) __attribute__((weak));
+void vkn_occz_enc_qend(uint64_t key) __attribute__((weak));
+void vkn_occz_enc_cond(uint64_t key) __attribute__((weak));
+void vkn_occz_enc_draw(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t count, uint32_t instances) __attribute__((weak));
+void vkn_occz_enc_depth_event(vkn_tex *t) __attribute__((weak));
+void vkn_occz_wk_targets(uint32_t n, vkn_tex *const *color, vkn_tex *depth) __attribute__((weak));
+#define OZ_ON (&vkn_occz_enc_on && vkn_occz_enc_on)
 
 // ================================================================ state
 static int g_mode, g_slots = VKN_RT_SLOTS_CMP;
@@ -432,6 +446,7 @@ typedef struct op_ubo { rt_hdr h; uint32_t pad[2]; } op_ubo;                    
 static void ubo_bad_fn(void *p) { const int32_t *a = (const int32_t *)p; vkn_draw_ubo(a[0], (uint32_t)a[1], (uint32_t)a[2], (uint32_t)a[3]); }
 uint32_t vkn_rt_ubo_gen(void) { return vkn_rt_live_ ? g_ubo_gen : vkn_draw_ubo_gen(); }
 void vkn_rt_ubo(int stage, uint32_t slot, uint32_t off, uint32_t size) {
+    if (OZ_ON) vkn_occz_enc_ubo(stage, slot, off, size);   // [stage 5 technique Z]
     if (!vkn_rt_live_) { vkn_draw_ubo(stage, slot, off, size); return; }
     const int inl0 = inline_here();   // [rt P1] (asked once: a foreign thread's call waits and counts there)
     if (stage >= 0 && stage < VKN_STAGE_SLOTS && slot < VKN_UBO_SLOTS) {   // vkn_draw_ubo's generation rule (out of range: ignored there)
@@ -468,6 +483,7 @@ void vkn_rt_ubo(int stage, uint32_t slot, uint32_t off, uint32_t size) {
 
 // ---- the condition of the next draw ----
 void vkn_rt_query_cond(uint64_t key) {
+    if (OZ_ON) vkn_occz_enc_cond(key);   // [stage 5 technique Z]
     if (!vkn_rt_live_ || inline_here()) { vkn_query_cond(key); return; }   // (an owned section: the draw that follows is executed at once too)
     g_cond = key; g_cond_on = 1;
 }
@@ -585,12 +601,14 @@ static int draw_enc(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t
     return 0;
 }
 int vkn_rt_draw_indexed(const vkn_draw_in *in, uint32_t first, uint32_t count, uint32_t instances) {
+    if (OZ_ON && count) vkn_occz_enc_draw(in, 1, first, count, instances);   // [stage 5 technique Z]
     if (!vkn_rt_live_) return vkn_draw_indexed(in, first, count, instances);
     if (!in) return 1;
     if (draw_enc(in, 1, first, count, instances)) { ST_ADD(oom, 1); vkn_rt_own_begin(&g_site_oom); const int r = vkn_draw_indexed(in, first, count, instances); vkn_rt_own_end(); return r; }
     return 0;
 }
 int vkn_rt_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
+    if (OZ_ON && count) vkn_occz_enc_draw(in, 0, first, count, 1);   // [stage 5 technique Z]
     if (!vkn_rt_live_) return vkn_draw_arrays(in, first, count);
     if (!in) return 1;
     if (draw_enc(in, 0, first, count, 1)) { ST_ADD(oom, 1); vkn_rt_own_begin(&g_site_oom); const int r = vkn_draw_arrays(in, first, count); vkn_rt_own_end(); return r; }
@@ -621,7 +639,7 @@ typedef struct op_end { rt_hdr h; int32_t present, interval, has_crop, pad; vkn_
 typedef struct op_tail { rt_hdr h; uint32_t pad[2]; uint64_t cpu[3]; void (*tick)(void); } op_tail;
 void vkn_rt_rec_begin(int presented) {
     if (!vkn_rt_live_ && g_mode != VKN_RT_OFF) bind_encoder();
-    if (!vkn_rt_live_) { (void)vkn_rec_begin(presented); return; }
+    if (!vkn_rt_live_) { (void)vkn_rec_begin(presented); if (OZ_ON) vkn_occz_enc_rec_begin(presented); return; }   // [stage 5 technique Z] tap (after: vkn_frame() names it)
     if (g_threaded && !pthread_equal(pthread_self(), g_enc)) {   // another thread renders frames now: it becomes the encoder
         RT_REDLN(R_FRAME, "a frame begins on another thread than the last one: that thread encodes from now on");
         foreign_wait(); g_enc = pthread_self(); t_enc = 1; __atomic_store_n(&g_owner_engine, 1, __ATOMIC_RELEASE); rebase();
@@ -629,6 +647,7 @@ void vkn_rt_rec_begin(int presented) {
     if (g_rebase && g_threaded) vkn_rt_sync(&g_site_rebase);
     if (presented && g_enc_due) { g_enc_frame++; g_enc_due = 0; }
     g_enc_serial++;
+    if (OZ_ON) vkn_occz_enc_rec_begin(presented);   // [stage 5 technique Z] (vkn_rt_frame() names this recording now)
     if (presented) { g_ring_start[g_enc_frame & 15] = vkn_ring_cum(); for (int i = 0; i < VKN_RT_CPU_RINGS; i++) g_cr_start[i][g_enc_frame & 15] = g_cr_cum[i]; }
     int inl; op_begin *b = (op_begin *)rec_new(K_BEGIN, sizeof(op_begin), &inl);
     if (!b) { vkn_rt_own_begin(&g_site_oom); (void)vkn_rec_begin(presented); vkn_rt_own_end(); return; }
@@ -637,6 +656,7 @@ void vkn_rt_rec_begin(int presented) {
     rec_done(&b->h, inl, 1);
 }
 void vkn_rt_rec_end(int present, vkn_tex *win, const int32_t crop[4], int interval) {
+    if (&vkn_occz_enc_rec_end) vkn_occz_enc_rec_end(present);   // [stage 5 technique Z] the frame's decisions (engine thread; off: returns at once)
     if (!vkn_rt_live_) {
         if (present) { vkn_pass_end(); if (win) (void)vkn_rec_present(win, crop, interval); }
         (void)vkn_rec_submit(!present);
@@ -750,9 +770,10 @@ void vkn_rt_frame_tail(const uint64_t cpu[3], void (*tick)(void)) {
 
 // ---- the host's backend calls ----
 typedef struct { uint32_t n, pad; vkn_tex *c[VKN_PASS_COLORS]; uint32_t l[VKN_PASS_COLORS], m[VKN_PASS_COLORS]; vkn_tex *d; } targets_job;
-static void targets_fn(void *p) { targets_job *j = (targets_job *)p; vkn_pass_targets(j->n, j->c, j->l, j->m, j->d); }
+static void targets_fn(void *p) { targets_job *j = (targets_job *)p; if (&vkn_occz_wk_targets) vkn_occz_wk_targets(j->n, j->c, j->d); vkn_pass_targets(j->n, j->c, j->l, j->m, j->d); }
 void vkn_rt_pass_targets(uint32_t n, vkn_tex *const color[VKN_PASS_COLORS], const uint32_t *layer, const uint32_t *mip, vkn_tex *depth) {
-    if (!vkn_rt_live_) { vkn_pass_targets(n, color, layer, mip, depth); return; }
+    if (OZ_ON) vkn_occz_enc_targets(n, color, depth);   // [stage 5 technique Z]
+    if (!vkn_rt_live_) { if (&vkn_occz_wk_targets) vkn_occz_wk_targets(n, color, depth); vkn_pass_targets(n, color, layer, mip, depth); return; }
     { int any = 0; for (uint32_t i = 0; color && i < n && i < VKN_PASS_COLORS; i++) any |= color[i] != NULL; g_enc_donly = !any && depth != NULL; }   // [rt P4] (a hint only)
     targets_job j; memset(&j, 0, sizeof j);
     j.n = n; j.d = depth;
@@ -776,11 +797,13 @@ static void cds_bound_fn(void *p) {
     vkn_pass_clear_depth(bd, j->what, j->depth, j->stencil);
 }
 void vkn_rt_pass_clear_depth(vkn_tex *t, int what, float depth, uint32_t stencil) {
+    if (OZ_ON) vkn_occz_enc_depth_event(t);   // [stage 5 technique Z]
     if (!vkn_rt_live_) { vkn_pass_clear_depth(t, what, depth, stencil); return; }
     const cds_job j = {t, what, depth, stencil, NULL};
     vkn_rt_call(cds_fn, &j, sizeof j);
 }
 void vkn_rt_pass_clear_bound_depth(int what, float depth, uint32_t stencil, uint64_t *none) {
+    if (OZ_ON) vkn_occz_enc_depth_event(NULL);   // [stage 5 technique Z]
     cds_job j = {NULL, what, depth, stencil, none};
     if (!vkn_rt_live_) { cds_bound_fn(&j); return; }
     vkn_rt_call(cds_bound_fn, &j, sizeof j);
@@ -788,6 +811,7 @@ void vkn_rt_pass_clear_bound_depth(int what, float depth, uint32_t stencil, uint
 typedef struct { vkn_tex *dst, *src; } copy_job;
 static void copy_fn(void *p) { copy_job *j = (copy_job *)p; vkn_pass_copy(j->dst, j->src); }
 void vkn_rt_pass_copy(vkn_tex *dst, vkn_tex *src) {
+    if (OZ_ON) vkn_occz_enc_depth_event(dst);   // [stage 5 technique Z]
     if (!vkn_rt_live_) { vkn_pass_copy(dst, src); return; }
     const copy_job j = {dst, src};
     vkn_rt_call(copy_fn, &j, sizeof j);
@@ -796,9 +820,16 @@ static void qbegin_fn(void *p) { vkn_query_begin(*(const uint64_t *)p); }
 static void qend_fn(void *p) { vkn_query_end(*(const uint64_t *)p); }
 // [rt P1] LEAN: with no bracket tracked (DM_VK_NATIVE_COND 0 and no GBUF_LE: vkn_query.c g_track == 0) a begin / end only counts there:
 // not written (counted here). g_track only goes down after install (b_gate: mode 9 -> 5 / 7 -> 0), so "0 now" stays 0 when the record would run.
+// [stage 5 technique Z] its encoder taps come first and see every begin / end (they run on this thread, not from the records).
 static int q_untracked(void) { return g_lean && !vkn_query_mode() && !vkn_query_le_asked(); }
-void vkn_rt_query_begin(uint64_t key) { if (!vkn_rt_live_) vkn_query_begin(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qbegin_fn, &key, sizeof key); }
-void vkn_rt_query_end(uint64_t key) { if (!vkn_rt_live_) vkn_query_end(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qend_fn, &key, sizeof key); }
+void vkn_rt_query_begin(uint64_t key) {
+    if (OZ_ON) vkn_occz_enc_qbegin(key);
+    if (!vkn_rt_live_) vkn_query_begin(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qbegin_fn, &key, sizeof key);
+}
+void vkn_rt_query_end(uint64_t key) {
+    if (OZ_ON) vkn_occz_enc_qend(key);
+    if (!vkn_rt_live_) vkn_query_end(key); else if (q_untracked()) ST_ADD(lean_q_skip, 1); else vkn_rt_call(qend_fn, &key, sizeof key);
+}
 typedef struct { vkn_tex *a, *b; int32_t v[4]; int k, has; } ui_job;
 static void ui_fn(void *p) {
     ui_job *j = (ui_job *)p;

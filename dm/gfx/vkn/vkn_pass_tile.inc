@@ -47,13 +47,15 @@ static void tl_hook_upd(void) {
 static VkCommandBuffer pcb(void) { return g_tl_outer || g_tl_redraw ? vkn_cb_primary() : vkn_cb(); }   // where commands outside a pass go ([P10 fix 3] the redraw's too)
 
 // ---- twins: the input-attachment form of a shader object (made once per base object; a refusal is kept too) ----
-typedef struct tl_twin { const vkn_shader *base; uint64_t handle; uint32_t id; const vkn_shader *tw; vkn_tile_var var; int8_t state; char v; } tl_twin;
-static tl_twin g_tw[TL_TWINS]; static uint32_t g_ntw;
+// code: the vertex retype code the twin's own vertex module carries (0 = the base module; a draw whose effect gives it a vertex module
+// of its own asks with 0: that module is the vertex stage, the twin's is never drawn).
+typedef struct tl_twin { const vkn_shader *base; uint64_t handle, code; uint32_t id; const vkn_shader *tw; vkn_tile_var var; int8_t state; char v; } tl_twin;
+static tl_twin g_tw[TL_TWINS]; static uint32_t g_ntw, g_tw_ring;
 typedef struct tl_job { const char *key; char v; xbg_vkn_stage *st; uint64_t decl[4]; vkn_tile_var *var; int rc; } tl_job;
 static void *tl_job_run(void *a) { tl_job *j = (tl_job *)a; j->rc = vkn_shlib_named_tile(j->key, j->v, j->st, j->decl, j->var); return NULL; }
 // Host tests / other sources of twin modules: fn(base, variant, &fs module, declared bindings, var) -> 0 ok. NULL = the shader library.
 static int (*g_twin_fn)(const vkn_shader *base, char v, VkShaderModule *fs, uint64_t declared[4], vkn_tile_var *var);
-void vkn_tile_twin_fn(int (*fn)(const vkn_shader *base, char v, VkShaderModule *fs, uint64_t declared[4], vkn_tile_var *var)) { g_twin_fn = fn; g_ntw = 0; }
+void vkn_tile_twin_fn(int (*fn)(const vkn_shader *base, char v, VkShaderModule *fs, uint64_t declared[4], vkn_tile_var *var)) { g_twin_fn = fn; g_ntw = 0; g_tw_ring = 0; }
 static int tl_twin_load(const vkn_shader *base, const char *key, char v, VkShaderModule *fs, uint64_t decl[4], vkn_tile_var *var) {
     if (g_twin_fn) return g_twin_fn(base, v, fs, decl, var);
     if (!vkn_shlib_named_tile) return -1;
@@ -69,10 +71,16 @@ static int tl_twin_load(const vkn_shader *base, const char *key, char v, VkShade
     free(st);
     return j.rc;
 }
-static tl_twin *tl_twin_get(const vkn_shader *base, char v) {
-    for (uint32_t i = 0; i < g_ntw && i < TL_TWINS; i++) if (g_tw[i].base == base && g_tw[i].handle == base->handle && g_tw[i].id == base->id && g_tw[i].v == v) return &g_tw[i];
-    tl_twin *e = &g_tw[g_ntw++ % TL_TWINS]; memset(e, 0, sizeof *e);
-    e->base = base; e->handle = base->handle; e->id = base->id; e->v = v; e->state = -1;
+static tl_twin *tl_twin_get(const vkn_shader *base, char v, uint64_t code) {
+    for (uint32_t i = 0; i < g_ntw; i++) if (g_tw[i].base == base && g_tw[i].handle == base->handle && g_tw[i].id == base->id && g_tw[i].v == v && g_tw[i].code == code) return &g_tw[i];
+    // a new entry: a free one, else a refusal (cheap to find again), else the oldest (a live twin goes only when 64 of them are live:
+    // a twin made again is another object, and the learned chain names the object it was learned with)
+    uint32_t k = g_ntw < TL_TWINS ? g_ntw++ : TL_TWINS;
+    for (uint32_t i = 0; k == TL_TWINS && i < TL_TWINS; i++) if (g_tw[(g_tw_ring + i) % TL_TWINS].state <= 0) k = (g_tw_ring + i) % TL_TWINS;
+    if (k == TL_TWINS) k = g_tw_ring % TL_TWINS;
+    g_tw_ring = (k + 1) % TL_TWINS;
+    tl_twin *e = &g_tw[k]; memset(e, 0, sizeof *e);
+    e->base = base; e->handle = base->handle; e->id = base->id; e->v = v; e->code = code; e->state = -1;
     const vkn_shader *eng = base; char lv = 0; const char *key = base->key[VKN_SRC_FS]; const char *why = NULL;
     VkShaderModule fs = VK_NULL_HANDLE; uint64_t decl[4] = {0, 0, 0, 0};
     vkn_bind tab[64]; uint32_t n = 0;
@@ -98,14 +106,16 @@ static tl_twin *tl_twin_get(const vkn_shader *base, char v) {
     if (!why) {
         vkn_fx_shader_src src; memset(&src, 0, sizeof src);
         src.name = v == 'F' || v == 'f' ? "tile-light-f" : v == 'G' || v == 'g' ? "tile-light-g" : "tile-twin";
-        src.vs = vkn_fx_shader_is(base) ? base->module[VKN_SRC_VS] : vkn_shader_module(base, VKN_STAGE_VS, 0, 0.0f, 0);
+        // (the vertex module the classic draw has: the retype variant of the engine format, as vkn_draw.c picks it for code)
+        src.vs = vkn_fx_shader_is(base) ? base->module[VKN_SRC_VS] : vkn_shader_module(base, VKN_STAGE_VS, 0, 0.0f, code);
         src.fs = fs; src.bind = tab; src.nbind = n; src.c1_from = base;
         src.ninputs = base->ninputs; memcpy(src.inputs, base->inputs, sizeof src.inputs); memcpy(src.input_classes, base->input_classes, sizeof src.input_classes);
         if (!src.vs || !(e->tw = vkn_fx_shader_create(&src))) why = "no vertex module / the binding table was refused";
     }
     if (why) { vkn_logf("tile pass: no twin for shader %s%s%c: %s", key, v ? " variant " : "", v ? v : ' ', why); return e; }
-    e->state = 1; g_s5.twins++;
-    vkn_logf("tile pass: twin of shader %s%s%c: %u input attachments, %u bindings, conditions %#x", key, v ? " variant " : "", v ? v : ' ', e->var.n, n, e->var.cond);
+    e->state = 1; g_s6.twins++;
+    vkn_logf("tile pass: twin of shader %s%s%c: %u input attachments, %u bindings, conditions %#x, vertex retype %#llx", key, v ? " variant " : "", v ? v : ' ', e->var.n, n, e->var.cond,
+             (unsigned long long)code);
     return e;
 }
 // The texture a binding of `base` will read in this draw (NULL = none / not a texture binding).
@@ -203,50 +213,69 @@ static int tl_center_ok(const vkn_shader *sh, uint32_t loc, uint32_t W, uint32_t
     }
     return area > 1e-6;
 }
-static const char *const k_tlv[10] = {"an alpha-test / retype variant or an effect on the draw", "a piece's shader that is not the fused light", "more input attachments than the device takes in a stage",
-    "no twin for its shader", "render scale is not 1 in the support block", "an input texture of another size / without the input usage / dead", "an input is a target of the same pass",
-    "LinearizeDepth: the depth sampler is not NEAREST", "LinearizeDepth: the coordinate is not proven to be the own pixel's centre", "a chain texture is also read as a plain sampler"};
-static uint32_t g_tlv_n[10];
+enum { TLV_ALPHA, TLV_PIECE, TLV_NINPUT, TLV_TWIN, TLV_SCALE, TLV_INPUT, TLV_SELF, TLV_SAMPLER, TLV_CENTER, TLV_PLAIN, TLV_FX, TLV_CRETYPE, TLV_N };
+static const char *const k_tlv[TLV_N] = {"an alpha test on the draw (its fragment module is the \"#at\" variant)", "a piece's shader that is not the fused light",
+    "more input attachments than the device takes in a stage", "no twin for its shader", "render scale is not 1 in the support block",
+    "an input texture of another size / without the input usage / dead", "an input is a target of the same pass",
+    "LinearizeDepth: the depth sampler is not NEAREST", "LinearizeDepth: the coordinate is not proven to be the own pixel's centre", "a chain texture is also read as a plain sampler",
+    "an effect drops the draw's fragment stage or discards it", "LinearizeDepth: a vertex retype (the centre proof reads the engine format as it is)"};
+static uint32_t g_tlv_n[TLV_N];
 static int tl_no(const vkn_shader *s, int why) {   // a verdict refused: counted, the first two of each kind logged (which draw of the frame has no twin, and why)
-    if (g_tlv_n[why]++ < 2 && why != 3) vkn_logf("tile pass: draw of shader %s (first after a target change) is no subpass of a chain: %s", s->key[VKN_SRC_FS][0] ? s->key[VKN_SRC_FS] : s->key[VKN_SRC_VS], k_tlv[why]);
+    if (g_tlv_n[why]++ < 2 && why != TLV_TWIN) vkn_logf("tile pass: draw of shader %s (first after a target change) is no subpass of a chain: %s", s->key[VKN_SRC_FS][0] ? s->key[VKN_SRC_FS] : s->key[VKN_SRC_VS], k_tlv[why]);
     return -1;
 }
 // The verdict for the draw being prepared: its twin and what each input index reads, when every condition holds. stamp: the epoch the
 // chain's / the candidate's attachments carry. An input whose texture is not of the chain is taken in as a read-only attachment
 // (*ext) when it has the chain's size, one level / layer / sample and the input usage. 0 = g_tpend filled.
+// The vertex side: the twin replaces the FRAGMENT module only, so whatever vertex stage the classic draw has stays exact with it -
+//   * a per-draw vertex module of an effect (vkn_fx_out.vin: PRESKIN's consumer, XLQ's trimmed module; each exact by its own proof, and
+//     the draw path draws it whatever object the chain ends with) stays the vertex stage of the twin's draw. PRESKIN plans the vertex
+//     shaders of LinearizeDepth (06b17b62), CascadedPCF (54c2aae4) and the light (fc568237) on the tilers: refusing it kept every chain
+//     from forming (phone run M03, 22.11);
+//   * a vertex retype without such a module: the twin is made with the retype variant of the base vertex module (vkn_shader_module(base,
+//     VS, code)), the module the classic draw binds. The centre proof of LinearizeDepth reads the engine format as it is: refused there.
+// Refused: the alpha test (the classic draw's fragment module is the "#at" variant, the twin was proven against the base one), an effect
+// that drops the fragment stage or discards the draw.
 static int tl_verdict(const vkn_shader *s, const vkn_draw_in *in, const vkn_fx_out *fx, uint64_t retype, uint32_t stamp, uint32_t W, uint32_t H) {
     memset(&g_tpend, 0, sizeof g_tpend);
-    if (retype || in->alpha_ref >= 0.0f || (fx && (fx->discard || fx->no_fs || fx->vin.vs))) return tl_no(s, 0);
+    if (in->alpha_ref >= 0.0f) return tl_no(s, TLV_ALPHA);
+    if (fx && (fx->discard || fx->no_fs)) return tl_no(s, TLV_FX);
+    const uint64_t code = fx && fx->vin.vs ? 0 : retype;   // (the effect's vertex module was made for the draw's retype code)
     char v = 0;
     if (vkn_fx_shader_is(s)) {
         const vkn_shader *l = NULL;
-        if (!vkn_lf_fused_of || vkn_lf_fused_of(s, &l, &v)) return tl_no(s, 1);
+        if (!vkn_lf_fused_of || vkn_lf_fused_of(s, &l, &v)) return tl_no(s, TLV_PIECE);
         // the short form (Sky reads the Light part's textures) when the pairs are the same images, else the long one if the device takes 11 inputs
         const vkn_tex *a0 = tl_bind_tex(s, 200, in, fx, NULL), *a1 = tl_bind_tex(s, 206, in, fx, NULL), *a2 = tl_bind_tex(s, 212, in, fx, NULL), *a3 = tl_bind_tex(s, 224, in, fx, NULL);
         const int share = a0 && a0 == tl_bind_tex(s, 10, in, fx, NULL) && a1 == tl_bind_tex(s, 22, in, fx, NULL) && a2 == tl_bind_tex(s, 16, in, fx, NULL) && a3 == tl_bind_tex(s, 34, in, fx, NULL);
         const vkn_dev *d = vkn_device();
         if (share) v = (char)(v - 32);
-        else if (!d || d->props.limits.maxPerStageDescriptorInputAttachments < 11) return tl_no(s, 2);
+        else if (!d || d->props.limits.maxPerStageDescriptorInputAttachments < 11) return tl_no(s, TLV_NINPUT);
     }
-    tl_twin *e = tl_twin_get(s, v);
-    if (!e || e->state <= 0) return tl_no(s, 3);
+    tl_twin *e = tl_twin_get(s, v, code);
+    if (!e || e->state <= 0) return tl_no(s, TLV_TWIN);
     const vkn_tile_var *var = &e->var;
     const vkn_dev *dv = vkn_device();
-    if (dv && var->n > dv->props.limits.maxPerStageDescriptorInputAttachments) return tl_no(s, 2);
-    if (var->cond & VKN_TILE_C_SHARE) { if (!(v == 'F' || v == 'G')) return tl_no(s, 3); }
-    if (var->cond & VKN_TILE_C_SCALE1) {   // the support block of this draw: every render-scale float is 1.0 (mode 1 writes 73 x 1.0f from byte 192)
+    if (dv && var->n > dv->props.limits.maxPerStageDescriptorInputAttachments) return tl_no(s, TLV_NINPUT);
+    if (var->cond & VKN_TILE_C_SHARE) { if (!(v == 'F' || v == 'G')) return tl_no(s, TLV_TWIN); }
+    // the support block of this draw: every render-scale float is 1.0. The block is std140 (common.glsl: `float _m5[73]` at byte 192 in a
+    // uniform block of 1392 bytes): _m5[i] is the float at byte 192 + 16 i (xbg_vulkan.cpp xbg_support_defaults writes exactly those).
+    // [P10 fix 2, run C1 22.11] the check read 73 floats in a row from byte 192 - _m5[0], then the zero padding after it: every draw of
+    // the chain was refused ("render scale is not 1") although the block holds 1.0 in every _m5
+    if (var->cond & VKN_TILE_C_SCALE1) {
         float sb[348];
-        if (g_scale_fn ? g_scale_fn(in->viewport[2], in->viewport[3]) : (!vkn_shader_support_fill || vkn_shader_support_fill(in->viewport[2], in->viewport[3], sb, sizeof sb))) return tl_no(s, 4);
-        if (!g_scale_fn) for (int i = 0; i < 73; i++) if (sb[48 + i] != 1.0f) return tl_no(s, 4);
+        if (g_scale_fn ? g_scale_fn(in->viewport[2], in->viewport[3]) : (!vkn_shader_support_fill || vkn_shader_support_fill(in->viewport[2], in->viewport[3], sb, sizeof sb))) return tl_no(s, TLV_SCALE);
+        if (!g_scale_fn) for (int i = 0; i < 73; i++) if (sb[48 + 4 * i] != 1.0f) return tl_no(s, TLV_SCALE);
     }
     memset(g_tpend.input, 0xff, sizeof g_tpend.input);
     for (uint32_t k = 0; k < var->n; k++) {
         int32_t sid = -1; vkn_tex *t = tl_bind_tex(s, var->binding[k], in, fx, &sid);
-        if (!t || t->dead || t->w != W || t->h != H || t->mips != 1 || t->layers != 1 || t->samples > 1 || t->nvn_target == 2 || !(t->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) || !t->view) return tl_no(s, 5);
-        if (in_set(&g_cur, t)) return tl_no(s, 6);   // (an input that is a target of its own subpass)
+        if (!t || t->dead || t->w != W || t->h != H || t->mips != 1 || t->layers != 1 || t->samples > 1 || t->nvn_target == 2 || !(t->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) || !t->view) return tl_no(s, TLV_INPUT);
+        if (in_set(&g_cur, t)) return tl_no(s, TLV_SELF);   // (an input that is a target of its own subpass)
         if ((var->cond & VKN_TILE_C_CENTER) && k == 0) {
-            if (sid < 0 || !vkn_sampler_nearest_by_id((uint32_t)sid)) return tl_no(s, 7);
-            if (!tl_center_ok(s, var->center_loc, W, H)) return tl_no(s, 8);
+            if (retype) return tl_no(s, TLV_CRETYPE);
+            if (sid < 0 || !vkn_sampler_nearest_by_id((uint32_t)sid)) return tl_no(s, TLV_SAMPLER);
+            if (!tl_center_ok(s, var->center_loc, W, H)) return tl_no(s, TLV_CENTER);
         }
         if (t->tl_ep == stamp && stamp) g_tpend.input[var->index[k]] = t->tl_i;
         else { g_tpend.input[var->index[k]] = 0xfe; g_tpend.ext[var->index[k]] = t; }
@@ -256,7 +285,7 @@ static int tl_verdict(const vkn_shader *s, const vkn_draw_in *in, const vkn_fx_o
         const vkn_bind *b = &e->tw->bind[i];
         if ((b->kind != VKN_BK_TEXTURE && b->kind != VKN_BK_FX_TEX) || b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) continue;
         const vkn_tex *t = tl_bind_tex(s, b->binding, in, fx, NULL);
-        if (t && stamp && t->tl_ep == stamp) return tl_no(s, 9);
+        if (t && stamp && t->tl_ep == stamp) return tl_no(s, TLV_PLAIN);
     }
     g_tpend.tw = e->tw; g_tpend.ok = 1;
     return 0;
@@ -294,7 +323,7 @@ static void tl_ob_finalize(void) {
             for (uint32_t j = 0; j < c->natt && ok; j++) { if (vkn_tex_ref(c->att[j])) nh++; else ok = 0; }
             if (!ok) { for (uint32_t j = 0; j < nh; j++) vkn_tex_unref(c->att[j]); }
             else {
-                tl_sh_drop(&g_tsh); g_tsh = *c; g_tsh.live = 1; g_tsh.held = 1; g_tsh.streak = 1; g_tsh.frame = f; g_tsh.primed = 0; g_s5.learned++;   // (another chain: no ban, no misses)
+                tl_sh_drop(&g_tsh); g_tsh = *c; g_tsh.live = 1; g_tsh.held = 1; g_tsh.streak = 1; g_tsh.frame = f; g_tsh.primed = 0; g_s6.learned++;   // (another chain: no ban, no misses)
             }
         }
     }
@@ -404,7 +433,7 @@ static int tl_sub_enter(uint32_t k, int prefix) {
                 if (clr_find(t, 0, rgba, 1)) { g_ch.a[j].clr = 1; g_ch.a[j].cv.color = clear_color(t->format, rgba); }
                 else if (covered) g_ch.a[j].dc = 1;
             }
-            if (g_tl_mode == 3 && g_ch.a[j].dc && !dp) { ca[nca].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; ca[nca].colorAttachment = i; ca[nca].clearValue.color = clear_color(t->format, (const float[4]){1.0f, 0.0f, 1.0f, 1.0f}); nca++; g_s5.poison++; }
+            if (g_tl_mode == 3 && g_ch.a[j].dc && !dp) { ca[nca].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; ca[nca].colorAttachment = i; ca[nca].clearValue.color = clear_color(t->format, (const float[4]){1.0f, 0.0f, 1.0f, 1.0f}); nca++; g_s6.poison++; }
         } else {   // a clear the engine asked for since its last subpass: now, inside the pass
             float rgba[4];
             if (dp && (t->pass_dclr & 3)) {
@@ -459,6 +488,12 @@ static void tl_infos(const tl_shape *sh) {
     }
     g_ch.info_prefix = g_ch.info[0]; memset(g_ch.info_prefix.write_mask, 0, sizeof g_ch.info_prefix.write_mask);
 }
+// [frame F1] region clears wait for the pass of g_cur (DM_VK_NATIVE_LAZYCLR): that pass begins the classic way (the clears run in it);
+// counted when it would have begun the learned chain.
+static void tl_lazy_refuse(void) {
+    const tl_shape *sh = &g_tsh;
+    if (sh->live && (same_set(&g_cur, &sh->sub[0]) || (sh->prefix && depth_only(&g_cur) && g_cur.d == sh->sub[0].d))) { g_s6.tried++; g_s6.refused[TLR_LAZY]++; }
+}
 // vkn_pass_ready, no chain: the pass about to begin for g_cur starts the learned chain. 1 = recording in subpass 0 (*info filled).
 static int tl_try_begin(vkn_pass_info *info) {
     tl_shape *sh = &g_tsh;
@@ -474,16 +509,16 @@ static int tl_try_begin(vkn_pass_info *info) {
     else if (g_hint_on) why = TLR_HINT;
     else if (vkn_query_mode && vkn_query_mode() != 0) why = TLR_QUERY;
     else if (!tl_shape_alive(sh)) why = TLR_TARGET;
-    g_s5.tried++;
-    if (why >= 0) { g_s5.refused[why]++; return 0; }
+    g_s6.tried++;
+    if (why >= 0) { g_s6.refused[why]++; return 0; }
     VkRenderPass rp = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; uint16_t compat[TL_SUBS];
-    if (tl_objects(sh, &rp, &fb, compat)) { g_s5.refused[TLR_PASS]++; return 0; }
+    if (tl_objects(sh, &rp, &fb, compat)) { g_s6.refused[TLR_PASS]++; return 0; }
     if (!sh->primed) {   // the G-buffer draws' pipelines for subpass 0 are built ahead while the frames are drawn the classic way
         if (g_tl_prime_frame != f) {   // one verdict a frame: a whole frame without a missing pipeline arms the chain
             if (g_tl_prime_frame + 1 == f && !sh->prime_missing && sh->prime_frames) sh->primed = 1;
             sh->prime_frames++; sh->prime_missing = 0; g_tl_prime_frame = f; g_tl_prime_ns = 0;
         }
-        if (!sh->primed) { vkn_tile_prime_compat = compat[0]; vkn_tile_prime_rp = rp; g_s5.refused[TLR_PRIME]++; return 0; }
+        if (!sh->primed) { vkn_tile_prime_compat = compat[0]; vkn_tile_prime_rp = rp; g_s6.refused[TLR_PRIME]++; return 0; }
         vkn_logf("tile pass: armed - %u subpasses, %u attachments, %ux%u, %u pipelines built ahead in %u frames", sh->nsub, sh->natt, sh->W, sh->H, sh->prime_built, sh->prime_frames);
     }
     if (g_ob.active) { g_ob.active = 0; g_ob.edge = 0; }
@@ -492,12 +527,12 @@ static int tl_try_begin(vkn_pass_info *info) {
     for (uint32_t j = 0; j < sh->natt; j++) { sh->att[j]->tl_ep = ep; sh->att[j]->tl_i = (uint8_t)j; }   // the chain's attachments, from here to its end
     memset(&g_ch, 0, sizeof g_ch);
     g_ch.epoch = ep; g_ch.rp = rp; g_ch.fb = fb; memcpy(g_ch.compat, compat, sizeof compat);
-    g_vs.n = 0; g_vs.nscr = 0; vkn_tile_redraw_on = g_tl_mode == 2 && g_s5.begun % g_tl_vevery == 0;   // mode 2: this chain's full-screen draws are drawn twice
+    g_vs.n = 0; g_vs.nscr = 0; vkn_tile_redraw_on = g_tl_mode == 2 && g_s6.begun % g_tl_vevery == 0;   // mode 2: this chain's full-screen draws are drawn twice
     tl_infos(sh);
     draw_counts(&g_ch.d0, &g_ch.u0);
     g_ch.st = TL_SUSP;
-    if (tl_sub_enter(0, pre)) { g_ch.st = TL_NONE; g_ch.epoch = 0; g_s5.refused[TLR_PASS]++; return 0; }
-    g_s5.begun++;
+    if (tl_sub_enter(0, pre)) { g_ch.st = TL_NONE; g_ch.epoch = 0; g_s6.refused[TLR_PASS]++; return 0; }
+    g_s6.begun++;
     if (info) *info = pre ? g_ch.info_prefix : g_ch.info[0];
     tl_hook_upd();
     return 1;
@@ -561,6 +596,11 @@ const struct vkn_shader *vkn_tile_twin(const struct vkn_shader *s, const vkn_dra
     if (g_ch.st == TL_NONE) {   // the observer: the first draw after the targets changed
         if (!g_ob.active || !g_ob.edge) return NULL;
         g_ob.edge = 0; tl_hook_upd();
+        // only a set that can be the candidate's next subpass needs a verdict (tl_ob_begin: no depth, colours only, the chain's size). A
+        // set with depth - the G-buffer pass itself, a forward pass - is never a full-screen subpass: its draws are drawn as they are
+        // (subpass 0 takes every draw of its set, alpha-tested, retyped or with an effect's vertex module), so no verdict, no twin asked
+        uint32_t W = 0, H = 0;
+        if (g_cur.d || !tl_plain_set(&g_cur, &W, &H) || W != g_ob.s.W || H != g_ob.s.H) return NULL;
         (void)tl_verdict(s, in, fx, retype, g_ob.epoch, g_ob.s.W, g_ob.s.H);
         return NULL;
     }
@@ -574,7 +614,7 @@ const struct vkn_shader *vkn_tile_twin(const struct vkn_shader *s, const vkn_dra
     return g_tpend.tw;
 }
 int vkn_tile_prime_budget(void) { return g_tl_prime_ns < 3000000ull; }   // 3 ms of builds ahead a frame
-void vkn_tile_prime_note(int built, uint64_t ns) { if (built) { g_tsh.prime_built++; g_tl_prime_ns += ns; g_s5.primed_pipes++; } else g_tsh.prime_missing++; }
+void vkn_tile_prime_note(int built, uint64_t ns) { if (built) { g_tsh.prime_built++; g_tl_prime_ns += ns; g_s6.primed_pipes++; } else g_tsh.prime_missing++; }
 
 // ---- verify (mode 2): the full-screen draws once more, the classic way, into scratch targets; both read back and compared ----
 // At the draw (the draw path calls vkn_tile_redraw_begin right after it recorded a twin's draw, draws the same draw again under
@@ -607,7 +647,7 @@ int vkn_tile_redraw_begin(void) {
     for (uint32_t c = 0; c < s->n; c++) {
         vkn_tex *t = s->c[c]; tl_scr *q = NULL;
         const uint32_t j = t ? t->tl_i : 0;
-        if (!t || (!g_ch.a[j].clr && !g_ch.a[j].dc && has_content(t)) || !(q = tl_scratch(g_vs.nscr, t->format, sh->W, sh->H))) { g_vs.nscr = scr0; g_s5.verify_skipped++; return 0; }
+        if (!t || (!g_ch.a[j].clr && !g_ch.a[j].dc && has_content(t)) || !(q = tl_scratch(g_vs.nscr, t->format, sh->W, sh->H))) { g_vs.nscr = scr0; g_s6.verify_skipped++; return 0; }
         g_vs.nscr++;
         k.color[c] = (uint32_t)t->format; k.load[c] = VK_ATTACHMENT_LOAD_OP_CLEAR; k.store[c] = VK_ATTACHMENT_STORE_OP_STORE;
         if (g_ch.a[j].clr) v->cv[c] = g_ch.a[j].cv;
@@ -615,9 +655,9 @@ int vkn_tile_redraw_begin(void) {
     }
     k.ncolor = (uint8_t)s->n;
     uint16_t compat = 0;
-    if (!nv || !vkn_rp_get(&k, &v->rp, &compat) || !v->rp || !(v->fb = vkn_fb_get(compat, views, nv, sh->W, sh->H, 1))) { g_vs.nscr = scr0; g_s5.verify_skipped++; return 0; }
+    if (!nv || !vkn_rp_get(&k, &v->rp, &compat) || !v->rp || !(v->fb = vkn_fb_get(compat, views, nv, sh->W, sh->H, 1))) { g_vs.nscr = scr0; g_s6.verify_skipped++; return 0; }
     SORT_FLUSH();
-    if (!(v->sec = vkn_cb2_begin(v->rp, 0, v->fb))) { g_vs.nscr = scr0; g_s5.verify_skipped++; return 0; }
+    if (!(v->sec = vkn_cb2_begin(v->rp, 0, v->fb))) { g_vs.nscr = scr0; g_s6.verify_skipped++; return 0; }
     g_vs.back = g_ch.sec[g_ch.nsec - 1];
     vkn_cb_route(v->sec); if (vkn_draw_raw_begin) vkn_draw_raw_begin();
     v->sub = (uint8_t)g_ch.cur; v->n = (uint8_t)s->n;
@@ -641,7 +681,7 @@ static void tl_verify_done(void *ctx) {
     tl_vjob *j = (tl_vjob *)ctx;
     const uint8_t *pa = (const uint8_t *)j->a.cpu, *pb = (const uint8_t *)j->b.cpu; uint64_t diff = 0;
     if (pa && pb) for (uint64_t i = 0; i < j->n; i++) diff += pa[i] != pb[i];
-    g_s5.verify_targets++; g_s5.verify_bytes += j->n; g_s5.verify_differ += diff;
+    g_s6.verify_targets++; g_s6.verify_bytes += j->n; g_s6.verify_differ += diff;
     if (diff && red_ok(&g_red_tl)) vkn_logf(RED "tile pass verify: subpass %u colour %u: %llu of %llu bytes differ between the merged pass and the classic draw", j->sub, j->slot, (unsigned long long)diff, (unsigned long long)j->n);
     vkn_block_free(&j->a); vkn_block_free(&j->b); free(j);
 }
@@ -660,7 +700,7 @@ static void tl_verify_emit(VkCommandBuffer cb) {
     }
     for (uint32_t i = 0; i < g_vs.n; i++) {
         tl_vsub *v = &g_vs.v[i];
-        if (v->bad) { g_s5.verify_skipped++; continue; }
+        if (v->bad) { g_s6.verify_skipped++; continue; }
         for (uint32_t c = 0; c < v->n; c++) tl_raw_barrier(cb, v->scr[c]->img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         const VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = v->rp, .framebuffer = v->fb, .renderArea = {{0, 0}, {sh->W, sh->H}}, .clearValueCount = v->n, .pClearValues = v->cv};
         vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
@@ -669,8 +709,8 @@ static void tl_verify_emit(VkCommandBuffer cb) {
         for (uint32_t c = 0; c < v->n; c++) {
             vkn_tex *t = v->real[c]; const uint64_t n = (uint64_t)sh->W * sh->H * fmt_bytes(t->format);
             tl_vjob *j = (tl_vjob *)calloc(1, sizeof *j);
-            if (!j || vkn_block_alloc(VKN_ARENA_STAGING, n, 256, &j->a)) { free(j); g_s5.verify_skipped++; continue; }
-            if (vkn_block_alloc(VKN_ARENA_STAGING, n, 256, &j->b)) { vkn_block_free(&j->a); free(j); g_s5.verify_skipped++; continue; }
+            if (!j || vkn_block_alloc(VKN_ARENA_STAGING, n, 256, &j->a)) { free(j); g_s6.verify_skipped++; continue; }
+            if (vkn_block_alloc(VKN_ARENA_STAGING, n, 256, &j->b)) { vkn_block_free(&j->a); free(j); g_s6.verify_skipped++; continue; }
             j->n = n; j->sub = v->sub; j->slot = c;
             barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             tl_raw_barrier(cb, v->scr[c]->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -686,6 +726,66 @@ static void tl_verify_emit(VkCommandBuffer cb) {
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         if (vkn_draw_raw_begin) vkn_draw_raw_begin();
     }
+}
+
+// ---- [P10 fix 6] the merged pass recorded at the submit: its stores decided by what the rest of the recording read ----
+// The store history discards a store after 8 frames in which nothing read it; a reader that comes only sometimes (phone run G01: a
+// forward draw sampled the shadow mask in frame 5113) then read undefined content - one wrong frame before the rule banned itself.
+// Now a merged pass with a discarded store is not written into the recording at the chain's end: the recording is split there
+// (vkn_rec_split) and the pass itself is recorded at the submit, between the part before and the part after. Every read of a discarded
+// attachment recorded meanwhile (hist_read: sampled, loaded, copied, laid out for a transfer) turns its store back to STORE first
+// (tl_dfr_revoke). So within the recording that holds the pass no reader ever sees a discarded attachment; what reaches the next
+// recording is what the chain overwrites before anything reads it (the store history's own rule, which still bans on a violation).
+static struct {
+    int on; vkn_mp_key k; VkFramebuffer fb; uint32_t W, H, nsub, natt, nsec;
+    VkClearValue cv[TL_ATTS]; vkn_tex *att[TL_ATTS]; uint8_t dead[TL_ATTS], poison[TL_ATTS]; uint64_t bytes[TL_ATTS];
+    VkCommandBuffer sec[TL_SECS]; uint8_t sec_sub[TL_SECS];
+    tset js;
+} g_dfr;
+static int tl_dfr_revoke(vkn_tex *t) {
+    if (!g_dfr.on || !t) return 0;
+    for (uint32_t j = 0; j < g_dfr.natt; j++) if (g_dfr.att[j] == t && g_dfr.dead[j]) {
+        g_dfr.dead[j] = 0; g_dfr.poison[j] = 0; g_dfr.k.store[j] = VK_ATTACHMENT_STORE_OP_STORE; if (is_depth(t)) g_dfr.k.sstore[j] = VK_ATTACHMENT_STORE_OP_STORE;
+        g_s6.store_revoked++; g_s6.merged_bytes += g_dfr.bytes[j]; if (g_s6.saved_bytes >= g_dfr.bytes[j]) g_s6.saved_bytes -= g_dfr.bytes[j];
+        g_s3.store_bytes += g_dfr.bytes[j];
+        return 1;
+    }
+    return 0;
+}
+// The commands of the merged pass (begin, its subpass buffers, end) and, mode 3, the poison of what it discarded. `restore`: the image
+// layouts after the poison go back to the attachment layouts by raw barriers (the tail was recorded against those; the tracked layout
+// does not change).
+static void tl_record_pass(VkCommandBuffer cb, VkRenderPass rp, VkFramebuffer fb, uint32_t W, uint32_t H, uint32_t natt, const VkClearValue *cv, uint32_t nsub,
+                           const VkCommandBuffer *sec, const uint8_t *sec_sub, uint32_t nsec, const tset *js, vkn_tex *const *att, const uint8_t *poison, int restore) {
+    const VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = {{0, 0}, {W, H}}, .clearValueCount = natt, .pClearValues = cv};
+    vkn_prof_pass_begin(cb, js->c, js->n, js->d, W, H);
+    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+    for (uint32_t i = 0; i < nsub; i++) {
+        if (i) vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        VkCommandBuffer list[TL_SECS]; uint32_t n = 0;
+        for (uint32_t q = 0; q < nsec; q++) if (sec_sub[q] == i) list[n++] = sec[q];
+        if (n) vkCmdExecuteCommands(cb, n, list);
+    }
+    vkCmdEndRenderPass(cb);
+    vkn_prof_pass_end(cb);
+    for (uint32_t j = 0; j < natt; j++) {
+        vkn_tex *t = att[j];
+        if (!poison[j] || is_depth(t)) continue;   // mode 3: what was not stored is magenta for whoever reads it from memory
+        const VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}; const VkClearColorValue m = clear_color(t->format, (const float[4]){1.0f, 0.0f, 1.0f, 1.0f});
+        if (restore) tl_raw_barrier(cb, t->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        else barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdClearColorImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &m, 1, &rg); g_s6.poison++;
+        if (restore) tl_raw_barrier(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+}
+static void tl_fill(VkCommandBuffer mid, void *ctx) {   // (vkn_rec_submit, after the close listeners)
+    (void)ctx;
+    if (!g_dfr.on) return;
+    g_dfr.on = 0;
+    VkRenderPass rp = VK_NULL_HANDLE; uint16_t compat[TL_SUBS];
+    if (!vkn_mp_get(&g_dfr.k, &rp, compat) || !rp) { g_st2.rp_fail++; if (red_ok(&g_red_tl)) vkn_logf(RED "tile pass: no render pass for the chain's final store ops: %u subpasses of draws lost", g_dfr.nsub); return; }
+    tl_record_pass(mid, rp, g_dfr.fb, g_dfr.W, g_dfr.H, g_dfr.natt, g_dfr.cv, g_dfr.nsub, g_dfr.sec, g_dfr.sec_sub, g_dfr.nsec, &g_dfr.js, g_dfr.att, g_dfr.poison, 1);
+    for (uint32_t j = 0; j < g_dfr.natt; j++) if (g_dfr.dead[j]) g_s6.stores_dropped++;
 }
 
 // ---- writing the chain out ----
@@ -738,8 +838,28 @@ static void tl_flush(int hit, int why) {
     // the pre-pass and loaded by the G-buffer pass
     for (uint32_t i = 0; i < nsub; i++) { const tset *s = &sh->sub[i]; for (uint32_t c = 0; c <= s->n; c++) { const vkn_tex *t = c < s->n ? s->c[c] : s->d; if (t) base += att_bytes(t, W, H); } }
     if (sh->prefix && sh->sub[0].d) base += 2 * att_bytes(sh->sub[0].d, W, H);
+    // [P10 fix 6] a discarded store: the pass is recorded at the submit (tl_fill), when every later read of this recording is known;
+    // without a split (none possible) every store is kept
+    uint32_t ndead = 0; for (uint32_t j = 0; j < sh->natt; j++) ndead += !stored[j];
+    int deferred = 0;
+    if (ndead && !g_dfr.on) {
+        memset(&g_dfr, 0, sizeof g_dfr);
+        g_dfr.k = k; g_dfr.fb = g_ch.fb; g_dfr.W = W; g_dfr.H = H; g_dfr.nsub = nsub; g_dfr.natt = sh->natt; g_dfr.nsec = g_ch.nsec;
+        memcpy(g_dfr.cv, cv, sizeof cv); memcpy(g_dfr.sec, g_ch.sec, sizeof g_dfr.sec); memcpy(g_dfr.sec_sub, g_ch.sec_sub, sizeof g_dfr.sec_sub);
+        for (uint32_t j = 0; j < sh->natt; j++) { g_dfr.att[j] = sh->att[j]; g_dfr.dead[j] = !stored[j]; g_dfr.poison[j] = poison[j]; g_dfr.bytes[j] = att_bytes(sh->att[j], W, H); }
+        g_dfr.on = 1;
+        if (!vkn_rec_split(tl_fill, NULL)) { deferred = 1; g_s6.deferred++; }
+        else g_dfr.on = 0;
+    }
+    if (ndead && !deferred) {   // (no split: kept, as before the history decided)
+        for (uint32_t j = 0; j < sh->natt; j++) if (!stored[j]) {
+            vkn_tex *t = sh->att[j]; st_ent *e = st_get(t, 0); if (e && e->state == HS_DEAD) e->state = HS_PENDING;
+            k.store[j] = VK_ATTACHMENT_STORE_OP_STORE; if (is_depth(t)) k.sstore[j] = VK_ATTACHMENT_STORE_OP_STORE;
+            stored[j] = 1; poison[j] = 0; sb += att_bytes(t, W, H); g_s6.store_kept_nosplit++;
+        }
+    }
     VkRenderPass rp = VK_NULL_HANDLE; uint16_t compat[TL_SUBS];
-    if (!vkn_mp_get(&k, &rp, compat) || !rp) {   // (cannot happen after tl_objects made the shape; the draws are lost)
+    if (!deferred && (!vkn_mp_get(&k, &rp, compat) || !rp)) {   // (cannot happen after tl_objects made the shape; the draws are lost)
         g_st2.rp_fail++; if (red_ok(&g_red_tl)) vkn_logf(RED "tile pass: no render pass for the chain's load / store ops: %u subpasses of draws lost", nsub);
     } else {
         tset js; memset(&js, 0, sizeof js); vkn_rp_key jk; vkn_rp_key_init(&jk);   // the journal's one line: the colours (first 8), the depth
@@ -748,19 +868,11 @@ static void tl_flush(int hit, int why) {
             if (is_depth(t)) { if (!js.d) { js.d = t; jk.depth_load = k.load[j]; jk.depth_store = k.store[j]; } }
             else if (js.n < VKN_PASS_COLORS) { js.c[js.n] = t; jk.load[js.n] = k.load[j]; jk.store[js.n] = k.store[j]; js.n++; }
         }
-        const VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = g_ch.fb, .renderArea = {{0, 0}, {W, H}}, .clearValueCount = sh->natt, .pClearValues = cv};
-        vkn_prof_pass_begin(cb, js.c, js.n, js.d, W, H);
-        vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-        for (uint32_t i = 0; i < nsub; i++) {
-            if (i) vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-            VkCommandBuffer list[TL_SECS]; uint32_t n = 0;
-            for (uint32_t q = 0; q < g_ch.nsec; q++) if (g_ch.sec_sub[q] == i) list[n++] = g_ch.sec[q];
-            if (n) vkCmdExecuteCommands(cb, n, list);
-        }
-        vkCmdEndRenderPass(cb);
-        vkn_prof_pass_end(cb);
+        const VkRect2D ra = {{0, 0}, {W, H}};
+        if (deferred) g_dfr.js = js;
+        else tl_record_pass(cb, rp, g_ch.fb, W, H, sh->natt, cv, nsub, g_ch.sec, g_ch.sec_sub, g_ch.nsec, &js, sh->att, poison, 0);
         if (vkn_draw_raw_begin) vkn_draw_raw_begin();
-        pj_begin(&js, &jk, W, H, bi.renderArea, lb, sb, 2 + (int)nsub);
+        pj_begin(&js, &jk, W, H, ra, lb, sb, 2 + (int)nsub);
         g_pj.d0 = g_pj.d0 >= g_ch.draws ? g_pj.d0 - g_ch.draws : 0;   // (its draws: those of its subpass buffers, not the foreign passes run meanwhile)
         pj_end(hit ? VKN_PE_TARGETS : VKN_PE_OTHER);
         g_dump.passes_frame++;
@@ -768,22 +880,18 @@ static void tl_flush(int hit, int why) {
             vkn_tex *t = sh->att[j];
             if (!g_ch.a[j].entered || sh->ext[j]) { if (!t->pass_ever) written(t); continue; }   // (never written before: it holds the pass's zeros now)
             written(t); if (g_dump.active && !is_depth(t)) dump_note(t);
-            if (poison[j] && !is_depth(t)) {   // mode 3: what was not stored is magenta for whoever reads it from memory
-                barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                const VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}; const VkClearColorValue m = clear_color(t->format, (const float[4]){1.0f, 0.0f, 1.0f, 1.0f});
-                vkCmdClearColorImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &m, 1, &rg); g_s5.poison++;
-            }
         }
     }
     const uint32_t f = (uint32_t)vkn_frame();
     if (hit) {
-        g_s5.hits++; g_s5.subpasses += nsub; g_s5.foreign += g_ch.foreign; sh->frame = f; sh->misses = 0;
-        g_s5.base_bytes += base; g_s5.merged_bytes += lb + sb; if (base > lb + sb) g_s5.saved_bytes += base - (lb + sb);
-        g_s5.passes_saved += (sh->prefix ? nsub : nsub - 1);
+        if (g_pol.cur.farea == 1) g_s6.farea_full++;   // [frame F1] DM_VK_NATIVE_FRAMEAREA is not applied to a merged pass: its render area is the whole target
+        g_s6.hits++; g_s6.subpasses += nsub; g_s6.foreign += g_ch.foreign; sh->frame = f; sh->misses = 0;
+        g_s6.base_bytes += base; g_s6.merged_bytes += lb + sb; if (base > lb + sb) g_s6.saved_bytes += base - (lb + sb);
+        g_s6.passes_saved += (sh->prefix ? nsub : nsub - 1);
         if (vkn_tile_redraw_on) tl_verify_emit(cb);
     } else {
-        g_s5.miss[why >= 0 && why < TLM_N ? why : TLM_OTHER]++; sh->frame = f; sh->cool = f + 1;
-        if (++sh->misses >= 8) { sh->ban_until = f + 600; sh->misses = 0; sh->streak = 0; g_s5.bans++; vkn_logf("tile pass: 8 chains in a row did not complete (last: %s): off for 600 frames", k_tlm[why >= 0 && why < TLM_N ? why : TLM_OTHER]); }
+        g_s6.miss[why >= 0 && why < TLM_N ? why : TLM_OTHER]++; sh->frame = f; sh->cool = f + 1;
+        if (++sh->misses >= 8) { sh->ban_until = f + 600; sh->misses = 0; sh->streak = 0; g_s6.bans++; vkn_logf("tile pass: 8 chains in a row did not complete (last: %s): off for 600 frames", k_tlm[why >= 0 && why < TLM_N ? why : TLM_OTHER]); }
     }
     for (uint32_t j = 0; j < sh->natt; j++) { sh->att[j]->tl_ep = 0; }
     g_ch.epoch = 0; g_ch.nsec = 0; g_tpend.ok = 0; vkn_tile_redraw_on = 0; g_vs.n = 0; g_vs.nscr = 0; g_tl_redraw = 0;
@@ -792,7 +900,8 @@ static void tl_flush(int hit, int why) {
 void vkn_tile_test_fns(int (*uv)(const struct vkn_shader *s, uint32_t loc, struct nr_cv_prog *out), int (*scale1)(float w, float h)) { g_uv_fn = uv; g_scale_fn = scale1; }
 static void tl_rec_begin(void) {   // (begin listener) a new recording
     if (!g_tl_latched && vkn_device()) { g_tl_latched = 1; g_tl_mode = tl_cfg(); if (g_tl_mode) { pol_apply(); vkn_logf("tile pass (P10): DM_VK_NATIVE_TILELIGHT=%d (%s): G-buffer -> LinearizeDepth -> CascadedPCF -> lighting as one render pass with input attachments%s", g_tl_mode, g_tl_env ? "env" : "family default", g_tl_mode == 2 ? " (verify: every store kept, the full-screen draws compared with their classic form)" : g_tl_mode == 3 ? " (+ poison)" : ""); } }
-    if (g_tsh.live && !tl_shape_alive(&g_tsh)) { tl_sh_drop(&g_tsh); g_s5.dropped++; }   // (a target died or changed: the references go, the next frames teach again)
+    if (g_tsh.live && !tl_shape_alive(&g_tsh)) { tl_sh_drop(&g_tsh); g_s6.dropped++; }   // (a target died or changed: the references go, the next frames teach again)
+    g_dfr.on = 0;   // [P10 fix 6] (a recording that ended without its submit: nothing to fill)
     g_ch.st = TL_NONE; g_ch.epoch = 0; g_ch.nsec = 0; g_ob.active = 0; g_ob.edge = 0; g_tpend.ok = 0; g_tl_outer = 0; g_tl_prev_donly = 0; vkn_tile_prime_compat = 0;
     vkn_tile_redraw_on = 0; g_tl_redraw = 0; g_vs.n = 0; g_vs.nscr = 0;
     tl_hook_upd();

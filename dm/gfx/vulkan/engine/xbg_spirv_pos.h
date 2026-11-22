@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "../../nr/nr_cover.h"
+#include "../../nr/nr_shs.h"
 
 // words: a vertex-stage module (the final SPIR-V the pipeline gets). pr->ok = 1 when the module is one function of one block (no call,
 // no branch), never writes ClipDistance / CullDistance, and each of gl_Position's four components, at the end of the shader, is a
@@ -16,3 +17,6 @@ void xbg_spirv_pos_prog(const uint32_t *words, size_t count, nr_cv_prog *pr, con
 // decoration) instead of gl_Position. pr->out[0], out[1] = its x, y (both must be followed); out[2], out[3] = z, w where the variable has
 // them and they are followed, else copies of out[0]. A ClipDistance write does not refuse it. dm/gfx/vkn: vkn_shlib_vs_out_prog.
 void xbg_spirv_out_prog(const uint32_t *words, size_t count, uint32_t location, nr_cv_prog *pr, const char **why = nullptr);
+// [VK-SHADOWS-MOVING] the long form with degrees (dm/gfx/nr/nr_shs.h): NULL = none, else malloc'ed (free()). pr->affine tells whether
+// the position is affine in Location 0 x / y / z (why then reads "ok", else "not affine in Location 0").
+nr_sb_prog *xbg_spirv_pos_long(const uint32_t *words, size_t count, const char **why = nullptr);

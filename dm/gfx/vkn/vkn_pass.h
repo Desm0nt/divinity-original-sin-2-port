@@ -103,7 +103,9 @@ void vkn_pass_watch(vkn_tex *t, vkn_pass_watch_fn fn);
 // pass count that moves by one re-keys every later pass - the 0 / 143 discards of U13r); 1 = (the set, how many times this set began a
 // pass before in this recording). [mgpu P6.1] join (DM_VK_NATIVE_PASSJOIN): 0 off / 1 a depth-only pass opens as the G-buffer pass that
 // followed it in the last frames (vkn_pass.c "pass join") / 2 count only / 3 = 1 + checks. Both 0 in a vkn_pass_policy_set of zeros.
-typedef struct vkn_pass_policy { int8_t load, store, fresh, tilebar, area, ubo; uint16_t store_frames; int8_t join, store_key; } vkn_pass_policy;
+// [frame F1] farea (DM_VK_NATIVE_FRAMEAREA), lazyclr (DM_VK_NATIVE_LAZYCLR), barlearn (DM_VK_NATIVE_TILEBAR_LEARN): the block "frame F1" at the
+// end of this header. All 0 in a vkn_pass_policy_set of zeros (and in every older positional initializer: they are the last fields).
+typedef struct vkn_pass_policy { int8_t load, store, fresh, tilebar, area, ubo; uint16_t store_frames; int8_t join, store_key; int8_t farea, lazyclr, barlearn; } vkn_pass_policy;
 // Exact values now (host tests; NULL = all off). A request (the host at install, from the environment) may carry -1 = the family
 // default: it is applied at the first recording begin with a device (the family is known then: vkn_shlib_policy, else vkn_policy_family_from),
 // with one log line. The effect function (vkn_fx.h, "pass-cover", order 900) is registered when load or tilebar is on.
@@ -198,6 +200,48 @@ void vkn_pass_before_ev(vkn_pass_ev_fn fn);
 // 1 + its value (take = 1: it leaves the record - the texture keeps what it holds), 0 = none.
 int vkn_pass_clear_take(vkn_tex *t, float rgba[4], int take);
 
+// ==== [frame F1] fewer bytes and fewer passes a frame (docs/dos2/nr/VK-FRAME-WORK.md) ====
+// farea    DM_VK_NATIVE_FRAMEAREA  the FRAME AREA: a pass of the engine's 3D targets begins with renderArea = the part its draws touch (the
+//          3D sub-rectangle under DM_HACK_SCALE / DRS: the engine draws a part of its full-size targets), so a tile GPU loads, clears and
+//          stores that part only. 0 off / 1 on / 2 verify (decided and counted, every pass begins full; a draw that would have left the
+//          area is counted) / 3 poison (1 + the texels OUTSIDE the area of an attachment that begins with a narrowed CLEAR are painted
+//          magenta / depth 0.5 first: anything that samples outside the 3D sub-rectangle shows; such a texture's next pass begins full).
+//          The area = the union of the draw rects (viewport x scissor) the same pass (target set + its ordinal in the recording) drew in
+//          the last frames + the rect of the draw that begins it; learned from 2 frames of full passes, no area when it saves < 10 %.
+//          Exact: (a) Vulkan keeps every texel outside the render area; (b) every draw of the pass is checked against the area before it
+//          is recorded (vkn_pass_ready: the draw path names the draw, vkn_pass_draw_in) - a draw outside, or one this module cannot see
+//          (the UI's raw draws, a piece's raw commands), ends the pass, which begins again FULL (three such restarts ban the pass for
+//          600 frames); (c) an attachment that begins with the engine's CLEAR is narrowed only when this module knows that every texel
+//          outside the area already holds that very clear value (vkn_tex.fa_*: set by a whole clear, grown by what later passes drew,
+//          dropped by any other write) - then clearing the area alone leaves the same image. UI targets, window textures, multi-level /
+//          layer targets, the shadow cache's atlas and passes with a UI hint are never narrowed. Recording thread.
+// lazyclr  DM_VK_NATIVE_LAZYCLR  a region clear of a current target that arrives while no pass is open waits for the pass of the next
+//          draw (vkCmdClearAttachments right after its begin) instead of opening a pass of its own at once - which the draw's first
+//          texture transition then ended again with 0 draws (the UI filter epochs: 15 empty passes of 77 in W07). The clear runs before
+//          anything can read or write the texture otherwise (targets change, copy, layout, storage, a whole clear supersedes it, the
+//          recording's close): the same texels. 0 off / 1 on / 2 count only.
+// barlearn DM_VK_NATIVE_TILEBAR_LEARN  a texture whose fragment-only read barrier had to be repaired by a full barrier that ENDED an
+//          open pass gets the full barrier straight away for the next 600 frames (a full barrier is always sufficient). 0 off / 1 on / 2 count.
+// The draw the draw path is preparing (set right before its vkn_pass_ready, taken and cleared there): its viewport / scissor / primitive
+// give the draw rect. NULL = a caller this module cannot see.
+struct vkn_draw_in;
+extern const struct vkn_draw_in *vkn_pass_draw_in;
+enum { VKN_FAR_OK, VKN_FAR_TARGET, VKN_FAR_HINT, VKN_FAR_NODRAW, VKN_FAR_HIST, VKN_FAR_BAN, VKN_FAR_SMALL, VKN_FAR_CLR_STATE, VKN_FAR_CLR_VALUE,
+       VKN_FAR_CLR_OUT, VKN_FAR_POISON, VKN_FAR_RESTART, VKN_FAR_TABLE, VKN_FAR_N };
+const char *vkn_pass_fa_name(int why);
+typedef struct vkn_pass_stats5 {
+    uint64_t fa_tried, fa_why[VKN_FAR_N];              // passes of the current / joined set begun; by outcome (VKN_FAR_OK = narrowed, or would be)
+    uint64_t fa_passes, fa_would;                      // begun narrowed (1 / 3) / would have been (2)
+    uint64_t fa_clears, fa_poisoned;                   // attachments begun with a narrowed CLEAR; their outsides poisoned (3)
+    uint64_t fa_px_full, fa_px_area;                   // of the narrowed (or would-be) passes: target pixels / area pixels
+    uint64_t fa_saved_bytes;                           // the traffic model: (load + store) bytes of the texels left out
+    uint64_t fa_restart_draw, fa_restart_unknown, fa_would_restart, fa_bans;   // a draw outside / a draw not seen ended a narrowed pass; mode 2; bans
+    uint64_t fa_unknown_passes;                        // tracked passes with a draw this module could not see (no history from them)
+    uint64_t lc_queued, lc_in_pass, lc_flushed, lc_superseded, lc_breaks, lc_would;   // lazyclr: region clears held; run in the draw's pass / in a pass
+                                                       // of their own (as before) / dropped under a whole clear; barriers recorded while one waited (= empty passes not begun); mode 2
+    uint64_t bar_learned, bar_marks, bar_would;        // barlearn: full barriers given at once; textures marked; mode 2
+} vkn_pass_stats5;
+void vkn_pass_stats5_get(vkn_pass_stats5 *s);
 // ==== [P10] the merged tile pass (vkn_pass_tile.inc; docs/dos2/nr/VK-P10.md; DM_VK_NATIVE_TILELIGHT 0 / 1 / 2 verify / 3 poison) ====
 // The draw path's side. vkn_tile_hook != 0: ask vkn_tile_twin before the draw's textures are bound (a full-screen draw of the chain is
 // drawn with the input-attachment twin of its shader; NULL = as it is). vkn_pass_input: the view and layout of an INPUT_ATTACHMENT
@@ -216,14 +260,17 @@ extern int vkn_tile_redraw_on; int vkn_tile_redraw_begin(void); void vkn_tile_re
 int vkn_tile_usage(void);                    // 1 = targets are created with the input-attachment usage (the switch is on for this device)
 void vkn_tile_mode_set(int mode);            // host tests: the switch as given (-1 = from the environment / family again)
 const char *vkn_tile_reason(int miss, int i);
-typedef struct vkn_pass_stats5 {
+typedef struct vkn_pass_stats6 {
     int mode; uint32_t streak, primed, nsub, natt;                          // in effect; the learned chain
     uint64_t learned, twins, tried, begun, hits, bans, refused[12], miss[12];   // chains learned / twins made / begins tried, begun, complete; by reason
     uint64_t subpasses, foreign, passes_saved;                              // of complete chains: subpasses, foreign passes run before them, passes fewer
     uint64_t base_bytes, merged_bytes, saved_bytes;                         // the traffic model: the same passes apart / the merged pass / the difference
     uint64_t primed_pipes, poison, verify_targets, verify_bytes, verify_differ, verify_skipped, dropped;
-} vkn_pass_stats5;
-void vkn_pass_stats5_get(vkn_pass_stats5 *s);
+    uint64_t redraw_end_kept, redraw_lost;   // [P10 fix 3] mode 2: pass ends asked during a redraw (the subpass kept); redraws not routed to their scratch pass (dropped)
+    uint64_t deferred, store_revoked, stores_dropped, store_kept_nosplit;   // [P10 fix 6] merged passes recorded at the submit; discarded stores turned back to STORE by a later read of the recording / really dropped / kept for want of a split
+    uint64_t farea_full;   // [frame F1] complete chains drawn with the whole target as render area while DM_VK_NATIVE_FRAMEAREA is on (not applied to a merged pass)
+} vkn_pass_stats6;
+void vkn_pass_stats6_get(vkn_pass_stats6 *s);
 // Host tests: where twin modules and the two shader-library facts come from (NULL = the library): the twin's fragment module, declared
 // bindings and input table for (base object, variant); the vertex output program of location `loc`; "the support block of this viewport
 // has render scale 1" (0 = yes).

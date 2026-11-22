@@ -5,7 +5,7 @@
 #include "vkn.h"
 #include "vkn_state.h"
 #include "vkn_drv.h"   // [stage 5.3 V2] driver corrections at pipeline build (colour mask, depth bias x2, creation lock)
-#include "vkn_policy.h"   // [VK-DRV] the DM_GFX_SIM_GPU tokens of the capability models
+#include "vkn_policy.h"   // [VK-DRV] the DM_GFX_SIM_GPU tokens of the capability models; [mgpu P6] render-pass build mode by family
 #include "vkn_tex.h"   // [VK-DRV] vkn_tex_depth_stats: a D24 stand-in exists (DM_VK_NATIVE_D24_BIAS)
 #include <pthread.h>
 #include <stdlib.h>
@@ -408,9 +408,38 @@ static void rp_canon(vkn_rp_key *c, const vkn_rp_key *k) {
         if (c->depth_store > 1) c->depth_store = 1; if (c->stencil_store > 1) c->stencil_store = 1;
     }
 }
+// ==== [mgpu P6.2 / P6.3] how every render pass of the process is built (one decision, latched at the first pass: render-pass
+// compatibility needs the same dependencies in every pass, and pipelines are built against the first pass of a class):
+//   DM_VK_NATIVE_PASSDEP  1 = the external dependency after a pass waits in att / fragment / transfer stages only, not VERTEX_SHADER /
+//                         COMPUTE_SHADER (FN-32: the next pass's vertex work may overlap this pass's fragments). Exact: every later use
+//                         of an attachment in another stage goes through vkn_pass's own barrier (a layout change: ALL_COMMANDS, or the
+//                         tile barrier's fragment-only one followed by a full one for any other reader). 0 = as stage 3. Also on with
+//                         DM_VK_NATIVE_TILEBAR=2. Default: the render-pass tilers (vkn_policy_tile_pass) 1, others 0.
+//   DM_VK_NATIVE_TE       1 = an attachment that does not LOAD declares the attachment layout as its initial layout instead of
+//                         UNDEFINED (vkn_pass always moves it into that layout before the begin, so this is the truth): Mali keeps the
+//                         transaction-elimination signatures of unchanged tiles (FN-33). Exact. Default: Mali 1, others 0.
+extern int vkn_shlib_policy(void) __attribute__((weak));
+static struct { int done, dep, te; } g_rpmode;
+static void rp_mode(void) {
+    if (g_rpmode.done) return;
+    g_rpmode.done = 1;
+    const vkn_dev *d = vkn_device();
+    const int f0 = vkn_shlib_policy ? vkn_shlib_policy() : -1;
+    const int f = f0 >= 0 ? f0 : vkn_policy_family_from(d ? d->props.vendorID : 0, d ? d->props.deviceName : NULL, getenv("DM_GFX_SIM_GPU"));
+    const uint32_t drv = vkn_drv()->driver_id;
+    int fd = 0, ft = 0;
+    g_rpmode.dep = vkn_policy_env("DM_VK_NATIVE_PASSDEP", vkn_policy_tile_pass(f, drv) ? 1 : 0, 0, 1, &fd);
+    if (!fd && vkn_policy_env("DM_VK_NATIVE_TILEBAR", 0, 0, 2, NULL) == 2) g_rpmode.dep = 1;
+    g_rpmode.te = vkn_policy_env("DM_VK_NATIVE_TE", f == VKN_FAM_MALI ? 1 : 0, 0, 1, &ft);
+    vkn_logf("render passes (mgpu P6): family %s driverID %u: DM_VK_NATIVE_PASSDEP=%d (%s; %s), DM_VK_NATIVE_TE=%d (%s; %s)", vkn_policy_family_name(f), (unsigned)drv,
+             g_rpmode.dep, fd ? "env" : "family default", g_rpmode.dep ? "external dependency without vertex / compute stages" : "stage-3 dependency",
+             g_rpmode.te, ft ? "env" : "family default", g_rpmode.te ? "initial layout = attachment layout" : "initial layout UNDEFINED when not loaded");
+}
+int vkn_rp_mode_get(int *dep, int *te) { rp_mode(); if (dep) *dep = g_rpmode.dep; if (te) *te = g_rpmode.te; return 0; }
 static VkRenderPass rp_create(const vkn_rp_key *k) {
     const vkn_dev *d = vkn_device();
     if (!d) return VK_NULL_HANDLE;
+    rp_mode();   // [mgpu P6]
     VkAttachmentDescription at[9]; VkAttachmentReference cref[8], dref; uint32_t na = 0;
     memset(at, 0, sizeof at);
     for (uint32_t i = 0; i < k->ncolor; i++) {
@@ -419,7 +448,7 @@ static VkRenderPass rp_create(const vkn_rp_key *k) {
         a->format = (VkFormat)k->color[i]; a->samples = (VkSampleCountFlagBits)k->samples;
         a->loadOp = (VkAttachmentLoadOp)k->load[i]; a->storeOp = (VkAttachmentStoreOp)k->store[i];
         a->stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; a->stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        a->initialLayout = k->load[i] == VK_ATTACHMENT_LOAD_OP_LOAD ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        a->initialLayout = vkn_rp_initial(k->load[i] == VK_ATTACHMENT_LOAD_OP_LOAD, g_rpmode.te, 0);   // [mgpu P6.3]
         a->finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         cref[i].attachment = na++; cref[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
@@ -429,7 +458,7 @@ static VkRenderPass rp_create(const vkn_rp_key *k) {
         a->loadOp = (VkAttachmentLoadOp)k->depth_load; a->storeOp = (VkAttachmentStoreOp)k->depth_store;
         a->stencilLoadOp = (VkAttachmentLoadOp)k->stencil_load; a->stencilStoreOp = (VkAttachmentStoreOp)k->stencil_store;
         const int loaded = k->depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || k->stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD;
-        a->initialLayout = loaded ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        a->initialLayout = vkn_rp_initial(loaded, g_rpmode.te, 1);   // [mgpu P6.3]
         a->finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         dref.attachment = na++; dref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
@@ -448,7 +477,7 @@ static VkRenderPass rp_create(const vkn_rp_key *k) {
     dep[0].dstStageMask = att_st; dep[0].dstAccessMask = att_rw;
     dep[1].srcSubpass = 0; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     dep[1].srcStageMask = att_st; dep[1].srcAccessMask = att_w;
-    dep[1].dstStageMask = att_st | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    dep[1].dstStageMask = vkn_rp_dep_after(g_rpmode.dep);   // [mgpu P6.2] (stage 3: att | transfer | vertex | fragment | compute)
     dep[1].dstAccessMask = att_rw | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     VkRenderPassCreateInfo ci; memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;

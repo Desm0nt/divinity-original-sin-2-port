@@ -156,7 +156,8 @@ typedef struct vkn_ui_pass_stats {
     uint64_t fc_pages, fc_page_bytes, fc_rd_hits, fc_rd_real, lh_lazy_bound, lh_lazy_skipped;
     uint64_t lh_dsclip, region_dsclip;   // [mgpu P7c] region epochs proven DS-dead after them; their DS draws / masked clears clipped to the region
     uint64_t lh_dsclip_no, fc_page_off;  // [mgpu P7d] region epochs with a DS use not proven dead (read later / run end / a whole clear); the pages turned off by a self-check
-    uint64_t fc_guard, fc_diff_edge, fc_rd_verify;   // (+ verified hits then read from their page)     // [mgpu P7e] regions grown by the guard band; self-check differences that lie only within 3 texels of the region's edge
+    uint64_t fc_guard, fc_diff_edge, fc_rd_verify;
+    uint64_t fc_unstable, fc_unstable_drop, fc_iv_refused, fc_own_writes, fc_engine_writes, fc_cmp_skip;   // [mgpu P7g]   // [mgpu P7g] epochs whose input changed between the key and the draw; entries dropped / not stored for it   // (+ verified hits then read from their page)     // [mgpu P7e] regions grown by the guard band; self-check differences that lie only within 3 texels of the region's edge
 } vkn_ui_pass_stats;
 // [mgpu P7] flush reasons: an engine draw / depth read on GDraw's binding (a custom draw), a conflicting engine use, the layer used by the
 // engine (Combine), a pass end (a piece, the recording's close), the size limit, other

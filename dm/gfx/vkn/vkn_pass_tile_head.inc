@@ -2,9 +2,9 @@
 enum { TL_NONE = 0, TL_REC, TL_SUSP };
 enum { TL_SUBS = VKN_MP_SUBS, TL_ATTS = VKN_MP_ATTS, TL_SECS = 16, TL_TWINS = 64 };
 // why a chain did not begin (refusals) / did not complete (misses)
-enum { TLR_HIST, TLR_BAN, TLR_PRIME, TLR_HINT, TLR_QUERY, TLR_OFFFRAME, TLR_TARGET, TLR_PASS, TLR_COOL, TLR_N };
+enum { TLR_HIST, TLR_BAN, TLR_PRIME, TLR_HINT, TLR_QUERY, TLR_OFFFRAME, TLR_TARGET, TLR_PASS, TLR_COOL, TLR_LAZY, TLR_N };
 static const char *const k_tlr[TLR_N] = {"no learned chain", "banned after misses", "pipelines not built yet", "a UI area hint", "visibility queries on",
-    "off-frame recording", "a target died / changed", "render pass / framebuffer / buffer", "the classic frame after a miss (the observer looks again)"};
+    "off-frame recording", "a target died / changed", "render pass / framebuffer / buffer", "the classic frame after a miss (the observer looks again)", "a region clear waits for this pass (DM_VK_NATIVE_LAZYCLR)"};
 enum { TLM_TARGETS, TLM_TWIN, TLM_CONFLICT, TLM_SAMPLE, TLM_END, TLM_OTHER, TLM_DRAWS, TLM_N };
 static const char *const k_tlm[TLM_N] = {"other targets came", "a draw without its twin", "a foreign use of a chain texture", "a chain target sampled by a plain draw",
     "pass end (a piece / the recording's close)", "clear / area / other", "a second draw in a full-screen subpass"};
@@ -34,8 +34,8 @@ static struct {
 static int g_tl_mode, g_tl_outer; static uint32_t g_tl_epoch;
 int vkn_tile_hook; uint16_t vkn_tile_prime_compat; VkRenderPass vkn_tile_prime_rp;
 static uint64_t g_tl_prime_ns; static uint32_t g_tl_prime_frame;
-static vkn_pass_stats5 g_s5;
-void vkn_pass_stats5_get(vkn_pass_stats5 *s) { if (s) { *s = g_s5; s->mode = g_tl_mode; s->streak = g_tsh.streak; s->primed = g_tsh.primed; s->nsub = g_tsh.live ? g_tsh.nsub : 0; s->natt = g_tsh.live ? g_tsh.natt : 0; } }
+static vkn_pass_stats6 g_s6;
+void vkn_pass_stats6_get(vkn_pass_stats6 *s) { if (s) { *s = g_s6; s->mode = g_tl_mode; s->streak = g_tsh.streak; s->primed = g_tsh.primed; s->nsub = g_tsh.live ? g_tsh.nsub : 0; s->natt = g_tsh.live ? g_tsh.natt : 0; } }
 static uint32_t g_red_tl;
 extern int vkn_lf_fused_of(const vkn_shader *fx, const vkn_shader **light, char *v) __attribute__((weak));
 extern int vkn_shader_support_fill(float width, float height, void *dst, uint32_t bytes) __attribute__((weak));

@@ -99,6 +99,10 @@ typedef struct vkn_tex {
     // [P10] the merged tile pass (vkn_pass.c "P10"; recording thread): tl_ep == the chain's / the observer's epoch: attachment tl_i of it;
     // tl_rd == the chain's epoch: a draw of the chain sampled it (a foreign write of it must come after the chain)
     uint32_t tl_ep, tl_rd; uint8_t tl_i;
+    // [frame F1] DM_VK_NATIVE_FRAMEAREA (vkn_pass.c "frame area"; the recording thread): while fa_ok and fa_up == shc_up, every texel of
+    // level 0 outside the box fa_r (x0, y0, x1, y1; x1 <= x0 = no texel inside) holds the clear value fa_v (colour: the engine's four
+    // floats; depth: fa_v[0], stencil fa_s). Written by vkn_pass.c only; zero (unknown) at creation.
+    uint8_t fa_ok; uint32_t fa_s; int32_t fa_r[4]; float fa_v[4]; uint64_t fa_up;
 } vkn_tex;
 
 // Creates the texture (VkImage, memory, views) and queues its data. Replaces a texture still linked under the same handle index

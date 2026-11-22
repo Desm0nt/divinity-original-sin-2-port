@@ -33,6 +33,9 @@
 //                         3 poison (the threshold x 16: far shadows of medium objects vanish). _PX = the threshold: the caster's bounding
 //                         sphere diameter in texels of that cascade (default 1.0); _FROM = the first cascade it applies to (default 1).
 //   DM_VK_ENG_SHTILE      the cascade tile in texels for the size classes until the backend has seen the far tile (default 768).
+//   DM_VK_ENG_SHSTATIC    I1a, the persistent static-caster layer (block "[eng I1a]" below; doc section 13): 0 off (default), 1 on, 2 verify,
+//                         3 poison; _FROM / _STABLE / _MIN / _SHIFT / _TRUST / _AGE. Takes over the cascades' draw build (0xb15090) and
+//                         the shadow cull's gather (0xa87980, caller 0xb18234); line "[vkn] eng shstatic cK ..." every 10 s.
 // The texel size of a cascade: its camera's view-projection (camera+0x1e0, rows by the 0xa4c030 convention clip[c] = sum_r p[r] e[4r+c])
 // is orthographic; the larger length of its x / y columns = clip units per world unit; x tile / 2 = texels per world unit.
 //   DM_VK_ENG_OCC         I2 (VK-ENGINE-SIDE.md section 12; the backend half and the rule: dm/gfx/vkn/vkn_eocc.h): occlusion culling in
@@ -252,6 +255,241 @@ VKN_HOOK eh_recv(VKN_A) {   // 0xb17ed0(cull, obj, x2): void
     return g_o_recv(VKN_F);
 }
 
+// ================================================================================================ [eng I1a] DM_VK_ENG_SHSTATIC
+#include "../gfx/nr/nr_shst.h"
+static int env_int(const char *n, int def, int lo, int hi);
+// The persistent static-caster layer (docs/dos2/nr/VK-ENGINE-SIDE.md section 13; the rules: dm/gfx/nr/nr_shst.h; the backend half:
+// dm/gfx/vkn/vkn_shc.h block "eng I1a"). Facts (capstone of main.raw, 22.11):
+//   The cascade's draw build 0xb15090(sub) (sub-stage vtable 0x299b0a0 +0x68, a job thread): set-up commands into the cascade's command
+//     list sub+0x18 (cascade 0: the atlas clear, type 5; then render target 0x16, viewport 0x12 {T, T, [sub+0xb0] T, [sub+0xb8] T},
+//     T = [[sub+0x90]+0x340], per-view constants 0x17 from [sub+0xc0] + 64 i, [[sub+0xd0] + 4 i], camera [sub+0x98] +0x74 (12 B), +0x98 and
+//     the view-projection 0xa4be10(camera) (= camera+0x160 when clean), i = [sub+0xb8] + 2 [sub+0xb0]), then the cull stage's gather
+//     ([[sub+0xa8]] +0x20 = 0xb181e0: waits for the cull job, 0xa87980(cull+0x380, cull+0x400) makes the array cull+0x408 of {object,
+//     word, 0} entries (0x18 B), count = bits 24..47 of [cull+0x410]), the sort 0xa88090(0, n-1, cull+0x380, camera) by the objects'
+//     vtable +0x80 key, and for i = n-1 .. 0: object->vtable[+0xb8](object, entry, ctx) appends the caster's commands. ctx = 0x70 B on
+//     its stack: {list, (u32) 2, (u16) 0x10, [sub+0x10], sub, 0...}. [sub+0x48] = 0: immediate mode (no list; not taken over).
+//   The command list allocator 0x941720(list, size, align) returns the command's memory; the executor (0xa49c30 -> 0x93e5f0) runs
+//     command type 1 as a callback: [cmd+8](cmd+0x18, 1, 0) returns the payload's size (the command is 0x18 + that).
+// What the hooks do: the gather (caller 0xb18234 only, while this cascade's draw build is in a hook) hands the entry count over and
+// leaves 0 for the original (its sort and loop do nothing); after the original's set-up the hook plans (nr_shst.h), puts the entries
+// back in groups and gives them to the casters' own +0xb8 in the original's way, with callback commands (markers: vkn_shc.h) between
+// the groups and before each observed caster. The members of a valid layer are not given to the draw build at all.
+enum { SUB_CTX = 0x10, SUB_LIST = 0x18, SUB_DEFER = 0x48, SUB_D = 0x90, SUB_CAM = 0x98, SUB_TX = 0xb0, SUB_TY = 0xb8, SUB_VIEWS = 0xc0, SUB_FARS = 0xd0,
+       D_TILE = 0x340, CULL_LIST = 0x380, CULL_OUT = 0x400, CULL_ARR = 0x408, CULL_CNT = 0x410, CAM_POS = 0x74, CAM_AUX = 0x98, O_VT_SHADOW = 0xb8,   /* O_BOX = 0x14c: the census enum above */
+       ST_MAXN = 6144, ENT = 0x18 };
+typedef struct st_k {
+    int busy, have; uint64_t cull, cnt;      // the gather's hand-over (a cascade's draw build runs on one job at a time)
+    nrst_cas c; nrst_stats prev;
+    nrst_in in[ST_MAXN]; uint8_t grp[ST_MAXN]; int32_t slot[ST_MAXN]; uint32_t tag[ST_MAXN]; uint32_t perm[ST_MAXN];
+    uint8_t ent[ST_MAXN * ENT];
+    uint64_t busy_n, imm, many, farskip, calls, marks, given, left;
+} st_k;
+static int g_st, g_st_from = 1, g_st_off_said; static nrst_par g_stp;
+static st_k *g_stk[CAS];
+static vkn_fn g_o_dbuild, g_o_gath;
+static void *g_mark_stub; static uint64_t g_gath_ret;
+typedef uint64_t (*st_alloc_fn)(uint64_t list, uint64_t size, uint64_t align);
+typedef void (*st_sort_fn)(int lo, int hi, uint64_t list, uint64_t cam);
+typedef uint64_t (*st_vp_fn)(uint64_t cam);
+typedef void (*st_cast_fn)(uint64_t obj, uint64_t entry, uint64_t ctx);
+static void st_mark_rec(void *p) { vkn_shc_eng_st((const vkn_shst_mark *)p); }
+VKN_HOOK eh_mark(VKN_A) {   // command type 1: fn(payload, 1, 0) on the render thread, at its place among the cascade's draws
+    VKN_UNUSED;
+    if (a1 == 1 && a2 == 0 && a0) vkn_rt_call(st_mark_rec, (const void *)(uintptr_t)a0, sizeof(vkn_shst_mark));
+    return sizeof(vkn_shst_mark);
+}
+static void st_mark(st_k *s, uint64_t list, const vkn_shst_mark *m) {
+    uint8_t *p = (uint8_t *)(uintptr_t)((st_alloc_fn)(uintptr_t)(dm_vkn_base() + 0x941720))(list, 0x18 + sizeof *m, 8);
+    if (!p) return;
+    memset(p, 0, 0x18); p[0] = 1; memcpy(p + 8, &g_mark_stub, 8); memcpy(p + 0x18, m, sizeof *m);
+    s->marks++;
+}
+static void st_mark_k(st_k *s, uint64_t list, uint32_t kind, int k, uint32_t slot, uint32_t tag) {
+    vkn_shst_mark m; memset(&m, 0, sizeof m); m.magic = VKN_SHST_MAGIC; m.kind = kind; m.k = (uint32_t)k; m.slot = slot; m.tag = tag;
+    st_mark(s, list, &m);
+}
+VKN_HOOK eh_gath(VKN_A) {   // 0xa87980(list, out): the chunked list into the array (many callers; only the shadow cull's gather is ours)
+    const uint64_t rc = g_o_gath(VKN_F);
+    if (dm_vkn_caller() != g_gath_ret) return rc;
+    const uint64_t cull = a0 - CULL_LIST;
+    for (int k = g_st_from; k < CAS; k++) {
+        st_k *s = g_stk[k];
+        if (!s || !__atomic_load_n(&s->busy, __ATOMIC_ACQUIRE) || s->cull != cull || a1 != cull + CULL_OUT) continue;
+        const uint64_t v = vkn_rd64(cull + CULL_CNT), z = v & ~(0xffffffull << 24);
+        s->cnt = v; s->have = 1;
+        memcpy((void *)(uintptr_t)(cull + CULL_CNT), &z, 8);   // the original's sort and loop see no entry
+        break;
+    }
+    return rc;
+}
+static int st_verdict(void *u, uint32_t slot, uint32_t tag) { return vkn_shc_eng_st_verdict((int)(intptr_t)u, slot, tag); }
+static uint32_t st_words(uint64_t obj, uint64_t word) {
+    uint32_t h = words_hash(obj + O_SPHERE, 0x164 - O_SPHERE);   // sphere, radius, box
+    h = (h ^ vkn_rd32(obj + O_FLAGS)) * 16777619u; h = (h ^ (uint32_t)word) * 16777619u; h = (h ^ (uint32_t)(word >> 32)) * 16777619u;
+    return h;
+}
+// Entries [lo, hi] of the array in the original's way: sorted (unless observed: their markers follow the order of the plan), the last
+// first; observed casters get an OBJ marker before their commands.
+static void st_give(st_k *s, int k, uint64_t arr, uint64_t list, uint64_t cull, uint64_t cam, uint64_t ctx, uint32_t lo, uint32_t hi, int mark) {
+    if (hi <= lo) return;
+    if (!mark && hi - lo > 1) ((st_sort_fn)(uintptr_t)(dm_vkn_base() + 0xa88090))((int)lo, (int)(hi - 1), cull + CULL_LIST, cam);
+    for (uint32_t i = hi; i-- > lo;) {
+        const uint64_t e = arr + (uint64_t)i * ENT, obj = vkn_rd64(e);
+        if (!obj) continue;
+        if (mark) { const uint32_t o = s->perm[i]; st_mark_k(s, list, VKN_SHST_OBJ, k, s->slot[o] < 0 ? 0xffffffffu : (uint32_t)s->slot[o], s->tag[o]); }
+        ((st_cast_fn)(uintptr_t)vkn_rd64(vkn_rd64(obj) + O_VT_SHADOW))(obj, e, ctx);
+        s->given++;
+    }
+}
+static void st_frame(int k, st_k *s, uint64_t sub, uint64_t cull) {
+    const uint64_t mask = 0xffffffull << 24, now = vkn_rd64(cull + CULL_CNT), back = (now & ~mask) | (s->cnt & mask);
+    memcpy((void *)(uintptr_t)(cull + CULL_CNT), &back, 8);   // the count back (as the original leaves it)
+    const uint32_t n = (uint32_t)(s->cnt >> 24 & 0xffffff);
+    const uint64_t arr = vkn_rd64(cull + CULL_ARR), list = sub + SUB_LIST, cam = vkn_rd64(sub + SUB_CAM);
+    uint64_t ctx[32]; memset(ctx, 0, sizeof ctx);   // (the original's 0x70 bytes on its stack)
+    ctx[0] = list; { const uint32_t two = 2; const uint16_t f = 0x10; memcpy((uint8_t *)ctx + 8, &two, 4); memcpy((uint8_t *)ctx + 12, &f, 2); }
+    ctx[2] = vkn_rd64(sub + SUB_CTX); ctx[3] = sub;
+    const uint64_t cx = (uint64_t)(uintptr_t)ctx;
+    s->calls++;
+    if ((!arr && n) || !cam || n > ST_MAXN) {   // not planned: the original's own sort and loop
+        if (n > ST_MAXN) s->many++;
+        for (uint32_t i = 0; i < n; i++) s->perm[i] = i;
+        st_give(s, k, arr, list, cull, cam, cx, 0, arr ? n : 0, 0);
+        return;
+    }
+    // the camera words (what the cascade's per-view constants are made of) and the tile
+    uint32_t cw[NRST_CAMW];
+    const uint64_t vpp = ((st_vp_fn)(uintptr_t)(dm_vkn_base() + 0xa4be10))(cam);
+    const uint32_t ci = vkn_rd32(sub + SUB_TY) + 2u * vkn_rd32(sub + SUB_TX);
+    memcpy(cw + NRST_VP, (const void *)(uintptr_t)vpp, 64);
+    memcpy(cw + NRST_VIEW, (const void *)(uintptr_t)(vkn_rd64(sub + SUB_VIEWS) + 64ull * ci), 64);
+    memcpy(cw + NRST_POS, (const void *)(uintptr_t)(cam + CAM_POS), 12);
+    cw[NRST_FAR] = vkn_rd32(vkn_rd64(sub + SUB_FARS) + 4ull * ci); cw[NRST_AUX] = vkn_rd32(cam + CAM_AUX);
+    const int32_t T = (int32_t)vkn_rd16(vkn_rd64(sub + SUB_D) + D_TILE);
+    const int32_t rect[4] = {(int32_t)vkn_rd32(sub + SUB_TX) * T, (int32_t)vkn_rd32(sub + SUB_TY) * T, T, T};
+    // the casters
+    if (n) memcpy(s->ent, (const void *)(uintptr_t)arr, (size_t)n * ENT);
+    for (uint32_t i = 0; i < n; i++) {
+        const uint64_t obj = vkn_rd64(arr + (uint64_t)i * ENT), word = vkn_rd64(arr + (uint64_t)i * ENT + 8);
+        s->in[i].key = obj ? obj : 1; s->in[i].h = obj ? st_words(obj, word) : 0;
+        if (obj) memcpy(s->in[i].box, (const void *)(uintptr_t)(obj + O_BOX), 24); else memset(s->in[i].box, 0, 24);
+    }
+    nrst_par p = g_stp;
+    if (vkn_shc_eng_st_bad() >= 3) {
+        p.mode = 0;
+        if (!g_st_off_said) { g_st_off_said = 1; vkn_logf(ENG_RED "eng: DM_VK_ENG_SHSTATIC: %d reuses could not be honoured by the backend: static casters are drawn every frame for this session", vkn_shc_eng_st_bad()); }
+    }
+    uint32_t ae = 0; const int as = vkn_shc_eng_st_ack(k, &ae), safe = vkn_shc_eng_st_safe();
+    uint32_t ack_e = 0; int ack_bad = 0; nrst_ack_view(safe, s->c.epoch, ae, as, &ack_e, &ack_bad);   // [fix2]
+    nrst_plan pl; nrst_plan_frame(&s->c, &p, s->in, n, cw, rect, st_verdict, (void *)(intptr_t)k, ack_e, ack_bad, s->grp, s->slot, s->tag, &pl);
+    // the order of the groups: BUILD STATIC | MID | OBS | NONE | DYN; REUSE TOUCH | OBS | NONE | DYN (LEFT not given); VERIFY OBS | NONE |
+    // DYN | V1 | LEFT | V2 | TOUCH; OFF / HOLD OBS | NONE | DYN
+    // [fix2] DM_VK_ENG_SHSTATIC_SAFE: REUSE SKIP0 | LEFT | SKIP1 | TOUCH | OBS | NONE | DYN (the members first: skipped by the backend when the
+    // layer's camera matched at their first draw, drawn otherwise)
+    static const uint8_t k_ord_all[2][NRST_A_N][5] = {
+        {{NRST_G_OBS, NRST_G_DYN, 255, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255, 255},
+         {NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH, 255}},
+        {{NRST_G_OBS, NRST_G_DYN, 255, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255, 255},
+         {NRST_G_LEFT, NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN, 255}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH, 255}}};
+    const uint8_t (*k_ord)[5] = k_ord_all[safe ? 1 : 0];
+    uint32_t lo[NRST_G_N], cnt[NRST_G_N] = {0}, at = 0;
+    for (uint32_t i = 0; i < n; i++) cnt[s->grp[i]]++;
+    for (int j = 0; j < 5 && k_ord[pl.act][j] != 255; j++) { lo[k_ord[pl.act][j]] = at; at += cnt[k_ord[pl.act][j]]; }
+    const uint32_t given_n = at;
+    for (int g = 0; g < NRST_G_N; g++) { int in = 0; for (int j = 0; j < 5; j++) in |= k_ord[pl.act][j] == g; if (!in) { lo[g] = at; at += cnt[g]; } }
+    uint32_t fill[NRST_G_N]; memcpy(fill, lo, sizeof fill);
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t d = fill[s->grp[i]]++;
+        s->perm[d] = i;
+        memcpy((void *)(uintptr_t)(arr + (uint64_t)d * ENT), s->ent + (size_t)i * ENT, ENT);
+    }
+    vkn_shst_mark m; memset(&m, 0, sizeof m);
+    m.magic = VKN_SHST_MAGIC; m.kind = VKN_SHST_START; m.k = (uint32_t)k; m.act = (uint32_t)pl.act; m.epoch = pl.epoch; m.nx = pl.nx; m.ny = pl.ny;
+    memcpy(m.rect, rect, sizeof m.rect); for (int g = 0; g < 5; g++) m.n[g] = pl.n[g]; m.n[5] = pl.members;
+    st_mark(s, list, &m);
+#define GIVE(g, mk) st_give(s, k, arr, list, cull, cam, cx, lo[g], lo[g] + cnt[g], mk)
+    switch (pl.act) {
+    case NRST_A_BUILD: GIVE(NRST_G_STATIC, 1); st_mark_k(s, list, VKN_SHST_MID, k, 0, 0); GIVE(NRST_G_OBS, 1); st_mark_k(s, list, VKN_SHST_NONE, k, 0, 0); GIVE(NRST_G_DYN, 0); break;
+    case NRST_A_REUSE:
+        if (safe) { st_mark_k(s, list, VKN_SHST_SKIP0, k, 0, 0); GIVE(NRST_G_LEFT, 0); st_mark_k(s, list, VKN_SHST_SKIP1, k, 0, 0); }
+        GIVE(NRST_G_TOUCH, 0); GIVE(NRST_G_OBS, 1); st_mark_k(s, list, VKN_SHST_NONE, k, 0, 0); GIVE(NRST_G_DYN, 0); break;
+    case NRST_A_VERIFY:
+        GIVE(NRST_G_OBS, 1); st_mark_k(s, list, VKN_SHST_NONE, k, 0, 0); GIVE(NRST_G_DYN, 0);
+        st_mark_k(s, list, VKN_SHST_V1, k, 0, 0); GIVE(NRST_G_LEFT, 0); st_mark_k(s, list, VKN_SHST_V2, k, 0, 0); GIVE(NRST_G_TOUCH, 0); break;
+    default: GIVE(NRST_G_OBS, 1); st_mark_k(s, list, VKN_SHST_NONE, k, 0, 0); GIVE(NRST_G_DYN, 0); break;
+    }
+#undef GIVE
+    st_mark_k(s, list, VKN_SHST_END, k, 0, 0);
+    s->left += n - given_n;
+}
+VKN_HOOK eh_dbuild(VKN_A) {   // 0xb15090(sub): the cascade's draw build (a job thread)
+    const uint64_t sub = a0, cull = sub ? vkn_rd64(sub + SUB_CULL) : 0;
+    int k = -1;
+    for (int i = 0; i < CAS && cull; i++) if (__atomic_load_n(&g_cull[i], __ATOMIC_RELAXED) == cull) { k = i; break; }
+    st_k *s = k >= g_st_from ? g_stk[k] : NULL;
+    if (!s) return g_o_dbuild(VKN_F);
+    if (!vkn_rd8(sub + SUB_DEFER)) { s->imm++; return g_o_dbuild(VKN_F); }   // immediate mode: no list to put markers in
+    if (k == __atomic_load_n(&g_far_idx, __ATOMIC_RELAXED) && __atomic_load_n(&g_skip, __ATOMIC_ACQUIRE)) { s->farskip++; return g_o_dbuild(VKN_F); }   // I1b left it out
+    if (__atomic_exchange_n(&s->busy, 1, __ATOMIC_ACQ_REL)) { s->busy_n++; return g_o_dbuild(VKN_F); }
+    s->cull = cull; s->have = 0;
+    const uint64_t rc = g_o_dbuild(VKN_F);
+    if (s->have) st_frame(k, s, sub, cull);   // (no gather: the original returned before it - shadows off in the settings)
+    __atomic_store_n(&s->busy, 0, __ATOMIC_RELEASE);
+    return rc;
+}
+static void st_census(void) {
+    typedef unsigned long long ull;
+    for (int k = g_st_from; k < CAS; k++) {
+        st_k *s = g_stk[k]; if (!s) continue;
+        nrst_stats c = s->c.st, d; const uint64_t *x = (const uint64_t *)&c, *y = (const uint64_t *)&s->prev; uint64_t *z = (uint64_t *)&d;
+        for (size_t i = 0; i < sizeof d / 8; i++) z[i] = x[i] - y[i];
+        s->prev = c;
+        if (!d.frames) continue;
+        const double f = (double)d.frames;
+        char b[1000]; size_t o = 0;
+        o += (size_t)snprintf(b + o, sizeof b - o, "eng shstatic c%d (DM_VK_ENG_SHSTATIC=%d, last 10 s, %llu builds of the cascade): off %llu, hold %llu, build %llu, reuse %llu (exact %llu, shifted %llu, before the ack %llu), verify %llu; "
+                              "casters a frame %.0f: left out %.0f, strip touchers %.0f, members drawn at a build %.0f, observed %.0f, other %.0f; members %.0f; dropped [", k, g_st, (ull)d.frames,
+                              (ull)d.act[NRST_A_OFF], (ull)d.act[NRST_A_HOLD], (ull)d.act[NRST_A_BUILD], (ull)d.act[NRST_A_REUSE], (ull)d.exact, (ull)d.shifted, (ull)d.optimistic, (ull)d.act[NRST_A_VERIFY],
+                              d.objs / f, d.left / f, d.touch / f, d.statics / f, d.obs / f, d.dyn / f, d.members / f);
+        for (int r = 1, m = 0; r < NRST_R_N && o < sizeof b - 64; r++) if (d.drop[r]) o += (size_t)snprintf(b + o, sizeof b - o, "%s%s %llu", m++ ? ", " : "", nrst_r_name(r), (ull)d.drop[r]);
+        o += (size_t)snprintf(b + o, sizeof b - o, "]; no build: few candidates %llu, camera moving %llu; acks good %llu bad %llu; table full %llu; immediate %llu, busy %llu, too many %llu, far left out %llu; markers %llu",
+                              (ull)d.nob[NRST_N_FEW], (ull)d.nob[NRST_N_MOVING], (ull)d.acks_good, (ull)d.acks_bad, (ull)d.full, (ull)s->imm, (ull)s->busy_n, (ull)s->many, (ull)s->farskip, (ull)s->marks);
+        s->imm = s->busy_n = s->many = s->farskip = s->marks = 0;
+        vkn_logf("%s", b);
+    }
+}
+// Registration (from dm_vkn_eng_register): the switch, the tables, the marker stub; 1 = the hooks are wanted.
+static int st_register(void) {
+    g_st = env_int("DM_VK_ENG_SHSTATIC", 0, 0, 3);
+    if (!g_st) return 0;
+    if (vkn_shc_eng_st_mode() != g_st) { vkn_logf("eng: DM_VK_ENG_SHSTATIC=%d but the shadow cache's half is %d (vkn_shc.h): 0", g_st, vkn_shc_eng_st_mode()); g_st = 0; return 0; }
+    g_st_from = vkn_shc_eng_st_from();
+    g_stp = nrst_par_default(); g_stp.mode = g_st;
+    g_stp.stable = (uint32_t)env_int("DM_VK_ENG_SHSTATIC_STABLE", 8, 1, 10000); g_stp.min_static = (uint32_t)env_int("DM_VK_ENG_SHSTATIC_MIN", 16, 1, 100000);
+    g_stp.shift_max = (uint32_t)env_int("DM_VK_ENG_SHSTATIC_SHIFT", 64, 0, 1024); g_stp.trust = (uint32_t)env_int("DM_VK_ENG_SHSTATIC_TRUST", 0, 0, 1);   // ([fix2] 0)
+    g_stp.age = (uint32_t)env_int("DM_VK_ENG_SHSTATIC_AGE", 1800, 2, 1000000);
+    g_mark_stub = dm_vkn_stack_stub_ex((void *)eh_mark, "ShadowStaticMarker", DM_VKN_SF_ENC);
+    for (int k = g_st_from; k < CAS && g_mark_stub; k++) { if (!(g_stk[k] = (st_k *)calloc(1, sizeof(st_k)))) break; nrst_init(&g_stk[k]->c); }
+    if (!g_mark_stub || !g_stk[CAS - 1]) {
+        vkn_logf(ENG_RED "eng: DM_VK_ENG_SHSTATIC=%d: no %s: 0", g_st, g_mark_stub ? "memory for the cascade tables" : "host-stack stub for the marker command");
+        for (int k = 0; k < CAS; k++) { free(g_stk[k]); g_stk[k] = NULL; }
+        g_st = 0; return 0;
+    }
+    g_gath_ret = (uint64_t)(uintptr_t)(dm_vkn_base() + 0xb18234);
+    vkn_logf("eng (VK-ENGINE-SIDE I1a): DM_VK_ENG_SHSTATIC=%d (%s) from cascade %d: stable %u frames, min %u, shift %u texels, trust %u, age %u; tables %.1f MB",
+             g_st, g_st == 1 ? "static casters left out while their cascade's layer holds" : g_st == 2 ? "verify" : "POISON", g_st_from, g_stp.stable, g_stp.min_static, g_stp.shift_max,
+             g_stp.trust, g_stp.age, (CAS - g_st_from) * sizeof(st_k) / 1048576.0);
+    return 1;
+}
+static void st_install(void) {
+    // First 4 instructions (capstone; none PC-relative).
+    static const uint32_t k_dbuild[4] = {0xd10483ff /* sub sp,sp,#0x120 */, 0xa90c6ffc, 0xa90d67fa, 0xa90e5ff8};
+    static const uint32_t k_gath[4] = {0xf81c0ff7 /* str x23,[sp,#-0x40]! */, 0xa90157f6, 0xa9024ff4, 0xa9037bfd};
+    dm_vkn_stack_flag((void *)eh_dbuild, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)eh_gath, DM_VKN_SF_ENC);
+    dm_vkn_site(0xb15090, k_dbuild, "ShadowCascade::BuildDraws", (void *)eh_dbuild, &g_o_dbuild, VKN_M_NATIVE);
+    dm_vkn_site(0xa87980, k_gath, "CullList::Gather", (void *)eh_gath, &g_o_gath, VKN_M_NATIVE);
+}
+
 // ---- the main-view receiver: census; I2 ----
 static void main_census(uint64_t stage, uint64_t obj, uint32_t fl) {
     ADD(m_calls, 1);
@@ -347,6 +585,7 @@ static void eng_census(void) {
                  g_shmin, g_shmin == 3 ? g_shmin_px * 16.0f : g_shmin_px, g_shmin_from, c.small_left[0] / fb, c.small_left[1] / fb, c.small_left[2] / fb, c.small_left[3] / fb,
                  c.small_would[0] / fb, c.small_would[1] / fb, c.small_would[2] / fb, c.small_would[3] / fb);
     if (g_census >= 2) vkn_eng_census();
+    if (g_st) st_census();   // [eng I1a]
 }
 
 static int env_int(const char *n, int def, int lo, int hi) { const char *v = getenv(n); if (!v || !*v) return def; const int x = atoi(v); return x < lo || x > hi ? def : x; }
@@ -374,7 +613,8 @@ void dm_vkn_eng_register(void) {
              g_census, g_rate, g_period, g_move, g_rate == 1 ? "the far cascade left out of every N-th build but one" : g_rate == 2 ? "count" : g_rate == 3 ? "POISON" : "off",
              g_shmin, g_shmin_px, g_shmin_from, g_shmin == 1 ? "small casters kept out" : g_shmin == 2 ? "count" : g_shmin == 3 ? "POISON x16" : "off");
     if (g_occ) vkn_logf("eng occ: DM_VK_ENG_OCC=%d (I2, VK-ENGINE-SIDE.md section 12), bit-0 objects %s", g_occ, g_occ_bit0 ? "included" : "left out (DM_VK_ENG_OCC_BIT0=0)");
-    if (!g_census && !g_rate && !g_shmin && !g_occ) return;
+    const int st = st_register();   // [eng I1a]
+    if (!g_census && !g_rate && !g_shmin && !g_occ && !st) return;
     if (g_census && !(g_ot = (ot_e *)calloc(OT_N, sizeof *g_ot))) vkn_logf(ENG_RED "eng census: no memory for the object table (static vs moving not counted)");
     if (g_census >= 2) vkn_eng_install();
     // First 4 instructions of each site (capstone; none PC-relative).
@@ -384,8 +624,9 @@ void dm_vkn_eng_register(void) {
     static const uint32_t k_main[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9026ffc, 0xa90367fa, 0xa9045ff8};
     dm_vkn_stack_flag((void *)eh_recv, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)eh_build, DM_VKN_SF_ENC);
     dm_vkn_stack_flag((void *)eh_exec, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)eh_main, DM_VKN_SF_ENC);
-    if (g_census || g_rate || g_shmin) {
+    if (g_census || g_rate || g_shmin)   // ([eng I1a] alone needs only the build: it names the cascades' cull stages)
         dm_vkn_site(0xb17ed0, k_recv, "ShadowCullReceiver", (void *)eh_recv, &g_o_recv, VKN_M_NATIVE);
+    if (g_census || g_rate || g_shmin || st) {
         dm_vkn_site(0xb15ae0, k_build, "ShadowStage::Build", (void *)eh_build, &g_o_build, VKN_M_NATIVE);
         dm_vkn_site(0xb164d0, k_exec, "ShadowStage::Execute", (void *)eh_exec, &g_o_exec, VKN_M_NATIVE);
         static const uint32_t k_res[4] = {0xa9ba6ffc /* stp x28,x27,[sp,#-0x60]! */, 0xa90167fa, 0xa9025ff8, 0xa90357f6};
@@ -397,6 +638,7 @@ void dm_vkn_eng_register(void) {
         else dm_vkn_site(0xb0c570, k_main, g_occ ? "ObjectGather(occ)" : "ObjectGather(census)", (void *)eh_main, &g_o_main, VKN_M_NATIVE);
     }
     if (g_occ) dm_vkn_census(vkn_eocc_census);
+    if (st) st_install();   // [eng I1a]
     g_census_frame0 = 0;
     dm_vkn_census(eng_census);
 }

@@ -295,7 +295,7 @@ static void vkn_pass_census(void) {
         q0 = q;
     }
     {   // [P10] the merged tile pass (vkn_pass_tile.inc, docs/dos2/nr/VK-P10.md): chains, why not, the traffic model's MB saved
-        static vkn_pass_stats5 t0; static uint64_t f0; vkn_pass_stats5 t; vkn_pass_stats5_get(&t);
+        static vkn_pass_stats6 t0; static uint64_t f0; vkn_pass_stats6 t; vkn_pass_stats6_get(&t);
         vkn_pass_stats4 q; vkn_pass_stats4_get(&q);
         const double ft = q.frames > f0 ? (double)(q.frames - f0) : 1.0;
         if (t.mode || t.learned) {
@@ -307,10 +307,11 @@ static void vkn_pass_census(void) {
 #define DT(x) ((double)(t.x - t0.x) / ft)
             vkn_logf("pass ends: tile pass (DM_VK_NATIVE_TILELIGHT=%d; a presented frame over %.0f): chain learned %u subpasses / %u attachments (streak %u, pipelines ready %u; learned %llu times, twins %llu); "
                      "begun %.2f, complete %.2f (subpasses %.2f, foreign passes before it %.2f, passes fewer %.2f); model MB a frame: apart %.1f, merged %.1f, saved %.1f; %s; "
-                     "pipelines built ahead %llu, bans %llu, poison clears %.2f; verify: targets compared %llu, bytes %llu, differ %llu, skipped %llu",
+                     "pipelines built ahead %llu, bans %llu, poison clears %.2f; verify: targets compared %llu, bytes %llu, differ %llu, skipped %llu; "
+                     "merged passes with the whole target as render area although DM_VK_NATIVE_FRAMEAREA is on %.2f",
                      t.mode, ft, t.nsub, t.natt, t.streak, t.primed, (unsigned long long)t.learned, (unsigned long long)t.twins, DT(begun), DT(hits), DT(subpasses), DT(foreign), DT(passes_saved),
                      DT(base_bytes) / mb, DT(merged_bytes) / mb, DT(saved_bytes) / mb, o ? why : "no refusals", (unsigned long long)t.primed_pipes, (unsigned long long)t.bans, DT(poison),
-                     (unsigned long long)t.verify_targets, (unsigned long long)t.verify_bytes, (unsigned long long)t.verify_differ, (unsigned long long)t.verify_skipped);
+                     (unsigned long long)t.verify_targets, (unsigned long long)t.verify_bytes, (unsigned long long)t.verify_differ, (unsigned long long)t.verify_skipped, DT(farea_full));
 #undef DT
         }
         t0 = t; f0 = q.frames;

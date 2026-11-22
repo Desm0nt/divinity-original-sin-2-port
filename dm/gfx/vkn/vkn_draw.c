@@ -33,7 +33,7 @@
 #include "vkn_tex.h"
 #include "../nr/nr_draw.h"   // [stage 5, draw cost] nr_fold_index / nr_fold_vertex / nr_vb_runs (the old path's folds, pure C)
 #include "vkn_sort.h"         // [rt2 R7] DM_VK_NATIVE_SORT: the graphics commands below go through vkn_sort while it is on (weak: absent = off)
-extern int vkn_sort_on __attribute__((weak)); extern int vkn_sort_cap __attribute__((weak));
+extern int vkn_sort_on __attribute__((weak)); extern int vkn_sort_cap __attribute__((weak)); extern int vkn_sort_list __attribute__((weak));
 uint64_t vkn_pass_begins(void) __attribute__((weak));
 #define SORT (&vkn_sort_on && vkn_sort_on)
 
@@ -1072,9 +1072,10 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     } else if (bind_textures(s, in, NULL, 0, 0)) return -1;
     vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
     vkn_prof_mark(VKN_PROF_TEX);   // [stage 5 A0 probes]
+    vkn_pass_draw_in = in;   // [frame F1] the draw this pass serves (its viewport / scissor: vkn_pass.h; taken and cleared by vkn_pass_ready)
     if (vkn_pass_ready(pi)) { g_st.dropped_pass++; DRAW_RED(R_PASS, "no render pass for the current targets (shader %#llx, draw dropped)", (unsigned long long)in->shader); return -1; }
     cb = vkn_cb_peek();   // [P10] the pass may have moved the recording into / out of a subpass buffer (vkn_cb_route; the router forgot what was bound)
-    if (SORT) (void)vkn_sort_eligible(did, pi->ncolor, pi->write_mask, pi->has_depth, s, g_fx_nest > 0, prim != in->prim, vkn_pass_begins ? vkn_pass_begins() : 0);   // [rt2 R7]
+    if (SORT) { vkn_sort_list = prim == 1; (void)vkn_sort_eligible(did, pi->ncolor, pi->write_mask, pi->has_depth, s, g_fx_nest > 0, prim != in->prim, vkn_pass_begins ? vkn_pass_begins() : 0); }   // [rt2 R7] ([frame F2] a triangle list: its index ranges may be joined)
     vkn_prof_mark(VKN_PROF_PASS);   // [stage 5 A0 probes]
     // pipeline
     vkn_pipe_desc pd; memset(&pd, 0, sizeof pd);
@@ -1502,4 +1503,9 @@ void vkn_draw_resolve(const vkn_draw_in *in, int indexed, vkn_draw_pre *p) {
 
 void vkn_draw_stats_get(vkn_draw_stats *s) { if (s) *s = g_st; }
 void vkn_draw_stats2_get(vkn_draw_stats2 *s) { if (s) *s = g_st2; }
+// [frame F1] draws recorded + every drop of the draw path, without the two struct copies (vkn_pass.c draw_stamp: per engine draw)
+uint64_t vkn_draw_stamp(void) {
+    return g_st.draws + g_st.dropped_shader + g_st.dropped_state + g_st.dropped_pipe + g_st.dropped_pass + g_st.dropped_prim + g_st2.dropped_bind + g_st2.dropped_vb + g_st2.dropped_ib +
+           g_st2.dropped_viewport + g_st2.dropped_variant + g_st2.dropped_set + g_st2.dropped_cb + g_st2.scissor_empty + g_st2.placeholder_fail;
+}
 #endif
