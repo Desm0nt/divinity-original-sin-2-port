@@ -4,6 +4,8 @@
 #ifdef DM_GAME_DOS2
 #include "vkn_prepass.h"
 #include "vkn_draw.h"
+#include "vkn_buf.h"
+#include "vkn_fx.h"
 #include "vkn_frame.h"
 #include "vkn_pass.h"
 #include "vkn_query.h"
@@ -34,6 +36,7 @@ static struct {
     // [fixpp] one chain function only (the chain has 12 places and the merged tree uses 10 of them): the override of the draw in hand
     // is checked at the next call of this function against the chain's skip counter (vkn_fx_stats.skipped) taken when it was given
     int pend; uint64_t pend_key, pend_skipped;
+    int repair;   // [eng3] DM_VK_NATIVE_PREPASS_REPAIR (default 1): skipped draws no G-buffer draw claimed are drawn again late
     int nofs_rule;   // [mgpu P4] DM_VK_NATIVE_PREPASS_NOFS
     vkn_prepass_test_fn test;
 } g;
@@ -114,6 +117,129 @@ static int pair_open(void) {   // a report pair is open now (COND != 0 only: wit
     vkn_query_stats q; vkn_query_stats_get(&q);
     return q.begins > q.ends;
 }
+// [eng2] the instance of a draw: its per-object block = vertex binding 0 ("PGlobals" of every DOS2 material program: WorldMatrix at 0
+// for static meshes, BoneMatrices from 0 and WorldMatrix at 6144 for skinned ones, DecalViewMatrix for decals). The GLSLC reflection of
+// the game's 1860 DEP / DEF program pairs (Materials.pak + Engine.pak): 1800 have the same block, the other 60 differ only by trailing
+// members of the DEF one (decal dimensions), never in the first 64 / 128 bytes - so the depth pre-pass draw and the G-buffer draw of
+// one object hash the same bytes, two objects of one mesh at different places do not. Hashed: bytes [0, 64) (block < 128 bytes) or
+// [0, 128) (>= 128), plus [6144, 6208) of a skinned block. 0 = no block of >= 64 bytes (instanced STI programs, screen quads): no
+// identity - such a draw is never skipped (keep "noid") and never claims. Only a shader whose vertex stage declares that block counts:
+// an announced block persists (vkn_draw_ubo), so a program without it would carry the previous draw's one.
+static uint64_t inst_id(const vkn_shader *sh) {
+    int has = 0;
+    for (uint16_t i = 0; sh && i < sh->nbind && !has; i++) has = sh->bind[i].kind == VKN_BK_UNIFORM && sh->bind[i].stage == 0 && sh->bind[i].slot == 0;
+    if (!has) return 0;
+    uint32_t off = 0, n = 0;
+    if (vkn_draw_ubo_get(0, 0, &off, &n) || n < 64) return 0;
+    static const uint8_t *ring; if (!ring) ring = (const uint8_t *)vkn_ring_cpu();
+    if (!ring) return 0;
+    const uint8_t *p = ring + off; uint64_t h = 0x50474c4f42414c53ull, w;
+    const uint32_t m = n >= 128 ? 128 : 64;
+    for (uint32_t i = 0; i < m; i += 8) { memcpy(&w, p + i, 8); h = mix(h, w); }
+    if (n >= 6208) for (uint32_t i = 6144; i < 6208; i += 8) { memcpy(&w, p + i, 8); h = mix(h, w); }
+    return h ? h : 1;
+}
+// ---------------------------------------------------------------- [eng3] the skipped draws, kept for a late repair
+// Phone G03 (Mali model, 140 s walk): one frame "unmatched 1, unsafe 1" - a skipped pre-pass draw whose G-buffer draw did not come in the
+// G-buffer pass (it came later in another pass, under other per-object bytes, or not at all): its depth stayed missing for what came
+// after. Every skipped draw is now kept here (its inputs, the constant blocks it saw, the slot ids, the buffer versions) for the table
+// it belongs to. Two things use it:
+//   twin by mesh  a G-buffer draw whose instance key has no pre-pass draw this frame but whose MESH key (index range) has a skipped draw
+//                 nobody claimed is that draw's G-buffer draw with other per-object bytes (the block changed between the two passes):
+//                 it claims for it (mode 1: the override), instead of drawing EQUAL against the missing depth;
+//   repair        before the first draw after the G-buffer pass that could see the scene depth without them - a draw into it in another
+//                 colour pass, or any draw that samples it - every skipped draw still unclaimed is drawn again into the scene depth (the
+//                 same draw: the depth pass is min(depth, z) of LESS / LEQUAL fragments, its order does not matter), with the engine
+//                 shader (the pieces' variants write the same depth). From then on the depth is the one the pre-pass would have left.
+// A copy or a dispatch that reads the depth first is still seen only afterwards (counted bad, as before).
+enum { REC_N = 512 };
+typedef struct pp_ub { uint32_t off, size; uint8_t ok; } pp_ub;
+typedef struct pp_rec {
+    uint64_t key, mesh; vkn_draw_in in; uint32_t first, count, inst; uint8_t has_t[2], has_s[2], done;
+    int32_t tex[2][VKN_TEX_SLOTS], smp[2][VKN_TEX_SLOTS]; pp_ub ub[2][VKN_UBO_SLOTS]; uint64_t vver[3], iver;
+} pp_rec;
+static pp_rec *g_rec; static uint32_t g_nrec; static uint64_t g_rec_frame, g_rec_depth; static vkn_tex *g_rec_D;
+enum { MESH_N = 1024 };
+static uint64_t g_mesh_k[MESH_N]; static uint32_t g_mesh_n[MESH_N];   // mesh key -> skipped records (a hint for the twin search)
+static void rec_reset(uint64_t frame, uint64_t depth, vkn_tex *D) {
+    if (g_rec_D) vkn_tex_unref(g_rec_D);
+    g_rec_D = D && vkn_tex_ref(D) ? D : NULL;
+    g_nrec = 0; g_rec_frame = frame; g_rec_depth = depth;
+    memset(g_mesh_n, 0, sizeof g_mesh_n);
+}
+static uint32_t *mesh_slot(uint64_t mesh, int create) {
+    uint32_t i = (uint32_t)(mesh * 0x9E3779B97F4A7C15ull >> 54) & (MESH_N - 1);
+    for (int p = 0; p < 16; p++, i = (i + 1) & (MESH_N - 1)) {
+        if (g_mesh_n[i] && g_mesh_k[i] == mesh) return &g_mesh_n[i];
+        if (!g_mesh_n[i]) { if (!create) return NULL; g_mesh_k[i] = mesh; return &g_mesh_n[i]; }
+    }
+    return NULL;
+}
+static int rec_room(void) {
+    if (!g_rec && !(g_rec = (pp_rec *)malloc(REC_N * sizeof *g_rec))) return 0;
+    return g_nrec < REC_N;
+}
+static void rec_add(uint64_t key, uint64_t mesh, const vkn_draw_in *in, const vkn_fx_ctx *ctx) {
+    pp_rec *r = &g_rec[g_nrec++];
+    r->key = key; r->mesh = mesh; r->in = *in; r->first = ctx->first; r->count = ctx->count; r->inst = ctx->instances ? ctx->instances : 1; r->done = 0;
+    for (int st = 0; st < 2; st++) {
+        r->has_t[st] = in->tex[st] != NULL; r->has_s[st] = in->smp[st] != NULL;
+        if (in->tex[st]) memcpy(r->tex[st], in->tex[st], sizeof r->tex[st]);
+        if (in->smp[st]) memcpy(r->smp[st], in->smp[st], sizeof r->smp[st]);
+        for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) r->ub[st][sl].ok = !vkn_draw_ubo_get(st, sl, &r->ub[st][sl].off, &r->ub[st][sl].size);
+    }
+    for (int i = 0; i < 3; i++) r->vver[i] = in->vb[i] ? vkn_buf_version(VKN_BUF_VB, in->vb[i], NULL) : 0;
+    r->iver = in->ib ? vkn_buf_version(VKN_BUF_IB, in->ib, NULL) : 0;
+    uint32_t *m = mesh_slot(mesh, 1); if (m) (*m)++;
+}
+// Draws the records of the table still owed (skipped - claimed - repaired, per key) into the scene depth. ok: nothing read the depth first.
+static void repair_all(vkn_fx_out *out, int ok) {
+    prepass_frame *f = &g.pp->f;
+    if (!g_nrec || !g_rec_D || f->depth != g_rec_depth) return;
+    vkn_fx_out keep = *out;
+    uint32_t n0 = 0, lay[VKN_PASS_COLORS], mip[VKN_PASS_COLORS]; vkn_tex *col[VKN_PASS_COLORS], *dep = NULL, *held[VKN_PASS_COLORS + 1];
+    vkn_pass_cur_get(&n0, col, lay, mip, &dep);
+    for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) { vkn_tex *t = i < VKN_PASS_COLORS ? col[i] : dep; held[i] = t && vkn_tex_ref(t) ? t : NULL; }
+    pp_ub ub0[2][VKN_UBO_SLOTS];
+    for (int st = 0; st < 2; st++) for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) ub0[st][sl].ok = !vkn_draw_ubo_get(st, sl, &ub0[st][sl].off, &ub0[st][sl].size);
+    int switched = 0;
+    for (uint32_t i = 0; i < g_nrec; i++) {
+        pp_rec *r = &g_rec[i];
+        if (r->done) continue;
+        r->done = 1;
+        prepass_slot *sl = prepass_find(f, r->key, 0);
+        if (!sl || sl->used + sl->repaired >= sl->skipped) continue;   // claimed (or repaired) already
+        int stale = r->in.ib && vkn_buf_version(VKN_BUF_IB, r->in.ib, NULL) != r->iver;
+        for (int k = 0; k < 3; k++) if (r->in.vb[k] && vkn_buf_version(VKN_BUF_VB, r->in.vb[k], NULL) != r->vver[k]) stale = 1;
+        if (stale) { g.s.repair_stale++; pred(R_BAD, "repair: a skipped draw's vertex / index buffer was written since it was skipped: not drawn again (its depth stays missing this frame)"); continue; }
+        if (!switched) { vkn_fx_bypass(1); vkn_pass_targets(0, NULL, NULL, NULL, g_rec_D); switched = 1; }
+        vkn_draw_in in = r->in;
+        in.tex[0] = r->has_t[0] ? r->tex[0] : NULL; in.tex[1] = r->has_t[1] ? r->tex[1] : NULL;
+        in.smp[0] = r->has_s[0] ? r->smp[0] : NULL; in.smp[1] = r->has_s[1] ? r->smp[1] : NULL;
+        for (int st = 0; st < 2; st++) for (uint32_t u = 0; u < VKN_UBO_SLOTS; u++) if (r->ub[st][u].ok) vkn_draw_ubo(st, u, r->ub[st][u].off, r->ub[st][u].size);
+        if (vkn_draw_indexed(&in, r->first, r->count, r->inst)) { g.s.repair_drop++; pred(R_BAD, "repair: the draw path dropped a skipped draw drawn again (its depth stays missing this frame)"); continue; }
+        prepass_note_repair(g.pp, r->key, 1, ok);
+        g.s.repaired++;
+    }
+    if (switched) {
+        for (int st = 0; st < 2; st++) for (uint32_t u = 0; u < VKN_UBO_SLOTS; u++) if (ub0[st][u].ok) vkn_draw_ubo(st, u, ub0[st][u].off, ub0[st][u].size);
+        vkn_pass_targets(n0, col, lay, mip, dep);
+        vkn_fx_bypass(0);
+        g.s.repair_runs++;
+    }
+    for (uint32_t i = 0; i <= VKN_PASS_COLORS; i++) if (held[i]) vkn_tex_unref(held[i]);
+    *out = keep;
+    g_nrec = 0;   // (the table is repaired: a later claim of those keys only gives an override, harmless on the restored depth)
+}
+static int samples_tex(const vkn_draw_in *in, const vkn_shader *sh, const vkn_tex *D) {   // the draw's shader reads D through a slot
+    if (!sh || !D || D->pool_id == ~0u) return 0;
+    for (uint16_t i = 0; i < sh->nbind; i++) {
+        const vkn_bind *b = &sh->bind[i];
+        if (b->kind != VKN_BK_TEXTURE || b->stage > 1 || b->slot >= VKN_TEX_SLOTS) continue;
+        const int32_t *ids = in->tex[b->stage]; if (ids && ids[b->slot] == (int32_t)D->pool_id) return 1;
+    }
+    return 0;
+}
 static int read_layout(VkImageLayout l) {
     return l == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || l == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL || l == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
            l == VK_IMAGE_LAYOUT_GENERAL || l == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
@@ -126,7 +252,10 @@ static void line_of(const prepass_result *r) {
              "df never=%u less=%u equal=%u lequal=%u greater=%u notequal=%u gequal=%u always=%u override=%u refused func=%u blend=%u kill=%u raster=%u stencil=%u lost=%u "
              "vbdiff=%u hazards stencil=%u bounds=%u func=%u pass=%u blendw=%u read=%u | keys=%u ok=%u unsafe_keys=%u bad=%u unmatched=%u ambiguous=%u refused_keys=%u "
              "unsafe=%u | total skipped=%llu override=%llu bad_frames=%llu bad_keys=%llu fallbacks=%llu; backend: facts unknown %llu, pre-pass draws kept in an open "
-             "report pair %llu, overrides lost after the chain %llu, ds table full %llu, red lines %llu; [mgpu] fragment stage dropped by an earlier piece %llu (rule %d)",
+             "report pair %llu, overrides lost after the chain %llu, ds table full %llu, red lines %llu; [mgpu] fragment stage dropped by an earlier piece %llu (rule %d); "
+             "[I3] G-buffer stencil draws whose result does not depend on depth (no hazard) %llu; [eng2] instance keys: kept without an identity %u, "
+             "same instance twice (exact, not bad) %u; [eng3] skipped draws drawn again late (no G-buffer draw claimed them) %u (total %llu in %llu "
+             "runs, stale %llu, dropped %llu), G-buffer twins found by mesh (other per-object bytes) %llu, kept for lack of a record %llu",
              g.mode, g.pp->gate, (unsigned long long)r->frame, r->pre_draws, r->pre_cand, r->pre_skip, (unsigned long long)r->pre_verts, (unsigned long long)r->cand_verts,
              (unsigned long long)r->skip_verts, (unsigned long long)r->keep_verts, r->keep[PREPASS_K_KILL], r->keep[PREPASS_K_FS], r->keep[PREPASS_K_STATE],
              r->keep[PREPASS_K_STENCIL], r->keep[PREPASS_K_ALPHA], r->keep[PREPASS_K_COUNTING], r->keep[PREPASS_K_NOTINDEXED], r->keep[PREPASS_K_LATE],
@@ -137,7 +266,9 @@ static void line_of(const prepass_result *r) {
              r->hazard[PREPASS_H_BLENDW], r->hazard[PREPASS_H_READ], r->keys, r->ok_keys, r->unsafe_keys, r->bad_keys, r->unmatched, r->ambiguous, r->refused, r->unsafe,
              (unsigned long long)g.pp->total_skipped, (unsigned long long)g.pp->total_override, (unsigned long long)g.pp->total_bad_frames, (unsigned long long)g.pp->total_bad_keys,
              (unsigned long long)g.s.fallbacks, (unsigned long long)g.s.facts_unknown, (unsigned long long)g.s.counting_open, (unsigned long long)g.s.lost,
-             (unsigned long long)g.s.ds_full, (unsigned long long)g.s.reds, (unsigned long long)g.s.nofs, g.nofs_rule);
+             (unsigned long long)g.s.ds_full, (unsigned long long)g.s.reds, (unsigned long long)g.s.nofs, g.nofs_rule, (unsigned long long)g.s.st_free, r->keep[PREPASS_K_NOID], r->amb_same, r->repaired, (unsigned long long)g.s.repaired,
+             (unsigned long long)g.s.repair_runs, (unsigned long long)g.s.repair_stale, (unsigned long long)g.s.repair_drop, (unsigned long long)g.s.twin_mesh,
+             (unsigned long long)g.s.rec_full);
 }
 static void retired(void) {
     const prepass_result *r = &g.pp->last; const uint32_t bad = g.pp->prev_frame_bad;
@@ -164,6 +295,18 @@ static void pp_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
         g.pend = 0;
     }
     vkn_tex *d = ctx->depth;
+    // [eng3] the repair point: unclaimed skips of the open table, and this draw is past the G-buffer pass or reads the scene depth
+    if (g_nrec && g.mode == PREPASS_SKIP && g.repair && ctx->frame == g_rec_frame && g.pp->f.depth == g_rec_depth) {
+        prepass_frame *f = &g.pp->f;
+        int colors0 = 0; uint64_t ph0 = 0x9E3779B97F4A7C15ull;
+        for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) { if (ctx->color[i]) colors0 = 1; ph0 = mix(ph0, (uint64_t)(uintptr_t)ctx->color[i]); }
+        const int on_d = d && (uint64_t)(uintptr_t)d == g_rec_depth;
+        const int other_pass = on_d && colors0 && f->gb_pass && (ph0 ? ph0 : 1) != f->gb_pass;
+        const int reads = samples_tex(in, ctx->shader, g_rec_D);
+        int ok = 1;
+        if (!on_d && g_rec_D && f->pre_cand > f->claims && read_layout(g_rec_D->layout)) { prepass_note_read(g.pp, g_rec_depth); g.s.reads++; ok = 0; }   // read already (a copy / dispatch)
+        if (other_pass || reads || !ok) repair_all(out, ok);
+    }
     if (!d || g.mode <= 0) return;
     if (prepass_frame_begin(g.pp, ctx->frame)) retired();
     if (g.mode <= 0) return;
@@ -178,7 +321,10 @@ static void pp_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
     uint8_t a[8]; memset(a, 0, sizeof a);
     if (ds) vkn_ds_args(ds, a);   // test, write, func (Vulkan op), stencil on, mask, func, fail, pass; id 0 = depth test off
     const int idx = ctx->indexed;
-    const uint64_t key = idx ? prepass_key(in->ib, (int32_t)ctx->first, (int32_t)ctx->count, 0, ctx->instances, 0) : 0;
+    // [eng2] the key names the instance (mesh range x per-object block, inst_id): two objects of one mesh no longer share a key, so a
+    // G-buffer override can no longer go to the other one (phone D09: "ambiguous 2" in 4 frames of 40 s, each frame drawn wrong)
+    const uint64_t iid = idx ? inst_id(ctx->shader) : 0;
+    const uint64_t key = iid ? mix(prepass_key(in->ib, (int32_t)ctx->first, (int32_t)ctx->count, 0, ctx->instances, 0), iid) | 1 : 0;
     const uint64_t vb0 = in->vb[0] * 0x9E3779B97F4A7C15ull ^ in->vb_off[0];
     if (!colors) {
         g.s.pre_seen++;
@@ -193,8 +339,14 @@ static void pp_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
         prepass_pre_in pi; memset(&pi, 0, sizeof pi);
         pi.key = key; pi.vb0 = vb0; pi.verts = (uint64_t)ctx->count * (ctx->instances ? ctx->instances : 1);
         pi.why = prepass_classify(fsc, a[0], a[1], a[3], in->alpha_ref >= 0.0f ? 5 : PREPASS_NVN_ALWAYS_ALPHA, counting, idx, out->discard);
+        if (pi.why < 0 && idx && !iid) { pi.why = PREPASS_K_NOID; g.s.noid++; }   // [eng2] no instance identity: kept
         if (pi.why < 0) pi.raster = raster_hash(in, ctx->raster);   // only a candidate's raster state is kept
-        if (prepass_note_pre(g.pp, serial, &pi) && (g.mode == PREPASS_SKIP || g.mode == PREPASS_POISON)) { out->skip = 1; g.s.skipped++; }
+        if (ctx->frame != g_rec_frame || serial != g_rec_depth) rec_reset(ctx->frame, serial, d);   // [eng3] a new table
+        if (pi.why < 0 && g.mode == PREPASS_SKIP && g.repair && !rec_room()) { pi.why = PREPASS_K_FULL; g.s.rec_full++; }   // (no record: never skipped)
+        if (prepass_note_pre(g.pp, serial, &pi) && (g.mode == PREPASS_SKIP || g.mode == PREPASS_POISON)) {
+            out->skip = 1; g.s.skipped++;
+            if (g.mode == PREPASS_SKIP && g.repair) rec_add(key, prepass_key(in->ib, (int32_t)ctx->first, (int32_t)ctx->count, 0, ctx->instances, 0), in, ctx);
+        }
         return;
     }
     g.s.gb_seen++;
@@ -205,19 +357,42 @@ static void pp_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
     for (uint32_t i = 0; i < VKN_PASS_COLORS; i++) ph = mix(ph, (uint64_t)(uintptr_t)ctx->color[i]);
     gi.pass = ph ? ph : 1;
     gi.dt = a[0]; gi.df = a[0] ? a[2] + 1 : 0; gi.dw = a[1]; gi.st = a[3]; gi.bounds = 0;   // NVN func = Vulkan op + 1 (1 NEVER .. 8 ALWAYS)
+    // [VK-ENGINE-SIDE I3] the stencil hazard only when the stencil result depends on the depth test (xbg_prepass.h st_split): a[4] the
+    // write (and compare) mask, a[6] / a[7] the depth-fail / depth-pass ops (the fail op of the stencil test itself is KEEP)
+    gi.st_split = 1; gi.st_dep = a[3] && a[0] && a[4] && a[6] != a[7];
+    if (a[3] && !gi.st_dep) g.s.st_free++;
+    // [VK-ENGINE-SIDE I3] "blend" = a real blend, or a draw that may leave a channel of a target unwritten. The backend builds every
+    // pipeline with the write mask = all channels of the target's format (vkn_write_mask_nvn; vkn_state.h: the engine's blend carries
+    // no mask), so an R11G11B10F / RG16F / R8 target is written whole: it is NOT a partial mask (this check refused every G-buffer draw
+    // of DOS2 - 3 of its 4 targets have fewer than 4 channels: phone logs "refused blend=328 ... keys=382 ok=0"). A format the table does
+    // not know (mask 0) or a draw whose fragment stage an earlier piece dropped (it writes no colour) still counts as one.
     const VkPipelineColorBlendAttachmentState *ba = ctx->blend ? vkn_blend_att(ctx->blend) : NULL;
+    if (out->no_fs) gi.blend = 1;
     for (uint32_t i = 0; i < VKN_PASS_COLORS && !gi.blend; i++) {
         const vkn_tex *c = ctx->color[i]; if (!c) continue;
-        if ((ba && ba->blendEnable) || vkn_write_mask_nvn(c->nvn_fmt) != 0xFu) gi.blend = 1;
+        if ((ba && ba->blendEnable) || !vkn_write_mask_nvn(c->nvn_fmt)) gi.blend = 1;
     }
     // the engine shader's facts: a swap at this point is MAT's XLQ object, which keeps the engine's fragment module (vkn_mat.h)
     const int fsc = s && !vkn_fx_shader_is(s) ? fs_class(s) : -1;
     gi.kill = fsc < 0 || fsc == 2 || in->alpha_ref >= 0.0f;   // unknown facts: may kill
+    // [eng3] twin by mesh: no pre-pass draw has this instance key, but a skipped draw of the same index range is unclaimed - this is its
+    // G-buffer draw with other per-object bytes (the block changed between the two passes): it claims for that skipped draw
+    if (key && g_nrec && serial == g_rec_depth && !prepass_find(&g.pp->f, key, 0)) {
+        const uint64_t mesh = prepass_key(in->ib, (int32_t)ctx->first, (int32_t)ctx->count, 0, ctx->instances, 0);
+        uint32_t *m = mesh_slot(mesh, 0);
+        for (uint32_t i = 0; m && *m && i < g_nrec; i++) {
+            const pp_rec *r = &g_rec[i]; if (r->mesh != mesh || r->done) continue;
+            const prepass_slot *sl = prepass_find(&g.pp->f, r->key, 0);
+            if (!sl || sl->gb_ok >= sl->cand) continue;   // (its claims are complete)
+            gi.key = r->key; gi.raster = raster_hash(in, ctx->raster); g.s.twin_mesh++; (*m)--;
+            break;
+        }
+    }
     if (!prepass_note_gbuffer(g.pp, serial, &gi) || g.mode != PREPASS_SKIP) return;
     const uint16_t v = leq_of(ds);
-    if (!v) { prepass_note_lost(g.pp, key); g.s.lost++; return; }
+    if (!v) { prepass_note_lost(g.pp, gi.key); g.s.lost++; return; }
     out->ds = v; g.s.overrides++;
-    { vkn_fx_stats fs; vkn_fx_stats_get(&fs); g.pend = 1; g.pend_key = key; g.pend_skipped = fs.skipped; }
+    { vkn_fx_stats fs; vkn_fx_stats_get(&fs); g.pend = 1; g.pend_key = gi.key; g.pend_skipped = fs.skipped; }
 }
 
 // ---------------------------------------------------------------- install, census, tests
@@ -225,6 +400,7 @@ static int family_tile(uint32_t v, const char *n) {   // xbg_tile_family(xbg_eff
     const char *sim = getenv("DM_GFX_SIM_GPU");
     if (sim && (strstr(sim, "mali") || strstr(sim, "pvr") || strstr(sim, "powervr"))) return 1;
     if (v == 0x13B5 || v == 0x1010) return 1;
+    if (v == 0x5143) return 1;   // [23.11] on again: H02 (Turnip, 140 s walk) and H01 (Mali model) 0 bad keys with the eng3 repair;   // [22.11] back to 0: G03 (Mali model, walking 140 s) had 1 bad key "unmatched 1, unsafe 1"; was Adreno too after the phone (F09 Turnip walking: 0 bad keys, skip 223 of 625, not slower; D09 had 4 before the eng2 key fix)
     return n && (strstr(n, "Mali") || strstr(n, "PowerVR") || strstr(n, "IMG ")) ? 1 : 0;
 }
 static int reg_fn(void) {
@@ -233,7 +409,7 @@ static int reg_fn(void) {
 }
 static int alloc_ctx(void) {
     if (!g.pp && !(g.pp = (prepass_ctx *)malloc(sizeof *g.pp))) { pred(R_CFG, "no memory for the tables (%zu KB): off", sizeof *g.pp / 1024); return 0; }
-    prepass_ctx_init(g.pp, g.hist); g.pp->admit_limit = g.admit;
+    prepass_ctx_init(g.pp, g.hist); g.pp->admit_limit = g.admit; g.pp->ident = 1;   // [eng2] instance keys (inst_id)
     return 1;
 }
 void vkn_prepass_install(uint32_t vendor, const char *device_name) {
@@ -245,6 +421,7 @@ void vkn_prepass_install(uint32_t vendor, const char *device_name) {
     const char *ad = getenv("DM_VK_NATIVE_PREPASS_ADMIT"); g.admit = ad && *ad && atol(ad) >= 0 ? (uint32_t)atol(ad) : 32u;
     const char *l = getenv("DM_VK_NATIVE_PREPASS_LOG"); g.log_every = l && *l && atol(l) > 0 ? (uint64_t)atol(l) : 300u;
     { const char *nf = getenv("DM_VK_NATIVE_PREPASS_NOFS"); g.nofs_rule = nf && *nf ? atol(nf) != 0 : 1; }   // [mgpu P4]
+    { const char *rp = getenv("DM_VK_NATIVE_PREPASS_REPAIR"); g.repair = rp && *rp ? atol(rp) != 0 : 1; }   // [eng3]
     vkn_logf("DM_VK_NATIVE_PREPASS=%d (stage 5.2 B4, replaces DM_DOS2_PREPASS; %s; family default %d): %s; history gate %d, new meshes admitted a frame %u (0 = all); "
              "line every %llu frames", g.mode, e && *e ? "env" : "family default", def,
              g.mode == PREPASS_SKIP ? "opaque pre-pass draws skipped, their G-buffer draws LEQUAL + depth write" : g.mode == PREPASS_COUNT ? "compare - decisions and their check, nothing changes" :
@@ -259,7 +436,7 @@ void vkn_prepass_stats_get(vkn_prepass_stats *s) { if (s) *s = g.s; }
 void vkn_prepass_census(void) { if (g.inst && g.pp && g.pp->last_valid) line_of(&g.pp->last); }
 void vkn_prepass_test_setup(int mode, vkn_prepass_test_fn fn) {
     memset(g_fs_s, 0, sizeof g_fs_s);
-    g.test = fn; g.mode = prepass_clamp_mode(mode); g.hist = 1; g.admit = 32; g.log_every = 1; g.logged = 0; g.pend = 0; g.nofs_rule = 1;
+    g.test = fn; g.mode = prepass_clamp_mode(mode); g.hist = 1; g.admit = 32; g.log_every = 1; g.logged = 0; g.pend = 0; g.nofs_rule = 1; g.repair = 1; rec_reset(0, 0, NULL);
     memset(g.leq, 0, sizeof g.leq);
     g.inst = g.mode && alloc_ctx() && reg_fn();
     if (!g.inst) g.mode = 0;

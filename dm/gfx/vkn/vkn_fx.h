@@ -120,6 +120,9 @@ typedef struct vkn_fx_shader_src {
     VkShaderModule vs, fs;                         // fs VK_NULL_HANDLE = no fragment stage
     const vkn_bind *bind; uint32_t nbind;
     uint8_t ninputs; uint8_t inputs[16], input_classes[16];
+    // [P10] an input-attachment twin (vkn_pass.c): texture bindings (TEXTURE / FX_TEX) may have type INPUT_ATTACHMENT (the draw path asks
+    // vkn_pass_input for their view and layout); c1_from != NULL: VKN_BK_C1 bindings are allowed and fed from that object's static C1 blocks
+    const struct vkn_shader *c1_from;
 } vkn_fx_shader_src;
 const vkn_shader *vkn_fx_shader_create(const vkn_fx_shader_src *src);
 static inline int vkn_fx_shader_is(const vkn_shader *s) { return s && s->id >= (uint32_t)VKN_FX_SHADER_ID0; }

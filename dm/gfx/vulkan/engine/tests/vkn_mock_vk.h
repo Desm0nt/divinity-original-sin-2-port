@@ -92,6 +92,7 @@ typedef struct mk_obj {
     // stage 3
     VkImageLayout gpu_layout;                                     // image: layout as the GPU executes the submissions (validator)
     uint64_t ev_first; int began;                                 // command buffer: log sequence number of its last begin
+    uint64_t inh_rp; uint32_t inh_sub, inh_flags; int inh;        // [P10 fix 3] command buffer: the begin's flags and inheritance (render pass, subpass)
     uint64_t pend_seq;                                            // command buffer / fence: submission sequence while in flight (0 = not)
     uint64_t *uses; uint32_t nuses, capuses;                      // command buffer: objects its last submitted recording uses
     uint32_t max_sets, nsets;                                     // descriptor pool
@@ -534,7 +535,8 @@ VkResult vkBeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo
     if (mk_fail_begin > 0) { mk_fail_begin--; pthread_mutex_unlock(&mk_mu); return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
     mk_obj *o = mk_cb(cb, "vkBeginCommandBuffer", 0);
     if (o && o->pend_seq) mk_err("vkBeginCommandBuffer of a command buffer still in flight");
-    if (o) { o->cb_state = 1; o->ev_first = mk_log(cb, MK_E_BEGIN_CB)->seq; o->began = 1; }
+    if (o) { o->cb_state = 1; o->ev_first = mk_log(cb, MK_E_BEGIN_CB)->seq; o->began = 1;
+        o->inh_flags = bi ? bi->flags : 0; o->inh = bi && bi->pInheritanceInfo; o->inh_rp = o->inh ? (uint64_t)(uintptr_t)bi->pInheritanceInfo->renderPass : 0; o->inh_sub = o->inh ? bi->pInheritanceInfo->subpass : 0; }
     pthread_mutex_unlock(&mk_mu); return VK_SUCCESS;
 }
 VkResult vkEndCommandBuffer(VkCommandBuffer cb) {
@@ -1390,6 +1392,12 @@ static void mk_replay_x(mk_obj *cbo, mk_obj *src, VkCommandBuffer cb, mk_vstate 
         case MK_E_EXECUTE: {
             mk_obj *so = mk_find(e->a[0], MK_CB);
             if (!so) { MK_V("executed secondary buffer is dead"); break; }
+            {   // [P10 fix 3] what a driver takes from the begin of a secondary buffer (Turnip reads its subpass from the inheritance, not the caller)
+                mk_obj *irp = so->inh_rp ? mk_any(so->inh_rp) : NULL;
+                if (!(so->inh_flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) || !so->inh) MK_V("secondary buffer executed in a render pass without RENDER_PASS_CONTINUE / inheritance");
+                else if (!irp || irp->kind != MK_RP || !st.rp_real || !mk_rp_compat(&irp->rp, &st.rp_real->rp)) MK_V("secondary buffer inherits a render pass incompatible with the open one");
+                else if (so->inh_sub != st.sub) MK_V("secondary buffer inherits subpass %u, executed in subpass %u", so->inh_sub, st.sub);
+            }
             { const mk_ev *keep = mk_v_ev; mk_replay_x(cbo, so, (VkCommandBuffer)(uintptr_t)e->a[0], &st); mk_v_ev = keep; }
             st.gpipe = 0; st.gset = 0; memset(st.vb, 0, sizeof st.vb); st.ib = 0; st.vp = st.sc = 0;   // (nothing bound survives vkCmdExecuteCommands)
             break;

@@ -118,6 +118,54 @@ typedef struct vkn_shlib_named_hacks {
 } vkn_shlib_named_hacks;
 void vkn_shlib_named_hacks_get(vkn_shlib_named_hacks *h);
 
+// ==== [P10] input-attachment twins for the merged tile pass (docs/dos2/nr/VK-P10.md) ====
+// The chain G-buffer -> LinearizeDepth -> CascadedPCF -> fused light as one render pass with subpasses (tile GPUs): the three full-screen
+// draws read the earlier subpasses' attachments as input attachments. Their fragment modules ("twins") are built into the backend
+// (dm/android/shaders/tile_*.frag.spv.inc + the table tile_twins.inc, made and proven by tools/dos2_tile_shaders.py: twin == the module
+// it replaces, bit for bit on the interpreter): the same GLSL with the chain's own textures as subpassInput and the render-scale slow
+// path compiled out. No setup run, no pack change.
+// A twin is handed out ONLY for the exact module it was proven against: FNV-1a 64 + word count of the SPIR-V the key has now (the pack's
+// named / Dref bundle; for 'f' / 'g' the bundle vkn_shlib_named_fused hands out, built-in capped forms included) must be the table
+// row's (a pack built by setup's pinned glslc from this tree's sources carries those bytes; for the fused ones that includes the
+// player's DeferredSky c1, also compared on its own). Then: head = the translated head byte for byte except the length word, output
+// locations equal, input locations equal (VKN_TILE_C_CENTER: the coordinate's location may be absent - the twin does not read it), every
+// descriptor of the twin declared by the replaced module (a twin may declare fewer: an unread support block), the depth-compare
+// bindings equal (a Dref twin keeps VKN_BF_CMP on the atlas), the input attachments of the twin's words equal to the table row.
+// A translated module (DM_VK_NATIVE_SH 0 / 2, DM_VK_NATIVE_SH_PCF=0, a refused pack bundle) has no twin; the non-fused Light and
+// DeferredSky have none either (the chain is built around the fused light).
+#define VKN_TILE_C_SCALE1 1u   // valid only while the support block's ten render-scale floats (sb._m5[0..9]) are all 1.0
+#define VKN_TILE_C_CENTER 2u   // (LinearizeDepth) binding[0] replaced texture(s, TexCoord0.xy) of fragment input location `center_loc`:
+                               // the caller proves the coordinate is the own pixel's centre and the sampler is NEAREST
+#define VKN_TILE_C_SHARE  4u   // (variants 'F' / 'G') the Sky part declares no G-buffer bindings of its own: it reads bindings 10 / 22 / 16 /
+                               // 34 where the fused module read 200 / 206 / 212 / 224 - the caller proves each pair holds the same image
+typedef struct vkn_tile_var {
+    uint8_t n;                 // input attachments the module declares (0 = none)
+    uint8_t binding[16];       // descriptor set 0 binding of each (ascending)
+    uint8_t index[16];         // its input_attachment_index
+    uint8_t center_loc;        // with VKN_TILE_C_CENTER: the fragment input location of the coordinate (LinearizeDepth: 1)
+    uint32_t cond;             // VKN_TILE_C_*
+} vkn_tile_var;
+// The input-attachment twin of the fragment module the library hands out for the engine fragment key `fs_key` (variant 0: whatever
+// module that key has now - named / Dref; a translated one has no twin), or of the fused light of that Light key (variant 'f' / 'g',
+// exactly the module vkn_shlib_named_fused(fs_key, variant) hands out, capped forms included: 11 input attachments; variant 'F' / 'G':
+// the same module's VKN_TILE_C_SHARE form, 7 input attachments, for devices whose maxPerStageDescriptorInputAttachments is below 11).
+// `out` / `declared` as vkn_shlib_named_fused (the module loaded through the library's whole load-time chain under its own key
+// "<key>#nt" / "#ntf" / "#ntg" / "#ntF" / "#ntG"; out->bindings = the head table: the caller retypes the listed ones); *var: the table
+// above. >= 8 MB stack. 0 = ok; 1 = no twin for this module / a check refused (one line); -1 = the library is not up.
+int vkn_shlib_named_tile(const char *fs_key, char variant, xbg_vkn_stage *out, uint64_t declared[4], vkn_tile_var *var);
+// The straight-line program (dm/gfx/nr/nr_cover.h nr_cv_prog; out[0], out[1] = x, y) of the VERTEX stage's output at `location` of an
+// engine shader (as vkn_shlib_vs_pos gives gl_Position; xbg_spirv_out_prog of the final words, which are read again from the bundle:
+// call it once per shader and keep the answer; >= 8 MB stack). 0 = filled, else not such a program.
+struct nr_cv_prog; struct vkn_shader;
+int vkn_shlib_vs_out_prog(const struct vkn_shader *s, uint32_t location, struct nr_cv_prog *out);
+// Counters (the census line) and the host test's door: the checks of vkn_shlib_named_tile for (fs_key, variant) with one fault put in
+// (1 the replaced module's hash, 2 an input_attachment_index, 3 a binding the replaced module lacks, 4 an output location). 1 = refused
+// as it must be, 0 = accepted (a hole), -1 = no twin to test with. Nothing is loaded.
+typedef struct vkn_tile_stats { uint64_t ok, none, refused; const char *last; } vkn_tile_stats;   // last: the built-in file (tile_*) of the twin handed out last, NULL none
+void vkn_shlib_named_tile_stats(vkn_tile_stats *s);
+int vkn_shlib_named_tile_fault(const char *fs_key, char variant, int fault);
+// ==== [/P10]
+
 #ifdef __cplusplus
 }
 #endif

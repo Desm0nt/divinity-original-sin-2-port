@@ -1702,7 +1702,7 @@ void vkn_shc_install(void) {
                               : "verify: drawn every frame, the frame before's far tile compared with this frame's every second frame (\"rate cmp\" in the census)");
     }
     {   // [eng I1b] DM_VK_ENG_FARRATE (vkn_shc.h; the host side dm/host/hle_dos2_vkn_eng.c reads the same switches and makes the decisions)
-        const char *q = getenv("DM_VK_ENG_FARRATE"); int em = q && *q ? atoi(q) : 0;
+        const char *q = getenv("DM_VK_ENG_FARRATE"); int em = q && *q ? atoi(q) : 1;   // [23.11] default 1 (the host side reads the same default)
         if (em < 0 || em > 3) { vkn_logf(RED "shcache: DM_VK_ENG_FARRATE=%s is not 0-3: 0", q); em = 0; }
         if (em && fr == 1) { vkn_logf("shcache: DM_VK_ENG_FARRATE=%d with DM_VK_NATIVE_SHFAR=1 (no far cascade at all): 0", em); em = 0; }
         const char *n = getenv("DM_VK_ENG_FARRATE_N"); int per = n && *n ? atoi(n) : 2;

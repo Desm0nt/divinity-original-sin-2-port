@@ -8,6 +8,8 @@
 //   (2) superset: wherever nvn_cover (the old proof) says yes, nr_cv_cover says "the whole framebuffer".
 //   (3) the analysis on synthetic SPIR-V: the translator's shape (registers in Function variables, z / w constants), a scale + bias by
 //       a uniform (fma), refusals (two blocks, ClipDistance, a computed component it cannot follow, an integer input, a storage block).
+//       [P10] xbg_spirv_out_prog: the same walk for the Output variable at a Location (a varying: whole-vector store, x / y component
+//       stores with z / w falling back to x, ClipDistance irrelevant; refusals: nothing at the location, x not followed, only y written).
 // ./nr_cover_test --census <dir with *.xgs> [programs.txt]: every vertex bundle of a pack through the analysis: counts by result, and
 //   (programs.txt) the program of each accepted shader for tests/nr_cover_census.py, which re-runs them against tools/spv_interp.py.
 #include "../xbg_spirv_pos.h"
@@ -222,14 +224,15 @@ struct B {
     uint32_t id() { return next++; }
     void op(uint32_t o, std::initializer_list<uint32_t> a) { w.push_back(uint32_t((a.size() + 1) << 16) | o); for (uint32_t x : a) w.push_back(x); }
 };
-enum { V_TRANSLATOR, V_SCALE_BIAS, V_TWO_BLOCKS, V_CLIP, V_UNKNOWN_OP, V_INT_INPUT, V_STORAGE_BLOCK, V_VEC_STORE, V_PTR_COPY };
+enum { V_TRANSLATOR, V_SCALE_BIAS, V_TWO_BLOCKS, V_CLIP, V_UNKNOWN_OP, V_INT_INPUT, V_STORAGE_BLOCK, V_VEC_STORE, V_PTR_COPY,
+       V_OUT_VEC, V_OUT_COMP, V_OUT_CLIP, V_OUT_UNKNOWN, V_OUT_Y_ONLY };   // [P10] a varying at Location 1 (xbg_spirv_out_prog)
 Module vertex(int variant) {
     B b; b.w = {0x07230203u, 0x00010000u, 0, 0, 0};
     const uint32_t glsl = b.id(), tvoid = b.id(), tfn = b.id(), tf = b.id(), tv4 = b.id(), ti = b.id(), tu = b.id(), tarr1 = b.id(), tpv = b.id(), tarr = b.id(), tblk = b.id(),
         p_out_pv = b.id(), p_in_v4 = b.id(), p_in_f = b.id(), p_out_f = b.id(), p_fn_f = b.id(), p_uni_blk = b.id(), p_uni_f = b.id(), p_out_v4 = b.id(), tiv4 = b.id(), p_in_iv4 = b.id(),
-        c0 = b.id(), c1 = b.id(), c2 = b.id(), c3 = b.id(), f0 = b.id(), f1 = b.id(), u1 = b.id(), u16 = b.id(), pv = b.id(), in0 = b.id(), in4 = b.id(), ubo = b.id(), main = b.id(), iin = b.id();
+        c0 = b.id(), c1 = b.id(), c2 = b.id(), c3 = b.id(), f0 = b.id(), f1 = b.id(), u1 = b.id(), u16 = b.id(), pv = b.id(), in0 = b.id(), in4 = b.id(), ubo = b.id(), main = b.id(), iin = b.id(), ovar = b.id(), fh = b.id();
     b.op(11, {glsl, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0});          // "GLSL.std.450"
-    b.op(71, {in0, 30, 0}); b.op(71, {in4, 30, 4}); b.op(71, {iin, 30, 2});
+    b.op(71, {in0, 30, 0}); b.op(71, {in4, 30, 4}); b.op(71, {iin, 30, 2}); b.op(71, {ovar, 30, 1});
     b.op(72, {tpv, 0, 11, 0}); b.op(72, {tpv, 1, 11, 1}); b.op(72, {tpv, 2, 11, 3}); b.op(71, {tpv, 2});
     b.op(71, {tarr, 6, 16}); b.op(72, {tblk, 0, 35, 0}); b.op(71, {tblk, variant == V_STORAGE_BLOCK ? 3u : 2u}); b.op(71, {ubo, 34, 0}); b.op(71, {ubo, 33, 6});
     b.op(19, {tvoid}); b.op(33, {tfn, tvoid}); b.op(22, {tf, 32}); b.op(23, {tv4, tf, 4}); b.op(21, {ti, 32, 1}); b.op(21, {tu, 32, 0});
@@ -237,8 +240,8 @@ Module vertex(int variant) {
     b.op(28, {tarr1, tf, u1}); b.op(30, {tpv, tv4, tf, tarr1}); b.op(28, {tarr, tv4, u16}); b.op(30, {tblk, tarr});
     b.op(32, {p_out_pv, 3, tpv}); b.op(32, {p_in_v4, 1, tv4}); b.op(32, {p_in_f, 1, tf}); b.op(32, {p_out_f, 3, tf}); b.op(32, {p_fn_f, 7, tf});
     b.op(32, {p_uni_blk, 2, tblk}); b.op(32, {p_uni_f, 2, tf}); b.op(32, {p_out_v4, 3, tv4}); b.op(23, {tiv4, ti, 4}); b.op(32, {p_in_iv4, 1, tiv4});
-    b.op(43, {ti, c0, 0}); b.op(43, {ti, c1, 1}); b.op(43, {ti, c2, 2}); b.op(43, {ti, c3, 3}); b.op(43, {tf, f0, 0}); b.op(43, {tf, f1, 0x3f800000u});
-    b.op(59, {p_out_pv, pv, 3}); b.op(59, {p_in_v4, in0, 1}); b.op(59, {p_in_v4, in4, 1}); b.op(59, {p_uni_blk, ubo, 2}); b.op(59, {p_in_iv4, iin, 1});
+    b.op(43, {ti, c0, 0}); b.op(43, {ti, c1, 1}); b.op(43, {ti, c2, 2}); b.op(43, {ti, c3, 3}); b.op(43, {tf, f0, 0}); b.op(43, {tf, f1, 0x3f800000u}); b.op(43, {tf, fh, 0x3f000000u});
+    b.op(59, {p_out_pv, pv, 3}); b.op(59, {p_in_v4, in0, 1}); b.op(59, {p_in_v4, in4, 1}); b.op(59, {p_uni_blk, ubo, 2}); b.op(59, {p_in_iv4, iin, 1}); b.op(59, {p_out_v4, ovar, 3});
     b.op(54, {tvoid, main, 0, tfn}); b.op(248, {b.id()});
     const uint32_t rx = b.id(), ry = b.id(); b.op(59, {p_fn_f, rx, 7}); b.op(59, {p_fn_f, ry, 7});
     auto out = [&](uint32_t comp) { uint32_t p = b.id(); b.op(65, {p_out_f, p, pv, c0, comp}); return p; };
@@ -261,7 +264,14 @@ Module vertex(int variant) {
     } else if (variant == V_PTR_COPY) {   // the store goes through a copy of the access chain
         uint32_t p = out(c0), q = b.id(); b.op(83, {p_out_f, q, p}); b.op(62, {q, x}); b.op(62, {out(c1), y});
     } else { b.op(62, {out(c0), x}); b.op(62, {out(c1), y}); }
-    if (variant == V_CLIP) { uint32_t p = b.id(); b.op(65, {p_out_f, p, pv, c2, c0}); b.op(62, {p, f0}); }
+    if (variant >= V_OUT_VEC) {   // [P10] the varying at Location 1: (x * 0.5 + 0.5, y * 0.5[, 0, 1])
+        uint32_t u = b.id(), v = b.id(); b.op(12, {tf, u, glsl, 50, x, fh, fh}); b.op(133, {tf, v, y, fh});
+        if (variant == V_OUT_UNKNOWN) { uint32_t nu = b.id(); b.op(12, {tf, nu, glsl, 13 /* Sin */, u}); u = nu; }
+        auto oc = [&](uint32_t comp) { uint32_t p = b.id(); b.op(65, {p_out_f, p, ovar, comp}); return p; };
+        if (variant == V_OUT_VEC) { uint32_t w = b.id(); b.op(80, {tv4, w, u, v, f0, f1}); b.op(62, {ovar, w}); }
+        else { if (variant != V_OUT_Y_ONLY) b.op(62, {oc(c0), u}); b.op(62, {oc(c1), v}); }
+    }
+    if (variant == V_CLIP || variant == V_OUT_CLIP) { uint32_t p = b.id(); b.op(65, {p_out_f, p, pv, c2, c0}); b.op(62, {p, f0}); }
     if (variant == V_TWO_BLOCKS) { uint32_t l = b.id(); b.op(249, {l}); b.op(248, {l}); }
     b.op(253, {}); b.op(56, {});
     b.w[3] = b.next; return b.w;
@@ -285,6 +295,21 @@ void test_analysis() {
     check(!run(V_UNKNOWN_OP), "a component through an op the walk does not know"); check(!run(V_INT_INPUT), "an integer input");
     check(!run(V_STORAGE_BLOCK), "a BufferBlock (GPU-writable) is not a uniform leaf");
     { Module m = vertex(V_TRANSLATOR); m[0] = 0; xbg_spirv_pos_prog(m.data(), m.size(), &p, &why); check(!p.ok, "bad magic"); }
+    // [P10] xbg_spirv_out_prog: the Output variable at Location 1
+    auto outp = [&](int v, uint32_t loc) { Module m = vertex(v); xbg_spirv_out_prog(m.data(), m.size(), loc, &p, &why); return p.ok != 0; };
+    check(outp(V_OUT_VEC, 1) && p.in_mask == 1 && p.nubo == 0 && !p.exact, "varying: a whole vec4 store");
+    check(nr_cv_eval(&p, in, nullptr, nullptr, pos) && pos[0] == 0.625f && pos[1] == -0.25f && pos[2] == 0 && pos[3] == 1, "varying: (x * 0.5 + 0.5, y * 0.5, 0, 1) evaluates");
+    check(outp(V_OUT_COMP, 1) && nr_cv_eval(&p, in, nullptr, nullptr, pos) && pos[0] == 0.625f && pos[1] == -0.25f && pos[2] == pos[0] && pos[3] == pos[0],
+          "varying: x / y component stores, z / w (never written) fall back to x");
+    check(outp(V_OUT_CLIP, 1) && nr_cv_eval(&p, in, nullptr, nullptr, pos) && pos[0] == 0.625f, "varying: a ClipDistance write does not refuse it");
+    check(!run(V_OUT_CLIP), "... while the position of the same module is refused");
+    check(run(V_OUT_VEC) && p.exact && nr_cv_eval(&p, in, nullptr, nullptr, pos) && pos[0] == 0.25f && pos[1] == -0.5f, "the position of a module with a varying is unchanged");
+    check(!outp(V_OUT_VEC, 2) && !outp(V_OUT_VEC, 0) && !outp(V_OUT_VEC, 40), "varying: no Output at the location (an Input's location is not one)");
+    check(!outp(V_TRANSLATOR, 1), "varying: declared, never written");
+    check(!outp(V_OUT_UNKNOWN, 1), "varying: x through an op the walk does not know");
+    check(!outp(V_OUT_Y_ONLY, 1), "varying: only y written");
+    check(!outp(V_TWO_BLOCKS, 1), "varying: two blocks");
+    { Module m = vertex(V_OUT_VEC); for (size_t cut = 5; cut < m.size(); cut += 5) { xbg_spirv_out_prog(m.data(), cut, 1, &p, &why); } check(true, "varying: truncated modules do not crash"); }
     { Module m = vertex(V_SCALE_BIAS); for (size_t cut = 5; cut < m.size(); cut += 7) { xbg_spirv_pos_prog(m.data(), cut, &p, &why); } check(true, "truncated modules do not crash"); }
 }
 

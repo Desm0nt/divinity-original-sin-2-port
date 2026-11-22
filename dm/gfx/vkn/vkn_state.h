@@ -127,6 +127,24 @@ static inline VkPipelineStageFlags vkn_rp_dep_after(int narrow) {
 static inline VkImageLayout vkn_rp_initial(int loaded, int te, int depth) {
     return loaded || te ? (depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) : VK_IMAGE_LAYOUT_UNDEFINED;
 }   // [mgpu P6.2 / P6.3] how passes are built (vkn_state.c "mgpu P6"): narrow external dependency, initial layout
+// ==== [P10] merged render passes (docs/dos2/nr/VK-P10.md): one attachment list, up to 6 subpasses, input attachments ====
+// att j: its VkFormat, depth[j] = 1 for a depth-stencil format, ops (sload / sstore: the stencil aspect of a depth-stencil format).
+// sub i: colour slots (attachment index, 0xff = slot not bound), ds (0xff = none), input[n] = the attachment behind
+// input_attachment_index n (0xff = unused). Layouts: as one-subpass passes for colour / depth attachments (initial = final = the
+// attachment layout; UNDEFINED initial when not loaded, unless DM_VK_NATIVE_TE); an input reference is SHADER_READ_ONLY_OPTIMAL
+// (colour) or DEPTH_STENCIL_READ_ONLY_OPTIMAL (depth): the descriptor of the draw must name that layout. Attachments not touched by a
+// subpass after their first use are preserved. vkn_mp_get: the pass of the key (made on a miss), and the compatibility class of every
+// subpass - a class of its own (never a one-subpass class's), the same for every load / store variant of the shape: pipelines keyed
+// by it are built for that subpass, vkn_fb_get(compat[0], views of ALL attachments in order, ...) is the framebuffer. 0 = failure.
+enum { VKN_MP_SUBS = 6, VKN_MP_ATTS = 12, VKN_MP_INPUTS = 16 };
+typedef struct vkn_mp_key {
+    uint8_t natt, nsub, samples, pad;
+    uint32_t fmt[VKN_MP_ATTS];
+    uint8_t depth[VKN_MP_ATTS], load[VKN_MP_ATTS], store[VKN_MP_ATTS], sload[VKN_MP_ATTS], sstore[VKN_MP_ATTS];
+    struct { uint8_t ncolor, ds, ninput, pad; uint8_t color[8]; uint8_t input[VKN_MP_INPUTS]; } sub[VKN_MP_SUBS];
+} vkn_mp_key;
+int vkn_mp_get(const vkn_mp_key *k, VkRenderPass *pass, uint16_t compat[VKN_MP_SUBS]);
+int vkn_rp_compat_merged(uint16_t compat);   // 0 = a one-subpass class; else 1 + the subpass of a merged pass's class
 // Framebuffer of (compatibility class, views in attachment order: bound colour slots then depth, extent, layers); created on a miss.
 VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers);
 // [VK-DRV] the same, made with render pass rp itself (DM_VK_NATIVE_FB_EXACT, vkn_drv.h: PowerVR stock); rp NULL = vkn_fb_get.

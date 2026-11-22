@@ -91,6 +91,13 @@ static inline int vkn_policy_env(const char *name, int def, int lo, int hi, int 
     return def;
 }
 // The four switches for a family (getenv: install time / shader-library init only, never per draw).
+// [P10] DM_VK_NATIVE_TILELIGHT's default (vkn_pass_tile.inc tl_cfg) and the switch itself, read the same way by the shader library: the
+// centre proof of LinearizeDepth reads the position programs / fragment outputs it builds at load. [22.11] default 0 everywhere (the
+// first armed chain crashed in the driver, phone run D02); back to vkn_policy_tile_pass once confirmed on the phone.
+// [23.11] series H: verify 0 differ (H01 Mali model 2548 targets, H02 Turnip 1508 targets, 140 s each), poison clean (H05, 0 magenta in
+// 66 frames), no store red in normal mode (H10 / H12), Turnip G05 +9 % fps -> on for the tile-pass families and every Adreno driver.
+static inline int vkn_policy_tilelight_default(int f, uint32_t driver_id) { return vkn_policy_tile_pass(f, driver_id) || f == VKN_FAM_ADRENO; }
+static inline int vkn_policy_tilelight(int f, uint32_t driver_id, int *from) { return vkn_policy_env("DM_VK_NATIVE_TILELIGHT", vkn_policy_tilelight_default(f, driver_id), 0, 3, from); }
 static inline int vkn_policy_load(int f) { return vkn_policy_env("DM_VK_NATIVE_LOAD", vkn_policy_load_default(f), 0, 3, NULL); }
 static inline int vkn_policy_store(int f) { return vkn_policy_env("DM_VK_NATIVE_STORE", vkn_policy_store_default(f), 0, 3, NULL); }
 static inline int vkn_policy_fresh(int f) { return vkn_policy_env("DM_VK_NATIVE_FRESH", vkn_policy_fresh_default(f), 0, 3, NULL); }

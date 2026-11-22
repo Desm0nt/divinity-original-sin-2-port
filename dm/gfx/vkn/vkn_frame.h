@@ -49,7 +49,7 @@ int vkn_frame_gpu_ns(uint64_t *begin_ns, uint64_t *end_ns);
 // presents: handed to the presenter without error; submit_fail: recordings lost at vkEndCommandBuffer / vkQueueSubmit; left_open:
 // recordings still open at the next vkn_rec_begin (submitted then); fence_timeouts: buffers the GPU did not finish in 5 s;
 // present_waits / present_wait_ns: waits in dm_present_wait_submitted before a submission (present thread).
-typedef struct vkn_frame_xstats { uint64_t presents, submit_fail, left_open, fence_timeouts, present_waits, present_wait_ns; } vkn_frame_xstats;
+typedef struct vkn_frame_xstats { uint64_t presents, submit_fail, left_open, fence_timeouts, present_waits, present_wait_ns, splits, split_lost; } vkn_frame_xstats;   // [P10 fix 6] splits: vkn_rec_split
 void vkn_frame_xstats_get(vkn_frame_xstats *s);
 
 // ==== [stage 5.5] the recording thread (vkn_rt.h): "single-threaded" above means the recording's owner, which may change between the
@@ -60,6 +60,28 @@ void vkn_frame_xstats_get(vkn_frame_xstats *s);
 uint64_t vkn_frame_gpu_done(int *any);
 void vkn_frame_wait_frame(uint64_t f);
 int vkn_rec_end_due(void);
+
+// ==== [P10] secondary command buffers of the open recording (the merged tile pass, vkn_pass.c "P10") ====
+// vkn_cb2_begin: a secondary buffer of the open recording begun for (render pass, subpass, framebuffer) with RENDER_PASS_CONTINUE; up
+// to 24 a recording, reused with the recording's slot; VK_NULL_HANDLE = none left / failure. vkn_cb2_end ends it (0 = ok) and drops a
+// route to it. vkn_cb_route(sec): vkn_cb() / vkn_cb_peek() answer `sec` until vkn_cb_route(VK_NULL_HANDLE) (the caller flushes a
+// waiting sort window before it changes the route); vkn_cb_serial does not change (the frame-scoped state of the pieces lives on), so
+// whoever caches what is BOUND in the command buffer is told by the router (vkn_draw_raw_begin). vkn_cb_primary: the recording's own
+// buffer whatever the route. The owner of the recording only.
+VkCommandBuffer vkn_cb2_begin(VkRenderPass rp, uint32_t subpass, VkFramebuffer fb);
+int vkn_cb2_end(VkCommandBuffer sec);
+void vkn_cb_route(VkCommandBuffer sec);
+VkCommandBuffer vkn_cb_primary(void);
+// [P10 fix 6] the decision of a pass that is recorded LAST: vkn_rec_split(fill, ctx) ends nothing, but from here on the open presented
+// recording goes on in a second primary buffer (the "tail"; vkn_cb / vkn_cb_primary answer it). At vkn_rec_submit, after the close
+// listeners, fill(mid, ctx) records into a third primary buffer, and the queue gets [head, mid, tail] in this order in one submit: what
+// fill records executes after everything recorded before the split and before everything recorded after it, yet it is written when the
+// whole recording is known (the merged tile pass decides its stores by what the rest of the frame read). fill must record into `mid`
+// only and leave every image in the layout the tail was recorded against. One split a recording; presented recordings only. 0 = split
+// (fill will run), -1 = not possible (nothing changed). vkn_rec_split_parts(head, &mid, &tail): the parts of the last recording begun
+// on buffer `head` (host tests: what was recorded where), 0 = it was split.
+int vkn_rec_split(void (*fill)(VkCommandBuffer mid, void *ctx), void *ctx);
+int vkn_rec_split_parts(VkCommandBuffer head, VkCommandBuffer *mid, VkCommandBuffer *tail);
 
 #ifdef __cplusplus
 }

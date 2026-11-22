@@ -16,11 +16,49 @@
 #ifndef SKY_C1Y
 #define SKY_C1Y 0x3db851ecu   // 0.09
 #endif
+// [P10] the merged tile pass (docs/dos2/nr/VK-P10.md; only tools/dos2_tile_shaders.py defines OC here, the pack build never does): the
+// four textures of the chain this part reads at the fragment's own pixel. OC bit 8 lfG0, 9 lfDepth, 10 lfNormal, 11 lfBase = an input
+// attachment of its own (input_attachment_index = the bit); OC bit 12 = no declaration at all: the part reads the Light part's tG0 /
+// tDepth / tNormal / tBase (bindings 10 / 22 / 16 / 34) - valid only when bindings 200 / 206 / 212 / 224 hold the same images as those
+// (the caller's check), for devices whose input-attachment limit is below 11. Without those bits: the declarations as before.
+#if (OC >> 12) & 1
+#define LF_G0(p) F_G0(p)
+#define LF_DEPTH(p) F_DEPTH(p)
+#define LF_NORMAL(p) F_NORMAL(p)
+#define LF_BASE(p) F_BASE(p)
+#else
+#if (OC >> 8) & 1
+layout(input_attachment_index = 8, set = 0, binding = 200) uniform subpassInput lfG0;
+#define LF_G0(p) subpassLoad(lfG0)
+#else
 layout(set = 0, binding = 200) uniform sampler2D lfG0;
+#define LF_G0(p) texelFetch(lfG0, p, 0)
+#endif
+#if (OC >> 9) & 1
+layout(input_attachment_index = 9, set = 0, binding = 206) uniform subpassInput lfDepth;
+#define LF_DEPTH(p) subpassLoad(lfDepth)
+#else
 layout(set = 0, binding = 206) uniform sampler2D lfDepth;
+#define LF_DEPTH(p) texelFetch(lfDepth, p, 0)
+#endif
+#if (OC >> 10) & 1
+layout(input_attachment_index = 10, set = 0, binding = 212) uniform subpassInput lfNormal;
+#define LF_NORMAL(p) subpassLoad(lfNormal)
+#else
 layout(set = 0, binding = 212) uniform sampler2D lfNormal;
+#define LF_NORMAL(p) texelFetch(lfNormal, p, 0)
+#endif
+#endif
 layout(set = 0, binding = 218) uniform samplerCube lfIrr;
+#if !((OC >> 12) & 1)
+#if (OC >> 11) & 1
+layout(input_attachment_index = 11, set = 0, binding = 224) uniform subpassInput lfBase;
+#define LF_BASE(p) subpassLoad(lfBase)
+#else
 layout(set = 0, binding = 224) uniform sampler2D lfBase;
+#define LF_BASE(p) texelFetch(lfBase, p, 0)
+#endif
+#endif
 layout(set = 0, binding = 230) uniform sampler2D lfExposure;
 layout(set = 0, binding = 236) uniform sampler2D lfLut;
 layout(set = 0, binding = 242) uniform samplerCube lfSpec;
@@ -44,12 +82,12 @@ vec3 q11(vec3 v) { return vec3(lf_q(v.x, 17u, 1048576.0, 65024.0), lf_q(v.y, 17u
 void lf_sky(vec4 ray, out vec3 spec, out vec3 diff)
 {
     ivec2 i = ivec2(gl_FragCoord.xy);
-    vec4 g0 = texelFetch(lfG0, i, 0);
-    float d = texelFetch(lfDepth, i, 0).x;
+    vec4 g0 = LF_G0(i);
+    float d = LF_DEPTH(i).x;
     int model = int((uint(int(uint(max(roundEven(g0.w * 255.0), 0.0))) & 6u)) >> 1);
     spec = vec3(0.0); diff = vec3(0.0);
     [[dont_flatten]] if (d != 1.0 && model != 1) {
-        vec2 n = texelFetch(lfNormal, i, 0).xy;
+        vec2 n = LF_NORMAL(i).xy;
         float k = uintBitsToFloat(SKY_C1X);
         float ex = fma(n.x, k, -1.77769995), ey = fma(n.y, k, -1.77769995);
         float s = 2.0 / (fma(ey, ey, ex * ex) + 1.0);
@@ -68,7 +106,7 @@ void lf_sky(vec4 ray, out vec3 spec, out vec3 diff)
         float Rx = fma(Nx * mn, -2.0, -vn.x), Ry = fma(Ny * mn, -2.0, -vn.y), Rz = fma(Nz * mn, -2.0, -vn.z);
         vec3 irr = texture(lfIrr, lf_nanz3(vec3(Nx * m1, Ny * m1, Nz * m1))).xyz;
         float m2 = 1.0 / max(abs(Rz), max(abs(Rx), abs(Ry)));
-        vec3 base = texelFetch(lfBase, i, 0).xyz;
+        vec3 base = LF_BASE(i).xyz;
         float e = texelFetch(lfExposure, ivec2(0), 0).x;
         vec3 lut = textureLod(lfLut, nanz(vec2(ndv, rough)), 0.0).xyz;
         vec4 k6 = lfc6._m0[2];

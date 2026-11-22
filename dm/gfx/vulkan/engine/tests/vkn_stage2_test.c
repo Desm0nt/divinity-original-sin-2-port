@@ -2221,7 +2221,7 @@ static void test_passes(void) {
     CHECK(vkn_fb_get(c1, v3, 3, 64, 32, 1) == f1); CHECK(vkn_fb_get(c1, v3, 3, 64, 32, 0) == f1); CHECK_EQ(mk_created[MK_FB], fb0 + 1);
     const VkFramebuffer f2 = vkn_fb_get(c1, v3, 3, 32, 32, 1);
     CHECK(f2 && f2 != f1);
-    CHECK(vkn_fb_get(c1, v3, 10, 64, 32, 1) == VK_NULL_HANDLE); CHECK(vkn_fb_get(c1, v3, 3, 0, 32, 1) == VK_NULL_HANDLE); CHECK(vkn_fb_get(200, v3, 3, 64, 32, 1) == VK_NULL_HANDLE);
+    CHECK(vkn_fb_get(c1, v3, 13, 64, 32, 1) == VK_NULL_HANDLE); CHECK(vkn_fb_get(c1, v3, 3, 0, 32, 1) == VK_NULL_HANDLE); CHECK(vkn_fb_get(200, v3, 3, 64, 32, 1) == VK_NULL_HANDLE);
     vkn_state_stats_get(&ss); CHECK_EQ(ss.framebuffers, 2);
     const VkImageView v3b[3] = {t2->att, t0->att, td->att};   // other views of the same class: another framebuffer, untouched by the forget below
     const VkFramebuffer f3 = vkn_fb_get(c1, v3b, 3, 64, 32, 1); CHECK(f3 && f3 != f1);
@@ -2602,7 +2602,7 @@ static void test_shaders(void) {
     CHECK_EQ(vkn_shader_support(1280.0f, 720.0f, &sb), 0);
     CHECK(sb.size >= 1392); CHECK_EQ(sb.off % 64, 0);
     const float *f = (const float *)sb.cpu;
-    CHECK(f[144 / 4] == 1.0f / 1280.0f && f[148 / 4] == 1.0f / 720.0f && f[160 / 4] == 1280.0f && f[164 / 4] == 720.0f && f[192 / 4] == 1.0f && f[192 / 4 + 72] == 1.0f && f[0] == 0.0f);
+    CHECK(f[144 / 4] == 1.0f / 1280.0f && f[148 / 4] == 1.0f / 720.0f && f[160 / 4] == 1280.0f && f[164 / 4] == 720.0f && f[192 / 4] == 1.0f && f[192 / 4 + 4 * 72] == 1.0f && f[192 / 4 + 1] == 0.0f && f[192 / 4 + 4] == 1.0f && f[0] == 0.0f);   // (std140 stride 16)
     CHECK_EQ(vkn_shader_support(1280.0f, 720.0f, &sb2), 0); CHECK(sb2.buf == sb.buf && sb2.off == sb.off);
     CHECK_EQ(vkn_shader_support(640.0f, 360.0f, &sb3), 0); CHECK(sb3.off != sb.off); CHECK(((const float *)sb3.cpu)[160 / 4] == 640.0f);
     CHECK_EQ(vkn_shader_support(0.0f, 720.0f, &sb3), -1); CHECK_EQ(vkn_shader_support(1.0f, 1.0f, NULL), -1);
@@ -2626,7 +2626,7 @@ static void test_shaders(void) {
 // -1 and the bytes for a frame-local copy (vkn_shader_support_fill).
 static int sup_is(const vkn_block *b, float w, float h) {
     const float *f = (const float *)b->cpu;
-    return f[144 / 4] == 1.0f / w && f[148 / 4] == 1.0f / h && f[160 / 4] == w && f[164 / 4] == h && f[192 / 4] == 1.0f && f[192 / 4 + 72] == 1.0f;
+    return f[144 / 4] == 1.0f / w && f[148 / 4] == 1.0f / h && f[160 / 4] == w && f[164 / 4] == h && f[192 / 4] == 1.0f && f[192 / 4 + 4 * 72] == 1.0f && f[192 / 4 + 1] == 0.0f;
 }
 static void test_support_drs(void) {
     vkn_block win, b;

@@ -48,7 +48,17 @@ layout(set = 0, binding = 4, std140) uniform support_buffer
 layout(set = 0, binding = 22, std140) uniform fp_c15 { vec4 _m0[4096]; } c15;
 layout(set = 0, binding = 28, std140) uniform fp_c4 { vec4 _m0[4096]; } c4;
 layout(set = 0, binding = 34, std140) uniform fp_c1 { vec4 _m0[4096]; } c1;
+// [P10] -DOC=1 (only tools/dos2_tile_shaders.py; the pack build never defines it): LinearDepth is an input attachment of the merged tile
+// pass (docs/dos2/nr/VK-P10.md), read at the fragment's own pixel - the render-scale handling of main() is compiled out, so such a module
+// is valid only while the support block's render scales are 1 (VKN_TILE_C_SCALE1). The atlas stays a sampler.
+#ifndef OC
+#define OC 0
+#endif
+#if OC
+layout(input_attachment_index = 0, set = 0, binding = 10) uniform subpassInput LinearDepth;
+#else
 layout(set = 0, binding = 10) uniform sampler2D LinearDepth;
+#endif
 #if PCF_MODE == 3
 layout(set = 0, binding = 16) uniform sampler2DShadow Shadow;
 #else
@@ -150,6 +160,9 @@ void cascadeStep(const int i, vec3 p, inout float result, inout bool done)
 void main()
 {
     // LinearDepth texel of this pixel, with the translation's render-scale handling (support buffer words 1 / 2 of _m5)
+#if OC
+    float depth = subpassLoad(LinearDepth).x;
+#else
     float rs = sb._m5[0], sc = sb._m5[1];
     ivec2 base = ivec2(trunc(gl_FragCoord.xy / rs));
     ivec2 px;
@@ -157,6 +170,7 @@ void main()
     else if (sc < 0.0) px = ivec2(fma(vec2(base), vec2(-sc), mod(gl_FragCoord.xy, vec2(-sc))));
     else px = ivec2(vec2(base) * sc);
     float depth = texelFetch(LinearDepth, px, 0).x;
+#endif
     vec3 p = depth * TexCoord0.xyz + c15._m0[12].xyz;
 
     // Unrolled by hand: the cascade index is a constant in every copy (no dynamic indexing of QUAD / vec4 components).

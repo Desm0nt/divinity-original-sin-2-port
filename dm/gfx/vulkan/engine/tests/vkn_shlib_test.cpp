@@ -27,6 +27,13 @@
 // xbg_nr_sh.inc hacks, the library's vkn_shlib_named.cpp port): the PPFXAA / ClusteredLightingWithSSAO modules are the built-in FSR /
 // light-cap modules behind the player's head, and every compare above covers them (words = the translator's); the summary adds the
 // library's hack states (each asked hack swapped - FSR=2: checked, not swapped) and PASS needs them.
+// [P10] every model: the input-attachment twins of the merged tile pass (vkn_shlib_named.h vkn_shlib_named_tile; the table and the words:
+// dm/android/shaders/tile_twins.inc, tools/dos2_tile_shaders.py). Variant 0 for every NR-04 key: a twin exactly when the library replaced
+// the key by name and it is LinearizeDepth / CascadedPCF_* (a translated module: 1); variants f / g / F / G for the Light key: a twin
+// exactly when vkn_shlib_named_fused hands that fused module out (the pack's, or with "-lc<N>" the built-in capped one). Each twin: a
+// fragment module whose words are the built-in file's after the library's load-time chain (the file's words unchanged, or - where the
+// chain rewrote them - still declaring exactly the table row's input attachments), *var = the table row, `declared` = the bindings of
+// the file; every fault of vkn_shlib_named_tile_fault refused; wrong variants / keys answer 1. PASS needs all of it.
 // Build + run (WSL; tests/vkn_shlib_test.sh does exactly this, and copies the pack into the Linux file system first):
 //   g++ -std=c++17 -O1 -w -D_GNU_SOURCE -DDM_GAME_DOOM=1 -DDM_GAME_D3=1 -DDM_GAME_TL2=1 -DDM_GAME_DOS2=1 -DVK_USE_PLATFORM_ANDROID_KHR
 //       -DDM_ASTC_LAZY=1 -I<shim: android/hardware_buffer.h, zlib.h> -I<NDK vulkan headers> -Idm/gfx/vulkan -Idm/gfx/nvn/include -Idm/host -Idm
@@ -52,6 +59,7 @@
 #include <vector>
 #include "../xbg_game.h"
 #include "../../../vkn/vkn_shlib.h"
+#include "../../../nr/nr_cover.h"   // [P10 fix 5] nr_cv_prog (the position program)
 #include "../../../vkn/vkn_shlib_named.h"
 #include "../../../nr/nr_sh.h"
 
@@ -76,7 +84,8 @@ static bool pick_model(const char *n) {
         if (!strcmp(n, "adreno-simmali")) g_m.env.push_back({"DM_GFX_SIM_GPU", "mali"});
         if (!strcmp(n, "adreno-native")) g_m.env.push_back({"DM_GFX_NATIVE_SHADERS", "1"});
         if (!strcmp(n, "adreno-files")) g_m.env.push_back({"DM_GFX_SHADER_PACK", "0"});   // the loose <key>.xgs files only
-        return !strcmp(n, "adreno") || !strcmp(n, "adreno-simmali") || !strcmp(n, "adreno-native") || !strcmp(n, "adreno-files");
+        if (!strcmp(n, "adreno-tl")) g_m.env.push_back({"DM_VK_NATIVE_TILELIGHT", "1"});   // [P10 fix 5] the merged tile pass on Turnip (LOAD 0 by family)
+        return !strcmp(n, "adreno") || !strcmp(n, "adreno-simmali") || !strcmp(n, "adreno-native") || !strcmp(n, "adreno-files") || !strcmp(n, "adreno-tl");
     }
     if (!strcmp(n, "mali")) {   // Immortalis-G720 (Valhall 5th gen): subgroup 16, no formatless storage reads; no GPU self-test on a host
         g_m = {"mali", 0x13B5, "Mali-G720-Immortalis MC12", VK_API_VERSION_1_3, 0x30000, VK_DRIVER_ID_ARM_PROPRIETARY, 16, VFC, 0xbf, all_features(true, true, false), true, true,
@@ -255,6 +264,101 @@ static bool same_module(VkShaderModule o, VkShaderModule ob, VkShaderModule n, V
     return true;
 }
 static void tally(Count &c, bool ok) { c.compared++; (ok ? c.same : c.differ)++; }
+
+// ---------------------------------------------------------------- [P10] tile twins
+namespace tile {
+#include "../../../../android/shaders/tile_twins.inc"
+static const int rows = int(sizeof k_tile_rows / sizeof k_tile_rows[0]);
+// (binding, input_attachment_index) pairs of a module's words, by ascending binding
+static std::vector<std::pair<uint32_t, uint32_t>> inputs(const std::vector<uint32_t> &w) {
+    std::map<uint32_t, uint32_t> idx, bind; std::vector<std::pair<uint32_t, uint32_t>> out;
+    for (size_t k = 5; k < w.size();) {
+        const uint32_t c = w[k] >> 16, op = w[k] & 0xffff; if (!c || k + c > w.size()) break;
+        if (op == 71 && c >= 4) { if (w[k + 2] == 43) idx[w[k + 1]] = w[k + 3]; if (w[k + 2] == 33) bind[w[k + 1]] = w[k + 3]; }
+        k += c;
+    }
+    for (auto &e : idx) out.push_back({bind.count(e.first) ? bind[e.first] : ~0u, e.second});
+    std::sort(out.begin(), out.end()); return out;
+}
+static uint64_t made, same_words, rewritten, none_ok, faults_ok, faults, bad;
+static std::set<std::string> names;   // the built-in files handed out
+static void fail(const char *fmt, ...) {
+    char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    if (bad++ < 24) printf("TILE %s\n", b);
+}
+// one call of vkn_shlib_named_tile held against what must come back (want: a twin is due)
+static void one(const char *name, const char *key, char variant, bool want) {
+    xbg_vkn_stage *sf = new xbg_vkn_stage; uint64_t decl[4] = {~0ull, ~0ull, ~0ull, ~0ull}; vkn_tile_var var; memset(&var, 0xee, sizeof var);
+    const int rc = vkn_shlib_named_tile(key, variant, sf, decl, &var); const char vc = variant ? variant : '0';
+    if (!want) {
+        if (rc != 1 || var.n || decl[0] || decl[3]) fail("%s variant %c: no twin is due, rc %d (n %u)", name, vc, rc, var.n); else none_ok++;
+        delete sf; return;
+    }
+    const std::vector<uint32_t> *w = rc == 0 && sf->module ? words(sf->module) : nullptr;
+    if (rc || !w || sf->stage != 4) { fail("%s variant %c: a twin is due, rc %d", name, vc, rc); delete sf; return; }
+    // the row: the built-in file the library names (vkn_tile_stats.last), of this shader and variant
+    const vkn_tile_row *hit = nullptr; const auto fin = inputs(*w); vkn_tile_stats ts; vkn_shlib_named_tile_stats(&ts);
+    for (int r = 0; r < rows && !hit; r++) { const vkn_tile_row &t = k_tile_rows[r]; if (ts.last && !strcmp(t.inc, ts.last) && !strcmp(t.name, name) && t.variant == variant) hit = &t; }
+    if (!hit) { fail("%s variant %c: no table row for the file the library names (%s)", name, vc, ts.last ? ts.last : "none"); delete sf; return; }
+    bool ok = true;
+    // the words: the file's, or (the load-time chain rewrote them: uniform blocks) still declaring exactly the row's inputs - checked below
+    if (w->size() == hit->spv_bytes / 4 && !memcmp(w->data(), hit->spv, hit->spv_bytes)) same_words++; else rewritten++;
+    names.insert(hit->inc);
+    ok = ok && var.n == hit->n && !memcmp(var.binding, hit->binding, hit->n) && !memcmp(var.index, hit->index, hit->n) && var.cond == hit->cond && var.center_loc == hit->center_loc;
+    ok = ok && fin.size() == var.n;
+    uint32_t seen = 0;
+    for (size_t q = 0; ok && q < fin.size(); q++) {
+        ok = fin[q].first == var.binding[q] && fin[q].second == var.index[q] && var.index[q] < 16 && !(seen >> var.index[q] & 1) && (decl[var.binding[q] >> 6] >> (var.binding[q] & 63) & 1);
+        seen |= 1u << var.index[q];
+    }
+    // `declared` = the Binding decorations of the built-in file
+    uint64_t fd[4] = {0, 0, 0, 0};
+    for (size_t k = 5; k < hit->spv_bytes / 4;) { const uint32_t c = hit->spv[k] >> 16, op = hit->spv[k] & 0xffff; if (!c) break;
+        if (op == 71 && c >= 4 && hit->spv[k + 2] == 33 && hit->spv[k + 3] < 256) fd[hit->spv[k + 3] >> 6] |= 1ull << (hit->spv[k + 3] & 63); k += c; }
+    ok = ok && !memcmp(fd, decl, sizeof fd);
+    if (variant) {   // the fused forms: Sky's uniform extras always; its four G-buffer bindings only in the own-input form
+        const bool own = variant == 'f' || variant == 'g', b200 = decl[3] >> (200 - 192) & 1, b254 = decl[3] >> (254 - 192) & 1;
+        ok = ok && b254 && b200 == own && var.n == (own ? 11 : 7) && var.cond == (own ? 1u : 5u);
+    } else ok = ok && var.n == 1 && var.binding[0] == 10 && var.index[0] == 0 && (var.cond & 1u);
+    if (!ok) fail("%s variant %c: twin handed out but its facts are wrong (inputs in the words %zu, var.n %u, cond %u, words %zu, row %s)", name, vc, fin.size(), var.n, var.cond, w->size(), hit->inc);
+    else made++;
+    for (int f = 1; f <= 4; f++) { faults++; const int fr = vkn_shlib_named_tile_fault(key, variant, f); if (fr == 1) faults_ok++; else fail("%s variant %c: fault %d answered %d (1 = refused is due)", name, vc, f, fr); }
+    forget(sf->module); delete sf;
+}
+static bool run(bool nr_mode1) {
+    const int li = nr_sh_find_name("ClusteredLightingWithSSAO");
+    for (int i = 0; i < nr_sh_count; i++) {
+        const nr_sh_entry &e = nr_sh_table[i]; char key[17]; memcpy(key, e.key, 16); key[16] = 0;
+        const bool chain = !strcmp(e.name, "LinearizeDepth") || !strncmp(e.name, "CascadedPCF_", 12);
+        one(e.name, key, 0, nr_mode1 && chain && vkn_shlib_named_entry(key, nullptr) >= 0);
+        if (i == li) continue;
+        one(e.name, key, 'f', false); one(e.name, key, 'G', false);   // only the Light key has fused forms
+    }
+    if (li >= 0) {
+        char key[17]; memcpy(key, nr_sh_table[li].key, 16); key[16] = 0;
+        for (char v : {'f', 'g'}) {
+            xbg_vkn_stage *sf = new xbg_vkn_stage; uint64_t decl[4], dr = 0;
+            const bool fused = vkn_shlib_named_fused(key, v, sf, decl, &dr) == 0 && sf->module;
+            if (sf->module) forget(sf->module);
+            delete sf;
+            one("ClusteredLightingWithSSAO", key, v, fused); one("ClusteredLightingWithSSAO", key, char(v - 32), fused);
+        }
+        xbg_vkn_stage *sf = new xbg_vkn_stage; vkn_tile_var var;
+        if (vkn_shlib_named_tile(key, 'x', sf, nullptr, &var) != 1 || vkn_shlib_named_tile("0123456789abcdef", 0, sf, nullptr, &var) != 1 || vkn_shlib_named_tile("short", 0, sf, nullptr, &var) != 1)
+            fail("a wrong variant / an unknown key / a short key must answer 1");
+        else none_ok += 3;
+        delete sf;
+    }
+    vkn_tile_stats ts; vkn_shlib_named_tile_stats(&ts);
+    std::string nl; for (const std::string &n : names) nl += " " + n.substr(5);
+    if (ts.refused) fail("the library refused %llu twins by a check (none is due to fail here)", (unsigned long long)ts.refused);
+    printf("tile twins (P10): table rows %d; handed out and right %llu (words = the built-in file %llu, rewritten by the load-time chain %llu), no twin as due %llu, "
+           "faults refused %llu of %llu; library counters ok %llu none %llu refused %llu; files:%s: %s\n", rows, (unsigned long long)made, (unsigned long long)same_words,
+           (unsigned long long)rewritten, (unsigned long long)none_ok, (unsigned long long)faults_ok, (unsigned long long)faults, (unsigned long long)ts.ok,
+           (unsigned long long)ts.none, (unsigned long long)ts.refused, nl.c_str(), bad ? "BAD" : "ok");
+    return !bad;
+}
+}  // namespace tile
 
 int main(int argc, char **argv) {
     // [stage 5 A1] "<model>+nr<q>" / "+nrv" / "+nr3nl": the named-bundle replacement on both sides (head comment)
@@ -448,11 +552,27 @@ int main(int argc, char **argv) {
                want_f ? hk_fsr.c_str() : "0", h.fsr, h.state[0], (unsigned long long)h.swapped[0], (unsigned long long)h.checked, (unsigned long long)h.refused[0],
                want_l ? hk_lc.c_str() : "0", h.lights, h.state[1], (unsigned long long)h.swapped[1], (unsigned long long)h.refused[1], hk_ok ? "ok" : "BAD");
     }
+    // [P10 fix 5] (phone run F06) the position program of LinearizeDepth's vertex shader and its fragment outputs - what the centre proof
+    // of the merged tile pass reads - are built wherever the tile pass is on, not only where DM_VK_NATIVE_LOAD is: "adreno-tl" must have
+    // them; plain "adreno" (LOAD 0, TILELIGHT 0) builds none (the load-time cost stays where nothing reads them)
+    bool posl_ok = true;
+    if (g_m.name == std::string("adreno")) {
+        xbg_vkn_stage *v = new xbg_vkn_stage(), *f = new xbg_vkn_stage();
+        const int rv = vkn_shlib_shader("06b17b62ec233b75", nullptr, nullptr, v), rf = vkn_shlib_shader("f23c09d198b55dc5", nullptr, nullptr, f);
+        const bool have = !rv && !rf && vkn_shlib_vs_pos(v->shader) && vkn_shlib_vs_pos(v->shader)->ok && vkn_shlib_fs_outputs(f->shader) >= 0;
+        const char *tl = getenv("DM_VK_NATIVE_TILELIGHT"); const bool want = tl && atoi(tl) > 0;
+        const char *ld = getenv("DM_VK_NATIVE_LOAD"); const bool load = ld && atoi(ld) > 0;
+        posl_ok = rv || rf ? true : (want || load) ? have : !have;
+        printf("tile pass facts: LinearizeDepth position program %s, fragment outputs %s (DM_VK_NATIVE_TILELIGHT %s): %s\n", have ? "built" : "none", have ? "built" : "none",
+               tl ? tl : "-", rv || rf ? "bundles missing (not checked)" : posl_ok ? "ok" : "BAD");
+        delete v; delete f;
+    }
+    const bool tile_ok = limit ? true : tile::run(nr_on && nr != "nrv");   // [P10] (needs every NR-04 key loaded: not with a bundle limit)
     if (nr_on) vkn_shlib_named_census();
     if (g_log) fclose(g_log);
     if (!ovr.empty()) remove(ovr.c_str());
     const bool pass = !c_base.differ && !c_alpha.differ && !c_retype.differ && c_base.compared && !g_nr_alt_bad && !g_nr_pass_bad && (!nr_on || nr == "nr0" || g_nr_replaced || limit) &&
-                      (hk_ok || limit);   // [stage 5.4 G1]
+                      (hk_ok || limit) && tile_ok && posl_ok;   // [stage 5.4 G1] [P10] [P10 fix 5]
     printf("%s\n", pass ? "PASS" : "FAIL");
     fflush(stdout); _exit(pass ? 0 : 1);   // no static destructors: the translator's state is not shut down
 }

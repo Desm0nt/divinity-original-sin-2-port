@@ -7,7 +7,7 @@
 // Pack facts (bundles of work/shaders-vk/shaders.xgspack, 12329 of them, scanned 20.11): one descriptor set, Vulkan binding = original
 // binding x 6 + bundle stage (bundle stages: 0 vertex, 4 fragment, 5 compute), descriptor count 1 everywhere. Sources DOS2 uses:
 //   SUPPORT  every vertex / fragment / compute bundle, one each: the translator's 1392-byte block of the viewport (xbg_support_defaults:
-//            1/w, 1/h at byte 144, w, h at 160, 73 x 1.0f from 192, the rest 0). The draw path binds vkn_shader_support(viewport w, h).
+//            1/w, 1/h at byte 144, w, h at 160, 73 x 1.0f at 192 + 16 i (std140 float[73]: the .x of 73 vec4), the rest 0). The draw path binds vkn_shader_support(viewport w, h).
 //   UNIFORM  engine constant blocks: slot = the block's binding index (block byte +0x35); slots 0..7 are the shader's own blocks
 //            (record arrays per stage, FlushShaderConstants 0x925740), 8..13 the global blocks (FlushGlobalConstants 0x926f90).
 //   C1       the shader's own constants (bundle bytes): this module copies them once into a static block (vkn_shader.c1[]).
@@ -63,6 +63,7 @@ typedef struct vkn_shader {
     uint8_t missing;            // bit VKN_SRC_*: no bundle for the stage's key (its draws must be skipped, as the translator does)
     uint8_t unusable;           // bit VKN_SRC_*: the bundle needs a capability the device lacks (no module; skip)
     uint8_t dyn_policy;
+    uint8_t has_inputs;         // [P10] a piece's shader with INPUT_ATTACHMENT texture bindings (vkn_fx_shader_create)
     VkDescriptorSetLayout set_layout;
     VkPipelineLayout layout;
     VkShaderModule module[VKN_SRCS];   // base modules (owned by the loader, live until the process ends)

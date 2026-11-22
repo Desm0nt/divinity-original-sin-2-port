@@ -35,7 +35,7 @@ static void safe_count(const char *what, VkResult r) {
 
 #define FR_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
 
-enum { VKN_FR_RING = 3, VKN_FR_OFF = VKN_FR_RING, VKN_FR_NCB = VKN_FR_RING + 1, VKN_FR_LISTEN = 8 };
+enum { VKN_FR_RING = 3, VKN_FR_OFF = VKN_FR_RING, VKN_FR_NCB = VKN_FR_RING + 1, VKN_FR_LISTEN = 8, VKN_FR_NSEC = 24 };
 enum { FENCE_WAIT_NS = 5000000000ull };   // a fence that takes longer is a lost / hung device: the buffer is never reused then
 // Unexpected conditions (each prints its first 16 occurrences as red lines).
 enum { RL_INIT, RL_WAIT, RL_BEGIN, RL_END, RL_SUBMIT, RL_PRESENT, RL_PRESENT_LATE, RL_OPEN, RL_LISTEN, RL_NONE, RL_N };
@@ -45,6 +45,9 @@ typedef struct fr_slot {
     uint8_t pending;    // submitted, fence not yet seen signalled
     uint8_t ts;         // the timestamp pair of this buffer was written by its last recording
     uint64_t frame;     // [stage 5.5] vkn_frame() of its last presented recording (vkn_frame_gpu_done)
+    VkCommandBuffer sec[VKN_FR_NSEC]; uint8_t nsec;   // [P10] secondary buffers of this slot's recording (vkn_cb2_begin); reused with the slot
+    VkCommandBuffer cb0, mid, tail; uint8_t split;    // [P10 fix 6] vkn_rec_split: cb0 = the slot's own buffer (head), cb = tail once split
+    void (*fill)(VkCommandBuffer mid, void *ctx); void *fill_ctx;
 } fr_slot;
 
 static struct {
@@ -54,6 +57,7 @@ static struct {
     VkQueryPool qp; double ts_period;                       // qp = VK_NULL_HANDLE: no timestamps
     uint32_t next;                                          // the next ring slot of a presented recording
     int cur, cur_presented;                                 // cur = open slot, -1 = none
+    VkCommandBuffer route;                                  // [P10] vkn_cb_route: what vkn_cb() answers instead of the slot's buffer
     uint32_t serial;
     int want_presented;                                     // vkn_rec_begin(1) was asked since the last presented submit (even if it failed)
     int end_due;                                            // a presented recording was submitted: its vkn_frame_end waits for the next buffer (end_due_run)
@@ -94,7 +98,7 @@ static int fr_init(void) {
     }
     for (int i = 0; i < VKN_FR_NCB && r == VK_SUCCESS; i++) {
         const VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        g.s[i].cb = cbs[i];
+        g.s[i].cb = g.s[i].cb0 = cbs[i];
         r = vkCreateFence(g.dev, &fi, NULL, &g.s[i].fence);
     }
     if (r != VK_SUCCESS) {
@@ -181,6 +185,7 @@ int vkn_rec_begin(int presented) {
     if (slot_wait(k)) { g.st.begin_fail++; return -1; }
     if (presented) end_due_run();   // buffer k is free: the recording 3 before this one finished
     const VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    s->cb = s->cb0; s->split = 0; s->fill = NULL; s->fill_ctx = NULL;   // [P10 fix 6] (the head again; mid / tail are reset when used)
     VkResult r = vkResetFences(g.dev, 1, &s->fence);
     if (r == VK_SUCCESS) r = vkResetCommandBuffer(s->cb, 0);
     if (r == VK_SUCCESS) r = vkBeginCommandBuffer(s->cb, &bi);
@@ -190,7 +195,7 @@ int vkn_rec_begin(int presented) {
         return -1;
     }
     if (presented) { g.next++; s->frame = vkn_frame(); }   // [stage 5.5] (after the due frame end: the frame its draws see)
-    g.cur = k; g.cur_presented = presented;
+    g.cur = k; g.cur_presented = presented; g.route = VK_NULL_HANDLE; s->nsec = 0;   // [P10]
     if (g.qp) {
         vkCmdResetQueryPool(s->cb, g.qp, 2u * (uint32_t)k, 2);
         vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g.qp, 2u * (uint32_t)k);
@@ -204,8 +209,45 @@ int vkn_rec_begin(int presented) {
 // [rt2 R7] every recorder asks vkn_cb() for the handle: a waiting window of DM_VK_NATIVE_SORT goes in first (vkn_sort.h); the draw path
 // and vkn_pass's checks ask vkn_cb_peek (no flush). vkn_sort_flush itself records through vkn_cb_peek.
 extern uint32_t vkn_sort_n __attribute__((weak)); void vkn_sort_flush(void) __attribute__((weak));
-VkCommandBuffer vkn_cb(void) { if (&vkn_sort_n && vkn_sort_n && vkn_sort_flush) vkn_sort_flush(); return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
-VkCommandBuffer vkn_cb_peek(void) { return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
+VkCommandBuffer vkn_cb(void) { if (&vkn_sort_n && vkn_sort_n && vkn_sort_flush) vkn_sort_flush(); return g.cur < 0 ? VK_NULL_HANDLE : g.route ? g.route : g.s[g.cur].cb; }
+VkCommandBuffer vkn_cb_peek(void) { return g.cur < 0 ? VK_NULL_HANDLE : g.route ? g.route : g.s[g.cur].cb; }
+// ==== [P10] secondary command buffers of the open recording (vkn_frame.h; the merged tile pass of vkn_pass.c) ====
+VkCommandBuffer vkn_cb_primary(void) { return g.cur >= 0 ? g.s[g.cur].cb : VK_NULL_HANDLE; }
+void vkn_cb_route(VkCommandBuffer sec) { if (g.cur >= 0) g.route = sec; }
+VkCommandBuffer vkn_cb2_begin(VkRenderPass rp, uint32_t subpass, VkFramebuffer fb) {
+    if (g.cur < 0 || !rp) return VK_NULL_HANDLE;
+    fr_slot *s = &g.s[g.cur];
+    if (s->nsec >= VKN_FR_NSEC) return VK_NULL_HANDLE;
+    if (!s->sec[s->nsec]) {
+        const VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g.pool, .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1};
+        if (vkAllocateCommandBuffers(g.dev, &ai, &s->sec[s->nsec]) != VK_SUCCESS) { s->sec[s->nsec] = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    }
+    const VkCommandBufferInheritanceInfo ih = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .renderPass = rp, .subpass = subpass, .framebuffer = fb};
+    const VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT, .pInheritanceInfo = &ih};
+    if (vkResetCommandBuffer(s->sec[s->nsec], 0) != VK_SUCCESS || vkBeginCommandBuffer(s->sec[s->nsec], &bi) != VK_SUCCESS) return VK_NULL_HANDLE;
+    return s->sec[s->nsec++];
+}
+static VkCommandBuffer fr_primary(VkCommandBuffer *p) {   // [P10 fix 6] a primary buffer of the pool, allocated once, reset and begun
+    if (!*p) { const VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = g.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+               if (vkAllocateCommandBuffers(g.dev, &ai, p) != VK_SUCCESS) { *p = VK_NULL_HANDLE; return VK_NULL_HANDLE; } }
+    const VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    if (vkResetCommandBuffer(*p, 0) != VK_SUCCESS || vkBeginCommandBuffer(*p, &bi) != VK_SUCCESS) return VK_NULL_HANDLE;
+    return *p;
+}
+int vkn_rec_split(void (*fill)(VkCommandBuffer mid, void *ctx), void *ctx) {
+    if (g.cur < 0 || !g.cur_presented || !fill || g.route) return -1;
+    fr_slot *s = &g.s[g.cur];
+    if (s->split || !fr_primary(&s->tail)) return -1;
+    s->split = 1; s->fill = fill; s->fill_ctx = ctx; s->cb = s->tail;
+    g.xs.splits++;
+    return 0;
+}
+int vkn_rec_split_parts(VkCommandBuffer head, VkCommandBuffer *mid, VkCommandBuffer *tail) {
+    for (int k = 0; k < VKN_FR_NCB; k++) if (g.s[k].cb0 == head && head) { if (!g.s[k].split) return -1; if (mid) *mid = g.s[k].mid; if (tail) *tail = g.s[k].tail; return 0; }
+    return -1;
+}
+int vkn_cb2_end(VkCommandBuffer sec) { if (g.route == sec) g.route = VK_NULL_HANDLE; return sec && vkEndCommandBuffer(sec) == VK_SUCCESS ? 0 : -1; }
 uint32_t vkn_cb_serial(void) { return g.serial; }
 int vkn_rec_presented(void) { return g.cur >= 0 && g.cur_presented; }
 
@@ -287,16 +329,29 @@ int vkn_rec_submit(int wait) {
     if (g.pres.have && g.pres.tex && g.pres.tex->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) vkn_pass_layout(g.pres.tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     vkn_prof_rec_close(s->cb, k);   // [stage 5 A0] after the close listeners (the last pass ended)
     if (g.qp) { vkCmdWriteTimestamp(s->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g.qp, 2u * (uint32_t)k + 1); s->ts = 1; }
+    g.route = VK_NULL_HANDLE;   // [P10] (the close listeners ended every routed buffer)
     g.cur = -1;   // from here on recorders see no command buffer
     int rc = 0;
+    VkCommandBuffer list[3]; uint32_t nl = 0;   // [P10 fix 6] [head, mid, tail] of a split recording, else the one buffer
+    if (s->split) {
+        VkCommandBuffer mid = fr_primary(&s->mid);
+        if (mid) { s->fill(mid, s->fill_ctx); if (vkEndCommandBuffer(mid) != VK_SUCCESS) mid = VK_NULL_HANDLE; }
+        if (!mid) { g.xs.split_lost++; if (red_ok(RL_END)) vkn_logf(FR_RED "frame: the deferred part of buffer %d (vkn_rec_split) was not recorded: its pass is lost", k); }
+        s->fill = NULL;
+        VkResult rh = vkEndCommandBuffer(s->cb0);
+        if (rh == VK_SUCCESS) list[nl++] = s->cb0;
+        if (mid) list[nl++] = mid;
+        if (rh != VK_SUCCESS && red_ok(RL_END)) vkn_logf(FR_RED "frame: vkEndCommandBuffer of the head of buffer %d failed (VkResult %d)", k, (int)rh);
+    }
     VkResult r = vkEndCommandBuffer(s->cb);
+    if (r == VK_SUCCESS) list[nl++] = s->cb;
     if (r != VK_SUCCESS) {
         rc = -1; g.xs.submit_fail++; s->ts = 0;
         if (red_ok(RL_END)) vkn_logf(FR_RED "frame: vkEndCommandBuffer of buffer %d failed (VkResult %d): the recording is lost", k, (int)r);
     } else {
         before_submit();
         if (xbg_safe_mode_vkn_tick) xbg_safe_mode_vkn_tick(1);   // [VK-DRV] the lost / hang test, if armed
-        const VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &s->cb};
+        const VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = nl, .pCommandBuffers = list};
         vkn_queue_lock(); r = vkQueueSubmit(g.queue, 1, &si, s->fence); vkn_queue_unlock();
         if (r == VK_SUCCESS) { s->pending = 1; g.st.submits++; }
         else {

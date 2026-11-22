@@ -591,6 +591,9 @@ static void hist_read(vkn_tex *t, int how) {
     st_ent *e = st_get(t, 0);
     if (!e || !e->state) return;
     sk_ent *k = sk_get(e->key, 0);
+    // [P10 fix 6] the merged tile pass of this recording decides its stores at the submit (vkn_rec_split): a read before that keeps the
+    // store - nothing is lost, the content is there for this reader (phone run G01: a forward draw sampled the discarded shadow mask)
+    if (e->state == HS_DEAD && tl_dfr_revoke(t)) { if (k) k->streak = 0; e->state = HS_NONE; return; }
     if (e->state == HS_DEAD || e->state == HS_VDEAD) {
         const int real = e->state == HS_DEAD;
         if (real) g_s3.violations++; else g_s3.would_violations++;
@@ -612,8 +615,15 @@ static void hist_over(vkn_tex *t) {
     if (k && k->inc != frame32() + 1) { if (k->streak < 255) k->streak++; k->inc = frame32() + 1; }
     e->state = HS_NONE;
 }
+// [P10 fix 4] g_store_shared: the merged tile pass's attachments may sit on the engine's shared render-target storage (every 3D target of
+// DOS2 does: GBuffer1..3, HDRFullBuffer1..3, LinearDepth, the shadow mask, the depth). Such a texture is still ONE object for every
+// name the engine gives it (vkn_tex_create_shared attaches a same-shape alias to the same vkn_tex; any other shape gets an image of its
+// own, which never sees this image's bytes), so the history of this object sees every read of this image: discarding its store is as
+// exact as for any other texture. Classic passes keep the old rule for now (phone run F04: the chain stored all 10 attachments,
+// "stores dontcare 0.0" in the whole frame, 86 of 138 stores "not eligible").
+static int g_store_shared;
 static int store_eligible(const vkn_tex *t) {
-    return single_sub(t) && !t->shared && t->cls != VKN_TC_WINDOW && t != g_watch_t && !t->dead;
+    return single_sub(t) && (!t->shared || g_store_shared) && t->cls != VKN_TC_WINDOW && t != g_watch_t && !t->dead;
 }
 // The store op of attachment slot `slot` (VKN_PASS_COLORS = depth) of a pass whose load already resolved t's pending content.
 // Returns the op; *poison = 1 for mode 3.

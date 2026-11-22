@@ -355,7 +355,7 @@ void dm_vkn_eng_register(void);
 void dm_vkn_eng_register(void) {
     if (vkn_mode() != VKN_NATIVE) return;
     g_census = env_int("DM_VK_ENG_CENSUS", 0, 0, 2);
-    g_rate = env_int("DM_VK_ENG_FARRATE", 0, 0, 3);
+    g_rate = env_int("DM_VK_ENG_FARRATE", 1, 0, 3);   // [23.11] default 1 by the owner (D07 +11 % walking; clip F07/F08 accepted)
     g_period = env_int("DM_VK_ENG_FARRATE_N", 2, 2, 4);
     g_move = env_f("DM_VK_ENG_FARRATE_MOVE", 8.0f);
     g_shmin = env_int("DM_VK_ENG_SHMIN", 0, 0, 3);

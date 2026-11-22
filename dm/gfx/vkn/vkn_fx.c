@@ -161,16 +161,17 @@ const vkn_shader *vkn_fx_shader_create(const vkn_fx_shader_src *src) {
     vkn_bind *tab = src->nbind ? (vkn_bind *)malloc(src->nbind * sizeof *tab) : NULL;
     if (!s || (src->nbind && !tab)) { free(s); free(tab); vkn_logf(RED "fx: shader \"%s\": out of memory", nm); return NULL; }
     VkDescriptorSetLayoutBinding lb[64]; memset(lb, 0, sizeof lb);
-    uint32_t dyn = 0; int bad = 0;
+    uint32_t dyn = 0, nin = 0; int bad = 0;
     for (uint32_t i = 0; i < src->nbind; i++) {
         vkn_bind *t = &tab[i]; *t = src->bind[i];
-        const int ubo = t->kind == VKN_BK_UNIFORM || t->kind == VKN_BK_SUPPORT || t->kind == VKN_BK_FX_UBO;
+        const int ubo = t->kind == VKN_BK_UNIFORM || t->kind == VKN_BK_SUPPORT || t->kind == VKN_BK_FX_UBO || (t->kind == VKN_BK_C1 && src->c1_from);   // [P10]
         const int tex = t->kind == VKN_BK_TEXTURE || t->kind == VKN_BK_FX_TEX;
         if ((!ubo && !tex) || t->count != 1 || (i && t->binding <= tab[i - 1].binding) ||
             (ubo && t->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && t->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) ||
-            (tex && t->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) ||
+            (tex && t->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && t->type != VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) ||   // [P10]
             (t->kind == VKN_BK_FX_TEX && t->slot >= VKN_FX_TEX) || (t->kind == VKN_BK_FX_UBO && t->slot >= VKN_FX_UBO)) { bad = 1; break; }
         t->dyn = t->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ? (uint8_t)dyn++ : (uint8_t)VKN_NO_DYN;
+        if (t->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) nin++;
         lb[i].binding = t->binding; lb[i].descriptorType = t->type; lb[i].descriptorCount = 1;
         lb[i].stageFlags = t->bundle_stage == 4 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
     }
@@ -205,6 +206,7 @@ const vkn_shader *vkn_fx_shader_create(const vkn_fx_shader_src *src) {
     snprintf(s->key[VKN_SRC_VS], sizeof s->key[0], "%.16s", nm);
     if (src->fs) snprintf(s->key[VKN_SRC_FS], sizeof s->key[0], "%.16s", nm);
     s->bind = tab; s->nbind = (uint16_t)src->nbind; s->ndyn = (uint16_t)dyn;
+    s->has_inputs = nin != 0; if (src->c1_from) memcpy(s->c1, src->c1_from->c1, sizeof s->c1);   // [P10]
     s->ninputs = src->ninputs > 16 ? 16 : src->ninputs;
     memcpy(s->inputs, src->inputs, sizeof s->inputs); memcpy(s->input_classes, src->input_classes, sizeof s->input_classes);
     vkn_logf("fx: shader \"%s\" id %#x: %u bindings (%u dynamic), fragment stage %d", nm, s->id, src->nbind, dyn, src->fs ? 1 : 0);

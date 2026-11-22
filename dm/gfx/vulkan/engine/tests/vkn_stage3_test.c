@@ -4063,6 +4063,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mk_main_thread = pthread_self();
     mk_validate_on = 1; mk_blit = 1;
+    setenv("DM_VK_NATIVE_TILELIGHT", "0", 0); setenv("DM_VK_ENG_FARRATE", "0", 0);   /* [23.11] default 1 now; the shadow-cache tests keep their frames */   // [23.11] P10 is on by default on the mock's Adreno now; the other tests keep their frames (test_p10 sets its mode itself)
     vkn_set_mode(VKN_NATIVE);
     // install order of the host: the modules' listeners first, then the test's own
     vkn_pass_init(); vkn_draw_install(); vkn_tex_update_init();

@@ -42,6 +42,7 @@ CBUF(100, c15)
 // n of the list below with bit n of OC set is an input attachment (input_attachment_index n) of a merged render pass: 0 tG0, 1 tNormal,
 // 2 tDepth, 3 tEmissive, 4 tBase, 5 tAniso, 6 tAmbient, 7 tShadow (tExposure, 1x1, stays a texture). Such a variant exists only for
 // render scale 1 (the host's value): every fetch is at the fragment's own pixel, which is what subpassLoad reads.
+// [P10] bits 8..12 belong to the fused Sky part (lightfuse_sky.glsl, with -DLIGHTFUSE): tools/dos2_tile_shaders.py.
 #ifndef OC
 #define OC 0
 #endif

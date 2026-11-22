@@ -329,6 +329,15 @@ static const fused *fused_for_locked(const vkn_shader *l, char v) {
     return f->fx ? f : NULL;
 }
 
+// [P10] the Light shader and the variant ('f' / 'g') behind a fused object of this piece (vkn_pass.c makes its input-attachment twin). 0 = found.
+int vkn_lf_fused_of(const vkn_shader *fx, const vkn_shader **light, char *v) {
+    int r = -1;
+    pthread_mutex_lock(&g_mk_mu);
+    for (uint32_t i = 0; i < g.nfu && i < FUSED; i++) if (g.fu[i].fx == fx && fx) { if (light) *light = g.fu[i].light; if (v) *v = g.fu[i].v; r = 0; break; }
+    pthread_mutex_unlock(&g_mk_mu);
+    return r;
+}
+
 // ---------------------------------------------------------------- the stash and the recovery
 static void stash_drop(void) {
     for (uint32_t i = 0; i < g.st.nheld; i++) vkn_tex_unref(g.st.held[i]);

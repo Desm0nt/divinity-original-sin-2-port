@@ -379,7 +379,7 @@ static VkRenderPass g_rp[VKN_RP_MAX]; static uint16_t g_rp_compat[VKN_RP_MAX]; s
 static compat_e g_compat[VKN_COMPAT_MAX]; static uint32_t g_ncompat;
 static int g_rp_ok;
 // Framebuffer key: views in attachment order (VkImageView as u64), extent, layers, compatibility class.
-typedef struct { uint64_t view[9]; uint32_t w, h, layers; uint16_t compat; uint8_t nviews, pad; uint64_t pass; } fb_k;   // pass: [VK-DRV] vkn_fb_get_rp (0 = the class's)
+typedef struct { uint64_t view[12]; uint32_t w, h, layers; uint16_t compat; uint8_t nviews, pad; uint64_t pass; } fb_k;   // pass: [VK-DRV] vkn_fb_get_rp (0 = the class's)
 static otab g_fb_tab;            // fb_k -> VkFramebuffer
 static uint64_t g_fb_retired;
 
@@ -496,6 +496,138 @@ uint16_t vkn_rp_get(const vkn_rp_key *k, VkRenderPass *pass, uint16_t *compat) {
 }
 VkRenderPass vkn_rp_compat_pass(uint16_t compat) { const compat_e *c = compat_get(compat); return c ? c->pass : VK_NULL_HANDLE; }
 
+// ==== [P10] merged render passes (vkn_state.h "P10"): several subpasses over one attachment list, input attachments ====
+// A shape = the key without its load / store ops; each (shape, subpass) is a compatibility class of its own (compat_k.pad = {shape + 1,
+// subpass}: never equal to a one-subpass class of the same formats), whose pass is the shape's first pass - every pass of the shape is
+// compatible with it (Vulkan: equal but for ops and layouts), so pipelines and framebuffers built against it serve all of them.
+enum { MP_SHAPES = 16, MP_PASSES = 96 };
+static struct { vkn_mp_key k; uint16_t compat[VKN_MP_SUBS]; } g_mp_shape[MP_SHAPES]; static uint32_t g_nmp_shape;
+static struct { vkn_mp_key k; VkRenderPass p; uint8_t shape; } g_mp_pass[MP_PASSES]; static uint32_t g_nmp_pass;
+static void mp_canon(vkn_mp_key *c, const vkn_mp_key *k, int ops) {
+    memset(c, 0, sizeof *c);
+    c->natt = k->natt > VKN_MP_ATTS ? VKN_MP_ATTS : k->natt; c->nsub = k->nsub > VKN_MP_SUBS ? VKN_MP_SUBS : k->nsub; c->samples = k->samples ? k->samples : 1;
+    for (uint32_t j = 0; j < c->natt; j++) {
+        c->fmt[j] = k->fmt[j]; c->depth[j] = k->depth[j] ? 1 : 0;
+        if (!ops) continue;
+        c->load[j] = k->load[j] > 2 ? 2 : k->load[j]; c->store[j] = k->store[j] ? 1 : 0;
+        if (c->depth[j] && fmt_has_stencil(k->fmt[j])) { c->sload[j] = k->sload[j] > 2 ? 2 : k->sload[j]; c->sstore[j] = k->sstore[j] ? 1 : 0; }
+        else { c->sload[j] = VK_ATTACHMENT_LOAD_OP_DONT_CARE; c->sstore[j] = VK_ATTACHMENT_STORE_OP_DONT_CARE; }
+    }
+    for (uint32_t i = 0; i < c->nsub; i++) {
+        c->sub[i].ncolor = k->sub[i].ncolor > 8 ? 8 : k->sub[i].ncolor; c->sub[i].ninput = k->sub[i].ninput > VKN_MP_INPUTS ? VKN_MP_INPUTS : k->sub[i].ninput;
+        c->sub[i].ds = k->sub[i].ds < c->natt ? k->sub[i].ds : 0xff;
+        memset(c->sub[i].color, 0xff, sizeof c->sub[i].color); memset(c->sub[i].input, 0xff, sizeof c->sub[i].input);
+        for (uint32_t j = 0; j < c->sub[i].ncolor; j++) if (k->sub[i].color[j] < c->natt) c->sub[i].color[j] = k->sub[i].color[j];
+        for (uint32_t j = 0; j < c->sub[i].ninput; j++) if (k->sub[i].input[j] < c->natt) c->sub[i].input[j] = k->sub[i].input[j];
+    }
+}
+static int mp_uses(const vkn_mp_key *k, uint32_t sub, uint32_t att) {
+    if (k->sub[sub].ds == att) return 1;
+    for (uint32_t j = 0; j < k->sub[sub].ncolor; j++) if (k->sub[sub].color[j] == att) return 1;
+    for (uint32_t j = 0; j < k->sub[sub].ninput; j++) if (k->sub[sub].input[j] == att) return 1;
+    return 0;
+}
+static VkRenderPass mp_create(const vkn_mp_key *k) {   // under g_rp_mu (the reference arrays are static)
+    const vkn_dev *d = vkn_device();
+    if (!d || !k->natt || !k->nsub) return VK_NULL_HANDLE;
+    rp_mode();
+    VkAttachmentDescription at[VKN_MP_ATTS]; memset(at, 0, sizeof at);
+    for (uint32_t j = 0; j < k->natt; j++) {
+        VkAttachmentDescription *a = &at[j]; const int dp = k->depth[j];
+        a->format = (VkFormat)k->fmt[j]; a->samples = (VkSampleCountFlagBits)k->samples;
+        a->loadOp = (VkAttachmentLoadOp)k->load[j]; a->storeOp = (VkAttachmentStoreOp)k->store[j];
+        a->stencilLoadOp = (VkAttachmentLoadOp)k->sload[j]; a->stencilStoreOp = (VkAttachmentStoreOp)k->sstore[j];
+        const int loaded = k->load[j] == VK_ATTACHMENT_LOAD_OP_LOAD || (dp && k->sload[j] == VK_ATTACHMENT_LOAD_OP_LOAD);
+        a->initialLayout = vkn_rp_initial(loaded, g_rpmode.te, dp);
+        a->finalLayout = dp ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    static VkAttachmentReference cref[VKN_MP_SUBS][8], iref[VKN_MP_SUBS][VKN_MP_INPUTS], dref[VKN_MP_SUBS]; static uint32_t pres[VKN_MP_SUBS][VKN_MP_ATTS];
+    VkSubpassDescription sp[VKN_MP_SUBS]; memset(sp, 0, sizeof sp);
+    uint8_t first[VKN_MP_ATTS]; memset(first, 0xff, sizeof first);
+    for (uint32_t i = 0; i < k->nsub; i++) for (uint32_t j = 0; j < k->natt; j++) if (first[j] == 0xff && mp_uses(k, i, j)) first[j] = (uint8_t)i;
+    for (uint32_t i = 0; i < k->nsub; i++) {
+        VkSubpassDescription *q = &sp[i]; q->pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        for (uint32_t j = 0; j < k->sub[i].ncolor; j++) {
+            const uint8_t a = k->sub[i].color[j];
+            cref[i][j].attachment = a == 0xff ? VK_ATTACHMENT_UNUSED : a; cref[i][j].layout = a == 0xff ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        for (uint32_t j = 0; j < k->sub[i].ninput; j++) {
+            const uint8_t a = k->sub[i].input[j];
+            iref[i][j].attachment = a == 0xff ? VK_ATTACHMENT_UNUSED : a;
+            iref[i][j].layout = a == 0xff ? VK_IMAGE_LAYOUT_UNDEFINED : k->depth[a] ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        q->colorAttachmentCount = k->sub[i].ncolor; q->pColorAttachments = k->sub[i].ncolor ? cref[i] : NULL;
+        q->inputAttachmentCount = k->sub[i].ninput; q->pInputAttachments = k->sub[i].ninput ? iref[i] : NULL;
+        if (k->sub[i].ds != 0xff) { dref[i].attachment = k->sub[i].ds; dref[i].layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; q->pDepthStencilAttachment = &dref[i]; }
+        uint32_t np = 0;   // kept through a subpass that does not touch it: everything used before
+        for (uint32_t j = 0; j < k->natt; j++) if (first[j] < i && !mp_uses(k, i, j)) pres[i][np++] = j;
+        q->preserveAttachmentCount = np; q->pPreserveAttachments = np ? pres[i] : NULL;
+    }
+    const VkPipelineStageFlags att_st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    const VkAccessFlags att_w = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    const VkAccessFlags att_rw = att_w | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    VkSubpassDependency dep[2 * VKN_MP_SUBS + VKN_MP_SUBS * VKN_MP_SUBS / 2]; memset(dep, 0, sizeof dep); uint32_t nd = 0;
+    for (uint32_t i = 0; i < k->nsub; i++) {   // the two outer dependencies of every one-subpass pass, for every subpass
+        VkSubpassDependency *e = &dep[nd++];
+        e->srcSubpass = VK_SUBPASS_EXTERNAL; e->dstSubpass = i;
+        e->srcStageMask = att_st | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        e->srcAccessMask = att_w | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT; e->dstStageMask = att_st; e->dstAccessMask = att_rw;
+        e = &dep[nd++];
+        e->srcSubpass = i; e->dstSubpass = VK_SUBPASS_EXTERNAL; e->srcStageMask = att_st; e->srcAccessMask = att_w;
+        e->dstStageMask = vkn_rp_dep_after(g_rpmode.dep);
+        e->dstAccessMask = att_rw | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    }
+    for (uint32_t i = 1; i < k->nsub; i++) for (uint32_t j = 0; j < i; j++) {   // an earlier subpass's writes -> this one's attachment / input reads, per pixel
+        VkSubpassDependency *e = &dep[nd++];
+        e->srcSubpass = j; e->dstSubpass = i; e->srcStageMask = att_st; e->srcAccessMask = att_w;
+        e->dstStageMask = att_st | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; e->dstAccessMask = att_rw | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+        e->dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+    }
+    VkRenderPassCreateInfo ci; memset(&ci, 0, sizeof ci);
+    ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    ci.attachmentCount = k->natt; ci.pAttachments = at; ci.subpassCount = k->nsub; ci.pSubpasses = sp; ci.dependencyCount = nd; ci.pDependencies = dep;
+    VkRenderPass p = VK_NULL_HANDLE;
+    const VkResult r = vkCreateRenderPass(d->dev, &ci, NULL, &p);
+    if (r != VK_SUCCESS) {
+        static int noted; if (noted++ < 8) vkn_logf(VKN_RED "merged render pass: vkCreateRenderPass %d (%u attachments, %u subpasses)", (int)r, k->natt, k->nsub);
+        return VK_NULL_HANDLE;
+    }
+    return p;
+}
+int vkn_mp_get(const vkn_mp_key *key, VkRenderPass *pass, uint16_t compat[VKN_MP_SUBS]) {
+    vkn_mp_key c, sh; mp_canon(&c, key, 1); mp_canon(&sh, key, 0);
+    if (!c.natt || !c.nsub) return 0;
+    VkRenderPass p = VK_NULL_HANDLE; int si = -1;
+    pthread_mutex_lock(&g_rp_mu);
+    for (uint32_t i = 0; i < g_nmp_pass && !p; i++) if (!memcmp(&g_mp_pass[i].k, &c, sizeof c)) { p = g_mp_pass[i].p; si = g_mp_pass[i].shape; }
+    if (!p && rp_ready()) {
+        for (uint32_t i = 0; i < g_nmp_shape && si < 0; i++) if (!memcmp(&g_mp_shape[i].k, &sh, sizeof sh)) si = (int)i;
+        const int new_shape = si < 0;
+        if (g_nmp_pass >= MP_PASSES || (new_shape && (g_nmp_shape >= MP_SHAPES || g_ncompat + c.nsub > VKN_COMPAT_MAX))) {
+            static int noted; if (!noted++) vkn_logf(VKN_RED "merged render pass: tables full (%u passes, %u shapes, %u classes): no more", g_nmp_pass, g_nmp_shape, g_ncompat);
+        } else if ((p = mp_create(&c)) != VK_NULL_HANDLE) {
+            if (new_shape) {
+                si = (int)g_nmp_shape; g_mp_shape[si].k = sh;
+                for (uint32_t i = 0; i < c.nsub; i++) {
+                    compat_k ck; memset(&ck, 0, sizeof ck);
+                    ck.ncolor = c.sub[i].ncolor; ck.samples = c.samples; ck.pad[0] = (uint8_t)(si + 1); ck.pad[1] = (uint8_t)i;
+                    for (uint32_t j = 0; j < ck.ncolor; j++) ck.color[j] = c.sub[i].color[j] == 0xff ? 0 : c.fmt[c.sub[i].color[j]];
+                    ck.depth = c.sub[i].ds == 0xff ? 0 : c.fmt[c.sub[i].ds];
+                    g_compat[g_ncompat].k = ck; g_compat[g_ncompat].pass = p; __atomic_store_n(&g_ncompat, g_ncompat + 1, __ATOMIC_RELEASE);
+                    g_mp_shape[si].compat[i] = (uint16_t)g_ncompat;
+                }
+                g_nmp_shape++;
+            }
+            g_mp_pass[g_nmp_pass].k = c; g_mp_pass[g_nmp_pass].p = p; g_mp_pass[g_nmp_pass].shape = (uint8_t)si; g_nmp_pass++;
+        }
+    }
+    if (p && compat) memcpy(compat, g_mp_shape[si].compat, sizeof g_mp_shape[si].compat);
+    pthread_mutex_unlock(&g_rp_mu);
+    if (pass) *pass = p;
+    return p != VK_NULL_HANDLE;
+}
+int vkn_rp_compat_merged(uint16_t compat) { const compat_e *c = compat_get(compat); return c && c->k.pad[0] ? 1 + c->k.pad[1] : 0; }
+
 // ================================================================ framebuffers =================================================
 
 static void fb_destroy(void *ctx) { const vkn_dev *d = vkn_device(); if (d) vkDestroyFramebuffer(d->dev, (VkFramebuffer)ctx, NULL); }
@@ -504,7 +636,7 @@ VkFramebuffer vkn_fb_get(uint16_t compat, const VkImageView *views, uint32_t nvi
 }
 VkFramebuffer vkn_fb_get_rp(uint16_t compat, VkRenderPass rp, const VkImageView *views, uint32_t nviews, uint32_t width, uint32_t height, uint32_t layers) {
     const compat_e *c = compat_get(compat); const vkn_dev *d = vkn_device();
-    if (!c || !d || nviews > 9 || (nviews && !views) || !width || !height) return VK_NULL_HANDLE;
+    if (!c || !d || nviews > 12 || (nviews && !views) || !width || !height) return VK_NULL_HANDLE;   // ([P10] a merged pass: up to 12)
     fb_k k; memset(&k, 0, sizeof k);
     for (uint32_t i = 0; i < nviews; i++) k.view[i] = (uint64_t)(uintptr_t)views[i];
     k.w = width; k.h = height; k.layers = layers ? layers : 1; k.compat = compat; k.nviews = (uint8_t)nviews; k.pass = (uint64_t)(uintptr_t)rp;
@@ -738,7 +870,7 @@ static VkPipeline pipe_build(const vkn_pipe_desc *k, VkPrimitiveTopology topo, c
     ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     ci.stageCount = nst; ci.pStages = st; ci.pVertexInputState = &vi; ci.pInputAssemblyState = &ia; ci.pViewportState = &vp;
     ci.pRasterizationState = &rs; ci.pMultisampleState = &ms; ci.pDepthStencilState = c->k.depth ? &ds : NULL; ci.pColorBlendState = &cbs;
-    ci.pDynamicState = &dy; ci.layout = src->layout; ci.renderPass = src->pass ? src->pass : c->pass; ci.subpass = 0; ci.basePipelineIndex = -1;
+    ci.pDynamicState = &dy; ci.layout = src->layout; ci.renderPass = src->pass ? src->pass : c->pass; ci.subpass = c->k.pad[0] ? c->k.pad[1] : 0; ci.basePipelineIndex = -1;   // [P10] a merged pass's class names its subpass
     VkPipeline p = VK_NULL_HANDLE;
     // The default VkPipelineCache is internally synchronised (created without EXTERNALLY_SYNCHRONIZED): both builders share it.
     const int lk = vkn_drv_lock();   // [stage 5.3 V2] DM_GFX_PIPE_SERIAL (PowerVR: render thread and warm-up worker build one at a time)
@@ -791,7 +923,7 @@ VkPipeline vkn_pipe_get(const vkn_pipe_key *k, const vkn_pipe_src *src) {
         if (p) vkn_retire(pipe_destroy, (void *)(uintptr_t)p);
     } else if (!ot_insert(&g_pipe_tab, k, (uint64_t)(uintptr_t)p)) vkn_logf(VKN_RED "pipelines: cache table: out of memory");   // a failure is cached too
     pthread_mutex_unlock(&g_pipe_mu);
-    if (keep && !warm && p && vkn_warm_note) vkn_warm_note(&d, src);   // listed for the next run (only queued on this thread)
+    if (keep && !warm && p && vkn_warm_note && !vkn_rp_compat_merged(d.pass)) vkn_warm_note(&d, src);   // listed for the next run (only queued on this thread)
     return p;
 }
 VkPipeline vkn_pipe_build(const vkn_pipe_desc *d, const vkn_pipe_src *src, uint64_t *ns) {
