@@ -2168,7 +2168,12 @@ static int a5_child(const char *const env[][2], void (*fn)(a5_res *), a5_res *ou
 }
 
 // ---- the shadow-cache scenario
-typedef struct a5_cfg { int behind, hold; } a5_cfg;
+// moved: [shcfix 22.11] buffers written by the engine AFTER a draw of them, in the frame (the phone's "reads a vertex / index buffer
+// written since it was drawn" in a repair): moving caster 0 of every cascade reads its vertices from VB 65, rewritten right after
+// its draw; moving caster 1 its indices from IB 67, rewritten right after its draw; member 2 of cascade 1 reads VB 66, rewritten
+// right after its draw in frame 8 (the frame whose missing member makes cascade 1 a repair: that member was skipped, its block not
+// named by a draw since frame 2 - a write in place would lose the bytes the repair needs)
+typedef struct a5_cfg { int behind, hold, moved; } a5_cfg;
 static a5_cfg g_a5;
 static int32_t g_a5_t0[VKN_TEX_SLOTS], g_a5_t1[VKN_TEX_SLOTS], g_a5_tl[VKN_TEX_SLOTS], g_a5_s[VKN_TEX_SLOTS];
 static uint64_t a5_hash_rect(vkn_tex *t, int32_t x, int32_t y, int32_t w, int32_t h, int *all_clear) {
@@ -2212,6 +2217,12 @@ static void a5_shc(a5_res *r) {
       CHECK(vkn_buf_update(VKN_BUF_VB, H(51, 1), 0, pat, 4096, NULL, NULL) >= 0);
       for (int i = 0; i < 1024; i++) pat[i] = (uint8_t)((i & 1) ? 0 : (i / 2) % 7);
       CHECK(vkn_buf_update(VKN_BUF_IB, H(52, 1), 0, pat, 1024, NULL, NULL) >= 0); }
+    if (g_a5.moved) {   // [shcfix 22.11] (made in the children of both sides: the content model never sees a handle)
+        uint8_t pat[4096]; for (int i = 0; i < 4096; i++) pat[i] = (uint8_t)(i * 29 + (i >> 4) * 5 + 9);
+        vkn_block b; CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(65, 1), 4096, 0, 0, pat, &b), 0); CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(66, 1), 4096, 0, 0, pat, &b), 0);
+        for (int i = 0; i < 1024; i++) pat[i] = (uint8_t)((i & 1) ? 0 : (i / 2) % 5);
+        CHECK_EQ(vkn_buf_create(VKN_BUF_IB, H(67, 1), 1024, 2, 0, pat, &b), 0);
+    }
     for (int i = 0; i < VKN_TEX_SLOTS; i++) g_a5_t0[i] = g_a5_t1[i] = g_a5_tl[i] = g_a5_s[i] = -1;
     g_a5_t0[0] = 512; g_a5_t0[3] = 303; g_a5_t1[0] = 300; g_a5_t1[3] = 303; g_a5_tl[0] = 510; g_a5_tl[3] = 303; g_a5_s[0] = 10; g_a5_s[3] = 13;
     const uint64_t md0 = mk_depth_draws;
@@ -2244,9 +2255,24 @@ static void a5_shc(a5_res *r) {
                 if (f == 23 && k == 1 && i == 6) (void)vkn_pass_sample(A);           // a read inside a cascade (a dispatch binding it; 1 = feedback)
                 if (f == 26 && k == 0 && i == 4) a5_cast(&in, A, k, 18, 0, H(71, 1));   // GREATER
                 if (f == 29 && k == 1 && i == 4) a5_cast(&in, A, k, 19, 0, H(72, 1));   // stencil
+                if (g_a5.moved && k == 1 && i == 2) {   // [shcfix 22.11] a member whose buffer is written after its draw in frame 8
+                    in.vb[0] = H(66, 1); a5_cast(&in, A, k, i, 0, H(70, 1)); in.vb[0] = g_in.vb[0];
+                    if (f == 8) { uint8_t b[16]; memset(b, 0x5c, sizeof b); CHECK(vkn_buf_update(VKN_BUF_VB, H(66, 1), 16u * (20 + 2), b, 16, NULL, NULL) >= 0); }
+                    continue;
+                }
                 a5_cast(&in, A, k, i, 0, H(70, 1));
             }
-            for (int j = 0; j < A5_DYN; j++) a5_cast(&in, A, k, A5_N + j, (uint32_t)f + 1, H(70, 1));   // moving casters
+            for (int j = 0; j < A5_DYN; j++) {   // moving casters
+                if (g_a5.moved && j == 0) {   // [shcfix 22.11] its vertices rewritten right after its draw
+                    in.vb[0] = H(65, 1); a5_cast(&in, A, k, A5_N + j, (uint32_t)f + 1, H(70, 1)); in.vb[0] = g_in.vb[0];
+                    uint8_t b[16]; for (int q = 0; q < 16; q++) b[q] = (uint8_t)(f * 7 + k * 3 + q);
+                    CHECK(vkn_buf_update(VKN_BUF_VB, H(65, 1), 16u * (uint32_t)(k * 20 + A5_N + j), b, 16, NULL, NULL) >= 0);
+                } else if (g_a5.moved && j == 1) {   // [shcfix 22.11] its indices rewritten right after its draw
+                    in.ib = H(67, 1); a5_cast(&in, A, k, A5_N + j, (uint32_t)f + 1, H(70, 1)); in.ib = g_in.ib;
+                    const uint16_t ix[3] = {(uint16_t)((f + k) % 5), (uint16_t)((f + 2) % 5), 1};
+                    CHECK(vkn_buf_update(VKN_BUF_IB, H(67, 1), 2u * 3u * (uint32_t)(k * 20 + A5_N + j), ix, sizeof ix, NULL, NULL) >= 0);
+                } else a5_cast(&in, A, k, A5_N + j, (uint32_t)f + 1, H(70, 1));
+            }
         }
         // the first draw outside the atlas (the cache's safe point): the engine's own targets and constant block must be bound for it;
         // frames 9 and 10: none - the lighting draw that samples the atlas is the safe point (cascade 1's layer is built there at 9)
@@ -2361,6 +2387,10 @@ typedef struct mv_box { int32_t x, y, w, h, z; int alive; } mv_box;
 static void mv_scn(mv_res *r) {
     mk_depth_on = 1; mk_geo_on = 1;
     const char *hv = getenv("MV_HARD"); const int hard = hv && *hv == '1';
+    // [shcfix 22.11] MV_MOVED=1: the caster of the other shader reads VB 68, rewritten right after its draw every frame (a repair of the
+    // scroll path draws it again); the boxes read VB 69 (the unit mesh), rewritten with the same bytes after cascade 0's boxes of
+    // frames 16 and 54 (a new content version: the strip touchers of that cascade are drawn into the layer from their kept blocks)
+    const char *mvv = getenv("MV_MOVED"); const int moved = mvv && *mvv == '1';
     pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);   // (the command log starts again between recordings: 64 frames do not fit otherwise)
     const int v0 = mk_val_errors, e0 = mk_errors;
     vkn_shs_cam_block(12, 128, 0); vkn_shs_test_prog(mv_prog); vkn_shc_test_nofs(mv_nofs);
@@ -2376,6 +2406,11 @@ static void mv_scn(mv_res *r) {
         CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(55, 1), 256, 0, 0, NULL, &b), 0); CHECK(vkn_buf_update(VKN_BUF_VB, H(55, 1), 0, vb, 256, NULL, NULL) >= 0);
         const uint16_t ix[4] = {0, 1, 2, 0};
         CHECK_EQ(vkn_buf_create(VKN_BUF_IB, H(56, 1), 16, 2, 0, NULL, &b), 0); CHECK(vkn_buf_update(VKN_BUF_IB, H(56, 1), 0, ix, 8, NULL, NULL) >= 0);
+        if (moved) {
+            CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(69, 1), 256, 0, 0, vb, &b), 0);
+            uint8_t pat[256]; for (int i = 0; i < 256; i++) pat[i] = (uint8_t)(i * 31 + 7);
+            CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(68, 1), 256, 0, 0, pat, &b), 0);
+        }
     }
     static mv_box box[3][MV_N]; static int32_t tl[VKN_TEX_SLOTS], ts[VKN_TEX_SLOTS];
     for (int i = 0; i < VKN_TEX_SLOTS; i++) tl[i] = ts[i] = -1;
@@ -2404,7 +2439,7 @@ static void mv_scn(mv_res *r) {
             if (f == 30 && k == 1) {   // a member vanishes inside the tile
                 for (int i = 0; i < MV_N; i++) { mv_box *b = &box[k][i]; if (b->alive && i % 7 && b->x - camx > 40 && b->x - camx < 180 && b->y - camy > 40 && b->y - camy < 180) { b->alive = 0; break; } }
             }
-            vkn_draw_in in = g_in; in.shader = H(83, 1); in.ds = H(73, 1); in.vb[0] = H(55, 1); in.vb_off[0] = 0; in.ib = H(56, 1);
+            vkn_draw_in in = g_in; in.shader = H(83, 1); in.ds = H(73, 1); in.vb[0] = moved ? H(69, 1) : H(55, 1); in.vb_off[0] = 0; in.ib = H(56, 1);
             in.tex[2] = NULL; in.smp[2] = NULL;
             in.viewport[0] = (float)rect[k][0]; in.viewport[1] = (float)rect[k][1]; in.viewport[2] = in.viewport[3] = (float)MV_T;
             in.scissor[0] = rect[k][0]; in.scissor[1] = rect[k][1]; in.scissor[2] = in.scissor[3] = MV_T;
@@ -2434,6 +2469,12 @@ static void mv_scn(mv_res *r) {
                 CHECK(vkn_pass_depth() == A); CHECK(vkn_pass_color(0) == NULL);
                 { uint32_t o = 0, z = 0; CHECK_EQ(vkn_draw_ubo_get(0, 0, &o, &z), 0); CHECK_EQ(o, off); }   // the engine's block after whatever the cache drew
             }
+            if (moved && k == 0 && (f == 16 || f == 54)) {   // [shcfix 22.11] the mesh written again (same bytes, new version) after the boxes' draws
+                uint8_t vb[256]; memset(vb, 0, sizeof vb);
+                const float v[3][3] = {{0, 0, 0}, {1, 1, 0}, {1, 0, 0}};
+                for (int i = 0; i < 3; i++) memcpy(vb + (size_t)i * g_mv_stride, v[i], 12);
+                CHECK(vkn_buf_update(VKN_BUF_VB, H(69, 1), 0, vb, 256, NULL, NULL) >= 0);
+            }
             {   // a caster of another shader (the hash model: a rectangle somewhere in the tile, another one every frame)
                 vkn_draw_in o = g_in; o.ds = H(73, 1); o.tex[2] = NULL; o.smp[2] = NULL;
                 memcpy(o.viewport, in.viewport, sizeof o.viewport); memcpy(o.scissor, in.scissor, sizeof o.scissor);
@@ -2441,7 +2482,9 @@ static void mv_scn(mv_res *r) {
                 uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = (uint32_t)k; u[1] = 77; u[2] = (uint32_t)f + 1;
                 vkn_draw_ubo(0, 2, off, 64);
                 o.vb_off[0] = 16u * (uint32_t)(k + 1);
+                if (moved) o.vb[0] = H(68, 1);
                 CHECK_EQ(vkn_draw_indexed(&o, 3u * (uint32_t)k, 3, 1), 0);
+                if (moved) { uint8_t b[16]; for (int q = 0; q < 16; q++) b[q] = (uint8_t)(f * 11 + k * 5 + q); CHECK(vkn_buf_update(VKN_BUF_VB, H(68, 1), 16u * (uint32_t)(k + 1), b, 16, NULL, NULL) >= 0); }   // [shcfix 22.11]
             }
         }
         targets(g_a2, NULL, g_d3);
@@ -2538,6 +2581,26 @@ static void test_moving(void) {
     static const char *const e_zold[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_VK_NATIVE_SHSCROLL_Z", "1"}, {"DM_HACK_SHFAR", NULL},
                                              {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}};
     static mv_res CZ; mv_child(e_zold, mv_scn, &CZ);
+    {   // [shcfix 22.11] MV_MOVED (mv_scn): buffers written after their draws - the scroll path's repairs and strips draw them from the kept blocks
+        static const char *const m_truth[][2] = {{"MV_MOVED", "1"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHSCROLL", "0"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_HACK_SHFAR", NULL},
+                                                  {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}};
+        static const char *const m_all[][2] = {{"MV_MOVED", "1"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, {"DM_HACK_SHFAR", NULL},
+                                                {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}};
+        static const char *const m_ver[][2] = {{"MV_MOVED", "1"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "2"}, {"DM_VK_NATIVE_SHCULL", "0"}, {"DM_HACK_SHFAR", NULL},
+                                                {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_NATIVE_SHCACHE_VERIFY", "1"}, {NULL, NULL}};
+        static mv_res MT, M1, M3; mv_child(m_truth, mv_scn, &MT); mv_child(m_all, mv_scn, &M1); mv_child(m_ver, mv_scn, &M3);
+        int moved = 0, bad1 = 0, bad3 = 0;
+        for (int f = 0; f < MV_F; f++) { moved += MT.h[f] != T.h[f]; bad1 += M1.h[f] != MT.h[f]; bad3 += M3.h[f] != MT.h[f]; if (M1.h[f] != MT.h[f] && bad1 <= 4) printf("  moving MV_MOVED: frame %d differs from the truth\n", f); }
+        printf("  moving MV_MOVED: frames differing %d (verify %d); recover %llu (with moved draws %llu, with drops %llu), moved draws %llu (strips %llu), stale %llu, strips done %llu failed %llu; "
+               "verify: scroll tiles %llu texels differing %llu, cache verify equal %llu differ %llu (repairs %llu)\n", bad1, bad3, (unsigned long long)M1.st.recover_now,
+               (unsigned long long)M1.st.moved_recover, (unsigned long long)M1.st.recover_bad, (unsigned long long)M1.st.replay_moved, (unsigned long long)M1.st.moved_strips,
+               (unsigned long long)M1.st.replay_stale, (unsigned long long)M1.sc.jobs, (unsigned long long)M1.sc.job_fail, (unsigned long long)M3.sc.sv_cmp, (unsigned long long)M3.sc.sv_px,
+               (unsigned long long)M3.st.verify_eq, (unsigned long long)M3.st.verify_ne, (unsigned long long)M3.st.verify_rec);
+        CHECK(moved > 10); CHECK_EQ(bad1, 0); CHECK_EQ(bad3, 0);
+        CHECK_EQ(M1.st.replay_stale, 0); CHECK_EQ(M1.st.recover_bad, 0); CHECK_EQ(M1.st.replay_drop, 0); CHECK_EQ(M1.sc.job_fail, 0);
+        CHECK(M1.st.moved_recover >= 1); CHECK(M1.st.moved_strips >= 1); CHECK(M1.sc.scroll_ranges > 30);
+        CHECK_EQ(M3.sc.sv_px, 0); CHECK_EQ(M3.st.verify_ne, 0); CHECK_EQ(M3.st.replay_stale, 0);
+    }
     { int bad = 0; for (int f = 0; f < MV_F; f++) bad += CZ.h[f] != T.h[f];
       CHECK_EQ(bad, 0); CHECK(CZ.sc.dz_ranges > 10); CHECK_EQ(CZ.sc.drop_z, 0); CHECK_EQ(CZ.sc.build_held, 0); CHECK(CZ.sc.scroll_ranges > C2.sc.scroll_ranges); }
     // The phone's numbers (MV_HARD, mv_scn): the truth; the default scroll (exact: z moved refused, an object whose own constants changed
@@ -2675,7 +2738,7 @@ static void test_a5_shc(void) {
     static const char *const e_rate2[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", "2"}, A5_BASE};   // [gpu2 P8]
     static const char *const e_rate3[][2] = {{"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", "3"}, A5_BASE};
 #undef A5_BASE
-    static a5_res T, Tb, C1, C2, C2b, C3, C4, C5, C6, C7, C8;
+    static a5_res T, Tb, C1, C2, C2b, C3, C4, C5, C6, C7, C8, Tm, C1m, C2m;
     CHECK(mkshader(H(80, 1), "v300000000000001", "f300000000000001", NULL) != NULL); CHECK(mkshader(H(81, 1), "v300000000000001", "f300000000000001", NULL) != NULL);
     g_a5.behind = 0; g_a5.hold = 0; a5_child(e_truth, a5_shc, &T);
     g_a5.behind = 1; a5_child(e_truth, a5_shc, &Tb);
@@ -2688,6 +2751,24 @@ static void test_a5_shc(void) {
     a5_child(e_far1c, a5_shc, &C6);
     a5_child(e_rate2, a5_shc, &C7);
     a5_child(e_rate3, a5_shc, &C8);
+    g_a5.moved = 1; a5_child(e_truth, a5_shc, &Tm); a5_child(e_on, a5_shc, &C1m);   // [shcfix 22.11]
+    g_a5.hold = 1; a5_child(e_verify, a5_shc, &C2m); g_a5.hold = 0; g_a5.moved = 0;
+    if (Tm.ran && C1m.ran && C2m.ran) {
+        // the writes after the draws change the picture (else equality proves nothing); mode 1 = the truth in every frame: the repairs
+        // draw the moved casters from the blocks the engine's draws read (before the fix: "not replayed", the tile lacked them)
+        int moved = 0, bad1 = 0, bad2 = 0;
+        for (int f = 1; f < A5_F; f++) moved += Tm.h[f] != T.h[f];
+        for (int f = 0; f < A5_F; f++) { bad1 += C1m.h[f] != Tm.h[f]; bad2 += C2m.h[f] != Tm.h[f]; if (C1m.h[f] != Tm.h[f] && bad1 <= 4) printf("  shc moved mode 1: frame %d differs from the truth\n", f); }
+        CHECK(moved >= A5_F - 2); CHECK_EQ(bad1, 0); CHECK_EQ(bad2, 0);
+        CHECK_EQ(C1m.st.replay_stale, 0); CHECK_EQ(C1m.st.recover_bad, 0); CHECK_EQ(C1m.st.replay_drop, 0); CHECK_EQ(C1m.st.build_fail, 0);
+        CHECK(C1m.rc[8] >= 1); CHECK(C1m.st.replay_moved >= 3); CHECK(C1m.st.moved_recover >= 1);
+        // mode 2 (verify): the would-be repairs are verified too - tile cleared, every kept draw again, equal to the engine's tile
+        CHECK(C2m.st.verify_rec >= 1); CHECK(C2m.st.moved_verify >= 1); CHECK_EQ(C2m.st.verify_ne, 0); CHECK(C2m.st.verify_eq > 0); CHECK_EQ(C2m.st.replay_stale, 0);
+        printf("  shc moved (buffers written after their draws): mode 1 frames differing %d, repairs %llu (with moved draws %llu), moved draws %llu, stale %llu, repaired with drops %llu; "
+               "mode 2 verify equal %llu differ %llu (repairs verified %llu, with moved draws %llu)\n", bad1, (unsigned long long)C1m.st.recover_now,
+               (unsigned long long)C1m.st.moved_recover, (unsigned long long)C1m.st.replay_moved, (unsigned long long)C1m.st.replay_stale, (unsigned long long)C1m.st.recover_bad,
+               (unsigned long long)C2m.st.verify_eq, (unsigned long long)C2m.st.verify_ne, (unsigned long long)C2m.st.verify_rec, (unsigned long long)C2m.st.moved_verify);
+    } else CHECK(0);
     if (!T.ran || !C1.ran) return;
     // the model draws something everywhere (else equality would prove nothing)
     CHECK(T.model_draws >= (uint64_t)A5_F * 3 * A5_N);
@@ -2727,6 +2808,7 @@ static void test_a5_shc(void) {
     if (C2.ran) {
         bad = 0; for (int f = 0; f < A5_F; f++) bad += C2.h[f] != T.h[f];
         CHECK_EQ(bad, 0); CHECK(C2.st.verify_eq > 0); CHECK_EQ(C2.st.verify_ne, 0); CHECK_EQ(C2.st.skipped > 0, 1);
+        CHECK(C2.st.verify_rec >= 1);  // [shcfix 22.11] the would-be repairs (frame 8's missing member, ...) verified, equal
         printf("  shc mode 2: verify equal %llu differ %llu (runs %llu, skipped %llu), would skip %llu\n", (unsigned long long)C2.st.verify_eq,
                (unsigned long long)C2.st.verify_ne, (unsigned long long)C2.st.verify_runs, (unsigned long long)C2.st.verify_skip, (unsigned long long)C2.st.skipped);
     }

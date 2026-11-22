@@ -47,10 +47,14 @@ typedef struct sdraw {
     // [VK-SHADOWS-MOVING] tcls: a translation-invariant caster - inst its instance (nr_shs.h registry of the slot), mh the hash the model
     // got, lb its tile-local pixel bounds, z0 / z1 its clip z range; touch: a member that touches an exposed strip (drawn, kept for the layer)
     int32_t inst; uint8_t tcls, touch; nr_ss_rect lb; float z0, z1; uint64_t mh;
+    // [shcfix 22.11] the vertex / index blocks the engine's draw read (bko: kept). A replay draws from them: an engine write of the
+    // buffer after the draw renames it (the old block keeps the old bytes until 3 frames after its retirement; every replay of a kept
+    // draw is made in the recording of the draw), so the replay reads the bytes the engine's draw read - also when the draw was skipped.
+    vkn_draw_bufs bk; uint8_t bko;
 } sdraw;
 
 enum { END_NEXT, END_CLEAR, END_READ, END_USE, END_CLOSE };   // why a cascade ended (END_NEXT: at a draw = the safe point)
-enum { P_NONE, P_BUILD, P_RECOVER, P_VERIFY };                // work left for the next safe point
+enum { P_NONE, P_BUILD, P_RECOVER, P_VERIFY, P_VERIFY_ALL };  // work left for the next safe point (P_VERIFY_ALL: [shcfix] mode 2, a would-be RECOVER)
 enum { RP_ALL, RP_DRAWN, RP_NONE };                           // replay: every kept draw / the ordinals the model marked drawn / none (a clear only)
 enum { R_ALLOC, R_ATLAS, R_IMG, R_BUILD, R_RECOVER, R_LOST, R_STALE, R_VERIFY, R_UBO, R_SAVE, R_PRE, R_SCROLL, R_N };
 
@@ -481,7 +485,7 @@ static void scroll_jobs_run(void) {
         sjob *j = &gs.job[k];
         if (!j->on) continue;
         j->on = 0; gs.njob--;
-        int bad = nopass || gs.tv_frame != g.frame;
+        int bad = nopass || gs.tv_frame != g.frame, moved = 0;
         for (int ei = 0; ei < j->ne && !bad; ei++) {
             nr_ss_piece pc[4]; const int np = nr_ss_pieces(j->rect[2], j->rect[3], j->O, &j->e[ei], pc);
             for (int p = 0; p < np && !bad; p++) {
@@ -496,7 +500,8 @@ static void scroll_jobs_run(void) {
                     if (!nr_ss_isect(&sd->lb, &pc[p].r)) continue;   // (its bounds do not reach this piece: no fragment there)
                     int stale = sd->indexed && vkn_buf_version(VKN_BUF_IB, sd->in.ib, NULL) != sd->iver;
                     for (int st = 0; st < 3; st++) if ((sd->vread >> st & 1) && vkn_buf_version(VKN_BUF_VB, sd->in.vb[st], NULL) != sd->vver[st]) stale = 1;
-                    if (stale) { bad = 1; g.s.replay_stale++; break; }
+                    if (stale && !sd->bko) { bad = 1; g.s.replay_stale++; break; }
+                    if (stale) { g.s.replay_moved++; moved = 1; }   // [shcfix 22.11] drawn from the blocks the engine's draw read
                     int32_t tex[2][VKN_TEX_SLOTS], smp[2][VKN_TEX_SLOTS];
                     memset(tex, 0xff, sizeof tex); memset(smp, 0xff, sizeof smp);
                     for (uint32_t i = 0; i < sd->ntex; i++) { tex[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].id; smp[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].sid; }
@@ -510,7 +515,9 @@ static void scroll_jobs_run(void) {
                     }
                     vkn_fx_out mo; const int forced = mat_replay(&in, g.S, sd, &mo);
                     if (forced) vkn_fx_force(&mo);
+                    if (sd->bko) { vkn_draw_nest_bufs = &sd->bk; vkn_draw_nest_in = &in; }   // [shcfix 22.11]
                     const int rc = sd->indexed ? vkn_draw_indexed(&in, sd->first, sd->count, sd->instances) : vkn_draw_arrays(&in, sd->first, sd->count);
+                    vkn_draw_nest_bufs = NULL; vkn_draw_nest_in = NULL;
                     if (forced) vkn_fx_force(NULL);
                     if (rc) { bad = 1; g.s.replay_drop++; } else { g.s.replayed++; gs.c.job_draws++; }
                 }
@@ -518,6 +525,7 @@ static void scroll_jobs_run(void) {
         }
         if (bad) { gs.c.job_fail++; scroll_drop(k); SHC_RED(R_SCROLL, "cascade %d: the scrolled layer's strips could not be drawn: the layer is dropped (drawn in full next frame)", k); }
         else gs.c.jobs++;
+        if (moved) g.s.moved_strips++;
     }
     for (int st = 0; st < 2; st++) for (uint32_t sl = 0; sl < VKN_UBO_SLOTS; sl++) if (ub0[st][sl].ok) vkn_draw_ubo(st, sl, ub0[st][sl].off, ub0[st][sl].size);
     vkn_pass_targets(n0, col, lay, mip, dep);
@@ -559,7 +567,8 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
         if (!sd->ok) { bad++; g.s.replay_drop++; continue; }
         int stale = sd->indexed && vkn_buf_version(VKN_BUF_IB, sd->in.ib, NULL) != sd->iver;
         for (int st = 0; st < 3; st++) if ((sd->vread >> st & 1) && vkn_buf_version(VKN_BUF_VB, sd->in.vb[st], NULL) != sd->vver[st]) stale = 1;
-        if (stale) { bad++; g.s.replay_stale++; SHC_RED(R_STALE, "replay: draw %u of cascade %d reads a vertex / index buffer written since it was drawn (not replayed)", o, g.R.k); continue; }
+        if (stale && !sd->bko) { bad++; g.s.replay_stale++; SHC_RED(R_STALE, "replay: draw %u of cascade %d reads a vertex / index buffer written since it was drawn (not replayed)", o, g.R.k); continue; }
+        if (stale) g.s.replay_moved++;   // [shcfix 22.11] drawn below from the blocks the engine's draw read (sd->bk)
         int32_t tex[2][VKN_TEX_SLOTS], smp[2][VKN_TEX_SLOTS];
         memset(tex, 0xff, sizeof tex); memset(smp, 0xff, sizeof smp);
         for (uint32_t i = 0; i < sd->ntex; i++) { tex[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].id; smp[sd->tx[i].st][sd->tx[i].slot] = sd->tx[i].sid; }
@@ -568,7 +577,9 @@ static int replay(vkn_tex *dst, const int32_t *clear_rect, uint32_t clear_bits, 
         for (uint32_t i = 0; i < sd->nubo; i++) vkn_draw_ubo(sd->ub[i].st, sd->ub[i].slot, sd->ub[i].off, sd->ub[i].size);
         vkn_fx_out mo; const int forced = mat_replay(&in, dst, sd, &mo);   // [fixpp] after the blocks are announced (the gate reads them)
         if (forced) vkn_fx_force(&mo);
+        if (sd->bko) { vkn_draw_nest_bufs = &sd->bk; vkn_draw_nest_in = &in; }   // [shcfix 22.11]
         const int rc = sd->indexed ? vkn_draw_indexed(&in, sd->first, sd->count, sd->instances) : vkn_draw_arrays(&in, sd->first, sd->count);
+        vkn_draw_nest_bufs = NULL; vkn_draw_nest_in = NULL;
         if (forced) vkn_fx_force(NULL);
         if (rc) { bad++; g.s.replay_drop++; } else g.s.replayed++;
     }
@@ -614,12 +625,17 @@ static void verify_done(void *ctx) {
     }
     vkn_block_free(&j->a); vkn_block_free(&j->b); free(j);
 }
-static void verify_run(int k, const int32_t r[4]) {
+// all: [shcfix 22.11] a would-be RECOVER of mode 2 - the tile cleared and every kept draw drawn again (the repair mode 1 would make),
+// compared with the tile the engine drew.
+static void verify_run(int k, const int32_t r[4], int all) {
     g.vnext[k] = g.frame + g.verify_every; g.s.verify_runs++;
-    const int scr = gs.V.on;   // [VK-SHADOWS-MOVING] a scrolled range: the tile cleared, the scrolled layer, then the drawn casters
+    const int scr = !all && gs.V.on;   // [VK-SHADOWS-MOVING] a scrolled range: the tile cleared, the scrolled layer, then the drawn casters
     if (!g.X && !(g.X = img_make("shc verify"))) { g.s.verify_skip++; return; }
-    if (scr) { gs.rp_comp = 1; const int b = replay(g.X, r, g.P.bits, RP_DRAWN); gs.rp_comp = 0; if (b) { g.s.verify_skip++; return; } }
+    const uint64_t m0 = g.s.replay_moved;
+    if (all) { g.s.verify_rec++; if (replay(g.X, r, g.P.bits, RP_ALL)) { g.s.verify_skip++; return; } }
+    else if (scr) { gs.rp_comp = 1; const int b = replay(g.X, r, g.P.bits, RP_DRAWN); gs.rp_comp = 0; if (b) { g.s.verify_skip++; return; } }
     else if (copy_tile(g.S, g.X, r) || replay(g.X, NULL, 0, RP_DRAWN)) { g.s.verify_skip++; return; }
+    if (g.s.replay_moved != m0) g.s.moved_verify++;
     vjob *j = (vjob *)calloc(1, sizeof *j);
     if (!j) { g.s.verify_skip++; return; }
     if (read_tile(g.atlas, r, &j->a)) { free(j); g.s.verify_skip++; return; }
@@ -637,7 +653,10 @@ static void run_pending(void) {
     g.pend = 0; g.P.kind = P_NONE;
     nrshc_cas *c = g.cas[k];
     if (kind == P_BUILD) {
-        if ((!g.S && !(g.S = img_make("shc layer"))) || replay(g.S, g.P.rect, g.P.bits, RP_DRAWN)) {
+        const uint64_t m0 = g.s.replay_moved;
+        const int rb = (!g.S && !(g.S = img_make("shc layer"))) || replay(g.S, g.P.rect, g.P.bits, RP_DRAWN);
+        if (g.s.replay_moved != m0) g.s.moved_build++;
+        if (rb) {
             c->layer = 0; g.slot_real[k] = 0; g.s.build_fail++;
             SHC_RED(R_BUILD, "cascade %d: the layer could not be drawn (image %s, %llu replayed draws dropped so far): no layer", k, g.S ? "ok" : "missing", (unsigned long long)g.s.replay_drop);
             return;
@@ -647,9 +666,11 @@ static void run_pending(void) {
             if (i != k && g.cas[i]->layer && overlap(g.cas[i]->rect, g.P.rect)) { g.cas[i]->layer = 0; g.slot_real[i] = 0; g.s.evicted++; }
     } else if (kind == P_RECOVER) {
         g.s.recover_now++;
+        const uint64_t m0 = g.s.replay_moved;
         const int bad = replay(g.atlas, g.P.rect, g.P.bits, RP_ALL);
+        if (g.s.replay_moved != m0) g.s.moved_recover++;
         if (bad) { g.s.recover_bad++; SHC_RED(R_RECOVER, "cascade %d: repaired with %d of its draws missing (this frame's tile lacks their shadows)", k, bad); }
-    } else if (kind == P_VERIFY) verify_run(k, g.P.rect);
+    } else if (kind == P_VERIFY || kind == P_VERIFY_ALL) verify_run(k, g.P.rect, kind == P_VERIFY_ALL);
 }
 static void pend(int kind) { g.pend = 1; g.P.kind = kind; g.P.k = g.R.k; memcpy(g.P.rect, g.R.rect, sizeof g.P.rect); g.P.bits = g.R.clear_bits; }
 // Work that can no longer be done (the atlas is read / copied, or the recording ends, before the next draw): counted.
@@ -705,6 +726,8 @@ static void end_range(int why) {
     } else if (e == NRSHC_E_RECOVER && act == NRSHC_A_HIT && g.mode != NRSHC_CHECK) {   // (a broken BUILD drew everything: nothing to do)
         pend(P_RECOVER);
         if (why != END_NEXT) pend_lost(why);
+    } else if (e == NRSHC_E_RECOVER && act == NRSHC_A_HIT && g.R.verify) {   // [shcfix 22.11] mode 2: the repair mode 1 would make, verified
+        if (why == END_NEXT) pend(P_VERIFY_ALL); else g.s.verify_skip++;
     } else if (e == NRSHC_E_NONE && g.R.verify) {
         if (why == END_NEXT) pend(P_VERIFY); else g.s.verify_skip++;
     }
@@ -1010,6 +1033,25 @@ static uint64_t ubo_hash(int st, uint32_t slot, uint32_t off, uint32_t n, uint32
     return h;
 }
 extern const vkn_draw_in *vkn_draw_rt_in;   // [rt2 F1] vkn_draw.c (the draw the record executes now)
+// [shcfix 22.11] the vertex / index blocks the engine's draw in hand is drawn with (sdraw.bk): the record's resolution when the draw path
+// takes it (vkn_draw.h vkn_draw_pre, DM_VK_NATIVE_RT_RES=1), else the lookups the draw path makes - which also mark the blocks used, so
+// a later write of the buffer renames them even when the draw is skipped (in place only for a block no draw of the last 3 frames named).
+static void keep_bufs(sdraw *sd, const vkn_draw_in *in, const vkn_fx_ctx *ctx, const vkn_vfmt *vf) {
+    vkn_draw_bufs *b = &sd->bk; memset(b, 0, sizeof *b); b->ib_rc = -1;
+    const vkn_draw_pre *p = vkn_draw_rt_pre && vkn_draw_rt_in == in && !vkn_draw_rt_res_verify ? vkn_draw_rt_pre : NULL;
+    for (uint32_t i = 0; vf && i < vf->nbind; i++) {
+        const uint32_t st = vf->bind[i].binding; if (st >= 3) continue;
+        if (p) { b->vb[st] = p->vb[st]; b->vb_off[st] = p->vb_off[st]; }
+        else { const vkn_block *k = in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL; if (k) { b->vb[st] = k->buf; b->vb_off[st] = k->off; } }
+        b->vset |= (uint8_t)(1u << st);
+    }
+    if (ctx->indexed) {
+        if (p) { b->ib = p->ib; b->ib_rc = in->ib ? p->ib_rc : -1; }
+        else b->ib_rc = in->ib ? vkn_buf_lookup(VKN_BUF_IB, in->ib, &b->ib) : -1;
+        b->iset = 1;
+    }
+    sd->bko = 1;
+}
 static struct { uint64_t used, checked, moved; } g_vs;   // [rt2 F1] versions from the record: used / checked (EHASH=2) / the table had moved on
 static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out, const vkn_shs_b *bp) {
     const vkn_shader *sh = ctx->shader; nrshc_range *r = g.rg; const int k = g.R.k;
@@ -1119,6 +1161,7 @@ static void draw_one(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *o
     if (g.R.save && o < NRSHC_DRAWS) {
         sdraw *sd = &g.sv[o];
         *sd = t; sd->in = *in; sd->first = ctx->first; sd->count = ctx->count; sd->instances = ctx->instances; sd->indexed = ctx->indexed;
+        keep_bufs(sd, in, ctx, vf);   // [shcfix 22.11]
         g.s.saved++;
         if (!t.ok) SHC_RED(R_SAVE, "cascade %d draw %u: not replayable (engine primitive %u, %u textures, %u constant blocks)", k, o, in->prim, t.ntex, t.nubo);
     }
@@ -1356,9 +1399,9 @@ void vkn_shc_census(void) {
     for (int i = 1, n = 0; i < NRSHC_W_N; i++) if (s->why[i]) put(&a, "%s%s %llu", n++ ? ", " : "", nrshc_why_name(i), (ull)s->why[i]);
     put(&a, "]; draws %.0f a frame, %s %.0f a frame (%.1f %%;", s->draws / fr, g.mode == NRSHC_CHECK ? "would skip" : "skipped", s->skipped / fr, s->draws ? 100.0 * (double)s->skipped / (double)s->draws : 0.0);
     for (int i = 0; i < NRSHC_CAS; i++) if (s->cdraws[i]) put(&a, " c%d %.0f/%.0f", i, s->cskip[i] / fr, s->cdraws[i] / fr);
-    put(&a, " skipped/drawn); kept %.0f, replayed %.0f a frame (dropped %llu, stale %llu), layer copies %.1f a frame (precopied %llu: hit %llu, put back %llu, LOST %llu), tile clears %.1f a frame; verify equal %llu differ %llu (runs %llu, skipped %llu); "
+    put(&a, " skipped/drawn); kept %.0f, replayed %.0f a frame (dropped %llu, stale %llu; buffer written after the draw %llu: drawn from the bytes the engine drew - repairs %llu, layers %llu, verifies %llu, strips %llu), layer copies %.1f a frame (precopied %llu: hit %llu, put back %llu, LOST %llu), tile clears %.1f a frame; verify equal %llu differ %llu (runs %llu, of them repairs %llu, skipped %llu); "
         "far cascade (DM_VK_NATIVE_SHFAR=%d) %.0f draws a frame, %s %.0f; layer memory %.1f MB, model %.1f MB; red", s->saved / fr, s->replayed / fr, (ull)s->replay_drop, (ull)s->replay_stale,
-        s->copies / fr, (ull)s->precopied, (ull)s->pre_hit, (ull)s->pre_undone, (ull)s->pre_lost, s->tile_clears / fr, (ull)s->verify_eq, (ull)s->verify_ne, (ull)s->verify_runs, (ull)s->verify_skip, g.far, s->far_draws / fr, g.far == 1 ? "skipped" : "would skip",
+        (ull)s->replay_moved, (ull)s->moved_recover, (ull)s->moved_build, (ull)s->moved_verify, (ull)s->moved_strips, s->copies / fr, (ull)s->precopied, (ull)s->pre_hit, (ull)s->pre_undone, (ull)s->pre_lost, s->tile_clears / fr, (ull)s->verify_eq, (ull)s->verify_ne, (ull)s->verify_runs, (ull)s->verify_rec, (ull)s->verify_skip, g.far, s->far_draws / fr, g.far == 1 ? "skipped" : "would skip",
         g.far == 1 ? s->far_skipped / fr : s->far_draws / fr, s->img_bytes / 1048576.0, s->model_bytes / 1048576.0);
     { int r = 0; for (int i = 0; i < R_N; i++) r += g.red[i]; put(&a, " %d", r); }
     if (g.rate >= 2)   // [gpu2 P8]

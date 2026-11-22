@@ -13,7 +13,9 @@
 //                ("precopy": one pass break a frame; a precopied tile no hit takes is put back to the clear value), else at the
 //                cascade's first draw; a member is skipped (out->skip), every other draw is drawn; when the cascade ends and a member did
 //                not come or a draw broke the order rule (RECOVER), the tile is cleared and every draw of the cascade (kept) is drawn
-//                again;
+//                again; [shcfix 22.11] every replay of a kept draw binds the vertex / index blocks the engine's draw read (vkn_draw.h
+//                vkn_draw_bufs), not the handles' blocks of now: the engine rewrites some buffers after their shadow draw in the frame
+//                (phone: "reads a vertex / index buffer written since it was drawn (not replayed)" - a repaired tile without them);
 //   "the cascade ends" = the next draw of the chain is not an atlas draw of the same tile: that call is the safe point where this
 //                module records its own draws (vkn_fx_bypass); a clear / read / copy of the atlas or the end of the recording seen
 //                first (vkn_pass_watch, a close listener) ends it too: the layer is still built at the next draw, a RECOVER that can no
@@ -29,7 +31,8 @@
 //                          0 off; 1 on; 2 verify - every decision is made and counted and the layer is built, but every draw is drawn
 //                          as the engine asks; every _VERIFY frames per cascade a would-be hit is made for real in a side image X (the
 //                          layer tile + the would-be drawn casters) and compared byte for byte with the atlas tile at retire ("verify
-//                          equal E differ F"); 3 poison - as 1, but a hit does not copy the layer: static shadows vanish on screen.
+//                          equal E differ F"; [shcfix 22.11] a would-be hit that ends in a RECOVER: the repair mode 1 makes - X's
+//                          tile cleared, every kept draw drawn again - compared the same way, "of them repairs R"); 3 poison - as 1, but a hit does not copy the layer: static shadows vanish on screen.
 //   DM_VK_NATIVE_SHCACHE_STABLE / _MIN / _AGE / _PROBE / _VERIFY   the model's parameters (defaults 3 / 64 / 120 / 8, verify 30)
 //   DM_VK_NATIVE_SHFAR     (replaces DM_HACK_SHFAR for the backend; default = DM_HACK_SHFAR / DM_HACK_TIER as before, i.e. 0)
 //                          1 the far cascade's draws are skipped before any hashing (its tile keeps the clear: no far shadows);
@@ -80,6 +83,11 @@ typedef struct vkn_shc_stats {
     // mode 3: tiles compared, texels compared / differing, the largest difference in depth steps (1 / 65535 for D16)
     uint64_t rate_far, rate_reused, rate_would, rate_recover, rate_skipped, rate_saved, rate_lost, rate_cmp, rate_cmp_all, rate_cmp_px; uint32_t rate_cmp_max;
     uint64_t rate_drawn;                                                       // draws of a reused cascade that could not be kept: drawn over F's tile
+    // [shcfix 22.11] kept draws whose vertex / index buffer the engine wrote after the draw (before the cache drew it again): drawn from
+    // the blocks the engine's draw read (vkn_draw.h vkn_draw_bufs) - in total, and the replays that had one: repairs (RECOVER), layers
+    // (BUILD), verifies (mode 2), strips (DM_VK_NATIVE_SHSCROLL); verify_rec: mode 2 would-be RECOVERs verified (the tile cleared, every
+    // kept draw drawn again into the side image, compared with the engine's tile: the exactness of the repair mode 1 makes)
+    uint64_t replay_moved, moved_recover, moved_build, moved_verify, moved_strips, verify_rec;
 } vkn_shc_stats;
 void vkn_shc_stats_get(vkn_shc_stats *s);   // the current window (since the last census)
 // [stage 5.4 G2] DM_VK_NATIVE_SHFAR in effect (0 / 1 / 2), -1 = not installed yet. The far-cascade rule is the old path's

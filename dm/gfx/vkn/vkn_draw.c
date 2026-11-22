@@ -118,6 +118,9 @@ const void *vkn_draw_rt_snap; const vkn_draw_in *vkn_draw_rt_in;
 const vkn_draw_pre *vkn_draw_rt_pre; int vkn_draw_rt_res_verify;
 static vkn_draw_res_stats g_rs;
 static const vkn_draw_pre *pre_of(const vkn_draw_in *in) { return !g_fx_nest && vkn_draw_rt_pre && vkn_draw_rt_in == in ? vkn_draw_rt_pre : NULL; }
+// [shcfix 22.11] (vkn_draw.h) a piece's replay of a kept draw: the blocks that draw was drawn with
+const vkn_draw_bufs *vkn_draw_nest_bufs; const vkn_draw_in *vkn_draw_nest_in;
+static const vkn_draw_bufs *nest_bufs_of(const vkn_draw_in *in) { return vkn_draw_nest_bufs && vkn_draw_nest_in == in ? vkn_draw_nest_bufs : NULL; }
 void vkn_draw_res_stats_get(vkn_draw_res_stats *s) { if (s) *s = g_rs; }
 // [rt P0] DM_VK_NATIVE_PROF=3 pipeline-change census; [rt P3] its counters and the check switch
 static vkn_draw_prof3 g_p3; static vkn_pipe_desc g_ppd; static uint16_t g_ppd_vin; static int g_ppd_ok;
@@ -1006,7 +1009,8 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     uint32_t vstride[VKN_VFMT_NULL_BINDING + 1] = {0, 0, 0, 0};
     const int cvb = (g_cost & VKN_COST_VB) != 0;
     const vkn_block *vblk[VKN_VFMT_STREAMS]; uint32_t nvfound = 0;
-    if (vf && cvb && !puse) {   // [stage 5, draw cost] every stream the format reads under one lock (stops where the loop below drops)
+    const vkn_draw_bufs *const nbk = nest_bufs_of(in);   // [shcfix 22.11]
+    if (vf && cvb && !puse && !(nbk && nbk->vset)) {   // [stage 5, draw cost] every stream the format reads under one lock (stops where the loop below drops)
         uint64_t vh[VKN_VFMT_STREAMS]; uint32_t nh = 0;
         for (uint32_t i = 0; i < vf->nbind; i++) if (vf->bind[i].binding < VKN_VFMT_STREAMS && vf->bind[i].binding != vin_st && nh < VKN_VFMT_STREAMS) vh[nh++] = in->vb[vf->bind[i].binding];
         nvfound = nh ? vkn_buf_get_n(VKN_BUF_VB, vh, nh, vblk) : 0; g_cs.vb_batched++;
@@ -1020,6 +1024,10 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         }
         VkBuffer bb = VK_NULL_HANDLE; uint64_t bo = 0;
         if (puse) { bb = pre->vb[st]; bo = pre->vb_off[st]; }   // [rt P2] resolved at encode (buf NULL: what a failed lookup drops)
+        else if (nbk && nbk->vset) {   // [shcfix 22.11] the blocks the kept draw was drawn with
+            if (st < 3 && (nbk->vset >> st & 1)) { bb = nbk->vb[st]; bo = nbk->vb_off[st]; }
+            else { const vkn_block *blk = in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL; if (blk) { bb = blk->buf; bo = blk->off; } }
+        }
         else {
             const vkn_block *blk = cvb ? (j < nvfound ? vblk[j] : NULL) : in->vb[st] ? vkn_buf_get(VKN_BUF_VB, in->vb[st]) : NULL;
             if (blk) { bb = blk->buf; bo = blk->off; }
@@ -1343,7 +1351,9 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
     vkn_buf_info ib; memset(&ib, 0, sizeof ib);
     int ib_rc;
     const vkn_draw_pre *const pre = pre_of(in);   // [rt P2] the IB resolved at encode
+    const vkn_draw_bufs *const nbk = nest_bufs_of(in);   // [shcfix 22.11] a replay of a kept draw: its index block
     if (pre && !vkn_draw_rt_res_verify) { ib = pre->ib; ib_rc = in->ib ? pre->ib_rc : -1; }
+    else if (nbk && nbk->iset) { ib = nbk->ib; ib_rc = in->ib ? nbk->ib_rc : -1; }
     else {
         ib_rc = in->ib ? vkn_buf_lookup(VKN_BUF_IB, in->ib, &ib) : -1;
         if (pre) {

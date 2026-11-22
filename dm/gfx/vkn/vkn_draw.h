@@ -178,6 +178,14 @@ typedef struct vkn_draw_pre {
 // vkn_state_handle_gen); marks the buffers as vkn_buf_mark / vkn_buf_lookup do. The IB only when indexed.
 void vkn_draw_resolve(const vkn_draw_in *in, int indexed, vkn_draw_pre *p);
 extern const vkn_draw_pre *vkn_draw_rt_pre;        // vkn_rt.c exec: the record's resolution for the draw vkn_draw_rt_in (NULL = none)
+// [shcfix 22.11] A piece's replay of a KEPT engine draw (the shadow cache, vkn_shc.c) draws with the vertex / index blocks that engine
+// draw was drawn with, not with the handles' blocks of now: a buffer written after the draw (vkn_buf_update: renamed - the old block
+// keeps the old bytes, retired 3 frames later; in place only for a block no draw of the last 3 frames named, and the cache marks the
+// blocks it keeps) would otherwise give the replay other bytes. vkn_draw_nest_bufs applies to the draw `vkn_draw_nest_in` only (the
+// piece sets both around its call and clears them); stream st < 3 takes vb[st] / vb_off[st] when bit st of vset is set, the index
+// buffer takes ib / ib_rc when iset. Never used for an engine draw.
+typedef struct vkn_draw_bufs { VkBuffer vb[3]; uint64_t vb_off[3]; vkn_buf_info ib; int32_t ib_rc; uint8_t vset, iset, pad[2]; } vkn_draw_bufs;
+extern const vkn_draw_bufs *vkn_draw_nest_bufs; extern const vkn_draw_in *vkn_draw_nest_in;
 extern int vkn_draw_rt_res_verify;                 // 1 = compare instead of use (vkn_rt.c, DM_VK_NATIVE_RT_RES=2)
 typedef struct vkn_draw_res_stats { uint64_t used, verified, differ, differ_shader, differ_state, differ_vb, differ_ib; } vkn_draw_res_stats;
 void vkn_draw_res_stats_get(vkn_draw_res_stats *s);
