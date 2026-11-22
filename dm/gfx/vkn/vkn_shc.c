@@ -84,7 +84,13 @@ static struct {
     // f_ok / f_rect / f_frame / f_gen / f_bits: what F holds; f_pend: the far cascade of this frame ended drawn - copy its tile into F at the
     // next safe point (fp_rect); cur_far: the draw in hand is into the far tile (nrh_far)
     int rate; vkn_tex *F; int f_ok, f_pend, cur_far; int32_t f_rect[4], fp_rect[4]; uint64_t f_frame, f_gen; uint32_t f_bits;
+    // [eng I1b] DM_VK_ENG_FARRATE (vkn_shc.h): the engine's decision for the frame being recorded (e_dec: -1 none yet, 0 drawn, 1 left
+    // out, 2 would be left out), the far draws seen since it came, the far tile (e_rect), the safe point owed (e_pend); f_eseq: the
+    // decision number whose drawn far tile F holds; e_empty: the last drawn decision had no far draw (its tile was the clear value)
+    int e_mode, e_period, e_dec, e_seen, e_pend, e_empty, e_saved_last; uint32_t e_draws; int32_t e_rect[4]; uint64_t e_seq, f_eseq;
+    vkn_shc_eng_stats es;
 } g;
+static int g_e_bad, g_e_tile;   // [eng I1b] (atomics: the engine side reads them) decisions that contradicted the recording; the far tile's width
 
 #define SHC_RED(k, ...) do { if (g.red[k] < 16) { g.red[k]++; vkn_logf(RED "shcache: " __VA_ARGS__); } } while (0)
 
@@ -745,6 +751,68 @@ static void far_save(void) {
     g.f_ok = 1; memcpy(g.f_rect, r, sizeof g.f_rect); g.f_frame = g.frame; g.f_gen = g.atlas_gen; g.f_bits = g.clear_bits; g.s.rate_saved++;
 }
 
+// ---- [eng I1b] DM_VK_ENG_FARRATE: the engine's far cascade every N-th frame (vkn_shc.h). At the safe point after the frame's atlas
+// draws (the first draw outside the atlas): a drawn far tile goes into F; in a frame the engine left the far cascade out of, F's tile
+// (drawn at most N-1 decisions ago, same atlas and clear value) goes back into the cleared atlas - the engine's resolve of that frame
+// reads the far cascade's matrices of the frame F was drawn in (the host side puts them back), so the static far shadows are bit for bit
+// where they were and a moving caster's far shadow is that many frames late. ----
+static void eng_red(const char *what) {
+    if (g.es.reds < 16) { g.es.reds++; vkn_logf(RED "shcache eng far: %s", what); }
+}
+static void eng_bad(const char *what) { __atomic_add_fetch(&g_e_bad, 1, __ATOMIC_RELEASE); g.es.bad++; eng_red(what); }
+static void eng_settle(void) {
+    const int dec = g.e_dec, seen = g.e_seen; const uint32_t nd = g.e_draws;
+    g.e_pend = 0; g.e_dec = -1; g.e_seen = 0; g.e_draws = 0;
+    const int clear_ok = g.clear_seen && g.clear_frame == g.frame;
+    if (dec == 2) { g.es.would++; g.es.would_draws += nd; return; }   // count mode: nothing changes
+    if (dec == 0) {
+        g.es.drawn++; g.es.drawn_draws += nd;
+        if (!seen) { g.es.empty++; g.e_empty = 1; g.f_ok = 0; return; }   // no far caster drew: the tile is the clear value
+        g.e_empty = 0; g.e_saved_last = 0;
+        if (g.e_mode != 1 && g.e_mode != 3) return;
+        if (!clear_ok || !g.atlas || (!g.F && !(g.F = img_make("shc far")))) { g.f_ok = 0; g.es.unsaved++; return; }
+        if (copy_tile(g.atlas, g.F, g.e_rect)) { g.f_ok = 0; g.es.unsaved++; return; }
+        g.e_saved_last = 1;
+        g.f_ok = 1; memcpy(g.f_rect, g.e_rect, sizeof g.f_rect); g.f_frame = g.frame; g.f_gen = g.atlas_gen; g.f_bits = g.clear_bits; g.f_eseq = g.e_seq; g.es.saved++;
+        __atomic_store_n(&g_e_tile, g.e_rect[2], __ATOMIC_RELAXED);
+        return;
+    }
+    g.es.skipped++;
+    if (seen) { g.f_ok = 0; eng_bad("a frame the engine left the far cascade out of drew into the far tile: the decision and the recording disagree"); return; }
+    const int f_ok = g.F && g.f_ok && g.f_gen == g.atlas_gen && g.f_bits == g.clear_bits && clear_ok && g.e_seq - g.f_eseq < (uint64_t)g.e_period;
+    if (!f_ok) {
+        if (g.e_empty) { g.es.empty_kept++; return; }   // (the last drawn far tile was the clear value too: nothing to restore)
+        g.es.missing++;
+        if (!g.e_saved_last) { eng_red("a left-out frame after a drawn one whose tile could not be saved (a new atlas, its clear not seen yet): no far shadows for one frame"); return; }
+        eng_bad("the far tile of a left-out frame could not be restored (no saved tile of this atlas / clear value / age): no far shadows for one frame");
+        return;
+    }
+    if (g.e_mode == 3) { g.es.poisoned++; return; }   // poison: the cleared tile stays (the far shadows blink)
+    if (copy_tile(g.F, g.atlas, g.f_rect)) { g.es.missing++; eng_bad("the far tile copy could not be recorded: no far shadows for one frame"); return; }
+    g.es.restored++;
+}
+static void eng_lost(const char *why) {
+    if (!g.e_pend) return;
+    g.es.lost++; g.e_pend = 0; g.e_seen = 0; g.e_draws = 0;
+    if (g.e_dec == 1) eng_bad(why);
+    else if (g.e_dec == 0) g.f_ok = 0;   // (not saved)
+    g.e_dec = -1;
+}
+void vkn_shc_eng_far(int dec) {   // recording thread (vkn_rt_call from the engine's shadow-stage execute)
+    if (!g.e_mode) return;
+    if (g.e_pend) eng_lost("a decision came before the last one's safe point (no draw outside the atlas between two shadow stages)");
+    g.e_dec = dec >= 0 && dec <= 2 ? dec : -1; g.e_seen = 0; g.e_draws = 0; g.e_seq++; g.es.dec++;
+}
+int vkn_shc_eng_far_bad(void) { return __atomic_load_n(&g_e_bad, __ATOMIC_ACQUIRE); }
+int vkn_shc_eng_far_tile(void) { return __atomic_load_n(&g_e_tile, __ATOMIC_RELAXED); }
+int vkn_shc_eng_far_mode(void) { return g.inst ? g.e_mode : 0; }
+void vkn_shc_eng_stats_get(vkn_shc_eng_stats *s) { if (s) *s = g.es; }
+void vkn_shc_eng_test(int mode, int period) {   // host tests: the switch as if read (the chain function must be registered already)
+    g.e_mode = mode; g.e_period = period >= 2 && period <= 4 ? period : 2; g.e_dec = -1; g.e_pend = g.e_seen = 0; g.e_draws = 0; g.e_empty = 0;
+    memset(&g.es, 0, sizeof g.es); __atomic_store_n(&g_e_bad, 0, __ATOMIC_RELAXED);
+    if (mode) g.rate = 1;
+}
+
 // ---- precopy: one pass break a frame instead of one per hit. At the frame's first cascade (the atlas cleared this frame, the
 // remembered clear not yet run) every slot whose layer nrshc_arm would take as a hit - layer drawn, same atlas / clear value, not too
 // old, previous cascade clean, tile inside the atlas - gets its tile copied from S now, before the atlas pass opens. A hit of that
@@ -768,6 +836,7 @@ static void precopy(void) {
     for (int j = 0; j < NRSHC_CAS; j++) {
         const nrshc_cas *c = g.cas[j]; const int32_t *r = c->rect;
         if (!c->layer || !g.slot_real[j] || g.slot_unrep[j] || !c->ranges || !c->prev_ok || c->atlas != g.atlas_gen || c->clear_bits != g.clear_bits || c->layer_ranges >= g.par.max_age) continue;
+        if (g.e_dec == 1 && g.f_ok && !memcmp(r, g.f_rect, sizeof g.f_rect)) continue;   // [eng I1b] the engine left the far cascade out: F's tile comes instead
         if (gs.sl && gs.sl[j].anch && !gs.sl[j].plain) continue;   // [VK-SHADOWS-MOVING] a scrolled layer is drawn by the piece, never copied
         if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 || (uint64_t)r[0] + (uint64_t)r[2] > g.atlas->w || (uint64_t)r[1] + (uint64_t)r[3] > g.atlas->h) continue;
         // [stage 5.1 A5 fix] the slot's last cascade was another tile (a cascade split by a clear / read took this slot for the rest of
@@ -1100,6 +1169,8 @@ static void new_frame(uint64_t f) {
 // The atlas was cleared / read / copied outside its pass (vkn_pass_watch): the cascade drawn now ends.
 static void on_watch(vkn_tex *t, int ev, float depth) {
     if (g.self || t != g.atlas) return;
+    if (g.e_pend) eng_lost(ev == VKN_PASS_EV_CLEAR ? "the atlas was cleared again before the far tile's safe point" : ev == VKN_PASS_EV_SAMPLE ?
+                           "the atlas was sampled before a draw outside it (no safe point for the far tile)" : "the atlas was copied / transitioned before the far tile's safe point");   // [eng I1b]
     if (ev == VKN_PASS_EV_CLEAR) {
         if (g.live) end_range(END_CLEAR);
         pend_lost(END_CLEAR); pre_lost(END_CLEAR);
@@ -1115,6 +1186,7 @@ static void on_watch(vkn_tex *t, int ev, float depth) {
     if (ev == VKN_PASS_EV_USE) { g.dirty = 1; if (g.f_pend) { g.f_pend = 0; g.s.rate_lost++; } }   // (a copy may write it; [gpu2 P8] not saved)
 }
 static void on_close(void) {
+    if (g.e_pend) eng_lost("the recording ended before the far tile's safe point");   // [eng I1b]
     if (g.live) end_range(END_CLOSE);
     pend_lost(END_CLOSE); pre_lost(END_CLOSE);
     scroll_jobs_lost();   // [VK-SHADOWS-MOVING] strips that were never drawn: those layers are not whole
@@ -1129,12 +1201,13 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     (void)user;
     vkn_tex *d = ctx->depth;
     if (d != g.atlas) {                       // every draw that is not into the atlas
-        if (g.live | g.pend | (int)g.pre | g.f_pend | gs.njob) {  // the cascade drawn before ends here: the safe point for its work
+        if (g.live | g.pend | (int)g.pre | g.f_pend | gs.njob | g.e_pend) {  // the cascade drawn before ends here: the safe point for its work
             if (g.live) end_range(END_NEXT);
             if (g.pend) run_pending();
             if (g.pre) pre_undo_all();
             if (g.f_pend) far_save();   // [gpu2 P8] (after a RECOVER's replay: the repaired tile)
             if (gs.njob) scroll_jobs_run();   // [VK-SHADOWS-MOVING] the strips of the scrolled layers: one pass of the layer image a frame
+            if (g.e_pend) eng_settle();   // [eng I1b] (last: after every repair of the tile)
         }
         if (d == g.rej || !d) return;
         if (!adopt(ctx, d)) return;
@@ -1156,13 +1229,18 @@ static void shc_fx_draw(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out
     if (g.pend) run_pending();
     if (g.f_pend) far_save();   // [gpu2 P8]
     g.cur_far = 0;
-    if (g.far || g.rate >= 2) {   // the far cascade (nrh_far: the frame's tiles in order of their first draw, the last one of 3 / of 2 for a 2048 atlas)
+    if (g.far || g.rate >= 2 || g.e_mode) {   // the far cascade (nrh_far: the frame's tiles in order of their first draw, the last one of 3 / of 2 for a 2048 atlas)
         // [stage 5.4 G2] only the sun atlas, as xbg_nr_hacks.inc far_draw (square, >= 1024): the cache adopts any depth-only image >= 256
         if (a->w != a->h || a->w < 1024) g.s.far_not_sun++;
         else if (nrh_far(&g.ftiles, rect, a->w) == 1) {
             g.cur_far = 1;
             if (g.far) g.s.far_draws++;
             if (g.far == 1) { out->skip = 1; g.s.far_skipped++; return; }
+        }
+        // [eng I1b] the frame's decision owes a safe point; a far draw is noted (a left-out frame must have none)
+        if (g.e_dec >= 0 && a->w == a->h && a->w >= 1024) {
+            g.e_pend = 1;
+            if (g.cur_far) { if (!g.e_seen) memcpy(g.e_rect, rect, sizeof g.e_rect); g.e_seen = 1; g.e_draws++; }
         }
     }
     // [VK-SHADOWS-MOVING] the bounds of the caster on the CPU: one that cannot touch viewport and scissor rasterises nothing (culled
@@ -1230,12 +1308,24 @@ void vkn_shc_install(void) {
                               "whose frame before drew the far tile takes that tile and skips every far draw (moving casters' far shadows one frame late)"
                               : "verify: drawn every frame, the frame before's far tile compared with this frame's every second frame (\"rate cmp\" in the census)");
     }
+    {   // [eng I1b] DM_VK_ENG_FARRATE (vkn_shc.h; the host side dm/host/hle_dos2_vkn_eng.c reads the same switches and makes the decisions)
+        const char *q = getenv("DM_VK_ENG_FARRATE"); int em = q && *q ? atoi(q) : 0;
+        if (em < 0 || em > 3) { vkn_logf(RED "shcache: DM_VK_ENG_FARRATE=%s is not 0-3: 0", q); em = 0; }
+        if (em && fr == 1) { vkn_logf("shcache: DM_VK_ENG_FARRATE=%d with DM_VK_NATIVE_SHFAR=1 (no far cascade at all): 0", em); em = 0; }
+        const char *n = getenv("DM_VK_ENG_FARRATE_N"); int per = n && *n ? atoi(n) : 2;
+        if (per < 2 || per > 4) per = 2;
+        if (em && g.rate >= 2) { vkn_logf("shcache: DM_VK_ENG_FARRATE=%d replaces DM_VK_NATIVE_SHRATE=%d (the backend's own far rate): 1", em, g.rate); g.rate = 1; }
+        g.e_mode = em; g.e_period = per; g.e_dec = -1;
+        vkn_logf("shcache: DM_VK_ENG_FARRATE=%d (VK-ENGINE-SIDE I1b: %s), period %d", em, em == 1 ? "the engine leaves the far cascade out, the backend puts the last drawn far tile back" :
+                 em == 2 ? "count only - the engine's would-be decisions and the far draws they would save" : em == 3 ? "POISON - left out and not put back: the far shadows blink" : "off", per);
+    }
     { const char *k = getenv("DM_VK_NATIVE_SHC_MASK"); vkn_shc_mask_set(k && *k ? atoi(k) : 0);   // [rt P3-GPU] (default 0 until the phone's verify run)
       vkn_logf("shcache: DM_VK_NATIVE_SHC_MASK=%d (%s)", g_shm, g_shm == 1 ? "constant blocks hashed only over the rows the shader reads" : g_shm == 2 ? "whole blocks hashed, the masked hash counted" : "whole blocks"); }
     vkn_logf("DM_VK_NATIVE_SHCACHE=%d (stage 5 A3, the static shadow cache: %s) stable=%u min=%u age=%u probe=%u verify=%u diag=%u (DM_VK_NATIVE_SHC_DIAG); DM_VK_NATIVE_SHFAR=%d (%s, %s)", m,
              m == 0 ? "off" : m == 1 ? "on" : m == 2 ? "verify - decided and counted, drawn as the engine asks, would-be hits compared" : "poison - a hit keeps the cleared tile",
              g.par.stable, g.par.min_static, g.par.max_age, g.par.probe, g.verify_every, g.par.diag, fr, fr == 1 ? "the far cascade is not drawn" : fr == 2 ? "far cascade counted" : "off",
              from == 'v' ? "env" : from == 'e' ? "DM_HACK_SHFAR" : from == 't' ? "DM_HACK_TIER" : "default");
+    if (g.e_mode) g.inst = 1;   // [eng I1b] (the far tile is kept by this chain function)
     if (!g.inst) return;
     if (vkn_fx_register("shcache", shc_fx, NULL, 100)) { vkn_logf(RED "shcache: the draw-effect chain refused the function: off"); g.inst = 0; return; }
     vkn_rec_on_close(on_close);
@@ -1333,6 +1423,15 @@ void vkn_shc_census(void) {
             vkn_logf("%s", m.b);
         }
         memset(&gs.c, 0, sizeof gs.c); vkn_shs_stats_reset();
+    }
+    if (g.e_mode) {   // [eng I1b]
+        const vkn_shc_eng_stats *e = &g.es;
+        vkn_logf("shcache eng far (DM_VK_ENG_FARRATE=%d, period %d, last 10 s): decisions %llu - drawn %llu (far draws a drawn frame %.0f, no far draw %llu), left out %llu "
+                 "(tile put back %llu, poisoned %llu, nothing to put back %llu, MISSING %llu), would leave out %llu (far draws a would frame %.0f); far tiles saved %llu "
+                 "(not saved %llu); lost safe points %llu; bad %llu (session %d: the engine stops leaving out after 3)", g.e_mode, g.e_period, (ull)e->dec, (ull)e->drawn,
+                 e->drawn ? (double)e->drawn_draws / (double)e->drawn : 0.0, (ull)e->empty, (ull)e->skipped, (ull)e->restored, (ull)e->poisoned, (ull)e->empty_kept, (ull)e->missing,
+                 (ull)e->would, e->would ? (double)e->would_draws / (double)e->would : 0.0, (ull)e->saved, (ull)e->unsaved, (ull)e->lost, (ull)e->bad, vkn_shc_eng_far_bad());
+        const uint64_t reds = g.es.reds; memset(&g.es, 0, sizeof g.es); g.es.reds = reds;
     }
     const uint64_t mb = s->model_bytes;
     memset(s, 0, sizeof *s); s->model_bytes = mb;

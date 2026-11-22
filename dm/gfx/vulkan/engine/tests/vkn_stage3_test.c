@@ -3575,6 +3575,36 @@ static void test_b4_prepass(void) {
         targets(C, NULL, D); vkn_draw_indexed(&gb, 0, 3, 1); fsubmit(0); vkn_query_init(0);
         vkn_prepass_stats s2; vkn_prepass_stats_get(&s2); CHECK(s2.counting_open > s1.counting_open);
     }
+    // [VK-ENGINE-SIDE I3] (phone: "refused blend=328 ... keys=382 ok=0", "hazards stencil=103") a G-buffer target with fewer than 4
+    // channels is written whole (the pipeline mask = the format's channels): skipped + overridden as with RGBA8; a stencil-testing
+    // G-buffer draw between the pre-pass and the claim is a hazard only when its stencil result depends on the depth test
+    {
+        vkn_tex *C1 = mktex(333, EF_R32UI, VKN_TC_COLOR, 1, 1280, 720, 1, 1, 333, 0); CHECK(C1 != NULL);
+        if (C1) {
+            CHECK_EQ(vkn_write_mask_nvn(C1->nvn_fmt), VK_COLOR_COMPONENT_R_BIT);
+            vkn_prepass_test_setup(1, b4_facts);
+#define B4C_FRAME(i) do { VkCommandBuffer cb_ = fbegin(1); targets(NULL, NULL, D); uint64_t m_ = mark();                                                      vkn_draw_indexed(&pre, 3, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1); predraws[i] = cnt(m_, cb_, MK_E_DRAW_IDX);                                            targets(C1, NULL, D); vkn_draw_indexed(&gb, 0, 3, 1); { const mk_gp *p_ = b5_pipe(cb_);                                                                 gbwrite[i] = p_ && p_->has_ds ? (int)p_->ds.depthWriteEnable * 10 + (int)p_->ds.depthCompareOp : -1; } fsubmit(0); } while (0)
+            B4C_FRAME(0); B4C_FRAME(1); B4C_FRAME(2);
+            CHECK_EQ(predraws[2], 1); CHECK_EQ(gbwrite[2], 10 + VK_COMPARE_OP_LESS_OR_EQUAL);   // was: refused as "blend", drawn twice
+#undef B4C_FRAME
+        }
+        CHECK(vkn_ds_put(H(73, 1), 1, 0, 2, 1, 0xff, 7, 2, 2) != 0);   // EQUAL + stencil: REPLACE on depth fail and on pass (no depth dependence)
+        CHECK(vkn_ds_put(H(74, 1), 1, 0, 2, 1, 0xff, 7, 0, 2) != 0);   // EQUAL + stencil: KEEP on depth fail, REPLACE on pass
+        vkn_draw_in sg = gb;
+        for (int dep = 0; dep < 2; dep++) {
+            sg.ds = dep ? H(74, 1) : H(73, 1);
+            vkn_prepass_test_setup(1, b4_facts);
+            for (int i = 0; i < 3; i++) {
+                VkCommandBuffer cb = fbegin(1); targets(NULL, NULL, D); uint64_t m = mark();
+                vkn_draw_indexed(&pre, 3, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1); predraws[i] = cnt(m, cb, MK_E_DRAW_IDX);
+                targets(C, NULL, D); vkn_draw_indexed(&sg, 9, 3, 1); vkn_draw_indexed(&gb, 0, 3, 1); fsubmit(0);
+            }
+            CHECK_EQ(predraws[2], dep ? 2 : 1);   // depth-dependent stencil before the claim: the key is unsafe, never skipped
+            const prepass_result *r = (const prepass_result *)vkn_prepass_test_last();
+            CHECK(r && r->hazard[PREPASS_H_STENCIL] == (uint32_t)dep);
+        }
+        vkn_prepass_stats s3; vkn_prepass_stats_get(&s3); CHECK(s3.st_free >= 3);
+    }
 #undef B4_FRAME
     vkn_prepass_census();
     vkn_prepass_stats_get(&s1);

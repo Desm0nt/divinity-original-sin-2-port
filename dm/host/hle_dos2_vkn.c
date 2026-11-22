@@ -149,6 +149,7 @@ void dm_dos2_vkn_install(void) {
     if (mode == VKN_NATIVE && vkn_shs_cam_block) vkn_shs_cam_block(12, 128, 0);
     if (mode == VKN_NATIVE && vkn_shc_install && vkn_shc_active) { vkn_shc_install(); if (vkn_shc_active()) dm_vkn_census(vkn_shc_census); }   // [stage 5 A3] the static shadow cache
     if (mode == VKN_NATIVE && vkn_lf_install && vkn_lf_active) { vkn_lf_install(); if (vkn_lf_active()) dm_vkn_census(vkn_lf_census); }   // [stage 5.1 A4] LIGHTFUSE + FOG
+    { extern void dm_vkn_eng_register(void) __attribute__((weak)); if (dm_vkn_eng_register) dm_vkn_eng_register(); }   // [VK-ENGINE-SIDE] hle_dos2_vkn_eng.c (after the shadow cache: DM_VK_ENG_FARRATE uses it)
     int in = 0, want = 0;
     for (int i = 0; i < g_nsite; i++) {
         vkn_site *s = &g_site[i];

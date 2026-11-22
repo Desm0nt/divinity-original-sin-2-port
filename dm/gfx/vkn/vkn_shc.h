@@ -159,6 +159,31 @@ struct vkn_shader;
 void vkn_shc_test_nofs(int (*fn)(const struct vkn_shader *s));   // host tests: "the fragment stage does nothing" (NULL = vkn_mat_peek)
 // [rt P4] DM_VK_NATIVE_SHC_EHASH (vkn_rt.h): the engine thread's block hashes taken / compared (mode 2) / different (totals)
 void vkn_shc_ehash_stats(uint64_t *used, uint64_t *verified, uint64_t *differ);
+// ==== [eng I1b] (docs/dos2/nr/VK-ENGINE-SIDE.md sections 4 I1b and 11) the far cascade every N-th frame, left out BY THE ENGINE ====
+// DM_VK_ENG_FARRATE  0 off (default: it changes the picture - a moving caster's far shadow is up to N-1 frames late - until the owner
+//                    has seen the clips); 1 on; 2 count (the engine decides and says so, nothing is left out); 3 poison (left out, the
+//                    tile NOT put back: the far shadows blink - proof that the path is live). DM_VK_ENG_FARRATE_N = N (2..4, default 2).
+//                    Replaces DM_VK_NATIVE_SHRATE (set to 1 while this is on); off with DM_VK_NATIVE_SHFAR=1.
+// The host side (dm/host/hle_dos2_vkn_eng.c) decides per shadow build: the cull receiver of the far cascade puts no object into its
+// list (no draw is made by the engine, none reaches the recording thread), and the far cascade's matrices of the last drawn build
+// are put back into the engine's shadow data, so the resolve of the frame reads the far tile with the projection it was drawn with.
+// Its shadow-stage execute (the encoder thread, in the order of the frame's records) hands the decision to vkn_shc_eng_far: 0 drawn,
+// 1 left out, 2 would be left out. Here: at the safe point after the frame's atlas draws (the first draw outside the atlas) a drawn far
+// tile (the tile nrh_far names) is copied into F; in a left-out frame F's tile goes back into the cleared atlas - if F holds this
+// atlas's tile with the same clear value, drawn at most N-1 decisions ago. A far draw in a left-out frame, a tile that cannot be put
+// back, a safe point that never comes (the atlas sampled / cleared / copied first, the recording's end) count as bad (red line); the
+// host side stops leaving out after 3 for the session (auto-fallback). The resolve of a left-out frame samples F's tile at the old
+// projection: static far shadows are where they were (bit for bit, the same tile and matrix), only casters that moved since lag.
+// Line "[vkn] shcache eng far ..." in the 10 s census.
+typedef struct vkn_shc_eng_stats {
+    uint64_t dec, drawn, drawn_draws, empty, skipped, restored, poisoned, empty_kept, missing, would, would_draws, saved, unsaved, lost, bad, reds;
+} vkn_shc_eng_stats;
+void vkn_shc_eng_far(int dec);                 // recording thread
+int vkn_shc_eng_far_bad(void);                 // any thread: bad decisions so far (the host side's fallback)
+int vkn_shc_eng_far_tile(void);                // any thread: the far tile's width in texels (0 = none seen yet)
+int vkn_shc_eng_far_mode(void);
+void vkn_shc_eng_stats_get(vkn_shc_eng_stats *s);   // the current window
+void vkn_shc_eng_test(int mode, int period);   // host tests
 #ifdef __cplusplus
 }
 #endif
