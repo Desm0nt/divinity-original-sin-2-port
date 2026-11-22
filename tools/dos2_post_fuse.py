@@ -329,22 +329,31 @@ def image(mod, W, H, inputs_of, ubos, tex, acc=None):
     return out
 
 
-def eq_F1(I, trs, n, rng, quiet=False, name='F1', flat=False):
+def eq_F1(I, trs, n, rng, quiet=False, name='F1', flat=False, part=0, outside=None):
     """LUT pass over a whole 8x8 image -> RGBA8 -> Sight at one pixel (translated, -O) vs the fused shader at that pixel.
     name='F1A..', flat=True (NB-18b-8): the HDR image has no edge (one colour +- 1 %), so the console's FXAA pass that follows Sight in
     the chain is the identity and F1A must still equal LUT -> RGBA8 -> Sight bit for bit."""
     W = H = 8; bad = {'mul': 0, 'div': 0}; worst = 0; out_lsb = 0
+    P = part or W   # [VK-LOWRES] a lower 3D scale: the chain draws the top-left P x P texels of its 8x8 targets (VP_MAP: TexCoord0 = texel centre)
+    outs = []
     for it in range(n):
         general = it >= (3 * n) // 4
         sbL = support(rng, W, H, general); sbS = support(rng, W, H, False)
         hdr = SI.Texture(rtex(rng, H, W, 0.0, 12.0, special=[0.0, 1.0, 1e4, 0.5]))
         if flat: hdr = SI.Texture((rng.uniform(0.02, 6.0, 4) * rng.uniform(0.99, 1.01, (H, W, 4))).astype(np.float32))
+        if P < W:   # outside the part: what the frame left there (poison NaN, or the caller's filling for the dependence check)
+            d = np.array(hdr.d, np.float32)
+            if d is not None:
+                fill = outside(rng, d.shape) if outside else np.full(d.shape, np.nan, np.float32)
+                m = np.zeros(d.shape[:2], bool); m[P:, :] = True; m[:, P:] = True
+                d[m] = fill[m]; hdr = SI.Texture(d)
         lut3 = SI.Texture3D(rng.uniform(0, 1, (4, 4, 4, 4)).astype(np.float32))
         c5L = cb({0: (rng.uniform(0, 0.05), rng.uniform(1, 20), float(rng.choice([0.0, 0.3, 1.0])), 0)})
         acc = []
         lut_img = image(I['LUT'], W, H, lambda x, y: {'FragCoord': (x + .5, y + .5, .5, 1)}, {4: sbL, 22: c5L}, {10: hdr, 16: lut3}, acc)
+        if P < W: lut_img[P:, :] = np.nan; lut_img[:, P:] = np.nan   # the LUT pass draws only the part
         lut_ex = np.mean([e for e, _ in acc]), np.mean([t for _, t in acc])
-        px, py = int(rng.integers(0, W)), int(rng.integers(0, H))
+        px, py = int(rng.integers(0, P)), int(rng.integers(0, P))
         uv = ((px + .5) / W, (py + .5) / H, 0.0, 1.0); ray = tuple(rng.uniform(-2, 2, 3)) + (0.0,)
         c8 = {i: tuple(rng.uniform(0.5, 4, 4)) for i in range(4)}
         c8[4] = (float(rng.choice([0.0, 0.6])), float(rng.choice([0.0, 0.7])), 0, 0)
@@ -356,6 +365,7 @@ def eq_F1(I, trs, n, rng, quiet=False, name='F1', flat=False):
             if b[0] in (4, 22): fu_ubo[vk] = {4: sbL, 22: c5L}[b[0]]
             else: fu_tx[vk] = {10: hdr, 16: lut3}[b[0]]
         got = I[name].run({'FragCoord': (px + .5, py + .5, .5, 1), 1: uv, 2: ray}, fu_ubo, fu_tx)
+        if part and outside is not None: outs.append((px, py, got)); continue   # eq_part_dep: only the fused result
         if not general and name == 'F1': stat('F1', 'fused', I['F1'].executed, I['F1'].tex_ops)
         for dec in ('mul', 'div'):
             ref = I['Sight'].run({1: uv, 2: ray}, sub, {**tx, 16: SI.Texture(q8(lut_img, dec))})
@@ -366,12 +376,29 @@ def eq_F1(I, trs, n, rng, quiet=False, name='F1', flat=False):
                 if dec == 'div':
                     worst = max(worst, ulps(ref[0], got[0]))
                     out_lsb = max(out_lsb, int(np.max(np.abs(q8(ref[0]) - q8(got[0])) * 255 + 0.5)))
+    if part and outside is not None: return outs
     line = ('%s: %d random 8x8 images (%d with render scale 1 in the LUT pass, %d random scales); intermediate RGBA8 '
             'decoded k*(1/255) (= the fused code): fused == LUT pass then Sight pass bit for bit %d / %d; decoded k/255 (texture unit): '
             'equal %d / %d, max %d ulp, max %d LSB after the RGBA8 store of Sight') % (
-        'F1 (LUT o Sight)' if name == 'F1' else name + ' on images without an edge (FXAA = identity)',
+        ('F1 (LUT o Sight)' if name == 'F1' else name + ' on images without an edge (FXAA = identity)') +
+        (' [part %dx%d of 8x8, the texels outside it NaN]' % (P, P) if part else ''),
         n, (3 * n) // 4, n - (3 * n) // 4, n - bad['mul'], n, n - bad['div'], n, worst, out_lsb)
     return line, bad['mul'] + (out_lsb > 1)
+
+
+def eq_part_dep(I, trs, name, n, P):
+    """[VK-LOWRES] F1A on a P x P part: which part pixels depend on the texels outside the part (FXAA's taps reach over the border; the
+    console's FXAA at 1:1 - the FSR pre pass - reads the same neighbourhood of its own input). The same scenes twice with two random
+    fillings outside the part: a pixel whose result changes depends on them. Returns {distance to the border: (changed, total)}."""
+    def runs(seed_out):
+        r_out = np.random.default_rng(seed_out)
+        return eq_F1(I, trs, n, np.random.default_rng(21), name=name, part=P,
+                     outside=lambda rng, shp: r_out.uniform(0.0, 12.0, shp).astype(np.float32))
+    a, b = runs(1), runs(2); dist = {}
+    for (px, py, ga), (_, _, gb) in zip(a, b):
+        d = min(P - 1 - px, P - 1 - py); c, t = dist.get(d, (0, 0))
+        dist[d] = (c + (not same(ga, gb)), t + 1)
+    return dist
 
 
 def comb_inputs(rng, Ww, Hw, px, py):
@@ -591,6 +618,8 @@ def main():
     ap.add_argument('--out', default=str(WORK / 'shaders-native-post'))
     ap.add_argument('--n', type=int, default=60)
     ap.add_argument('--only', default='')
+    ap.add_argument('--part', action='store_true', help='[VK-LOWRES] also prove F1 on a 75 / 50 %% part (outside NaN) and measure '
+                    'how far F1A depends on the texels outside the part')
     a = ap.parse_args()
     out = Path(a.out); fd = out / 'fused'
     if fd.exists(): shutil.rmtree(fd)
@@ -615,7 +644,10 @@ def main():
             (fd / (fn + '.xgs')).write_bytes(blob)
             I[name] = SI.Module(spv); I[name + 'x'] = extras
             rng = np.random.default_rng(int(K[host][:8], 16) ^ len(name))
-            if name == 'F1': line, nf = eq_F1(I, trs, a.n, rng)
+            if name == 'F1':
+                line, nf = eq_F1(I, trs, a.n, rng)
+                for P in ((6, 4) if a.part else ()):   # [VK-LOWRES] 75 % / 50 % of the 8x8 targets
+                    pl, pn = eq_F1(I, trs, a.n, np.random.default_rng(30 + P), part=P); print(pl); eq.append(pl); fails += pn
             elif name in LUMA:   # NB-18b-8: control build once, then per bundle: no-edge exactness, composition, decisions vs the chain
                 I[name + 'p'] = SI.Module(pre); I['FXAA'] = I.get('FXAA') or SI.Module(mods['FXAA']); nf = 0; line = ''
                 if not ctl_done:
@@ -627,6 +659,10 @@ def main():
                 dl, dst = eq_dec(I, trs, name, max(8, a.n * 2), np.random.default_rng(12), lut3)   # the same scenes for every proxy
                 line = dl[0]; print(chr(10).join(dl[1:])); eq.extend(dl[1:])
                 l3 = eq_luts(I, trs, name, max(8, a.n)); print(l3); eq.append(l3)
+                for P in ((6, 4) if a.part and name == 'F1A' else ()):   # [VK-LOWRES] the border band of F1A on a part
+                    dd = eq_part_dep(I, trs, name, max(16, a.n), P)
+                    pl = '%s on a %dx%d part of 8x8 (75 / 50 %%): part pixels whose result depends on the texels outside the part, by distance to its '                          'right / bottom border: %s' % (name, P, P, ', '.join('%d px: %d / %d' % (d, c, t) for d, (c, t) in sorted(dd.items())))
+                    print(pl); eq.append(pl)
                 if name == 'F1A' and dst['missed'] * 50 > dst['both'] + dst['missed']: nf += 1      # the default proxy: < 2 % of the chain's edges missed
                 sg = STATS[name].pop('sight')          # per pixel of the chain: LUT + PPFXAA (decision scenes) + EoCSight (composition scenes)
                 STATS[name]['parts'] = [(np.mean(dst['rex']) + np.mean([e for e, _ in sg]), np.mean(dst['rtx']) + np.mean([t for _, t in sg]))]

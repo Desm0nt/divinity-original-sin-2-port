@@ -127,7 +127,7 @@ static void install_line(void) {
         src(NRH_ANISO), th.mode, th.mode == 1 ? "per texture" : th.mode == 2 ? "per sampler" : th.mode == 0 ? "off" : "n/a", th.twins);
     put(&t, " | NOBLOOM=%d%s NOAA=%d%s SHADOWS=%d%s LOD=%d%s -> hle_dos2_quality.c (game settings / code caves, no backend part)", g_v[NRH_NOBLOOM], src(NRH_NOBLOOM),
         g_v[NRH_NOAA], src(NRH_NOAA), g_v[NRH_SHADOWS], src(NRH_SHADOWS), g_v[NRH_LOD], src(NRH_LOD));
-    if (vkn_post_level) put(&t, "; DM_VK_NATIVE_POST=%d (the AA step is skipped only at 100 %%, where the FSR module is FXAA)", vkn_post_level());
+    if (vkn_post_level) put(&t, "; DM_VK_NATIVE_POST=%d (the AA step is skipped only at 100 %%, where the FSR module is FXAA; below it route A leaves out the FSR pre pass: DM_VK_NATIVE_POST_PART)", vkn_post_level());
     vkn_logf("%s", t.b);
     // a value that is set and has no working implementation
     if (g_v[NRH_FSR] && nh.read && !nh.fsr) red("DM_HACK_FSR=%d%s set: not applied (DM_VK_NATIVE_SH=%d; the swap needs 1)", g_v[NRH_FSR], src(NRH_FSR), nh.sh_mode);

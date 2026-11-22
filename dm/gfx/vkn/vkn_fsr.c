@@ -40,8 +40,10 @@ static struct {
     fsr_sh sh[CACHE]; uint32_t nsh;
     VkShaderModule pre_fs; int pre_fs_tried;
     vkn_tex *scratch;             // the copy the EASU draw reads (source size / format)
+    uint64_t scratch_used;        // [VK-LOWRES] frame of its last pre pass (route A leaves it unused: freed after 600 frames)
     vkn_fsr_stats st;
     uint32_t told;                // bit per first-time line
+    struct { int on; uint64_t frame; uint32_t draw; } skip;   // [VK-LOWRES] vkn_fsr_pre_skip: this draw's pre pass is left out (F1A drew the AA)
     pthread_mutex_t mu;
 } g = {.mode = -1, .mu = PTHREAD_MUTEX_INITIALIZER};
 
@@ -177,8 +179,24 @@ static void fsr_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out
     if (sw > dst->w) sw = dst->w;
     if (sh > dst->h) sh = dst->h;
     g.st.last_w = sw; g.st.last_h = sh; g.st.last_s[0] = c3[0]; g.st.last_s[1] = c3[1];
+    if (g.skip.on && g.skip.frame == ctx->frame && g.skip.draw == ctx->draw_no) {   // [VK-LOWRES] route A at a part: the source is F1A's output
+        g.skip.on = 0; g.st.pre_f1a++;
+        if (g.scratch && ctx->frame > g.scratch_used + 600) {   // [VK-LOWRES] route A holds: the copy is not needed (a later pre pass makes it again)
+            vkn_logf("fsr-aa: the copy for EASU let go (%ux%u, %.1f MB): no pre pass for 600 frames, route A draws the AA", g.scratch->w, g.scratch->h,
+                     (double)g.scratch->bytes / 1048576.0);
+            vkn_tex_private_free(g.scratch); g.scratch = NULL; g.st.scratch_freed++;
+        }
+        if (!(g.told >> 29 & 1)) {
+            g.told |= 1u << 29;
+            vkn_logf("fsr-aa: first stretch after F1A (route A at a part, vkn_post.c): stretch %.4f x %.4f, the part %ux%u of %ux%u already anti-aliased "
+                     "by F1A - no pre pass, EASU reads it directly", (double)c3[0], (double)c3[1], sw - 1u, sh - 1u, dst->w, dst->h);
+        }
+        return;
+    }
+    g.skip.on = 0;
     if (g.mode == VKN_FSR_AA_COUNT) { g.st.would++; return; }
     vkn_tex *cp = scratch_for(src);
+    g.scratch_used = ctx->frame;
     if (!cp) { refuse(VKN_FSR_R_SCRATCH, NULL); return; }
     // the pre pass: the engine draw (its vertex shader, constants, textures) into the copy, clipped to the part
     uint32_t n0 = 0, lay[VKN_PASS_COLORS], mip[VKN_PASS_COLORS]; vkn_tex *col[VKN_PASS_COLORS], *dep = NULL;
@@ -206,6 +224,35 @@ static void fsr_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out
     }
 }
 
+// ---------------------------------------------------------------- [VK-LOWRES] route A at a part (vkn_post.c)
+int vkn_fsr_route_ok(void) { return g.reg && g.mode == VKN_FSR_AA_ON && module_swapped(); }
+// The pre-pass decision of fsr_fx for this draw, without side effects (but the first build of the shader objects): 1 = this draw is the
+// swapped module's stretch s < 1 of a source of the target's size over the whole target, the part EASU reads in lim (floor(s x size + 0.5),
+// at least 2: the module's own clamp; its 2x2 gathers stay at texels [0, lim - 1]).
+int vkn_fsr_stretch_part(const vkn_draw_in *in, const vkn_fx_ctx *ctx, uint32_t lim[2]) {
+    const vkn_shader *s = ctx ? ctx->shader : NULL;
+    if (!s || !in || strcmp(s->key[VKN_SRC_FS], k_key) || !vkn_fsr_route_ok()) return 0;
+    fsr_sh *e = entry_of(s);
+    if (e->state < 0 || !e->has_c3) return 0;
+    uint32_t off = 0, size = 0; const uint8_t *ring = (const uint8_t *)vkn_ring_cpu(); float c3[4];
+    if (!ring || vkn_draw_ubo_get(0, e->c3_slot, &off, &size) || size < 16) return 0;
+    memcpy(c3, ring + off, sizeof c3);
+    if (!(c3[0] > 0.0f && c3[0] <= 1.0f && c3[1] > 0.0f && c3[1] <= 1.0f) || fabsf(c3[0] - 1.0f) < 1.0f / 1024.0f) return 0;
+    if (c3[2] != 0.0f || c3[3] != 0.0f) return 0;   // the part at the origin (the pre pass's scissor assumes it too)
+    vkn_tex *src = NULL; VkImageView sv = VK_NULL_HANDLE;
+    if (in->tex[1] && in->tex[1][e->tex_slot] >= 0) sv = vkn_tex_view_by_id((uint32_t)in->tex[1][e->tex_slot], &src);
+    vkn_tex *dst = ctx->color[0];
+    if (!sv || !src || !dst || src->w != dst->w || src->h != dst->h || src->layers != 1) return 0;
+    const float W = (float)dst->w, H = (float)dst->h, *vp = in->viewport;
+    if (vp[0] != 0.0f || vp[2] != W || !((vp[1] == 0.0f && vp[3] == H) || (vp[1] == H && vp[3] == -H))) return 0;
+    float lw = floorf(c3[0] * W + 0.5f), lh = floorf(c3[1] * H + 0.5f);
+    if (lw < 2.0f) lw = 2.0f;
+    if (lh < 2.0f) lh = 2.0f;
+    if (lim) { lim[0] = (uint32_t)lw; lim[1] = (uint32_t)lh; }
+    return 1;
+}
+void vkn_fsr_pre_skip(const vkn_fx_ctx *ctx) { if (ctx) { g.skip.on = 1; g.skip.frame = ctx->frame; g.skip.draw = ctx->draw_no; } }
+
 // ---------------------------------------------------------------- install, stats
 void vkn_fsr_install(int mode) {
     pthread_mutex_lock(&g.mu);
@@ -226,8 +273,8 @@ void vkn_fsr_census(void) {
     if (!g.reg || !g.st.draws) return;
     char r[256]; int o = 0;
     for (int i = 0; i < VKN_FSR_R_N && o < (int)sizeof r - 48; i++) if (g.st.refused[i]) o += snprintf(r + o, sizeof r - (size_t)o, "%s%d:%llu", o ? " " : "", i, (unsigned long long)g.st.refused[i]);
-    vkn_logf("fsr-aa (10 s): DM_VK_NATIVE_FSR_AA=%d; PPFXAA draws %llu, at 1:1 %llu, pre passes %llu (would %llu), copies made %llu; last part %ux%u at %.3f x %.3f; refused %s",
-             g.mode, (unsigned long long)g.st.draws, (unsigned long long)g.st.one_to_one, (unsigned long long)g.st.pre, (unsigned long long)g.st.would,
+    vkn_logf("fsr-aa (10 s): DM_VK_NATIVE_FSR_AA=%d; PPFXAA draws %llu, at 1:1 %llu, pre passes %llu (would %llu), left out after F1A %llu (copies let go %llu), copies made %llu; last part %ux%u at %.3f x %.3f; refused %s",
+             g.mode, (unsigned long long)g.st.draws, (unsigned long long)g.st.one_to_one, (unsigned long long)g.st.pre, (unsigned long long)g.st.would, (unsigned long long)g.st.pre_f1a, (unsigned long long)g.st.scratch_freed,
              (unsigned long long)g.st.scratch_made, g.st.last_w, g.st.last_h, (double)g.st.last_s[0], (double)g.st.last_s[1], o ? r : "0");
 }
 #endif

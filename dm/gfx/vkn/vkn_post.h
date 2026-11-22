@@ -24,6 +24,15 @@
 //   DM_VK_NATIVE_POST_LUMA   F1A's luma proxy (old DM_NB_POST_LUMA): 0 = F1A linear light (default), 1 = F1AS sqrt, 2 = F1AR.
 //   DM_VK_NATIVE_POST_VERIFY 1 = every decision made and counted ("would ..."), the engine's draws drawn as recorded; 2 = poison: as
 //                            the level, plus every target whose write was skipped is cleared to magenta (a stale read shows).
+//                            [VK-LOWRES] at a part only the skipped draw's part is poisoned (outside it the image was never its).
+//   DM_VK_NATIVE_POST_PART   [VK-LOWRES] a 3D scale below 100 % (DM_HACK_SCALE / DRS: the chain draws the top-left part of its targets,
+//                            the AA step stretches it over the whole target; docs/dos2/nr/VK-FRAME-WORK.md section 13):
+//                            1 (default) = the coverage proofs are made against the drawn part: a draw that replaces every channel of
+//                            the skipped draw's part ends its watch / probe (was: only a whole-target overwrite, so F1 never armed at
+//                            50 % - its probe broke on EoCFog's part write every frame - or replayed the LUT every frame after DRS
+//                            dropped); route A at a part where the AA step is the FSR stretch with DM_VK_NATIVE_FSR_AA=1: F1A on the
+//                            part, the carries as at 100 %, the step drawn (it is the upscale) without its FXAA pre pass (vkn_fsr.c);
+//                            0 = as before (whole overwrites only, no route A at a part); 2 = part decisions counted, acted on as 0.
 //
 // Hot path: the chain function's first test is the class of the draw's shader, decided once per shader id (a table by id). A draw of
 // class "other" costs that lookup plus, while a watch is live, one layout compare and the colour-target compares per watched image.
@@ -97,6 +106,12 @@ typedef struct vkn_post_stats {
     uint64_t armed_frames[4], refused_total;                                   // armed now [F1, F2, route A, -]
     uint64_t dump_reads;                                                       // watched images copied out by DM_VK_NATIVE_DUMP (not violations)
     uint64_t cleared;                                                          // [mgpu P4] watches ended by a whole clear the engine asked for after them
+    // [VK-LOWRES] DM_VK_NATIVE_POST_PART (a 3D scale below 100 %: the chain draws a part of its targets)
+    int part;                                                                  // the switch in effect
+    uint64_t overwritten_part;                                                 // watches ended by a draw that replaced the skipped draw's part
+    uint64_t part_would;                                                       // mode 2: such draws (the watch went on the old way)
+    uint64_t f1a_part;                                                         // F1A draws on a part (route A at a stretch)
+    uint64_t stretch_pre_skipped, stretch_would;                               // FSR pre passes left out after F1A (mode 2 / unarmed: would)
 } vkn_post_stats;
 void vkn_post_stats_get(vkn_post_stats *s);
 // Host tests: a stand-in for the fused bundles' door (the library load of "F1.<host>" ... and vkn_post_pack.cpp's parsed table). fn fills
@@ -104,6 +119,7 @@ void vkn_post_stats_get(vkn_post_stats *s);
 struct xbg_vkn_stage;
 typedef int (*vkn_post_load_fn)(const char *key, struct xbg_vkn_stage *out, void *nb_fx_meta);
 void vkn_post_test_loader(vkn_post_load_fn fn);
+void vkn_post_test_switches(int part, int verify);   // [VK-LOWRES] DM_VK_NATIVE_POST_PART / _VERIFY in a forked test child
 
 #ifdef __cplusplus
 }

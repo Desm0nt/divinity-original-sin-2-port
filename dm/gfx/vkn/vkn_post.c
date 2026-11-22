@@ -23,6 +23,7 @@
 #include "vkn_frame.h"
 #include "vkn_shlib.h"
 #include "vkn_state.h"
+#include "vkn_fsr.h"   // [VK-LOWRES] route A at a stretch: the FSR pre pass left out (vkn_fsr_stretch_part / vkn_fsr_pre_skip)
 #include "../nb/nb_fused.h"
 #include "../nb/nb_post_aa.h"   // nb_post_aa_class / nb_post_aa_carry2 (and nb_ir.h: nb_post_class)
 
@@ -34,7 +35,7 @@ static vkn_post_load_fn g_test_load;
 void vkn_post_test_loader(vkn_post_load_fn fn) { g_test_load = fn; }
 
 // ================================================================================================ switches
-static int g_level = -1, g_aa = 1, g_luma = 0, g_verify = 0;
+static int g_level = -1, g_aa = 1, g_luma = 0, g_verify = 0, g_part = 1;   // g_part: [VK-LOWRES] DM_VK_NATIVE_POST_PART
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static int env_int(const char *n, int def, int lo, int hi) {
     const char *e = getenv(n);
@@ -47,10 +48,13 @@ static void read_switches(void) {
     g_aa = env_int("DM_VK_NATIVE_POST_AA", 1, 0, 1);
     g_luma = env_int("DM_VK_NATIVE_POST_LUMA", 0, 0, 2);
     g_verify = env_int("DM_VK_NATIVE_POST_VERIFY", 0, 0, 2);
+    g_part = env_int("DM_VK_NATIVE_POST_PART", 1, 0, 2);
     __atomic_store_n(&g_level, env_int("DM_VK_NATIVE_POST", VKN_POST_DEFAULT, 0, 4), __ATOMIC_RELEASE);
 }
 int vkn_post_level(void) { pthread_once(&g_once, read_switches); return __atomic_load_n(&g_level, __ATOMIC_ACQUIRE); }
 int vkn_post_mobile(void) { return vkn_post_level() >= VKN_POST_MOBILE; }
+// [VK-LOWRES] host tests (forked children: the switches were read once in the parent): DM_VK_NATIVE_POST_PART / _VERIFY set directly
+void vkn_post_test_switches(int part, int verify) { pthread_once(&g_once, read_switches); g_part = part; g_verify = verify; }
 
 // ================================================================================================ pure parts
 int vkn_post_class_key(const char *k) {
@@ -107,7 +111,7 @@ enum {
     R_BUNDLE, R_RT, R_ALPHA, R_EKEY, R_EXTRA, R_REQ_E, R_SIZE_E, R_NOHOST, R_HKEY, R_NOREAD, R_BASE, R_HSIZE, R_REQ_H, R_HCOVER,
     R_HOSTWRITE, R_STEP_SHAPE, R_STEP_INPUT, R_STEP_SIZE, R_STEP_COVER, R_STEP_SHARED, R_STEP_COPY, R_CARRY, R_OTHER_READER,
     R_NOSTEP, R_PART, R_TWIN, R_LATE_STEP, R_UNSEEN_USE, R_STALE_READ, R_OTHER_WRITE, R_BUILD, R_WATCH_FULL, R_SERIAL, R_REPLAY_FIRST,
-    R_EDRAWS, R_NOVIG, R_N
+    R_EDRAWS, R_NOVIG, R_STEP_STRETCH, R_STEP_PARTREAD, R_N
 };
 static const char *const k_why[R_N] = {
     "fused bundle not ready / unusable", "targets not one colour without depth", "alpha test", "elided key differs from the bundle's",
@@ -117,12 +121,14 @@ static const char *const k_why[R_N] = {
     "host writes the skipped target", "AA step shape", "AA step does not sample only the fused output", "AA step sizes / formats differ",
     "AA step coverage differs from the fused draw's", "AA step target has shared storage", "the step is the PPDefault copy (not replaced)",
     "carry pass refused", "another post draw reads the fused output before the AA step", "no AA step after the fused draw",
-    "a part of the target is drawn (dynamic resolution)", "reader of an alias cannot be redirected (copied)", "AA step refused after F1A (FXAA ran over it)",
+    "a part of the target is drawn and the AA step is not the FSR stretch with DM_VK_NATIVE_FSR_AA=1 (route A at a part needs it)", "reader of an alias cannot be redirected (copied)", "AA step refused after F1A (FXAA ran over it)",
     "a watched image was used by a draw / copy this module does not see", "a stale image was read and no stash could restore it",
     "a draw of another class writes a watched image", "fused / twin shader build failed", "more than 4 watched images",
     "a stash of another recording", "a replay before an arrays draw with another first vertex",
     "the skipped pass has more than one draw",
     "CombineUI without a Vignette draw before it (the scene draws no vignette: F2 has nothing to fuse)",   // [mgpu P4]
+    "AA step after F1A at a part is not the FSR stretch of that part (module / mode / stretch / viewport / source)",   // [VK-LOWRES]
+    "the FSR stretch reads beyond the part F1A and its carries drew",                                                 // [VK-LOWRES]
 };
 
 typedef struct dcopy {
@@ -145,7 +151,9 @@ typedef struct fused {
     uint8_t tfeed[VKN_FX_TEX], targ[VKN_FX_TEX], ufeed[VKN_FX_UBO], uarg[VKN_FX_UBO];
 } fused;
 typedef struct twin { const vkn_shader *r; uint32_t rid; uint64_t mask; const vkn_shader *sh; uint8_t tfeed[VKN_FX_TEX], targ[VKN_FX_TEX], ufeed[VKN_FX_UBO], uarg[VKN_FX_UBO]; int bad; } twin;
-typedef struct watch { vkn_tex *t; uint8_t kind, pair, bad; vkn_tex *holder; stash *st; uint32_t serial; const vkn_tex *ht; uint64_t clr_ns; } watch;   // clr_ns: [mgpu P4]   // ht: a probe host target (pointer only)
+typedef struct watch { vkn_tex *t; uint8_t kind, pair, bad; vkn_tex *holder; stash *st; uint32_t serial; const vkn_tex *ht; uint64_t clr_ns;
+                       int32_t rect[4]; } watch;   // rect: [VK-LOWRES] the texels whose content the watch is about (x0, y0, x1, y1): the skipped draw's cover
+                                                   // (STALE / PROBE; the part at a lower 3D scale), the whole image (ALIAS)   // clr_ns: [mgpu P4]   // ht: a probe host target (pointer only)
 typedef struct cls_ent { const vkn_shader *s; uint8_t cls; } cls_ent;
 
 static struct {
@@ -161,8 +169,8 @@ static struct {
     const vkn_tex *armO[2];          // per pair: the skipped target the arming was earned on (pointer compare only); another E target
                                      // (the HUD portrait's own LUT -> FXAA) is never skipped and never disarms the pair
     struct { uint32_t serial; const vkn_tex *O; } lastE[2];
-    struct { vkn_tex *O; int pair; const vkn_tex *ht; } probe;   // a probe to put after the current draw's own reads   // the last E of each pair: a second E into the same target = 2 draws
-    struct { int on, real; uint32_t serial; vkn_tex *S, *cur; int32_t rect[4]; int ncarry; } la;   // F1A output (real) / its observation
+    struct { vkn_tex *O; int pair; const vkn_tex *ht; int32_t rect[4]; } probe;   // a probe to put after the current draw's own reads   // the last E of each pair: a second E into the same target = 2 draws
+    struct { int on, real, part; uint32_t serial; vkn_tex *S, *cur; int32_t rect[4]; int ncarry; } la;   // part: [VK-LOWRES] F1A drawn on a part (the step must be the FSR stretch)   // F1A output (real) / its observation
     uint64_t why[R_N]; uint32_t reds[R_N];
     vkn_post_stats s;
     uint64_t next_ns;
@@ -197,6 +205,12 @@ static int cls_of(const vkn_shader *s) {
 static int ncolor(const vkn_fx_ctx *c) { int n = 0; for (int i = 0; i < VKN_PASS_COLORS; i++) if (c->color[i]) n = i + 1; return n; }
 static int one_target(const vkn_fx_ctx *c) { return c->color[0] && ncolor(c) == 1 && !c->depth; }
 static int blend_off(const vkn_fx_ctx *c) { if (!c->blend) return 1; const VkPipelineColorBlendAttachmentState *b = vkn_blend_att(c->blend); return b && !b->blendEnable; }
+// [VK-LOWRES] the draw replaces every channel of its colour target 0 (no blending, all four write-mask bits): what an overwrite needs
+static int writes_all(const vkn_fx_ctx *c) {
+    if (!c->blend) return 1;
+    const VkPipelineColorBlendAttachmentState *b = vkn_blend_att(c->blend);
+    return b && !b->blendEnable && (b->colorWriteMask & 0xfu) == 0xfu;
+}
 static vkn_tex *tex_at(const vkn_draw_in *in, int st, uint32_t slot, VkImageView *v) {
     if (v) *v = VK_NULL_HANDLE;
     if (st < 0 || st >= VKN_STAGE_SLOTS || !in->tex[st] || slot >= VKN_TEX_SLOTS || in->tex[st][slot] < 0) return NULL;
@@ -223,6 +237,9 @@ static uint64_t reads_of(const vkn_shader *s, const vkn_draw_in *in, const vkn_t
 static int same_shape(const vkn_tex *a, const vkn_tex *b) { return a && b && a->w == b->w && a->h == b->h && a->format == b->format && a->mips == b->mips && a->layers == b->layers && a->samples == b->samples; }
 static void cover_of(const vkn_draw_in *in, const vkn_tex *t, int32_t r[4]) { vkn_post_cover(in->viewport, in->scissor, t->w, t->h, r); }
 static int rect_whole(const int32_t r[4], const vkn_tex *t) { return r[0] <= 0 && r[1] <= 0 && r[2] >= (int32_t)t->w && r[3] >= (int32_t)t->h; }
+// [VK-LOWRES] r (x0, y0, x1, y1) covers every texel of the non-empty rect a
+static int rect_covers(const int32_t r[4], const int32_t a[4]) { return a[0] < a[2] && a[1] < a[3] && r[0] <= a[0] && r[1] <= a[1] && r[2] >= a[2] && r[3] >= a[3]; }
+static void rect_whole_of(const vkn_tex *t, int32_t r[4]) { r[0] = 0; r[1] = 0; r[2] = (int32_t)t->w; r[3] = (int32_t)t->h; }
 static const uint8_t *ring_at(int st, uint32_t slot, uint32_t *size) {
     uint32_t off = 0, sz = 0;
     if (vkn_draw_ubo_get(st, slot, &off, &sz)) return NULL;
@@ -291,7 +308,7 @@ static void disarm(int pair, uint64_t frame) { if (pair >= 0 && pair < PR_N) vkn
 static int related(int p, const vkn_tex *O) { return p < 0 || p > 1 || !g.armO[p] || g.armO[p] == O; }
 static void disarm_on(int p, const vkn_tex *O, uint64_t frame) { if (related(p, O)) { disarm(p, frame); if (p == PR_F1) disarm(PR_RA, frame); } }
 // Puts t under watch (kind, owner pair); the layout sentinel is set (vkn_pass_layout: pending clears of t run first). -1 = no room.
-static int watch_put(vkn_tex *t, int kind, int pair, vkn_tex *holder, stash *st) {
+static int watch_put(vkn_tex *t, int kind, int pair, vkn_tex *holder, stash *st, const int32_t rect[4]) {
     int i = watch_find(t);
     if (i < 0) {
         if (g.nw >= 4) { count(R_WATCH_FULL); return -1; }
@@ -300,6 +317,7 @@ static int watch_put(vkn_tex *t, int kind, int pair, vkn_tex *holder, stash *st)
     } else if (g.w[i].holder) { vkn_tex_unref(g.w[i].holder); g.w[i].holder = NULL; }
     watch *w = &g.w[i];
     w->kind = (uint8_t)kind; w->pair = (uint8_t)pair; w->bad = 0; w->st = st; w->serial = vkn_cb_serial();
+    if (rect) memcpy(w->rect, rect, sizeof w->rect); else rect_whole_of(t, w->rect);
     w->clr_ns = t->pass_nclr ? t->pass_clr_ns : 0;   // [mgpu P4] a clear remembered BEFORE the skip is not one after it
     if (holder && vkn_tex_ref(holder)) w->holder = holder;
     // (already GENERAL: a clear the engine asked for since stays remembered - the skipped draw would have overwritten it - and costs nothing)
@@ -605,8 +623,12 @@ static void at_elided(int p, const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_
     g.pend = p;
     if (!win_ok) disarm_on(p, O, c->frame);
     if (f->state > 0 && g.arm[p].armed && g.armO[p] == O && applying()) {
-        if (watch_put(O, W_STALE, p, NULL, s) < 0) { return; }
-        if (g_verify == 2) { static const float mg[4] = {1, 0, 1, 1}; vkn_pass_clear_color(O, 0, mg, NULL); vkn_pass_layout(O, VK_IMAGE_LAYOUT_GENERAL); }
+        if (watch_put(O, W_STALE, p, NULL, s, s->rect) < 0) { return; }
+        if (g_verify == 2) {   // [VK-LOWRES] at a part only the part is poisoned: what lies outside it was never the skipped draw's
+            static const float mg[4] = {1, 0, 1, 1};
+            const int32_t pr[4] = {s->rect[0], s->rect[1], s->rect[2] - s->rect[0], s->rect[3] - s->rect[1]};
+            vkn_pass_clear_color(O, 0, mg, s->whole ? NULL : pr); vkn_pass_layout(O, VK_IMAGE_LAYOUT_GENERAL);
+        }
         out->skip = 1; s->skipped = 1; g.s.skipped++;
     } else if (f->state > 0 && g.arm[p].armed && g.armO[p] == O) g.s.would_skip++;
 }
@@ -648,12 +670,19 @@ static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, 
         if (why < 0 && hr[0] < hr[2] && hr[1] < hr[3] && (hr[0] < s->rect[0] || hr[1] < s->rect[1] || hr[2] > s->rect[2] || hr[3] > s->rect[3])) why = R_HCOVER;
     }
     // route A (F1A): armed shape, both draws cover their whole targets, the F1A bundle usable with the same extras
-    fused *fa = NULL; int ra = 0;
+    fused *fa = NULL; int ra = 0, la_ok = 0, la_part = 0;
     if (why < 0 && p == PR_F1 && g_aa && g.level_ra) {
         const int whole = s->whole && c->color[0] && rect_whole(hr, c->color[0]);
-        if (!whole) count(R_PART);
-        else if ((fa = fused_get(FK_F1A, c->shader, base)) && extras_same(&fa->fx, &f->fx)) ra = g.arm[PR_RA].armed;
-        else fa = NULL;
+        // [VK-LOWRES] a lower 3D scale: the chain draws the top-left part and the AA step stretches it over the whole target. Route A
+        // can't skip that step (it is the upscale), but when it is the FSR stretch with its FXAA pre pass (DM_VK_NATIVE_FSR_AA=1) F1A
+        // draws that FXAA on the part and the pre pass is left out (at_step). Any other AA step at a part: route A stays off (R_PART).
+        const int part_ok = !whole && g_part && c->color[0] && hr[0] == 0 && hr[1] == 0 && hr[2] > hr[0] && hr[3] > hr[1] && vkn_fsr_route_ok();
+        if (!whole && !part_ok) count(R_PART);
+        else {
+            la_ok = 1; la_part = !whole;
+            if ((fa = fused_get(FK_F1A, c->shader, base)) && extras_same(&fa->fx, &f->fx)) ra = g.arm[PR_RA].armed && (whole || g_part == 1);
+            else fa = NULL;
+        }
     }
     if (why >= 0) {
         count(why);
@@ -668,8 +697,8 @@ static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, 
     }
     if (g.armO[p] != O) { g.arm[p].good = 0; g.arm[p].armed = 0; g.armO[p] = O; }   // the shape moved to another target: earn it again
     vkn_post_arm_note(&g.arm[p], c->frame, 1);
-    if (p == PR_F1 && c->color[0]) {   // the route-A observation starts at this host
-        g.la.on = 1; g.la.real = 0; g.la.serial = vkn_cb_serial(); g.la.S = c->color[0]; g.la.cur = c->color[0]; memcpy(g.la.rect, hr, sizeof hr); g.la.ncarry = 0;
+    if (p == PR_F1 && c->color[0] && la_ok) {   // the route-A observation starts at this host ([VK-LOWRES] only where route A can be)
+        g.la.on = 1; g.la.real = 0; g.la.part = la_part; g.la.serial = vkn_cb_serial(); g.la.S = c->color[0]; g.la.cur = c->color[0]; memcpy(g.la.rect, hr, sizeof hr); g.la.ncarry = 0;
     }
     if (s->skipped) {
         const fused *use = ra && fa ? fa : f;
@@ -683,11 +712,12 @@ static void at_host(int p, int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, 
             else if (use->ufeed[i] == FD_C1_VS || use->ufeed[i] == FD_C1_FS) feed_c1(&out->ubo[i], c->shader, use->uarg[i]);
         }
         g.s.fused[use == fa ? 1 : p == PR_F1 ? 0 : 2]++;
-        if (use == fa) g.la.real = 1;
+        if (use == fa) { g.la.real = 1; if (la_part) g.s.f1a_part++; }
         (void)cls;
     } else {
         g.s.would_fuse++;
         g.probe.O = O; g.probe.pair = p; g.probe.ht = c->color[0];   // probation: the window of O starts after this draw (post_fx puts the probe)
+        memcpy(g.probe.rect, s->rect, sizeof g.probe.rect);          // [VK-LOWRES] what a skip would leave stale: the skipped draw's cover
     }
     if (!s->skipped) stash_drop(s);
 }
@@ -721,12 +751,24 @@ static void at_step(int cls, const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_
     else if (in->alpha_ref >= 0 || !one_target(c)) why = R_STEP_SHAPE;
     else if (ntex != 1 || X == g.la.cur) why = R_STEP_INPUT;
     else if (!same_shape(X, g.la.cur)) why = R_STEP_SIZE;
+    else if (g.la.part) {   // [VK-LOWRES] F1A on a part: the step must be the FSR stretch over the whole target that reads only that part
+        uint32_t lim[2] = {0, 0};
+        cover_of(in, X, r);
+        if (!rect_whole(r, X) || !vkn_fsr_stretch_part(in, c, lim)) why = R_STEP_STRETCH;
+        else if (g.la.rect[0] > 0 || g.la.rect[1] > 0 || g.la.rect[2] < (int32_t)lim[0] || g.la.rect[3] < (int32_t)lim[1]) why = R_STEP_PARTREAD;
+    }
     else if ((cover_of(in, X, r), memcmp(r, g.la.rect, sizeof r)) || !rect_whole(r, X)) why = R_STEP_COVER;
     else if (X->shared && X->nnames > 1) why = R_STEP_SHARED;
     if (why >= 0) { la_fail(why, c); return; }
     vkn_post_arm_note(&g.arm[PR_RA], c->frame, 1);
+    if (g.la.part) {   // the step draws (EASU of the fused output, the upscale); its FXAA pre pass is what F1A already drew
+        if (g.la.real && applying() && g_part == 1) { vkn_fsr_pre_skip(c); g.s.stretch_pre_skipped++; }
+        else if (g.arm[PR_RA].armed || g_part == 2) g.s.stretch_would++;
+        g.la.on = 0;
+        return;
+    }
     if (g.la.real && applying()) {
-        if (watch_put(X, W_ALIAS, PR_RA, g.la.cur, NULL) < 0) { la_fail(R_WATCH_FULL, c); return; }
+        if (watch_put(X, W_ALIAS, PR_RA, g.la.cur, NULL, NULL) < 0) { la_fail(R_WATCH_FULL, c); return; }
         if (g_verify == 2) { static const float mg[4] = {1, 0, 1, 1}; vkn_pass_clear_color(X, 0, mg, NULL); vkn_pass_layout(X, VK_IMAGE_LAYOUT_GENERAL); }
         out->skip = 1; g.s.step_skipped++;
     } else if (g.arm[PR_RA].armed) g.s.step_would++;
@@ -770,8 +812,14 @@ static void watch_writes(const vkn_draw_in *in, const vkn_fx_ctx *c) {
         if (cleared_since(w)) { g.s.cleared++; watch_end(i); continue; }   // [mgpu P4]
         int32_t r[4] = {0, 0, 0, 0};
         if (hit && c->color[0] == w->t) cover_of(in, w->t, r);
-        const int full = hit && !hold && one_target(c) && c->color[0] == w->t && rect_whole(r, w->t) && blend_off(c) && !reads_of(c->shader, in, w->t);
-        if (full) { g.s.overwritten++; watch_end(i); continue; }
+        const int every = hit && !hold && one_target(c) && c->color[0] == w->t && writes_all(c) && !reads_of(c->shader, in, w->t);
+        if (every && rect_whole(r, w->t)) { g.s.overwritten++; watch_end(i); continue; }
+        // [VK-LOWRES] a lower 3D scale: the skipped draw wrote only its part (w->rect), the rest of the image holds what it held before in
+        // both chains - a draw that replaces every channel of that part ends the watch just as a whole overwrite does
+        if (every && rect_covers(r, w->rect)) {
+            if (g_part == 1) { g.s.overwritten_part++; watch_end(i); continue; }
+            if (g_part == 2) g.s.part_would++;
+        }
         if (w->kind == W_PROBE || materialize(i, c)) violation(i, R_OTHER_WRITE, c, "partly written / its holder written by a post draw");
     }
 }
@@ -844,7 +892,7 @@ static void post_fx(const vkn_draw_in *in, const vkn_fx_ctx *c, vkn_fx_out *out,
         vkn_tex *O = g.probe.O; g.probe.O = NULL;
         if (watch_find(O) < 0 && g.nw < 4 && vkn_tex_ref(O)) {
             watch *w = &g.w[g.nw++]; memset(w, 0, sizeof *w);
-            w->t = O; w->kind = W_PROBE; w->pair = (uint8_t)g.probe.pair; w->ht = g.probe.ht;
+            w->t = O; w->kind = W_PROBE; w->pair = (uint8_t)g.probe.pair; w->ht = g.probe.ht; memcpy(w->rect, g.probe.rect, sizeof w->rect);
         }
     }
 }
@@ -862,16 +910,19 @@ void vkn_post_install(void) {
     if (__atomic_exchange_n(&once, 1, __ATOMIC_ACQ_REL)) return;
     const int lv = vkn_post_level();
     g.level = lv; g.level_ra = lv >= VKN_POST_AA;
-    vkn_logf("post: DM_VK_NATIVE_POST=%d (%s; replaces DM_NB_POST / _AA / _AA_OUTLINE and the post part of DM_GFX_NATIVE_SHADERS), AA route %d, luma %d (%s), verify %d%s",
+    vkn_logf("post: DM_VK_NATIVE_POST=%d (%s; replaces DM_NB_POST / _AA / _AA_OUTLINE and the post part of DM_GFX_NATIVE_SHADERS), AA route %d, luma %d (%s), verify %d%s, "
+             "DM_VK_NATIVE_POST_PART=%d (%s)",
              lv, lv == 0 ? "the Switch post shaders, no fusion" : lv == 1 ? "mobile post shaders, no fusion" : lv == 2 ? "mobile + LUT o Sight (o FXAA)" :
              lv == 3 ? "mobile + LUT o Sight (o FXAA) + Vignette o Combine" : "mobile + LUT o Sight (o FXAA, fog and outline carry) + Vignette o Combine",
-             g_aa, g_luma, k_luma_name[g_luma], g_verify, g_verify == 1 ? " (decisions counted, the chain drawn as recorded)" : g_verify == 2 ? " (poison: skipped targets cleared to magenta)" : "");
+             g_aa, g_luma, k_luma_name[g_luma], g_verify, g_verify == 1 ? " (decisions counted, the chain drawn as recorded)" : g_verify == 2 ? " (poison: skipped targets cleared to magenta)" : "",
+             g_part, g_part == 0 ? "below 100 % only whole overwrites end a watch, no route A" : g_part == 1 ? "below 100 % the drawn part is what counts; route A with the FSR stretch" :
+             "below 100 % part decisions counted only");
     if (lv < VKN_POST_AA) return;
     g.installed = vkn_fx_register("post", post_fx, NULL, 400) == 0;
 }
 void vkn_post_stats_get(vkn_post_stats *s) {
     if (!s) return;
-    *s = g.s; s->level = g.level; s->aa = g_aa; s->luma = g_luma; s->verify = g_verify;
+    *s = g.s; s->level = g.level; s->aa = g_aa; s->luma = g_luma; s->verify = g_verify; s->part = g_part;
     for (int i = 0; i < PR_N && i < 4; i++) s->armed_frames[i] = g.arm[i].armed;
 }
 void vkn_post_census(void) {
@@ -887,6 +938,9 @@ void vkn_post_census(void) {
              s.level, s.verify == 1 ? " verify" : s.verify == 2 ? " poison" : "", D(draws_post), D(skipped), D(would_skip), D(fused[0]), D(fused[1]), D(fused[2]), D(would_fuse),
              D(step_skipped), D(step_would), D(carried), D(redirected), (unsigned)s.twins, D(recovered), D(recovered_close), D(materialized), D(overwritten),
              D(late_aa), D(violations), D(dump_reads), g.arm[PR_F1].armed, g.arm[PR_F2].armed, g.arm[PR_RA].armed, D(cleared), k ? by : "none");
+    // [VK-LOWRES] a line of its own (the one above is near the 1024-byte log line already)
+    vkn_logf("post part (10 s): DM_VK_NATIVE_POST_PART=%d: watches ended by a part overwrite %llu (would %llu), F1A on a part %llu, "
+             "FSR pre passes left out %llu (would %llu)", s.part, D(overwritten_part), D(part_would), D(f1a_part), D(stretch_pre_skipped), D(stretch_would));
 #undef D
     last = s; memcpy(lwhy, g.why, sizeof lwhy);
 }

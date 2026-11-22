@@ -4374,5 +4374,21 @@ def vkdrsfsr_check():   # [DOS2] VK-DRS-FSR (docs/dos2/nr/VK-DRS-FSR.md): the 3D
     assert 'test_fsr();' in s3 and 'dm/gfx/vkn/vkn_fsr.c' in s3[:6000], 'VK-DRS-FSR: the host test runs and links the piece'
     return 'VK-DRS-FSR: the 3D-resolution row live for every choice (JNI, gear, strings), the cave always in, the keeper only after a live call; the FXAA pre pass (module, piece order 450, install with the FSR swap, 1:1 untouched, default 1, host test)'
 print('PASS: ' + vkdrsfsr_check())
+def vklowres_check():   # [VK-LOWRES] (docs/dos2/nr/VK-FRAME-WORK.md section 13): the post fusion at a part of the targets
+    rd = lambda p: (root / p).read_text(encoding='utf-8')
+    po = rd('gfx/vkn/vkn_post.c'); fsr = rd('gfx/vkn/vkn_fsr.c'); s3 = rd('gfx/vulkan/engine/tests/vkn_stage3_test.c')
+    assert 'g_part = env_int("DM_VK_NATIVE_POST_PART", 1, 0, 2);' in po, 'VK-LOWRES: DM_VK_NATIVE_POST_PART default 1'
+    ww = po[po.index('static void watch_writes('):po.index('static void probe_marks(')]
+    assert 'writes_all(c)' in ww and 'rect_covers(r, w->rect)' in ww and ww.index('rect_whole(r, w->t)') < ww.index('rect_covers(r, w->rect)'),         'VK-LOWRES: a watch ends on a whole overwrite or on a draw replacing every channel of the skipped part'
+    assert 'watch_put(O, W_STALE, p, NULL, s, s->rect)' in po and 'memcpy(w->rect, g.probe.rect, sizeof w->rect);' in po, 'VK-LOWRES: the stale / probe watches carry the skipped draw cover'
+    ah = po[po.index('static void at_host('):po.index('// ================================================================================================ route A: carry and step')]
+    assert 'vkn_fsr_route_ok()' in ah and 'if (!whole && !part_ok) count(R_PART);' in ah, 'VK-LOWRES: route A at a part only with the FSR stretch'
+    st = po[po.index('static void at_step('):po.index('// ================================================================================================ watched images at a post draw')]
+    assert st.index('vkn_fsr_stretch_part(in, c, lim)') < st.index('vkn_fsr_pre_skip(c);') and 'g.la.rect[2] < (int32_t)lim[0]' in st, 'VK-LOWRES: the stretch checked, its read part inside the fused part'
+    ff = fsr[fsr.index('static void fsr_fx('):fsr.index('// ---------------------------------------------------------------- install, stats')]
+    assert ff.index('g.skip.frame == ctx->frame && g.skip.draw == ctx->draw_no') < ff.index('if (g.mode == VKN_FSR_AA_COUNT)') < ff.index('vkn_tex *cp = scratch_for(src);'),         'VK-LOWRES: the pre pass left out for the marked draw only, before the copy is touched'
+    assert 'test_post_part();' in s3, 'VK-LOWRES: host test'
+    return 'VK-LOWRES: post fusion at a part (DM_VK_NATIVE_POST_PART default 1; part overwrites end watches; route A at a part with the FSR stretch, its pre pass left out; host test)'
+print('PASS: ' + vklowres_check())
 _bad=delimiter_gate()
 assert not _bad,_bad
