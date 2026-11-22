@@ -1,0 +1,25 @@
+#version 450
+// [DOS2] VK-ENGINE-SIDE I2 v2 poison (DM_VK_ENG_OCC=3, dm/gfx/vkn/vkn_eocc.h): counts the pixels of G-buffer target 0 that the magenta
+// twin wrote (1, 0, 1) once the G-buffer is done - the objects the test would hide that are VISIBLE in this frame, measured on the image
+// itself (no box, no cells, no camera convention: what v1's self-check could not see). 8 x 8 threads a group, 2 x 2 pixels a thread,
+// one atomic add a group. Push: the area (w, h), the counter's index.
+// Build: glslc -fshader-stage=compute --target-env=vulkan1.0 -O vkn_eocc_magenta_count.comp -mfmt=num -o vkn_eocc_magenta_count.comp.spv.inc
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D img;
+layout(binding = 1, std430) buffer Out { uint cnt[]; } o;
+layout(push_constant) uniform P { ivec2 size; int slot; int pad; } pc;
+shared uint sc[64];
+void main() {
+    const ivec2 p0 = ivec2(gl_GlobalInvocationID.xy) * 2;
+    uint n = 0u;
+    for (int dy = 0; dy < 2; dy++)
+        for (int dx = 0; dx < 2; dx++) {
+            const ivec2 p = p0 + ivec2(dx, dy);
+            if (p.x < pc.size.x && p.y < pc.size.y) { const vec4 c = texelFetch(img, p, 0); if (c.r > 0.99 && c.g < 0.01 && c.b > 0.99) n++; }
+        }
+    const uint i = gl_LocalInvocationIndex;
+    sc[i] = n;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) { if (i < s) sc[i] += sc[i + s]; barrier(); }
+    if (i == 0u && sc[0] != 0u) atomicAdd(o.cnt[pc.slot], sc[0]);
+}

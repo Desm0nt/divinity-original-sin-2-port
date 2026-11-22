@@ -582,7 +582,9 @@ fail:
     return -1;
 }
 // The worker side of vkn_rt_pass_targets (vkn_rt.c: before vkn_pass_targets, in every DM_VK_NATIVE_RT mode).
+void vkn_eocc_wk_targets(uint32_t n, vkn_tex *const *color, vkn_tex *depth) __attribute__((weak));   // [VK-ENGINE-SIDE I2] vkn_eocc.h
 void vkn_occz_wk_targets(uint32_t n, vkn_tex *const *color, vkn_tex *depth) {
+    if (vkn_eocc_wk_targets) vkn_eocc_wk_targets(n, color, depth);   // [VK-ENGINE-SIDE I2] its snapshot point (off: returns at once)
     if (!g_mode || g_wphase != 1 || g_wsnap || !vkn_rec_presented()) return;
     uint32_t nc = 0;
     for (uint32_t i = 0; color && i < n && i < VKN_PASS_COLORS; i++) nc += color[i] != NULL;

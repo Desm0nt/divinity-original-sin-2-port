@@ -361,7 +361,10 @@ void vkn_query_dispatch(void) {
 }
 
 // ---- the draw path ----
+static uint64_t g_draw_cond_key;   // [VK-ENGINE-SIDE I2] the condition key of the draw being drawn (0 = none), in every mode
+uint64_t vkn_query_draw_cond_key(void) { return g_draw_cond_key; }
 int vkn_query_draw_enter(void) {
+    g_draw_cond_key = g_cond_set ? g_cond_key : 0;
     if (vkn_cond_is_b(g_mode)) { if (vkn_occb_replaying()) return 0; vkn_occb_q_enter(); }   // [stage 5 technique B] B's own replays: not the engine's
     g_pred_on = 0; g_list_q = -1; g_dcond = -1; g_list_bin = NO_BIN;
     if (!g_track) { if (g_cond_set) { g_cond_set = 0; g_st.conds++; } return 0; }

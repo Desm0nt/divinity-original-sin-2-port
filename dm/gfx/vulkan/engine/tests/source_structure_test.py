@@ -4390,5 +4390,32 @@ def vklowres_check():   # [VK-LOWRES] (docs/dos2/nr/VK-FRAME-WORK.md section 13)
     assert 'test_post_part();' in s3, 'VK-LOWRES: host test'
     return 'VK-LOWRES: post fusion at a part (DM_VK_NATIVE_POST_PART default 1; part overwrites end watches; route A at a part with the FSR stretch, its pre pass left out; host test)'
 print('PASS: ' + vklowres_check())
+def vkengocc_check():   # [VK-ENGINE-SIDE I2] (docs/dos2/nr/VK-ENGINE-SIDE.md section 12): occlusion culling in the main-view receiver
+    rd = lambda p: (root / p).read_text(encoding='utf-8')
+    eng = rd('host/hle_dos2_vkn_eng.c'); eo = rd('gfx/vkn/vkn_eocc.c'); em = rd('gfx/vkn/vkn_eocc_model.c'); eh = rd('gfx/vkn/vkn_eocc.h')
+    s3 = rd('gfx/vulkan/engine/tests/vkn_stage3_test.c'); fr = rd('host/hle_dos2_vkn_frame.c'); oz = rd('gfx/vkn/vkn_occz.c'); q = rd('gfx/vkn/vkn_query.c')
+    assert 'g_occ = env_int("DM_VK_ENG_OCC", 0, 0, 3);' in eng, 'I2: DM_VK_ENG_OCC default 0'
+    assert re.search(r'if \(!g_census && !g_rate && !g_shmin && !g_occ(?: && !st)?\) return;', eng), 'I2: nothing hooked while every switch is off'
+    em_main = eng[eng.index('VKN_HOOK eh_main('):eng.index('// ---- census line ----')]
+    assert em_main.index('vkn_eocc_obj(') < em_main.index('const uint64_t rc = g_o_main(VKN_F);', em_main.index('vkn_eocc_obj(')) < em_main.index('vkn_eocc_after('), 'I2: the decision before the original, the report after it'
+    assert '#define OCC_FORBID (0x7ffcu | 1u << 16 | 1u << 19 | 1u << 20)' in eng, 'I2: only the opaque list (bits 2..14, 16, 19, 20 forbid)'
+    assert 'cond_main' in eng and 'DM_VK_ENG_OCC=%d -> 0' in eng, 'I2: not with the COND techniques that own the hook'
+    for name, core in (('vkn_eocc.c', eo), ('vkn_eocc_model.c', em), ('vkn_eocc.h', eh)):
+        assert not re.search(r'\b0x[0-9a-f]{6,7}\b', core), 'I2: %s holds no game address' % name
+    assert 'vkn_eocc_enc_frame(vkn_rd64(dev + DEV_FRAME))' in fr and 'if (vkn_eocc_wk_targets) vkn_eocc_wk_targets(n, color, depth);' in oz, 'I2: the frame tag and the snapshot point'
+    assert 'g_draw_cond_key = g_cond_set ? g_cond_key : 0;' in q, 'I2: the draw condition key in every mode'
+    assert 'test_eocc();' in s3 and 'dm/gfx/vkn/vkn_eocc.c' in s3[:6000], 'I2: the host test runs and links it'
+    assert (root / 'gfx/vulkan/engine/tests/vkn_eocc_test.c').exists() and (root / 'android/shaders/vkn_eocc_magenta.frag.spv.inc').exists(), 'I2: the model test and the poison module'
+    # [v2] the depth rows as the backend draws them (vkn_draw.c flips the Vulkan viewport: NDC y = +1 is row 0); the snapshot ends with the
+    # pre-pass; its label from the report pairs; animated objects; the poison truth counter; the follow-camera and row reproductions
+    dr = rd('gfx/vkn/vkn_draw.c'); ex = rd('host/hle_dos2_vkn_exec.c'); mt = rd('gfx/vulkan/engine/tests/vkn_eocc_test.c')
+    assert 'const VkViewport vp = {in->viewport[0], in->viewport[1] + in->viewport[3], in->viewport[2], -in->viewport[3], 0.0f, 1.0f};' in dr, 'I2 v2: the draw path flips the viewport (the cells rows depend on it)'
+    assert 's->yup = 1;' in eo and 'v.yup = 1;' in eo and 'return yup ? (0.5 - 0.5 * ny) * h' in em, 'I2 v2: NDC y = +1 is row 0 in the model and the runtime'
+    assert "if (depth == g_wT && !nc) return;   // still the pre-pass" in eo, 'I2 v2: the snapshot at the end of the depth pre-pass'
+    assert 'if (vkn_eocc_enc_pair) vkn_eocc_enc_pair(j->q);' in ex and 's->eframe = g_wL;' in eo, 'I2 v2: the snapshot labelled with the cull frame of its report pairs'
+    assert 'VKN_EO_FL_CHARACTER' in eng and '(void)vkn_fx_gate("eng-occ", VKN_FX_G_NOC | VKN_FX_G_D, eo_gate_still);' in eo, 'I2 v2: characters never hidden; the draw function gated for depth-only sets'
+    assert 't_flip(n / 2);' in mt and 't_followcam(n / 2);' in mt and (root / 'android/shaders/vkn_eocc_magenta_count.comp.spv.inc').exists(), 'I2 v2: reproductions and the poison truth'
+    return 'VK-ENGINE-SIDE I2: DM_VK_ENG_OCC default 0, nothing hooked when off; v2: rows as drawn (flipped viewport), pre-pass snapshot labelled by the pairs, characters out, gated draw function; the decision before the original in the main-view receiver, opaque list only; frame tag + snapshot point; host tests'
+print('PASS: ' + vkengocc_check())
 _bad=delimiter_gate()
 assert not _bad,_bad

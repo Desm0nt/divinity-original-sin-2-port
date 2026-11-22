@@ -35,6 +35,16 @@
 //   DM_VK_ENG_SHTILE      the cascade tile in texels for the size classes until the backend has seen the far tile (default 768).
 // The texel size of a cascade: its camera's view-projection (camera+0x1e0, rows by the 0xa4c030 convention clip[c] = sum_r p[r] e[4r+c])
 // is orthographic; the larger length of its x / y columns = clip units per world unit; x tile / 2 = texels per world unit.
+//   DM_VK_ENG_OCC         I2 (VK-ENGINE-SIDE.md section 12; the backend half and the rule: dm/gfx/vkn/vkn_eocc.h): occlusion culling in
+//                         the main-view receiver against an earlier frame's depth. 0 off (default), 1 on (a hidden object never reaches
+//                         any list of the stage: no pre-pass, G-buffer or other draw is built for it), 2 count (decided, nothing hidden),
+//                         3 poison (drawn, its G-buffer draws magenta). Only objects of the opaque list (bit 18) without bits of other
+//                         lists: 2..8, 10 (other passes: decals, custom opaque, refraction), 9 / 11 (alpha, overlay: the character outline
+//                         behind walls), 12..14 (special), 16 (parts), 20; bit 0 (the "second set" lists) allowed unless
+//                         DM_VK_ENG_OCC_BIT0=0. Never the shadow receiver. Not with DM_VK_NATIVE_COND 5 / 6 / 10..13 (they own the hook).
+//                         The hook calls the original for every other object and reports, after it, whether the object went into the
+//                         opaque lists and its report pair of this frame (obj+0x268 when obj+0x270 = the frame: the condition key of its
+//                         G-buffer draws, which the poison / count modes recognise on the recording thread).
 // Static vs moving (census only): an object whose sphere and box words are unchanged for 30 engine frames (a table of 32768 objects
 // by address, the first thread to see an object in a frame updates it).
 #ifdef DM_GAME_DOS2
@@ -44,19 +54,20 @@
 #include <string.h>
 #include "../gfx/vkn/vkn.h"
 #include "../gfx/vkn/vkn_eng.h"
+#include "../gfx/vkn/vkn_eocc.h"
 #include "../gfx/vkn/vkn_rt.h"
 #include "../gfx/vkn/vkn_shc.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
 
 #define ENG_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"
-enum { O_SPHERE = 0x13c, O_RADIUS = 0x148, O_FLAGS = 0x1d8, CULL_IDX = 0x191, CULL_CAM = 0x1d0, CAM_STALE = 0x90, CAM_VP = 0x1e0,
+enum { O_SPHERE = 0x13c, O_RADIUS = 0x148, O_BOX = 0x14c, O_FLAGS = 0x1d8, O_PAIR = 0x268, O_PAIR_FRAME = 0x270, ST_CAMERA = 0x36b0, CULL_IDX = 0x191, CULL_CAM = 0x1d0, CAM_STALE = 0x90, CAM_VP = 0x1e0,
        D_SUB = 0x80, SUB_CULL = 0xa8, D_FARP = 0xbc, D_WIDTH = 0xcc, D_VIEW = 0xe0, D_PROJ = 0x1e0, D_COUNT = 0x342,
        R_DEV = 0xb70, DEV_FRAME = 0x51f0 };
 enum { CAS = 4, SZ = 8, OT_N = 1 << 15, OT_PROBE = 16, OT_STATIC = 30, OT_STALE = 600 };
 static const float k_sz_edge[SZ - 1] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 64.0f};
 
-static int g_census, g_rate, g_period = 2, g_shmin, g_shmin_from = 1;
+static int g_census, g_rate, g_period = 2, g_shmin, g_shmin_from = 1, g_occ, g_occ_bit0 = 1;
 static float g_move = 8.0f, g_shmin_px = 1.0f, g_tile = 768.0f;
 static vkn_fn g_o_recv, g_o_build, g_o_exec, g_o_main;
 
@@ -241,29 +252,60 @@ VKN_HOOK eh_recv(VKN_A) {   // 0xb17ed0(cull, obj, x2): void
     return g_o_recv(VKN_F);
 }
 
-// ---- the main-view receiver: census only ----
-VKN_HOOK eh_main(VKN_A) {   // 0xb0c570(stage, obj, x2): void
-    const uint64_t rc = g_o_main(VKN_F);
-    if (!a1) return rc;
-    const uint32_t fl = vkn_rd32(a1 + O_FLAGS);
+// ---- the main-view receiver: census; I2 ----
+static void main_census(uint64_t stage, uint64_t obj, uint32_t fl) {
     ADD(m_calls, 1);
     for (int i = 0; i < 4; i++) {
         uint64_t s = __atomic_load_n(&g_main_stage[i], __ATOMIC_RELAXED);
-        if (s == a0) break;
-        if (!s && __atomic_compare_exchange_n(&g_main_stage[i], &s, a0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { ADD(m_stages, 1); break; }
-        if (s == a0) break;
+        if (s == stage) break;
+        if (!s && __atomic_compare_exchange_n(&g_main_stage[i], &s, stage, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { ADD(m_stages, 1); break; }
+        if (s == stage) break;
     }
-    if (fl & 1u << 19) { ADD(m_hidden, 1); return rc; }
-    if (fl & (1u << 12 | 1u << 13 | 1u << 14)) { ADD(m_special, 1); return rc; }
+    if (fl & 1u << 19) { ADD(m_hidden, 1); return; }
+    if (fl & (1u << 12 | 1u << 13 | 1u << 14)) { ADD(m_special, 1); return; }
     if (fl & 1u << 18) {
         ADD(m_opaque, 1);
-        const int st = ot_state(a1, (uint32_t)eng_frame());
+        const int st = ot_state(obj, (uint32_t)eng_frame());
         if (st == 2) ADD(m_opaque_st, 1); else if (st == 1) ADD(m_opaque_mv, 1);
     }
     if (fl & (1u << 9 | 1u << 11)) ADD(m_alpha, 1);
     if (fl & 1u << 16) ADD(m_parts, 1);
     if (fl & (0x1fcu | 1u << 10 | 1u << 20)) ADD(m_other, 1);   // bits 2..8, 10, 20: the other passes (decals, custom opaque, refraction)
     if (fl & 1u) ADD(m_batch, 1);
+}
+// I2: the lists a hidden object may be kept out of - the opaque list only (doc section 2.2): bits 2..14, 16, 19, 20 forbid.
+#define OCC_FORBID (0x7ffcu | 1u << 16 | 1u << 19 | 1u << 20)
+VKN_HOOK eh_main(VKN_A) {   // 0xb0c570(stage, obj, x2): void
+    const uint64_t stage = a0, obj = a1;
+    if (!g_occ || !stage || !obj) {
+        const uint64_t rc = g_o_main(VKN_F);
+        if (g_census && obj) main_census(stage, obj, vkn_rd32(obj + O_FLAGS));
+        return rc;
+    }
+    const uint32_t fl = vkn_rd32(obj + O_FLAGS);
+    const uint64_t E = eng_frame();
+    float box[6], vp[16]; memcpy(box, (const void *)(uintptr_t)(obj + O_BOX), sizeof box);
+    const uint64_t cam = vkn_rd64(stage + ST_CAMERA);
+    const float *v = NULL;
+    if (cam && !vkn_rd8(cam + CAM_STALE)) { memcpy(vp, (const void *)(uintptr_t)(cam + CAM_VP), sizeof vp); v = vp; }
+    // [v2] the filter as a group (counted): characters (the receiver's own test 0xb0c9c4: vtbl[0](obj) has all bits of 0x2003) are never
+    // hidden - they move, animate and own the outline / offscreen paths
+    int elig = !(fl & 1u << 18) ? VKN_EO_FL_NOTOPAQUE : fl & (1u << 9 | 1u << 11) ? VKN_EO_FL_ALPHA : fl & 1u << 16 ? VKN_EO_FL_PARTS
+             : fl & (1u << 12 | 1u << 13 | 1u << 14 | 1u << 19) ? VKN_EO_FL_SPECIAL : fl & OCC_FORBID ? VKN_EO_FL_OTHER : !g_occ_bit0 && (fl & 1u) ? VKN_EO_FL_BIT0 : VKN_EO_FL_OK;
+    if (elig == VKN_EO_FL_OK) {
+        const uint64_t vt = vkn_rd64(obj), f0 = vt ? vkn_rd64(vt) : 0;
+        if (!f0 || (((uint32_t (*)(uint64_t))(uintptr_t)f0)(obj) & 0x2003u) == 0x2003u) elig = VKN_EO_FL_CHARACTER;
+    }
+    int poison = 0;
+    if (E && vkn_eocc_obj(stage, obj, E, v, box, elig, fl, &poison)) {   // hidden: the object is in no list of the stage this frame
+        if (g_census) main_census(stage, obj, fl);
+        return 0;
+    }
+    const uint64_t rc = g_o_main(VKN_F);
+    const int drew = (fl & 1u << 18) && !(fl & (1u << 19 | 1u << 12 | 1u << 13 | 1u << 14));
+    const uint64_t pair = vkn_rd64(obj + O_PAIR_FRAME) == E ? vkn_rd64(obj + O_PAIR) : 0;
+    if (E) vkn_eocc_after(stage, obj, E, drew, pair, poison);
+    if (g_census) main_census(stage, obj, fl);
     return rc;
 }
 
@@ -320,13 +362,19 @@ void dm_vkn_eng_register(void) {
     g_shmin_px = env_f("DM_VK_ENG_SHMIN_PX", 1.0f);
     g_shmin_from = env_int("DM_VK_ENG_SHMIN_FROM", 1, 0, 3);
     g_tile = env_f("DM_VK_ENG_SHTILE", 768.0f); if (g_tile < 64.0f) g_tile = 768.0f;
+    g_occ = env_int("DM_VK_ENG_OCC", 0, 0, 3);
+    g_occ_bit0 = env_int("DM_VK_ENG_OCC_BIT0", 1, 0, 1);
+    const int cond = env_int("DM_VK_NATIVE_COND", 0, -1000, 1000), cond_main = cond == 5 || cond == 6 || (cond >= 10 && cond <= 13);
+    if (g_occ && cond_main) { vkn_logf(ENG_RED "eng occ: DM_VK_NATIVE_COND=%d hooks the main-view receiver: DM_VK_ENG_OCC=%d -> 0", cond, g_occ); g_occ = 0; }
+    if (g_occ) { vkn_eocc_init(g_occ); g_occ = vkn_eocc_mode(); }
     if (g_rate && vkn_shc_eng_far_mode() != g_rate) {   // (the backend half: SHFAR=1, a chain refusal, a bad value)
         vkn_logf("eng: DM_VK_ENG_FARRATE=%d but the shadow cache's half is %d (vkn_shc.h; DM_VK_NATIVE_SHFAR=1?): 0", g_rate, vkn_shc_eng_far_mode()); g_rate = 0;
     }
     vkn_logf("eng (VK-ENGINE-SIDE stage 1): DM_VK_ENG_CENSUS=%d, DM_VK_ENG_FARRATE=%d (N %d, move %.1f texels: %s), DM_VK_ENG_SHMIN=%d (below %.2f texels from cascade %d: %s)",
              g_census, g_rate, g_period, g_move, g_rate == 1 ? "the far cascade left out of every N-th build but one" : g_rate == 2 ? "count" : g_rate == 3 ? "POISON" : "off",
              g_shmin, g_shmin_px, g_shmin_from, g_shmin == 1 ? "small casters kept out" : g_shmin == 2 ? "count" : g_shmin == 3 ? "POISON x16" : "off");
-    if (!g_census && !g_rate && !g_shmin) return;
+    if (g_occ) vkn_logf("eng occ: DM_VK_ENG_OCC=%d (I2, VK-ENGINE-SIDE.md section 12), bit-0 objects %s", g_occ, g_occ_bit0 ? "included" : "left out (DM_VK_ENG_OCC_BIT0=0)");
+    if (!g_census && !g_rate && !g_shmin && !g_occ) return;
     if (g_census && !(g_ot = (ot_e *)calloc(OT_N, sizeof *g_ot))) vkn_logf(ENG_RED "eng census: no memory for the object table (static vs moving not counted)");
     if (g_census >= 2) vkn_eng_install();
     // First 4 instructions of each site (capstone; none PC-relative).
@@ -336,19 +384,19 @@ void dm_vkn_eng_register(void) {
     static const uint32_t k_main[4] = {0xd10203ff /* sub sp,sp,#0x80 */, 0xa9026ffc, 0xa90367fa, 0xa9045ff8};
     dm_vkn_stack_flag((void *)eh_recv, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)eh_build, DM_VKN_SF_ENC);
     dm_vkn_stack_flag((void *)eh_exec, DM_VKN_SF_ENC); dm_vkn_stack_flag((void *)eh_main, DM_VKN_SF_ENC);
-    dm_vkn_site(0xb17ed0, k_recv, "ShadowCullReceiver", (void *)eh_recv, &g_o_recv, VKN_M_NATIVE);
-    dm_vkn_site(0xb15ae0, k_build, "ShadowStage::Build", (void *)eh_build, &g_o_build, VKN_M_NATIVE);
-    dm_vkn_site(0xb164d0, k_exec, "ShadowStage::Execute", (void *)eh_exec, &g_o_exec, VKN_M_NATIVE);
-    static const uint32_t k_res[4] = {0xa9ba6ffc /* stp x28,x27,[sp,#-0x60]! */, 0xa90167fa, 0xa9025ff8, 0xa90357f6};
-    dm_vkn_stack_flag((void *)eh_res, DM_VKN_SF_ENC);
-    dm_vkn_site(0xac8d10, k_res, "ShadowRenderStage::Build", (void *)eh_res, &g_o_res, VKN_M_NATIVE);
-    if (g_census) {   // the main-view receiver, unless technique A / Z (hle_dos2_vkn_occ.c) hooks it
-        const int cond = env_int("DM_VK_NATIVE_COND", 0, -1000, 1000);
-        if (cond == 5 || cond == 6 || (cond >= 10 && cond <= 13)) vkn_logf("eng census: DM_VK_NATIVE_COND=%d hooks the main-view receiver: its census is not counted", cond);
-        else {
-            dm_vkn_site(0xb0c570, k_main, "ObjectGather(census)", (void *)eh_main, &g_o_main, VKN_M_NATIVE);
-        }
+    if (g_census || g_rate || g_shmin) {
+        dm_vkn_site(0xb17ed0, k_recv, "ShadowCullReceiver", (void *)eh_recv, &g_o_recv, VKN_M_NATIVE);
+        dm_vkn_site(0xb15ae0, k_build, "ShadowStage::Build", (void *)eh_build, &g_o_build, VKN_M_NATIVE);
+        dm_vkn_site(0xb164d0, k_exec, "ShadowStage::Execute", (void *)eh_exec, &g_o_exec, VKN_M_NATIVE);
+        static const uint32_t k_res[4] = {0xa9ba6ffc /* stp x28,x27,[sp,#-0x60]! */, 0xa90167fa, 0xa9025ff8, 0xa90357f6};
+        dm_vkn_stack_flag((void *)eh_res, DM_VKN_SF_ENC);
+        dm_vkn_site(0xac8d10, k_res, "ShadowRenderStage::Build", (void *)eh_res, &g_o_res, VKN_M_NATIVE);
     }
+    if (g_census || g_occ) {   // the main-view receiver, unless technique A / Z (hle_dos2_vkn_occ.c) hooks it
+        if (cond_main) vkn_logf("eng census: DM_VK_NATIVE_COND=%d hooks the main-view receiver: its census is not counted", cond);
+        else dm_vkn_site(0xb0c570, k_main, g_occ ? "ObjectGather(occ)" : "ObjectGather(census)", (void *)eh_main, &g_o_main, VKN_M_NATIVE);
+    }
+    if (g_occ) dm_vkn_census(vkn_eocc_census);
     g_census_frame0 = 0;
     dm_vkn_census(eng_census);
 }

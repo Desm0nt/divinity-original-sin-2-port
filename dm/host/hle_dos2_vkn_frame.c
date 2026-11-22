@@ -89,6 +89,7 @@
 #include "../gfx/nvn/nvn_pace.h"
 #include "hle_dos2_vkn.h"
 #include "hle_dos2_vkn_stack.h"
+void vkn_eocc_enc_frame(uint64_t eframe) __attribute__((weak));   // [VK-ENGINE-SIDE I2] dm/gfx/vkn/vkn_eocc.h
 void dm_vkn_glue_flush_tex(void) __attribute__((weak));   // hle_dos2_vkn_glue.c: textures written through their mapped storage
 
 #define FH_RED "\xe3\x80\x90\xe7\xba\xa2\xe3\x80\x91"   // the red-line mark, a literal of its own (the next letter may be a hex digit)
@@ -260,6 +261,7 @@ VKN_HOOK fh_begin(VKN_A) {   // 0x9215f0 BeginFrame(r, bit0)
         wr64(dev + DEV_CTX, ctx);
     }
     vkn_rt_rec_begin(presented);   // (a failure is counted by vkn_frame; the recorders then see no command buffer) [stage 5.5] a record
+    if (presented && vkn_eocc_enc_frame) vkn_eocc_enc_frame(vkn_rd64(dev + DEV_FRAME));   // [VK-ENGINE-SIDE I2] the recording's engine frame (off: returns)
     if (presented) {
         const float ms = (float)((double)(vkn_rd64(ctx + CTX_TS1) - vkn_rd64(ctx + CTX_TS0)) / 1000000.0);   // 0x92175c: from the previous use
         memcpy((void *)(uintptr_t)(r + R_GPU_MS), &ms, 4);

@@ -371,7 +371,12 @@ static uint64_t ex_clear_on_stack(void *p) { const ex_clear_job *j = p; dm_vkn_p
 typedef struct { uint64_t r; uint32_t first, count; } ex_arrays_job;
 static uint64_t ex_arrays_on_stack(void *p) { const ex_arrays_job *j = p; return (uint64_t)(uint32_t)dm_vkn_exec_draw_arrays(j->r, j->first, j->count); }
 typedef struct { uint64_t q; int begin; } ex_query_job;
-static uint64_t ex_query_on_stack(void *p) { const ex_query_job *j = p; if (j->begin) vkn_rt_query_begin(j->q); else vkn_rt_query_end(j->q); return 0; }   // [stage 5.5] records
+void vkn_eocc_enc_pair(uint64_t key) __attribute__((weak));   // [VK-ENGINE-SIDE I2 v2] dm/gfx/vkn/vkn_eocc.h: the recording's cull frame (off: returns)
+static uint64_t ex_query_on_stack(void *p) {
+    const ex_query_job *j = p;
+    if (j->begin) { if (vkn_eocc_enc_pair) vkn_eocc_enc_pair(j->q); vkn_rt_query_begin(j->q); } else vkn_rt_query_end(j->q);
+    return 0;
+}   // [stage 5.5] records
 // [stage 5.5] the recording thread (vkn_rt.h): the three packet handlers that reach the backend encode their calls (a region clear, the
 // arrays draw, a query bracket): no default sync on their host-stack call.
 static vkn_rt_site g_site_clear = VKN_RT_SITE("packet 0x04"), g_site_arrays = VKN_RT_SITE("packet 0x23"), g_site_query = VKN_RT_SITE("packet 0x3d / 0x3e");

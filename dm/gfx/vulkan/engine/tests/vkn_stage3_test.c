@@ -2638,6 +2638,257 @@ static void test_moving(void) {
         CHECK(zv->svc_eq[1] < zv->svc_cmp[1]); CHECK_EQ(zv->svc_max[1], 1);
     }
 }
+// ================================================================================================ [eng I1a] DM_VK_ENG_SHSTATIC
+// The persistent static-caster layer driven by the engine side (dm/gfx/nr/nr_shst.h, the plan; vkn_shc.c block "eng I1a", the backend)
+// against the geometric depth model, as the engine's draw build would run it: per cascade the cull list (boxes touching the tile + 6 px,
+// every 7th static box always), the plan, the markers (vkn_shc_eng_st, in the order of the draws) and the casters of each group drawn,
+// the members of a valid layer NOT drawn. Three cascades of a 512x512 D16 atlas (256x256 tiles; cascade 0 is left to the cache as on
+// the phone), 40 static boxes a cascade, 2 boxes that move every frame, a "wind" caster (static words, a shader without a position
+// program, another rectangle every frame), a "flag" (a static box whose mesh is written again after every draw: a new content version).
+// The camera stands, walks by whole texels, moves in z, stands, half a texel, turns, jumps, walks; a static box of cascade 1 moves at
+// frame 30 (and stays), one of cascade 2 is destroyed inside its tile at 40, a new static one appears in cascade 1 at 44; the backend's
+// acks reach the plan 2 frames late (as the recording thread runs behind). Children: truth (everything off), SHSTATIC=1 (+ the cache,
+// scroll and culling on: their defaults), =2 (verify), =3 (poison). 1 and 2 equal the truth in every frame; 3 differs; the counters show
+// layers built, reused exact and shifted, the drops by reason, members left out, verdicts (the wind caster and the flag never OK).
+#include "../../../nr/nr_shst.h"
+enum { ST_F = 64, ST_N = 40, ST_LAG = 2 };
+typedef struct st_res {
+    int checks, fails, ran;
+    uint64_t h[ST_F], recorded; vkn_shc_st_stats ss; nrst_stats ps[3]; uint32_t left[ST_F], act[ST_F][3];
+    int wind_member, flag_member;
+} st_res;
+static int st_child(const char *const env[][2], void (*fn)(st_res *), st_res *out) {   // (as a5_child, for this result)
+    memset(out, 0, sizeof *out);
+    int pfd[2]; if (pipe(pfd)) return -1;
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]);
+        for (int i = 0; env && env[i][0]; i++) { if (env[i][1]) setenv(env[i][0], env[i][1], 1); else unsetenv(env[i][0]); }
+        st_res *r = (st_res *)calloc(1, sizeof *r);
+        const int c0 = g_checks, f0 = g_fails;
+        fn(r);
+        r->checks = g_checks - c0; r->fails = g_fails - f0; r->ran = 1;
+        const uint8_t *p = (const uint8_t *)r; size_t left = sizeof *r;
+        while (left) { const ssize_t w = write(pfd[1], p, left); if (w <= 0) break; p += w; left -= (size_t)w; }
+        close(pfd[1]);
+        _exit(0);
+    }
+    close(pfd[1]);
+    uint8_t *p = (uint8_t *)out; size_t got = 0;
+    while (got < sizeof *out) { const ssize_t n = read(pfd[0], p + got, sizeof *out - got); if (n <= 0) break; got += (size_t)n; }
+    close(pfd[0]);
+    int status = 0; waitpid(pid, &status, 0);
+    const int ok = got == sizeof *out && WIFEXITED(status) && WEXITSTATUS(status) == 0 && out->ran;
+    g_checks += out->checks + 1; g_fails += out->fails;
+    if (!ok) { g_fails++; printf("FAIL %s:%d: eng static child (status %#x, %zu of %zu result bytes)\n", __FILE__, __LINE__, status, got, sizeof *out); }
+    return ok ? 0 : -1;
+}
+// a caster of the scene: 0..ST_N-1 static boxes, ST_N, ST_N + 1 movers, ST_N + 2 wind, ST_N + 3 flag, ST_N + 4 the late box (cascade 1)
+typedef struct st_obj { int32_t x, y, w, h, z; int alive, kind; } st_obj;
+static int st_verdict_t(void *u, uint32_t slot, uint32_t tag) { return vkn_shc_eng_st_verdict((int)(intptr_t)u, slot, tag); }
+static void st_scn(st_res *r) {
+    mk_depth_on = 1; mk_geo_on = 1;
+    pthread_mutex_lock(&mk_mu); mk_jr_on = 1; mk_jr_n = 0; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);
+    const int v0 = mk_val_errors, e0 = mk_errors;
+    vkn_shs_cam_block(12, 128, 0); vkn_shs_test_prog(mv_prog); vkn_shc_test_nofs(mv_nofs);
+    vkn_shc_install();
+    const int mode = vkn_shc_eng_st_mode();
+    { const char *e = getenv("DM_VK_ENG_SHSTATIC"); CHECK_EQ(mode, e && *e ? atoi(e) : 0); }
+    vkn_tex *A = mktex(540, 49 /* NVN DEPTH16 */, VKN_TC_DEPTH, 1, 512, 512, 1, 1, 540, 0);
+    CHECK(A != NULL); if (!A) return;
+    CHECK(vkn_ds_put(H(74, 1), 1, 1, 1, 0, 0, 0, 0, 0) != 0);   // LESS with writes
+    {   // the unit mesh (VB 57) and the flag's copy of it (VB 58, written again after every draw of it); indices 0 1 2
+        uint8_t vb[256]; memset(vb, 0, sizeof vb);
+        const float v[3][3] = {{0, 0, 0}, {1, 1, 0}, {1, 0, 0}};
+        for (int i = 0; i < 3; i++) memcpy(vb + (size_t)i * g_mv_stride, v[i], 12);
+        vkn_block b;
+        CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(57, 1), 256, 0, 0, vb, &b), 0); CHECK_EQ(vkn_buf_create(VKN_BUF_VB, H(58, 1), 256, 0, 0, vb, &b), 0);
+        const uint16_t ix[4] = {0, 1, 2, 0};
+        CHECK_EQ(vkn_buf_create(VKN_BUF_IB, H(59, 1), 16, 2, 0, NULL, &b), 0); CHECK(vkn_buf_update(VKN_BUF_IB, H(59, 1), 0, ix, 8, NULL, NULL) >= 0);
+    }
+    static st_obj ob[3][ST_N + 5]; static int32_t tl[VKN_TEX_SLOTS], ts[VKN_TEX_SLOTS];
+    for (int i = 0; i < VKN_TEX_SLOTS; i++) tl[i] = ts[i] = -1;
+    tl[0] = 540; tl[3] = 303; ts[0] = 10; ts[3] = 13;
+    g_mv_rng = 0xBADA55;
+    for (int k = 0; k < 3; k++) for (int i = 0; i < ST_N + 5; i++) {
+        st_obj *b = &ob[k][i];
+        b->x = 1000 * k - 60 + (int32_t)(mv_rnd() % 520); b->y = -60 + (int32_t)(mv_rnd() % 520); b->w = 8 + (int32_t)(mv_rnd() % 52); b->h = 8 + (int32_t)(mv_rnd() % 52);
+        b->z = 100 + (int32_t)(mv_rnd() % 3000); b->alive = i != ST_N + 4 || k != 1 ? 1 : 0; b->kind = i < ST_N ? 0 : i < ST_N + 2 ? 1 : i == ST_N + 2 ? 2 : i == ST_N + 3 ? 3 : 0;
+        if (i == ST_N + 4) b->alive = 0;
+        if (b->kind == 2 || b->kind == 3) { b->x = 1000 * k + 60 + 30 * (i - ST_N); b->y = 90; }   // (inside the tile while the camera stands)
+    }
+    static nrst_cas cas[3]; nrst_par par = nrst_par_default();
+    par.mode = mode; par.stable = 3; par.min_static = 4; par.refresh_min = 4;
+    for (int k = 0; k < 3; k++) nrst_init(&cas[k]);
+    uint32_t ack_e[ST_LAG + 1][3]; int ack_s[ST_LAG + 1][3]; memset(ack_e, 0, sizeof ack_e); memset(ack_s, 0, sizeof ack_s);
+    double cx = 100, cy = 100; float m = 40.0f; double sxk = 1.0;
+    vkn_draw_stats d0; vkn_draw_stats_get(&d0);
+    static nrst_in in[ST_N + 8]; static uint8_t grp[ST_N + 8]; static int32_t slot[ST_N + 8]; static uint32_t tag[ST_N + 8]; static int oi[ST_N + 8];
+    for (int f = 0; f < ST_F; f++) {
+        if ((f >= 12 && f < 24) || f >= 51) { cx += (double)((int32_t)(mv_rnd() % 13) - 6); cy += (double)((int32_t)(mv_rnd() % 13) - 6); }
+        if (f >= 24 && f < 28) m += 3.0f;                   // the light's z moves
+        if (f == 36) cx += 0.5;                              // half a texel (two frames)
+        if (f == 38) cx -= 0.5;
+        sxk = f == 46 ? 1.0009765625 : 1.0;                  // a turned / scaled projection for one frame
+        if (f == 50) cx += 200;                              // a jump
+        if (f == 44) { st_obj *b = &ob[1][ST_N + 4]; b->alive = 1; b->x = (int32_t)cx + 1000 + 100; b->y = (int32_t)cy + 120; b->w = 30; b->h = 20; b->z = 200; }   // a new static box
+        fbegin(1);
+        targets(NULL, NULL, A); vkn_pass_clear_depth(A, 1, 1.0f, 0);
+        const int32_t rect[3][2] = {{0, 0}, {MV_T, 0}, {0, MV_T}};
+        for (int k = 0; k < 3; k++) {
+            const double camx = cx + 1000.0 * k, camy = cy;
+            if (f == 30 && k == 1) {   // a static box inside the tile moves (and stays)
+                for (int i = 0; i < ST_N; i++) { st_obj *b = &ob[k][i]; if (b->alive && i % 7 && b->x - camx > 40 && b->x - camx < 180 && b->y - camy > 40 && b->y - camy < 180) { b->x += 5; b->z += 1; break; } }
+            }
+            if (f == 40 && k == 2) {   // a member destroyed inside the tile
+                for (int i = 0; i < ST_N; i++) { st_obj *b = &ob[k][i]; if (b->alive && b->x - camx > 8 && b->x - camx < MV_T - 70 && b->y - camy > 8 && b->y - camy < MV_T - 70) { b->alive = 0; if (getenv("ST_DEBUG")) fprintf(stderr, "    destroyed c2 box %d at %d %d (cam %.0f %.0f), members %u valid %d\n", i, b->x, b->y, camx, camy, cas[k].nmem, cas[k].valid); break; } }
+            }
+            vkn_draw_in gin = g_in; gin.shader = H(83, 1); gin.ds = H(74, 1); gin.vb[0] = H(57, 1); gin.vb_off[0] = 0; gin.ib = H(59, 1); gin.tex[2] = NULL; gin.smp[2] = NULL;
+            gin.viewport[0] = (float)rect[k][0]; gin.viewport[1] = (float)rect[k][1]; gin.viewport[2] = gin.viewport[3] = (float)MV_T;
+            gin.scissor[0] = rect[k][0]; gin.scissor[1] = rect[k][1]; gin.scissor[2] = gin.scissor[3] = MV_T;
+            const float s = 2.0f / MV_T, vp[16] = {(float)(s * sxk), 0, 0, (float)(-camx * s * sxk - 1.0), 0, -s, 0, (float)(1.0 + camy * s), 0, 0, 16.0f / 65535.0f, m / 65535.0f, 0, 0, 0, 1};
+            {   // the per-view block: View rows at 0, ViewProjection rows at 128
+                uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(192, &off), 0);
+                float pv[48]; memset(pv, 0, sizeof pv); memcpy(pv, vp, sizeof vp); memcpy(pv + 32, vp, sizeof vp);
+                memcpy((uint8_t *)vkn_ring_cpu() + off, pv, 192); vkn_draw_ubo(0, 12, off, 192);
+                uint32_t fo = 0; CHECK_EQ(vkn_ring_alloc(64, &fo), 0); memset((uint8_t *)vkn_ring_cpu() + fo, 0x11, 64); vkn_draw_ubo(1, 0, fo, 64);
+            }
+            // the engine's cull list of this cascade
+            uint32_t n = 0;
+            for (int i = 0; i < ST_N + 5; i++) {
+                st_obj d = ob[k][i];
+                if (!d.alive) continue;
+                if (d.kind == 1) { d.x = (int32_t)camx + 20 + ((f * 5 + 40 * (i - ST_N)) % 190); d.y = (int32_t)camy + 30 + 70 * (i - ST_N); d.w = 22; d.h = 17; d.z = 50 + i; }
+                const int touches = d.x + d.w > camx - 6 && d.x < camx + MV_T + 6 && d.y + d.h > camy - 6 && d.y < camy + MV_T + 6;
+                if (!touches && (d.kind || i % 7)) continue;
+                oi[n] = i; in[n].key = (uint64_t)(0x10000 * (k + 1) + i) << 4;
+                in[n].h = (uint32_t)(d.x * 73856093 ^ d.y * 19349663 ^ d.w * 83492791 ^ d.h * 2654435761u ^ d.z * 97);
+                const float bx[6] = {(float)d.x, (float)d.y, (float)d.z, (float)(d.x + d.w), (float)(d.y + d.h), (float)d.z}; memcpy(in[n].box, bx, sizeof bx);
+                n++;
+            }
+            // the plan (cascade 0 is not taken over, as DM_VK_ENG_SHSTATIC_FROM=1)
+            nrst_plan pl; memset(&pl, 0, sizeof pl); pl.act = NRST_A_OFF;
+            const int own = mode && k >= vkn_shc_eng_st_from();
+            if (own) {
+                uint32_t cw[NRST_CAMW]; memset(cw, 0, sizeof cw); memcpy(cw + NRST_VP, vp, 64); memcpy(cw + NRST_VIEW, vp, 64);
+                { const float pos[3] = {(float)cx, (float)cy, 0}, far = 1.0f; memcpy(cw + NRST_POS, pos, 12); memcpy(cw + NRST_FAR, &far, 4); cw[NRST_AUX] = 7; }
+                const int32_t tr[4] = {rect[k][0], 512 - MV_T - rect[k][1], MV_T, MV_T};   // (the engine's viewport in its own origin: the backend learns the tile from the draws)
+                nrst_plan_frame(&cas[k], &par, in, n, cw, tr, st_verdict_t, (void *)(intptr_t)k, ack_e[ST_LAG][k], ack_s[ST_LAG][k] == 2, grp, slot, tag, &pl);
+                vkn_shst_mark mk; memset(&mk, 0, sizeof mk);
+                mk.magic = VKN_SHST_MAGIC; mk.kind = VKN_SHST_START; mk.k = (uint32_t)k; mk.act = (uint32_t)pl.act; mk.epoch = pl.epoch; mk.nx = pl.nx; mk.ny = pl.ny;
+                memcpy(mk.rect, tr, sizeof mk.rect);
+                vkn_shc_eng_st(&mk);
+                r->act[f][k] = (uint32_t)pl.act; if (pl.act == NRST_A_REUSE) r->left[f] += pl.n[NRST_G_LEFT];
+                for (uint32_t i = 0; i < n; i++) if (slot[i] >= 0 && cas[k].tab[slot[i]].mem == cas[k].epoch && cas[k].valid) {
+                    if (ob[k][oi[i]].kind == 2) r->wind_member = 1;
+                    if (ob[k][oi[i]].kind == 3) r->flag_member = 1;
+                }
+            } else for (uint32_t i = 0; i < n; i++) grp[i] = NRST_G_DYN;
+            // the groups in the engine side's order (dm/host/hle_dos2_vkn_eng.c st_frame)
+            static const uint8_t ord[NRST_A_N][4] = {{NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_OBS, NRST_G_DYN, 255, 255}, {NRST_G_STATIC, NRST_G_OBS, NRST_G_DYN, 255},
+                                                     {NRST_G_TOUCH, NRST_G_OBS, NRST_G_DYN, 255}, {NRST_G_OBS, NRST_G_DYN, NRST_G_LEFT, NRST_G_TOUCH}};
+            for (int j = 0; j < 4 && ord[pl.act][j] != 255; j++) {
+                const int g = ord[pl.act][j];
+                if (own && pl.act == NRST_A_VERIFY && g == NRST_G_LEFT) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_V1, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+                if (own && pl.act == NRST_A_VERIFY && g == NRST_G_TOUCH) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_V2, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+                for (uint32_t i = n; i-- > 0;) {
+                    if (grp[i] != g) continue;
+                    if (own && (g == NRST_G_OBS || g == NRST_G_STATIC)) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_OBJ, (uint32_t)k, 0, 0, (uint32_t)slot[i], tag[i], 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+                    const int oix = oi[i]; st_obj d = ob[k][oix];
+                    if (d.kind == 1) { d.x = (int32_t)camx + 20 + ((f * 5 + 40 * (oix - ST_N)) % 190); d.y = (int32_t)camy + 30 + 70 * (oix - ST_N); d.w = 22; d.h = 17; d.z = 50 + oix; }
+                    if (d.kind == 2) {   // the wind caster: the hash model's rectangle, another one every frame (its words never change)
+                        vkn_draw_in o = g_in; o.ds = H(74, 1); o.tex[2] = NULL; o.smp[2] = NULL;
+                        memcpy(o.viewport, gin.viewport, sizeof o.viewport); memcpy(o.scissor, gin.scissor, sizeof o.scissor);
+                        uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+                        uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = (uint32_t)k; u[1] = 78; u[2] = (uint32_t)f + 1;
+                        vkn_draw_ubo(0, 2, off, 64); o.vb_off[0] = 16u * (uint32_t)(k + 1);
+                        CHECK_EQ(vkn_draw_indexed(&o, 3u * (uint32_t)k, 3, 1), 0);
+                    } else {
+                        vkn_draw_in b = gin; if (d.kind == 3) b.vb[0] = H(58, 1);
+                        uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+                        const float w[16] = {(float)d.w, 0, 0, (float)d.x, 0, (float)d.h, 0, (float)d.y, 0, 0, 1, (float)d.z, 0, 0, 0, 1};
+                        memcpy((uint8_t *)vkn_ring_cpu() + off, w, 64); vkn_draw_ubo(0, 0, off, 64);
+                        CHECK_EQ(vkn_draw_indexed(&b, 0, 3, 1), 0);
+                        if (d.kind == 3) {   // the flag's mesh written again (the same bytes: a new content version)
+                            uint8_t vb[256]; memset(vb, 0, sizeof vb); const float v[3][3] = {{0, 0, 0}, {1, 1, 0}, {1, 0, 0}};
+                            for (int q = 0; q < 3; q++) memcpy(vb + (size_t)q * g_mv_stride, v[q], 12);
+                            CHECK(vkn_buf_update(VKN_BUF_VB, H(58, 1), 0, vb, 256, NULL, NULL) >= 0);
+                        }
+                    }
+                    CHECK(vkn_pass_depth() == A); CHECK(vkn_pass_color(0) == NULL);
+                }
+                if (own && g == NRST_G_STATIC) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_MID, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+                if (own && g == NRST_G_OBS) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_NONE, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+            }
+            if (own) { vkn_shst_mark mk = {VKN_SHST_MAGIC, VKN_SHST_END, (uint32_t)k, 0, 0, 0, 0, 0, 0, 0, {0}, {0}}; vkn_shc_eng_st(&mk); }
+        }
+        targets(g_a2, NULL, g_d3);
+        { vkn_draw_in e = g_in; CHECK_EQ(vkn_draw_indexed(&e, 0, 3, 1), 0); }
+        { vkn_draw_in l = g_in; l.tex[1] = tl; l.smp[1] = ts; CHECK_EQ(vkn_draw_indexed(&l, 0, 3, 1), 0); }   // lighting samples the atlas
+        fsubmit(0);
+        r->h[f] = a5_hash_rect(A, 0, 0, 512, 512, NULL);
+        // the acks as the plan sees them ST_LAG frames later
+        memmove(ack_e[1], ack_e[0], sizeof ack_e[0] * ST_LAG); memmove(ack_s[1], ack_s[0], sizeof ack_s[0] * ST_LAG);
+        for (int k = 0; k < 3; k++) ack_s[0][k] = vkn_shc_eng_st_ack(k, &ack_e[0][k]);
+    }
+    frames_n(4);   // the verify read-backs retire
+    mk_gpu_finish_all(); frames_n(1);
+    vkn_shc_eng_st_stats_get(&r->ss);
+    for (int k = 0; k < 3; k++) r->ps[k] = cas[k].st;
+    { vkn_draw_stats d1; vkn_draw_stats_get(&d1); r->recorded = d1.draws - d0.draws; }
+    vkn_shc_census();
+    CHECK_EQ(mk_val_errors, v0); CHECK_EQ(mk_errors, e0);
+}
+static void test_eng_static(void) {
+#define ST_BASE {"DM_HACK_SHFAR", NULL}, {"DM_HACK_TIER", NULL}, {"DM_VK_NATIVE_SHFAR", "0"}, {"DM_VK_NATIVE_SHRATE", NULL}, {"DM_VK_NATIVE_SHCACHE_MIN", "4"}, {"DM_VK_ENG_SHSTATIC_VERIFY", "1"}, {"DM_VK_ENG_SHSTATIC_POISON", "3"}, {NULL, NULL}
+    static const char *const e_truth[][2] = {{"DM_VK_ENG_SHSTATIC", "0"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHSCROLL", "0"}, {"DM_VK_NATIVE_SHCULL", "0"}, ST_BASE};
+    static const char *const e_on[][2] = {{"DM_VK_ENG_SHSTATIC", "1"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
+    static const char *const e_ver[][2] = {{"DM_VK_ENG_SHSTATIC", "2"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
+    static const char *const e_poi[][2] = {{"DM_VK_ENG_SHSTATIC", "3"}, {"DM_VK_NATIVE_SHCACHE", "1"}, {"DM_VK_NATIVE_SHSCROLL", "1"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
+    static const char *const e_alone[][2] = {{"DM_VK_ENG_SHSTATIC", "1"}, {"DM_VK_NATIVE_SHCACHE", "0"}, {"DM_VK_NATIVE_SHSCROLL", "0"}, {"DM_VK_NATIVE_SHCULL", "1"}, ST_BASE};
+#undef ST_BASE
+    if (!g_mv_sh || !g_mv_prog) { CHECK(g_mv_sh && g_mv_prog); return; }   // (made by test_moving)
+    static st_res T, S1, S2, S3, S4;
+    st_child(e_truth, st_scn, &T); st_child(e_on, st_scn, &S1); st_child(e_ver, st_scn, &S2); st_child(e_poi, st_scn, &S3); st_child(e_alone, st_scn, &S4);
+    { int distinct = 0; for (int f = 13; f < 24; f++) distinct += T.h[f] != T.h[f - 1]; CHECK(distinct > 8); }
+    const struct { const char *name; const st_res *r; int equal; } run[] = {{"SHSTATIC=1 (+ cache, scroll, cull)", &S1, 1}, {"SHSTATIC=2 (verify)", &S2, 1}, {"SHSTATIC=3 (poison)", &S3, 0}, {"SHSTATIC=1, cache off", &S4, 1}};
+    for (size_t i = 0; i < sizeof run / sizeof run[0]; i++) {
+        int bad = 0, first = -1; for (int f = 0; f < ST_F; f++) if (run[i].r->h[f] != T.h[f]) { bad++; if (first < 0) first = f; }
+        if (run[i].equal) { CHECK_EQ(bad, 0); if (bad) printf("  eng static %s: %d frames differ from the truth, first %d\n", run[i].name, bad, first); }
+        else CHECK(bad > 0);
+        const vkn_shc_st_stats *s = &run[i].r->ss; const nrst_stats *p1 = &run[i].r->ps[1], *p2 = &run[i].r->ps[2];
+        uint64_t left = 0; for (int f = 0; f < ST_F; f++) left += run[i].r->left[f];
+        printf("  eng static %-34s frames differing %2d; draws recorded %5llu (truth %llu); casters left out %llu; c1 build %llu reuse %llu (exact %llu shifted %llu) hold %llu verify %llu, c2 build %llu reuse %llu; "
+               "drops c1+c2: turned %llu z %llu frac %llu big %llu moved %llu gone %llu refresh %llu nack %llu; no build: few %llu moving %llu; verdicts ok %llu once %llu not %llu (no bounds %llu, sig %llu); "
+               "reuses %llu, copies %llu, poisoned %llu, xchk %llu (bad %llu), BAD %llu; verify tiles %llu equal %llu k1 %llu kn %llu strip %llu skipped %llu\n",
+               run[i].name, bad, (unsigned long long)run[i].r->recorded, (unsigned long long)T.recorded, (unsigned long long)left,
+               (unsigned long long)p1->act[NRST_A_BUILD], (unsigned long long)p1->act[NRST_A_REUSE], (unsigned long long)p1->exact, (unsigned long long)p1->shifted, (unsigned long long)p1->act[NRST_A_HOLD],
+               (unsigned long long)p1->act[NRST_A_VERIFY], (unsigned long long)p2->act[NRST_A_BUILD], (unsigned long long)p2->act[NRST_A_REUSE],
+               (unsigned long long)(p1->drop[NRST_R_TURN] + p2->drop[NRST_R_TURN]), (unsigned long long)(p1->drop[NRST_R_Z] + p2->drop[NRST_R_Z]), (unsigned long long)(p1->drop[NRST_R_FRAC] + p2->drop[NRST_R_FRAC]),
+               (unsigned long long)(p1->drop[NRST_R_BIG] + p2->drop[NRST_R_BIG]), (unsigned long long)(p1->drop[NRST_R_MOVED] + p2->drop[NRST_R_MOVED]), (unsigned long long)(p1->drop[NRST_R_GONE] + p2->drop[NRST_R_GONE]),
+               (unsigned long long)(p1->drop[NRST_R_REFRESH] + p2->drop[NRST_R_REFRESH]), (unsigned long long)(p1->drop[NRST_R_NACK] + p2->drop[NRST_R_NACK]),
+               (unsigned long long)(p1->nob[NRST_N_FEW] + p2->nob[NRST_N_FEW]), (unsigned long long)(p1->nob[NRST_N_MOVING] + p2->nob[NRST_N_MOVING]),
+               (unsigned long long)s->v[NRST_V_OK], (unsigned long long)s->v[NRST_V_ONCE], (unsigned long long)s->v[NRST_V_NOT], (unsigned long long)s->not_why[5], (unsigned long long)s->not_why[8],
+               (unsigned long long)s->reused, (unsigned long long)s->copies, (unsigned long long)s->poisoned, (unsigned long long)s->xchk, (unsigned long long)s->xchk_bad, (unsigned long long)s->bad,
+               (unsigned long long)s->vcmp, (unsigned long long)s->veq, (unsigned long long)s->vk1, (unsigned long long)s->vkn, (unsigned long long)s->vstrip, (unsigned long long)s->vskip);
+        if (getenv("ST_DEBUG")) { printf("    acts c1/c2:"); for (int f = 0; f < ST_F; f++) printf(" %u%u", run[i].r->act[f][1], run[i].r->act[f][2]); printf("\n"); }
+        CHECK_EQ(s->bad, 0); CHECK_EQ(s->xchk_bad, 0); CHECK_EQ(s->stray, 0); CHECK_EQ(s->unterminated, 0);
+        CHECK_EQ(run[i].r->wind_member, 0); CHECK_EQ(run[i].r->flag_member, 0);   // the wind caster and the flag are never in a layer
+        CHECK(p1->act[NRST_A_BUILD] >= 3); CHECK(p1->drop[NRST_R_MOVED] >= 1); CHECK(p2->drop[NRST_R_GONE] >= 1);
+        CHECK(p1->drop[NRST_R_Z] + p2->drop[NRST_R_Z] >= 1); CHECK(p1->drop[NRST_R_FRAC] + p2->drop[NRST_R_FRAC] >= 1); CHECK(p1->drop[NRST_R_TURN] + p2->drop[NRST_R_TURN] >= 1);
+        CHECK(p1->drop[NRST_R_BIG] + p2->drop[NRST_R_BIG] >= 1);
+        CHECK(s->not_why[5] >= 1);   // the wind caster: no bounds
+        if (run[i].r == &S2) {   // verify: nothing left out, every would-be reuse compared and equal
+            CHECK_EQ(left, 0); CHECK(p1->act[NRST_A_VERIFY] > 10); CHECK(s->vcmp > 10); CHECK_EQ(s->veq, s->vcmp); CHECK_EQ(s->vk1 + s->vkn + s->vstrip, 0); CHECK_EQ(s->reused, 0);
+        } else {
+            CHECK(left > 500); CHECK(p1->exact > 5); CHECK(p1->shifted > 5); CHECK(p1->act[NRST_A_HOLD] >= 1); CHECK(run[i].r->recorded < T.recorded);
+            if (run[i].r == &S3) CHECK(s->poisoned >= 3); else CHECK(s->reused > 20);
+        }
+    }
+}
+
 // ================================================================================================ [rt2 R7] DM_VK_NATIVE_SORT (vkn_sort.c)
 // A depth-only pass of a D16 target (the mock's depth content model: a draw writes one z over one rectangle, both from what it reads, by
 // content) with draws of three pipelines interleaved (LESS and LEQUAL, other vertex offsets / viewports / constants each), a GREATER draw
@@ -3613,6 +3864,18 @@ static void test_b4_prepass(void) {
     CHECK(vkn_ds_put(H(71, 1), 1, 0, 2, 0, 0, 0, 0, 0) != 0);   // G-buffer: EQUAL, no write
     CHECK_EQ(vkn_fx_register("b4-skipper", b4_skipper, NULL, 600), 0);
     vkn_draw_in pre = g_in, gb = g_in; pre.ds = H(70, 1); gb.ds = H(71, 1); pre.blend = gb.blend = 0; pre.alpha_ref = gb.alpha_ref = -1.0f;
+    {   // [eng2] a program whose vertex stage declares the per-object block (uniform binding 0, as every DOS2 material program: "PGlobals")
+        const VkDescriptorType UB = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        xbg_vkn_stage *vs = mk_bundle_add("v3000000000000b4", 0);
+        mk_bind(vs, 0, UB, XBG_SOURCE_SUPPORT, 0, 1392); mk_bind(vs, 1, UB, XBG_SOURCE_UNIFORM, 0, 64); mk_bind(vs, 2, UB, XBG_SOURCE_UNIFORM, 2, 256);
+        vs->input_count = 3; vs->inputs[0] = 0; vs->inputs[1] = 1; vs->inputs[2] = 4;
+        CHECK(mkshader(H(176, 1), "v3000000000000b4", "f300000000000001", NULL) != NULL);
+        pre.shader = gb.shader = H(176, 1);
+    }
+    // [eng2] the per-object block (vertex binding 0: the instance identity of the keys); one object for the cases below
+    uint32_t b4w[2] = {0, 0};
+    for (int i = 0; i < 2; i++) { CHECK_EQ(vkn_ring_alloc(64, &b4w[i]), 0); float *m = (float *)((uint8_t *)vkn_ring_cpu() + b4w[i]); memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1.0f; m[3] = 10.0f * (float)i; }
+    vkn_draw_ubo(0, 0, b4w[0], 64);
     vkn_prepass_stats s0, s1; vkn_prepass_stats_get(&s0);
     g_b4_cls = 1; vkn_prepass_test_setup(1, b4_facts); CHECK_EQ(vkn_prepass_mode(), 1);
     int predraws[8], gbwrite[8];
@@ -3687,6 +3950,42 @@ static void test_b4_prepass(void) {
         }
         vkn_prepass_stats s3; vkn_prepass_stats_get(&s3); CHECK(s3.st_free >= 3);
     }
+    // [eng2] two objects of ONE mesh (same index range, other World) in a frame (phone D09: "ambiguous 2", the frame drawn wrong): object
+    // P (pre-pass skippable) is established and skipped; then object Q of the same mesh is drawn in the pre-pass kept (alpha test) and
+    // its G-buffer draw comes FIRST. Mesh keys gave Q the override and left P with EQUAL against its missing depth; instance keys tell
+    // them apart: P gets LEQUAL + write, Q keeps EQUAL, no bad key.
+    {
+        vkn_prepass_test_setup(1, b4_facts);
+        int pw[6], qw[6];
+        for (int i = 0; i < 6; i++) {
+            const int q = i >= 3;   // frames 3..5: Q appears
+            VkCommandBuffer cb = fbegin(1); targets(NULL, NULL, D); uint64_t m = mark();
+            vkn_draw_ubo(0, 0, b4w[0], 64); vkn_draw_indexed(&pre, 3, 3, 1);                     // X (first: kept)
+            vkn_draw_ubo(0, 0, b4w[0], 64); vkn_draw_indexed(&pre, 0, 3, 1);                     // P
+            if (q) { vkn_draw_in qa = pre; qa.alpha_ref = 0.5f; vkn_draw_ubo(0, 0, b4w[1], 64); vkn_draw_indexed(&qa, 0, 3, 1); }   // Q: kept (alpha)
+            predraws[i] = cnt(m, cb, MK_E_DRAW_IDX);
+            targets(C, NULL, D);
+            qw[i] = -1;
+            if (q) { vkn_draw_ubo(0, 0, b4w[1], 64); vkn_draw_indexed(&gb, 0, 3, 1); const mk_gp *p = b5_pipe(cb); qw[i] = p && p->has_ds ? (int)p->ds.depthWriteEnable * 10 + (int)p->ds.depthCompareOp : -1; }
+            vkn_draw_ubo(0, 0, b4w[0], 64); vkn_draw_indexed(&gb, 0, 3, 1);
+            { const mk_gp *p = b5_pipe(cb); pw[i] = p && p->has_ds ? (int)p->ds.depthWriteEnable * 10 + (int)p->ds.depthCompareOp : -1; }
+            fsubmit(0);
+            if (i >= 2) { const prepass_result *r = (const prepass_result *)vkn_prepass_test_last(); CHECK(r && r->bad_keys == 0 && r->ambiguous == 0); }
+        }
+        for (int i = 2; i < 6; i++) { CHECK_EQ(pw[i], 10 + VK_COMPARE_OP_LESS_OR_EQUAL); CHECK_EQ(predraws[i], i >= 3 ? 2 : 1); }   // P skipped, overridden
+        for (int i = 3; i < 6; i++) CHECK_EQ(qw[i], VK_COMPARE_OP_EQUAL);                                                      // Q keeps EQUAL
+        // a draw without a per-object block (64 bytes at vertex binding 0) has no identity: never skipped
+        vkn_prepass_test_setup(1, b4_facts);
+        uint32_t small = 0; CHECK_EQ(vkn_ring_alloc(16, &small), 0);
+        for (int i = 0; i < 3; i++) {
+            VkCommandBuffer cb = fbegin(1); targets(NULL, NULL, D); uint64_t m = mark();
+            vkn_draw_ubo(0, 0, small, 16); vkn_draw_indexed(&pre, 3, 3, 1); vkn_draw_indexed(&pre, 0, 3, 1); predraws[i] = cnt(m, cb, MK_E_DRAW_IDX);
+            targets(C, NULL, D); vkn_draw_indexed(&gb, 0, 3, 1); fsubmit(0);
+        }
+        CHECK_EQ(predraws[2], 2);
+        { const prepass_result *r = (const prepass_result *)vkn_prepass_test_last(); CHECK(r && r->keep[PREPASS_K_NOID] == 2 && r->pre_skip == 0); }   // (both draws: the first one too)
+        vkn_draw_ubo(0, 0, b4w[0], 64);
+    }
 #undef B4_FRAME
     vkn_prepass_census();
     vkn_prepass_stats_get(&s1);
@@ -3733,6 +4032,7 @@ int main(void) {
     test_occ_a();   // [stage 5] technique A (vkn_occ.c, DM_VK_NATIVE_COND 5 / 6; forked children: here, while the effect chain has room)
     test_a5_shc();      // [stage 5.1 A5] (forked children: the cache's switches are read once per process)
     test_moving();      // [VK-SHADOWS-MOVING] the scrolling layer and the caster culling (forked children; the geometric depth model)
+    test_eng_static();  // [eng I1a] the engine-driven static-caster layer (forked children; the geometric depth model; after test_moving: its shader)
     test_sort();        // [rt2 R7] DM_VK_NATIVE_SORT (forked children; the depth content model)
     test_a5_fx();
     test_a5_oracle();

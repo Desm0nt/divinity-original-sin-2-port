@@ -61,6 +61,7 @@ void vkn_query_dispatch(void);
 
 // ---- hooks of the draw and pass modules (declared weak there: a build without this file keeps today's behaviour) ----
 int vkn_query_draw_enter(void);                  // top of vkn_draw_indexed / _arrays (count > 0): 1 = skip the draw (counted), 0 = go on
+uint64_t vkn_query_draw_cond_key(void);          // [VK-ENGINE-SIDE I2] the report-pair key of the draw's condition (set by vkn_query_draw_enter, 0 = none)
 void vkn_query_draw_pre(VkCommandBuffer cb);     // right before the vkCmdDraw* of that draw (the pass is open)
 void vkn_query_draw_post(VkCommandBuffer cb);    // right after it
 void vkn_query_pass_closing(VkCommandBuffer cb); // right before vkCmdEndRenderPass
