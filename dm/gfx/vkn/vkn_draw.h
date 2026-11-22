@@ -82,6 +82,7 @@ typedef struct vkn_draw_stats2 {
     uint64_t forget_all, pools, set_bytes_words;   // cache flushes, pools created, key words held now
 } vkn_draw_stats2;
 void vkn_draw_stats2_get(vkn_draw_stats2 *s);
+uint64_t vkn_draw_stamp(void);   // [frame F1] draws recorded + every drop (one number: it moves when a prepared draw ends)
 
 // ==== added by the immediate-draw piece (stage 3 wave 2, vkn_draw.c "index rewrite"): not part of the original contract ====
 // vkn_draw_arrays / vkn_draw_indexed draw engine primitives 2 (triangle fan), 4 (quads) and 7 (line loop) themselves: generated

@@ -1420,7 +1420,8 @@ static void rt_targets(vkn_tex *c, vkn_tex *d) { vkn_tex *cc[VKN_PASS_COLORS] = 
 // DM_VK_NATIVE_UIPASS 1 / 3 with a GDraw epoch on a target + DS (depth-tested draws, masked stencil clears, fences); RTX_POL the
 // load / store policy LOAD=1 STORE=1 FRESH=2; RTX_MAT MAT variant B with a gate word changing between draws of a depth-only pass;
 // RTX_SHC the shadow cache (an atlas pass of static casters + moving ones); RTX_LF LIGHTFUSE (Sky + Light every frame).
-enum { RTX_UI1 = 1, RTX_UI3 = 2, RTX_POL = 4, RTX_MAT = 8, RTX_SHC = 16, RTX_LF = 32, RTX_SORT = 64 };   // [rt2 R7] RTX_SORT: DM_VK_NATIVE_SORT=1, a depth-only pass of three pipelines
+enum { RTX_UI1 = 1, RTX_UI3 = 2, RTX_POL = 4, RTX_MAT = 8, RTX_SHC = 16, RTX_LF = 32, RTX_SORT = 64, RTX_FA = 128 };   // [frame F1 / F2] RTX_FA: FRAMEAREA=1 LAZYCLR=1 SORT=1 DRAWMERGE=1
+//   // [rt2 R7] RTX_SORT: DM_VK_NATIVE_SORT=1, a depth-only pass of three pipelines
 static int g_rtx;
 static void rtx_setup(void);
 static void rtx_on(int ext);
@@ -1670,7 +1671,7 @@ static void test_rt(void) {
     pthread_mutex_lock(&mk_mu); mk_jr_on = 1; if (!mk_jr_recording()) mk_ev_base = mk_seq; pthread_mutex_unlock(&mk_mu);   // (the log restarts after each submission; records not kept)
     for (uint32_t f = 0; f < 60; f++) rt_frame(f);
     rtx_setup();   // [stage 5.2 audit] and every extension's objects / pipelines (the shadow cache only in its children: installed once a process)
-    { static const int wx[] = {RTX_UI1, RTX_UI3, RTX_POL, RTX_MAT, RTX_LF, RTX_SORT}; for (size_t i = 0; i < sizeof wx / sizeof wx[0]; i++) { rtx_on(wx[i]); g_rtx = wx[i]; for (uint32_t f = 0; f < 30; f++) rt_frame(f); rtx_off(); g_rtx = 0; } }
+    { static const int wx[] = {RTX_UI1, RTX_UI3, RTX_POL, RTX_MAT, RTX_LF, RTX_SORT, RTX_FA}; for (size_t i = 0; i < sizeof wx / sizeof wx[0]; i++) { rtx_on(wx[i]); g_rtx = wx[i]; for (uint32_t f = 0; f < 30; f++) rt_frame(f); rtx_off(); g_rtx = 0; } }
     pthread_mutex_lock(&mk_mu); mk_jr_on = 0; mk_jr_n = 0; pthread_mutex_unlock(&mk_mu);
     rt_dyn_head = 0;
     rt_slots_init();
@@ -1752,7 +1753,7 @@ static void test_rt(void) {
     }
     {   // [stage 5.2 audit] the pieces merged after stage 5.5: a reference per extension, the modes against it
         static const struct { int ext; const char *what; } ex[] = {{RTX_UI1, "UIPASS=1"}, {RTX_UI3, "UIPASS=3"}, {RTX_POL, "LOAD=1 STORE=1 FRESH=2"},
-                                                                   {RTX_MAT, "MAT=2 gate"}, {RTX_SHC, "SHCACHE=1"}, {RTX_LF, "LIGHTFUSE"}, {RTX_SORT, "SORT=1"}};
+                                                                   {RTX_MAT, "MAT=2 gate"}, {RTX_SHC, "SHCACHE=1"}, {RTX_LF, "LIGHTFUSE"}, {RTX_SORT, "SORT=1"}, {RTX_FA, "FRAMEAREA=1 LAZYCLR=1 DRAWMERGE=1"}};
         static rt_res xr;
         {   // [rt P3-GPU] DM_VK_NATIVE_SHC_MASK=1 with the test's mask: its own reference (more hits than without the mask), the threaded modes against it
             const rt_cfg m0 = {0, 1, 0, 160, 0, RTX_SHC, 0, 0, 0, 0, 0, 0, 0, 1}, mm[2] = {{1, 1, 1, 160, 0, RTX_SHC, 1, 1, VKN_COST_ALL2, 0, 1, 1, 1, 1}, {2, 1, 1, 160, 0, RTX_SHC, 1, 2, VKN_COST_ALL2, 1, 2, 2, 2, 1}};
@@ -3592,6 +3593,85 @@ static void b1_child(a5_res *r) {
         vkn_pass_stats3_get(&c); CHECK_EQ(c.tilebar_fix - a.tilebar_fix, 1);
         m = mark(); CHECK_EQ(vkn_draw_dispatch(&ci, &ib1, 1, 1, 1, 1), 0); CHECK(barrier_of(m, R->image, 0) == NULL);   // once
         fsubmit(0);
+        {   // [frame F1] DM_VK_NATIVE_TILEBAR_LEARN: a read by another kind of reader while the pass of g_b2 is open: the repair ends that
+            // pass -> R is marked; in the next frames its fragment-only read gets the full barrier at once and there is nothing to repair
+            vkn_pass_policy p; memset(&p, 0, sizeof p); p.fresh = 1; p.tilebar = 1; p.area = 1; p.ubo = 1; p.store_frames = 3; p.barlearn = 1; vkn_pass_policy_set(&p);
+            vkn_pass_stats5 q0, q1; vkn_pass_stats5_get(&q0);
+            const VkPipelineStageFlags all = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            for (int f = 0; f < 3; f++) {
+                cb = fbegin(1);
+                targets(R, NULL, NULL); b1_draw(&g_b1, 3, NULL);
+                targets(g_b2, NULL, NULL);
+                m = mark(); b1_draw(&fr, 3, NULL);
+                bar = barrier_of(m, R->image, 0);
+                CHECK(bar && bar->l1 == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && (f ? bar->u[1] == all : bar->u[1] != all));
+                vkn_pass_stats3_get(&a);
+                vkn_pass_layout(g_t0, g_t0->layout);   // (any entry point: the draw's "fragment only" is over; nothing recorded)
+                m = mark(); CHECK_EQ(vkn_pass_sample(R), 0);
+                vkn_pass_stats3_get(&c);
+                CHECK_EQ(c.tilebar_fix - a.tilebar_fix, f ? 0 : 1); CHECK_EQ(cnt(m, cb, MK_E_END_RP), f ? 0 : 1); if (f) CHECK(barrier_of(m, R->image, 0) == NULL);
+                fsubmit(0);
+            }
+            vkn_pass_stats5_get(&q1);
+            CHECK_EQ(q1.bar_marks - q0.bar_marks, 1); CHECK_EQ(q1.bar_learned - q0.bar_learned, 2);
+            p.barlearn = 2; vkn_pass_policy_set(&p);   // count only: the fragment barrier again, counted
+            cb = fbegin(1); targets(R, NULL, NULL); b1_draw(&g_b1, 3, NULL); targets(g_b2, NULL, NULL);
+            m = mark(); b1_draw(&fr, 3, NULL); bar = barrier_of(m, R->image, 0); CHECK(bar && bar->u[1] != all);
+            fsubmit(0);
+            vkn_pass_stats5_get(&q0); CHECK_EQ(q0.bar_would - q1.bar_would, 1);
+        }
+    }
+    // ---- [frame F1] the frame area together with the cover proof (a post-style pass drawn into a part of its target), a draw this module
+    // cannot see, a draw outside the area that the chain reports
+    {
+        vkn_pass_policy p; memset(&p, 0, sizeof p); p.load = 1; p.fresh = 1; p.area = 1; p.ubo = 1; p.store_frames = 3; p.farea = 1; vkn_pass_policy_set(&p);
+        b1_prog(1.0f, -1); b1_verts(k_b1_full, 3);
+        vkn_tex *PT = mktex(740, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 740, 0), *PC = mktex(741, EF_RGBA8, VKN_TC_COLOR, 1, 64, 32, 1, 1, 741, 0);
+        CHECK(PT && PC); if (!PT || !PC) return;
+        vkn_draw_in pd = b1_base(); pd.viewport[2] = 32; pd.viewport[3] = 16; pd.scissor[2] = 32; pd.scissor[3] = 16;
+        const float sky[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+        vkn_pass_stats5 q0, q1; vkn_pass_stats5_get(&q0);
+        const int DC = VK_ATTACHMENT_LOAD_OP_DONT_CARE, CL = VK_ATTACHMENT_LOAD_OP_CLEAR, LD = VK_ATTACHMENT_LOAD_OP_LOAD;
+        for (int f = 0; f < 5; f++) {
+            cb = fbegin(1);
+            const mk_ev *b = NULL;
+            targets(PT, NULL, NULL); b1_draw(&pd, 3, &b);
+            CHECK(b != NULL);
+            if (f == 0) { CHECK_EQ(b1_load0(b), CL); CHECK(b && b->rect.extent.width == 64); }                    // never written: zeros over all of it
+            else { CHECK_EQ(b1_load0(b), DC); CHECK(b && b->rect.extent.width == 32 && b->rect.extent.height == 16); }   // the proven part (f >= 2: as the frame area)
+            { const uint64_t m2 = mark(); vkn_draw_arrays(&pd, 0, 3); CHECK_EQ(cnt(m2, cb, MK_E_BEGIN_RP), 0); }   // a draw inside: the same pass
+            targets(PC, NULL, NULL); vkn_pass_clear_color(PC, 0, sky, NULL); b = NULL; b1_draw(&pd, 3, &b);
+            CHECK(b != NULL); CHECK_EQ(b1_load0(b), CL);
+            CHECK(b && b->rect.extent.width == (f < 2 ? 64u : 32u));                                               // the engine's clear: whole while learning, then the area
+            if (f >= 2) CHECK_F(b->cv[0].color.float32[1], 0.2);
+            fsubmit(0);
+        }
+        vkn_pass_stats5_get(&q1);
+        CHECK_EQ(q1.fa_passes - q0.fa_passes, 6); CHECK_EQ(q1.fa_clears - q0.fa_clears, 3);
+        CHECK(q1.fa_why[VKN_FAR_HIST] - q0.fa_why[VKN_FAR_HIST] >= 4);
+        // a caller this module cannot see (vkn_pass_ready without the draw path): the narrowed pass ends, the next one is full with LOAD
+        cb = fbegin(1);
+        { const mk_ev *b = NULL; targets(PT, NULL, NULL); b1_draw(&pd, 3, &b); CHECK(b && b->rect.extent.width == 32);
+          const uint64_t m2 = mark(); CHECK_EQ(vkn_pass_ready(NULL), 0);
+          const mk_ev *b2 = nth(m2, cb, MK_E_BEGIN_RP, 0); CHECK_EQ(cnt(m2, cb, MK_E_END_RP), 1); CHECK(b2 && b2->rect.extent.width == 64); CHECK_EQ(b1_load0(b2), LD); }
+        fsubmit(0);
+        vkn_pass_stats5_get(&q0); CHECK_EQ(q0.fa_restart_unknown - q1.fa_restart_unknown, 1);
+        // (the history of that pass is dropped: two frames of learning again; the cover proof still narrows it by itself meanwhile)
+        for (int f = 0; f < 3; f++) { cb = fbegin(1); targets(PT, NULL, NULL); b1_draw(&pd, 3, NULL); targets(PC, NULL, NULL); vkn_pass_clear_color(PC, 0, sky, NULL); b1_draw(&pd, 3, NULL); fsubmit(0); }
+        vkn_pass_stats5_get(&q1);
+        // a draw outside the area, seen by the chain: the pass ends, this draw begins it again full (its own proof: the whole target)
+        cb = fbegin(1);
+        { const mk_ev *b = NULL; targets(PT, NULL, NULL); b1_draw(&pd, 3, &b); CHECK(b && b->rect.extent.width == 32);
+          vkn_draw_in full = b1_base(); const uint64_t m2 = mark(); vkn_draw_arrays(&full, 0, 3);
+          const mk_ev *b2 = nth(m2, cb, MK_E_BEGIN_RP, 0); CHECK_EQ(cnt(m2, cb, MK_E_END_RP), 1); CHECK(b2 && b2->rect.extent.width == 64 && b2->rect.extent.height == 32); CHECK_EQ(b1_load0(b2), DC); }
+        fsubmit(0);
+        vkn_pass_stats5_get(&q0); CHECK_EQ(q0.fa_restart_draw - q1.fa_restart_draw, 1); CHECK_EQ(q0.fa_why[VKN_FAR_RESTART] - q1.fa_why[VKN_FAR_RESTART], 1);
+        // verify (=2): nothing narrowed by the frame area (the proof's own part pass stays), the would-be passes counted
+        p.farea = 2; vkn_pass_policy_set(&p);
+        vkn_pass_stats5_get(&q1);
+        for (int f = 0; f < 4; f++) { cb = fbegin(1); targets(PC, NULL, NULL); vkn_pass_clear_color(PC, 0, sky, NULL); const mk_ev *b = NULL; b1_draw(&pd, 3, &b); CHECK(b && b->rect.extent.width == 64); fsubmit(0); }
+        vkn_pass_stats5_get(&q0); CHECK_EQ(q0.fa_passes - q1.fa_passes, 0); CHECK(q0.fa_would - q1.fa_would >= 3);
+        b1_pol(0, 0, 1, 0);
     }
     // ---- [B1 + B2] the UI's render-area hint (vkn_pass_area_hint / _get) and how it combines with the proof
     {
@@ -3763,9 +3843,14 @@ static void rtx_on(int ext) {
     }
     if (ext & RTX_LF) vkn_lf_test_setup(1, 1);
     if (ext & RTX_SORT) vkn_sort_mode_set(1);   // [rt2 R7]
+    if (ext & RTX_FA) {   // [frame F1 / F2]
+        vkn_pass_policy p; memset(&p, 0, sizeof p); p.fresh = 1; p.store_frames = 8; p.farea = 1; p.lazyclr = 1; vkn_pass_policy_set(&p);
+        vkn_sort_mode_set(1); vkn_sort_merge_set(1);
+    }
 }
 static void rtx_off(void) {
     vkn_ui_pass_config(0, 0, 0, 0); vkn_pass_policy_set(NULL); vkn_mat_test_setup(0, 0, NULL); vkn_lf_test_setup(0, 0);
+    if (vkn_sort_merge()) vkn_sort_merge_set(0);   // [frame F2]
     if (vkn_sort_mode()) vkn_sort_mode_set(0);   // [rt2 R7]
 }
 static uint64_t rtx_metric(int ext) {   // how often the piece acted (the same in every mode: its decisions are the recording's)
@@ -3774,6 +3859,7 @@ static uint64_t rtx_metric(int ext) {   // how often the piece acted (the same i
     if (ext & RTX_MAT) { vkn_mat_stats m; vkn_mat_stats_get(&m); return m.no_fs + m.vs_swaps * 1000; }
     if (ext & RTX_SHC) { vkn_shc_stats c; vkn_shc_stats_get(&c); if (getenv("VKN_RTX_LOG")) { vkn_shc_census(); vkn_draw_stats d; vkn_draw_stats2 d2; vkn_draw_stats_get(&d); vkn_draw_stats2_get(&d2); printf("rtx draws %llu idx %llu drop shader %llu state %llu pipe %llu pass %llu prim %llu vb %llu ib %llu vp %llu sc_empty %llu\n", (unsigned long long)d.draws, (unsigned long long)d.indexed, (unsigned long long)d.dropped_shader, (unsigned long long)d.dropped_state, (unsigned long long)d.dropped_pipe, (unsigned long long)d.dropped_pass, (unsigned long long)d.dropped_prim, (unsigned long long)d2.dropped_vb, (unsigned long long)d2.dropped_ib, (unsigned long long)d2.dropped_viewport, (unsigned long long)d2.scissor_empty); } return c.skipped + c.copies * 1000; }
     if (ext & RTX_LF) { vkn_lf_stats l; vkn_lf_stats_get(&l); return l.fused + l.sky_skipped * 1000; }
+    if (ext & RTX_FA) { vkn_pass_stats5 p; vkn_pass_stats5_get(&p); vkn_sort_stats s; vkn_sort_stats_get(&s); return p.fa_passes + p.lc_in_pass * 1000 + s.merged * 1000000; }   // [frame F1 / F2]
     if (ext & RTX_SORT) { vkn_sort_stats s; vkn_sort_stats_get(&s); return s.moved + s.windows * 1000; }   // [rt2 R7]
     return 0;
 }
@@ -3829,6 +3915,27 @@ static void rtx_frame(uint32_t f) {
         rt_targets(g_a2, g_d3);
         vkn_draw_in l = g_in; l.tex[0] = NULL; l.smp[0] = NULL; l.tex[1] = g_rx_atex; l.smp[1] = rt_fsmp; l.tex[2] = NULL; l.smp[2] = NULL; l.ib = H(52, 1);
         vkn_rt_query_cond(0); vkn_rt_draw_indexed(&l, 0, 3, 1);
+    }
+    if (g_rtx & RTX_FA) {   // [frame F1 / F2] a "3D" pass drawn into a part of its targets (the part changes every 40 frames), cleared whole every frame; a
+        // depth-only pass of adjacent index ranges under one block (joined); a region clear that waits for a draw sampling the 3D target
+        const uint32_t sw = (f / 40) % 2 ? 32 : 48, sh = 16;
+        static const float c4[4] = {0.25f, 0.5f, 0.75f, 1.0f}; static const int32_t rc[4] = {4, 4, 8, 8};
+        rt_targets(g_rx_df, g_d3); vkn_rt_pass_clear_color(g_rx_df, 0, c4, NULL); vkn_rt_pass_clear_depth(g_d3, 3, 1.0f, 0);
+        vkn_draw_in in = g_in; in.tex[0] = NULL; in.smp[0] = NULL; in.tex[1] = rt_ftex; in.smp[1] = rt_fsmp; in.tex[2] = NULL; in.smp[2] = NULL;
+        in.shader = H(30, 1); in.blend = 0; in.ds = H(76, 1); in.ib = H(52, 1); in.vb_off[0] = 16;
+        in.viewport[0] = 0; in.viewport[1] = 0; in.viewport[2] = (float)sw; in.viewport[3] = (float)sh; in.scissor[0] = 0; in.scissor[1] = 0; in.scissor[2] = (int32_t)sw; in.scissor[3] = (int32_t)sh;
+        for (uint32_t i = 0; i < 5; i++) {
+            uint32_t off = 0; CHECK_EQ(vkn_ring_alloc(64, &off), 0);
+            uint32_t *u = (uint32_t *)((uint8_t *)vkn_ring_cpu() + off); memset(u, 0, 64); u[0] = i; u[1] = f % 7; u[2] = 0x46524d45u;
+            vkn_rt_ubo(0, 2, off, 64);
+            if (f % 50 == 49 && i == 3) { in.viewport[2] = 64; in.viewport[3] = 32; in.scissor[2] = 64; in.scissor[3] = 32; }   // one draw outside the area: the restart
+            vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 3u * i, 3, 1);
+            in.viewport[2] = (float)sw; in.viewport[3] = (float)sh; in.scissor[2] = (int32_t)sw; in.scissor[3] = (int32_t)sh;
+        }
+        rt_targets(NULL, g_d3);
+        for (uint32_t i = 0; i < 7; i++) { vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 3u * i, 3, 1); }   // one block, adjacent ranges
+        rt_targets(g_rx_sp, NULL); vkn_rt_pass_clear_color(g_rx_sp, 0, c4, rc);
+        in.ds = 0; rt_ftex[0] = 344; vkn_rt_slots_touch(); vkn_rt_query_cond(0); vkn_rt_draw_indexed(&in, 0, 3, 1); rt_ftex[0] = 300; vkn_rt_slots_touch();
     }
     if (g_rtx & RTX_SORT) {   // [rt2 R7] a depth-only pass: 12 draws of three pipelines interleaved, LESS / LEQUAL, own constants each
         rt_targets(NULL, g_d3); vkn_rt_pass_clear_depth(g_d3, 1, 1.0f, 0);

@@ -547,6 +547,9 @@ void dm_vkn_draw_register(void) {
         {   // [rt2 R7] DM_VK_NATIVE_SORT (vkn_sort.h: 0 off, 1 depth-only LESS / LEQUAL runs grouped by pipeline, 2 verify; default 1)
             const char *e = getenv("DM_VK_NATIVE_SORT");
             vkn_sort_mode_set(e && *e ? atoi(e) : 1);
+            // [frame F2] DM_VK_NATIVE_DRAWMERGE (vkn_sort.h: 0 off, 1 adjacent index ranges of equal-state draws of a window = one draw, 2 count; default 1)
+            const char *g = getenv("DM_VK_NATIVE_DRAWMERGE");
+            vkn_sort_merge_set(g && *g ? atoi(g) : 1);
             dm_vkn_census(vkn_sort_census);
         }
         // [stage 5.1 G] bit 0x80 VFOLD (default on): the vertex fold alone (it changes vertexOffset / firstVertex; needs bit VB);

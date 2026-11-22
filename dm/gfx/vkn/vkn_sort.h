@@ -28,6 +28,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+// [frame F2] DM_VK_NATIVE_DRAWMERGE (needs DM_VK_NATIVE_SORT=1): inside an emitted window, consecutive indexed TRIANGLE-LIST draws whose
+// whole state is equal (pipeline, set + dynamic offsets = the same constants, vertex / index buffers, viewport, scissor, vertexOffset,
+// instances) and whose index ranges are adjacent (the next begins where the run ends, the run a whole number of triangles) are recorded as
+// ONE vkCmdDrawIndexed of the joined range: the same triangles from the same indices in the same order, in a window whose result does
+// not depend on the order anyway (depth-only LESS / LEQUAL). The engine issues such runs for the parts of one mesh that share a material
+// in a depth-only pass (their fragment stage is dropped or equal). 0 off / 1 join / 2 count only (what 1 would join).
+extern int vkn_sort_list;        // the draw being prepared draws a triangle list (vkn_draw.c, before vkn_sort_eligible)
+void vkn_sort_merge_set(int mode);
+int vkn_sort_merge(void);
 extern int vkn_sort_on;          // mode != 0 (install time)
 extern int vkn_sort_cap;         // the draw being prepared is captured (vkn_draw.c)
 extern uint32_t vkn_sort_n;      // packets waiting
@@ -56,6 +65,7 @@ int vkn_sort_eligible(uint16_t depth_state, uint32_t ncolor, const VkColorCompon
 typedef struct vkn_sort_stats {
     uint64_t windows, packets, moved, pipe_rec, pipe_sort, pipe_emit, set_rec, set_emit, restores, full;   // rec / sort: binds in recorded / sorted order; emit: emitted
     uint64_t why_not[8];             // draws not captured, by reason (VKN_SORT_W_*)
+    uint64_t merged, merge_runs, merge_would, merge_idx;   // [frame F2] draws joined into an earlier one / runs / mode 2 / indices in joined draws
 } vkn_sort_stats;
 enum { VKN_SORT_W_NESTED, VKN_SORT_W_COLOUR, VKN_SORT_W_DEPTH, VKN_SORT_W_STENCIL, VKN_SORT_W_SHADER, VKN_SORT_W_QUERY, VKN_SORT_W_FIRST, VKN_SORT_W_REWRITE };
 void vkn_sort_stats_get(vkn_sort_stats *s);

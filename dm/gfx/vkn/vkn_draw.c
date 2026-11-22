@@ -323,7 +323,7 @@ static VkDescriptorPool pool_new(void) {
     const VkDescriptorPoolSize sz[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, POOL_SETS * 12}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, POOL_SETS * 12},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, POOL_SETS * 16}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, POOL_SETS * 4},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, POOL_SETS * 4}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64}};
+        {VK_DESCRIPTOR_TYPE_SAMPLER, POOL_SETS * 4}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 64}};   // [P10]
     VkDescriptorPoolCreateInfo pi; memset(&pi, 0, sizeof pi);
     pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; pi.maxSets = POOL_SETS; pi.poolSizeCount = sizeof sz / sizeof sz[0]; pi.pPoolSizes = sz;
     VkDescriptorPool p = VK_NULL_HANDLE;
@@ -449,6 +449,10 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                     }
                     te->t = t;
                     vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
+                    if (b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {   // [P10] an attachment of the merged tile pass, read in place
+                        if (compute || vkn_pass_input(t, &el->img.imageView, &el->img.imageLayout)) { g_st2.dropped_bind++; DRAW_RED(R_BIND, "shader %#llx binding %u: input attachment without its tile pass (draw dropped)", (unsigned long long)s->handle, b->binding); return -1; }
+                        continue;
+                    }
                     if (vkn_pass_sample(t) == 1) {
                         te->fb = 1;
                         if (compute) vkn_pass_layout(t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -456,6 +460,7 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                     }
                     vkn_prof_mark_f(VKN_PROF_F_TEX_SAMPLE);   // [rt P0]
                 }
+                if (use_ph && b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) { g_st2.dropped_bind++; return -1; }   // [P10] (no placeholder for an input)
                 if (use_ph) {
                     int cls = PH_FLOAT; v = placeholder(b->flags, &cls);
                     if (!v) { g_st2.placeholder_fail++; DRAW_RED(R_PLACE, "shader %#llx stage %d slot %u: no placeholder for binding flags %#x (draw dropped)", (unsigned long long)s->handle, st, slot, b->flags); return -1; }
@@ -486,6 +491,10 @@ static int bind_textures(const vkn_shader *s, const vkn_draw_in *in, const vkn_i
                 el->img.imageView = t->view; el->img.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             } else if (b->kind == VKN_BK_FX_TEX) {   // [stage 5] a texture the chain gave (vkn_fx_out.tex[slot])
                 const vkn_fx_tex *ft = g_fx && (uint32_t)b->slot + k < VKN_FX_TEX ? &g_fx->tex[b->slot + k] : NULL;
+                if (ft && ft->tex && b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {   // [P10]
+                    if (vkn_pass_input(ft->tex, &el->img.imageView, &el->img.imageLayout)) { g_st2.dropped_bind++; g_fx_drop++; return -1; }
+                    continue;
+                }
                 if (!ft || !ft->view || b->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || (ft->tex && vkn_pass_sample(ft->tex) == 1)) {
                     g_st2.dropped_bind++; g_fx_drop++;
                     DRAW_RED(R_BIND, "shader %#llx (%s) binding %u: effect texture %u has no view, or is a target of this pass (draw dropped)", (unsigned long long)s->handle, s->key[0], b->binding, b->slot + k);
@@ -587,6 +596,7 @@ static int tex_bind_mem(const vkn_shader *s, const vkn_draw_in *in, int fx_zero,
     return 0;
 }
 static int tex_bind_draw(const vkn_shader *s, const vkn_draw_in *in, int fx_zero) {
+    if (s->has_inputs) return bind_textures(s, in, NULL, 0, 0);   // [P10] (a twin's draw: once a frame, never from memory)
     const int on = (g_cost & VKN_COST_SET) && g_tex_gen;
     if (on && (g_cost & VKN_COST_SHMEM)) return tex_bind_mem(s, in, fx_zero, g_tex_gen());   // [rt P3]
     uint32_t gen = 0;
@@ -968,11 +978,13 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
         if (g_fx_out.no_fs && (s->stages & (1u << VKN_SRC_FS))) fxbits |= VKN_PIPE_FX_NO_FS;
     }
     vkn_prof_mark(VKN_PROF_FX);   // [stage 5 A0 probes]
-    const int fxs = vkn_fx_shader_is(s);   // a piece's shader: its own modules, no variants
+    int fxs = vkn_fx_shader_is(s);   // a piece's shader: its own modules, no variants
     const vkn_vfmt *vf = vid ? vkn_vfmt_info(vid) : NULL;
     uint16_t vs_inputs = 0;
     for (uint32_t i = 0; i < s->ninputs && i < 16; i++) if (s->inputs[i] < VKN_VFMT_LOCS) vs_inputs |= (uint16_t)(1u << s->inputs[i]);
-    const uint64_t code = fxs ? 0 : retype_code(s, vf);
+    uint64_t code = fxs ? 0 : retype_code(s, vf);
+    // [P10] the merged tile pass (vkn_pass.h): a full-screen draw of its chain is drawn with the input-attachment twin of its shader
+    if (vkn_tile_hook) { const vkn_shader *tw = vkn_tile_twin(s, in, g_fx, code); if (tw) { s = tw; fxs = 1; code = 0; } }
     // [stage 5.3 V1] a per-draw vertex module (vkn_fx.h vkn_fx_out.vin): the code above stays the engine format's (the module is made for
     // it); its own vertex format (content id) feeds the pipeline and the stream binds, its stream `vin->stream` is bound at its buffer
     const vkn_fx_vin *vin = g_fx && g_fx_out.vin.vs ? &g_fx_out.vin : NULL;
@@ -1053,6 +1065,7 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
     vkn_prof_mark_f(VKN_PROF_F_TEX_REST);   // [rt P0]
     vkn_prof_mark(VKN_PROF_TEX);   // [stage 5 A0 probes]
     if (vkn_pass_ready(pi)) { g_st.dropped_pass++; DRAW_RED(R_PASS, "no render pass for the current targets (shader %#llx, draw dropped)", (unsigned long long)in->shader); return -1; }
+    cb = vkn_cb_peek();   // [P10] the pass may have moved the recording into / out of a subpass buffer (vkn_cb_route; the router forgot what was bound)
     if (SORT) (void)vkn_sort_eligible(did, pi->ncolor, pi->write_mask, pi->has_depth, s, g_fx_nest > 0, prim != in->prim, vkn_pass_begins ? vkn_pass_begins() : 0);   // [rt2 R7]
     vkn_prof_mark(VKN_PROF_PASS);   // [stage 5 A0 probes]
     // pipeline
@@ -1084,6 +1097,21 @@ static int prepare(const vkn_draw_in *in, uint8_t prim, VkCommandBuffer *cb_out,
             else g_cs.pipe_front_miss++;
         }
         if (!p) p = vkn_pipe_get(&key, NULL);
+        if (vkn_tile_prime_compat) {   // [P10] the same draw's pipeline for its subpass of the learned merged pass, built ahead (a few ms a frame)
+            vkn_pipe_desc p2 = pd; p2.pass = vkn_tile_prime_compat; vkn_pipe_key k2 = vkn_pipe_key_pack(&p2);
+            if (vin) k2.w[2] |= (uint64_t)vin->vs_id << 48;
+            if (!vkn_pipe_get(&k2, NULL)) {
+                int built = 0; uint64_t t0 = 0;
+                if (vkn_tile_prime_budget()) {
+                    vkn_pipe_src s2; memset(&s2, 0, sizeof s2); t0 = vkn_now_ns();
+                    s2.vs = vin ? vin->vs : fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);
+                    s2.fs = !has_fs ? VK_NULL_HANDLE : fxs ? s->module[VKN_SRC_FS] : vkn_shader_module(s, VKN_STAGE_FS, fsv ? 5u : 0u, fsv ? in->alpha_ref : 0.0f, 0);
+                    s2.layout = s->layout; s2.pass = vkn_tile_prime_rp; s2.vs_inputs = vs_inputs;
+                    built = s2.vs && (s2.fs || !has_fs) && vkn_pipe_get(&k2, &s2) != VK_NULL_HANDLE;
+                }
+                vkn_tile_prime_note(built, built ? vkn_now_ns() - t0 : 0);
+            }
+        }
         if (!p) {
             vkn_pipe_src src; memset(&src, 0, sizeof src);
             src.vs = vin ? vin->vs : fxs ? s->module[VKN_SRC_VS] : vkn_shader_module(s, VKN_STAGE_VS, 0, 0.0f, code);   // [stage 5.3 V1] vin
@@ -1294,6 +1322,19 @@ static int draw_rewritten(const vkn_draw_in *in, const void *src, uint32_t isz, 
 }
 void vkn_draw_rw_stats_get(vkn_draw_rw_stats *s) { if (s) *s = g_rw_st; }
 
+// [P10] mode 2 (vkn_pass.h): the draw just recorded with an input-attachment twin, once more the classic way (same effect output)
+void vkn_fx_force(const vkn_fx_out *o) __attribute__((weak));
+static void tile_redraw(const vkn_draw_in *in, int indexed, uint32_t first, uint32_t count, uint32_t instances) {
+    static vkn_fx_out fo;
+    if (!vkn_fx_force) return;
+    if (g_fx) fo = *g_fx; else memset(&fo, 0, sizeof fo);
+    if (!vkn_tile_redraw_begin()) return;
+    vkn_fx_force(&fo);
+    if (indexed) (void)vkn_draw_indexed(in, first, count, instances); else (void)vkn_draw_arrays(in, first, count);
+    vkn_fx_force(NULL);
+    vkn_tile_redraw_end();
+}
+int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count);
 int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count, uint32_t instances) {
     if (!in) return 1;
     if (!count) return 0;
@@ -1359,6 +1400,7 @@ int vkn_draw_indexed(const vkn_draw_in *in, uint32_t first_index, uint32_t count
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
     g_st.draws++; g_st.indexed++;
+    if (vkn_tile_redraw_on) tile_redraw(in, 1, first_index, count, instances);   // [P10] mode 2
     return 0;
 }
 
@@ -1379,6 +1421,7 @@ int vkn_draw_arrays(const vkn_draw_in *in, uint32_t first, uint32_t count) {
     Q_POST(cb);  // [stage 4: queries]
     vkn_prof_mark(VKN_PROF_CMD);   // [stage 5 A0 probes]
     g_st.draws++; g_st.arrays++;
+    if (vkn_tile_redraw_on) tile_redraw(in, 0, first, count, 1);   // [P10] mode 2
     return 0;
 }
 

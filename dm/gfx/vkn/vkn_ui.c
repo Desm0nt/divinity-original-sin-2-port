@@ -1138,7 +1138,9 @@ static void ui_clear_color_x(vkn_tex *t, const int32_t rect[4]) {
         if (!nb_ua_empty(r)) up_event(r, 0, UP_KEY_CLEAR, whole);
     }
     vkn_pass_clear_color(t, 0, zero, rect);
-    if (region && g_ep.on) up_opened();   // (a region clear of a current target opens its pass)
+    // (a region clear of a current target opens its pass; [frame F1] not under DM_VK_NATIVE_LAZYCLR: the clear waits for the pass of the next
+    // draw, whose up_opened then sees the area it really began with)
+    if (region && g_ep.on && (!vkn_pass_area_get || vkn_pass_area_get(NULL))) up_opened();
     g_st.clears_color++;
 }
 

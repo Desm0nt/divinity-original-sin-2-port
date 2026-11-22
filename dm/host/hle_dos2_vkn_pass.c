@@ -275,7 +275,45 @@ static void vkn_pass_census(void) {
                  DQ(join_tried), DQ(joined), DQ(join_hit), DQ(join_miss), DQ(join_early), DQ(join_would), DQ(join_refused[0]), DQ(join_refused[1]), DQ(join_refused[2]),
                  DQ(join_refused[3]), DQ(join_refused[5]), DQ(ord_full), dep, te);
 #undef DQ
+        {   // [frame F1] the frame area, the waiting region clear, the learned barrier (vkn_pass.h "frame F1")
+            static vkn_pass_stats5 r0; vkn_pass_stats5 r; vkn_pass_stats5_get(&r);
+#define DR(x) ((double)(r.x - r0.x) / fq)
+            char wy[900]; int w = 0; wy[0] = 0;
+            for (int i = 1; i < VKN_FAR_N && w < (int)sizeof wy - 90; i++)
+                if (r.fa_why[i] != r0.fa_why[i]) w += snprintf(wy + w, sizeof wy - (size_t)w, "%s%s %.2f", w ? ", " : "", vkn_pass_fa_name(i), DR(fa_why[i]));
+            const double pf = (double)(r.fa_px_full - r0.fa_px_full), pa = (double)(r.fa_px_area - r0.fa_px_area);
+            vkn_logf("pass frame (frame F1; a presented frame over %.0f): DM_VK_NATIVE_FRAMEAREA=%d: passes of the engine's sets %.2f: narrowed %.2f, would be %.2f (area %.1f %% of their targets, "
+                     "%.1f MB of load + store left out), narrowed clears %.2f (poisoned %.2f); not narrowed: %s; restarts: draw outside %.3f, draw not seen %.3f, would %.3f, bans %llu; "
+                     "passes with a draw not seen %.2f | DM_VK_NATIVE_LAZYCLR=%d: region clears held %.2f: run in the draw's pass %.2f, in a pass of their own %.2f, superseded %.2f, "
+                     "empty passes not begun %.2f, would hold %.2f | DM_VK_NATIVE_TILEBAR_LEARN=%d: full barriers at once %.2f, textures marked %.3f, would %.2f",
+                     fq, pol.farea, DR(fa_tried), DR(fa_passes), DR(fa_would), pf > 0 ? 100.0 * pa / pf : 0.0, DR(fa_saved_bytes) / mb, DR(fa_clears), DR(fa_poisoned), w ? wy : "none",
+                     DR(fa_restart_draw), DR(fa_restart_unknown), DR(fa_would_restart), (unsigned long long)r.fa_bans, DR(fa_unknown_passes), pol.lazyclr, DR(lc_queued), DR(lc_in_pass),
+                     DR(lc_flushed), DR(lc_superseded), DR(lc_breaks), DR(lc_would), pol.barlearn, DR(bar_learned), DR(bar_marks), DR(bar_would));
+#undef DR
+            r0 = r;
+        }
         q0 = q;
+    }
+    {   // [P10] the merged tile pass (vkn_pass_tile.inc, docs/dos2/nr/VK-P10.md): chains, why not, the traffic model's MB saved
+        static vkn_pass_stats5 t0; static uint64_t f0; vkn_pass_stats5 t; vkn_pass_stats5_get(&t);
+        vkn_pass_stats4 q; vkn_pass_stats4_get(&q);
+        const double ft = q.frames > f0 ? (double)(q.frames - f0) : 1.0;
+        if (t.mode || t.learned) {
+            char why[700]; int o = 0; why[0] = 0;
+            for (int i = 0; i < 12 && o < (int)sizeof why - 100; i++)
+                if (t.refused[i] != t0.refused[i]) o += snprintf(why + o, sizeof why - (size_t)o, "%snot begun: %s %.2f", o ? ", " : "", vkn_tile_reason(0, i), (double)(t.refused[i] - t0.refused[i]) / ft);
+            for (int i = 0; i < 12 && o < (int)sizeof why - 100; i++)
+                if (t.miss[i] != t0.miss[i]) o += snprintf(why + o, sizeof why - (size_t)o, "%sincomplete: %s %.2f", o ? ", " : "", vkn_tile_reason(1, i), (double)(t.miss[i] - t0.miss[i]) / ft);
+#define DT(x) ((double)(t.x - t0.x) / ft)
+            vkn_logf("pass ends: tile pass (DM_VK_NATIVE_TILELIGHT=%d; a presented frame over %.0f): chain learned %u subpasses / %u attachments (streak %u, pipelines ready %u; learned %llu times, twins %llu); "
+                     "begun %.2f, complete %.2f (subpasses %.2f, foreign passes before it %.2f, passes fewer %.2f); model MB a frame: apart %.1f, merged %.1f, saved %.1f; %s; "
+                     "pipelines built ahead %llu, bans %llu, poison clears %.2f; verify: targets compared %llu, bytes %llu, differ %llu, skipped %llu",
+                     t.mode, ft, t.nsub, t.natt, t.streak, t.primed, (unsigned long long)t.learned, (unsigned long long)t.twins, DT(begun), DT(hits), DT(subpasses), DT(foreign), DT(passes_saved),
+                     DT(base_bytes) / mb, DT(merged_bytes) / mb, DT(saved_bytes) / mb, o ? why : "no refusals", (unsigned long long)t.primed_pipes, (unsigned long long)t.bans, DT(poison),
+                     (unsigned long long)t.verify_targets, (unsigned long long)t.verify_bytes, (unsigned long long)t.verify_differ, (unsigned long long)t.verify_skipped);
+#undef DT
+        }
+        t0 = t; f0 = q.frames;
     }
 }
 
@@ -307,6 +345,10 @@ void dm_vkn_pass_register(void) {
         rq.store_frames = (uint16_t)vkn_policy_env("DM_VK_NATIVE_STORE_FRAMES", 8, 1, 255, NULL);
         rq.join = (int8_t)vkn_policy_env("DM_VK_NATIVE_PASSJOIN", -1, 0, 3, NULL);        // [mgpu P6.1] -1 = render-pass tilers 1, others 0
         rq.store_key = (int8_t)vkn_policy_env("DM_VK_NATIVE_STORE_KEY", -1, 0, 1, NULL);  // [mgpu P4] -1 = 1
+        // [frame F1] (vkn_pass.h "frame F1") -1 = the defaults of pol_resolve: frame area 1 on the render-pass tilers, waiting region clear 1, learned barrier with TILEBAR
+        rq.farea = (int8_t)vkn_policy_env("DM_VK_NATIVE_FRAMEAREA", -1, 0, 3, NULL);
+        rq.lazyclr = (int8_t)vkn_policy_env("DM_VK_NATIVE_LAZYCLR", -1, 0, 2, NULL);
+        rq.barlearn = (int8_t)vkn_policy_env("DM_VK_NATIVE_TILEBAR_LEARN", -1, 0, 2, NULL);
         vkn_pass_policy_request(&rq);
     }
     dm_vkn_census(vkn_pass_census);

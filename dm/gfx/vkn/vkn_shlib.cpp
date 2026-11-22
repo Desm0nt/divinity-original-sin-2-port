@@ -78,6 +78,7 @@ struct Cfg {
     int ubovec = 0, idvs = 0, early_z = 1, invariant = 0, gscull = 0x61, gather_snap = 1, spv_opt = 0, warp_mode = 1;
     int ubd_mode = 0; bool ubd_ro = false, ubd_scan = false;   // NR-08b (nrubd::init)
     bool pos_on = false;   // [stage 5.2 B1] DM_VK_NATIVE_LOAD != 0 for the policy family: position programs / output masks built at load
+    uint32_t pos_drv = 0;  // [frame F0] the driverID that decision used (vkn_policy_tile_pass)
     bool noout = false;    // [stage 5.3 V2] DM_GFX_NOOUT_MASK for the policy family (vkn_drv.c): the "no colour output" fact built at load
     bool psk_on = false;   // [stage 5.3 V1] DM_VK_NATIVE_PRESKIN != 0 for the policy family (vkn_preskin_switch): the candidate test at load
 };
@@ -821,7 +822,20 @@ extern "C" int vkn_shlib_init(const vkn_shlib_config *c, char *error, size_t err
     { const char *e = getenv("DM_GFX_WARP_MODE"); g.warp_mode = e && !strcmp(e, "native") ? 0 : e && !strcmp(e, "lone") ? 1 : g.subgroup.subgroupSize == 32 ? 0 : 1; }
     { const char *e = getenv("DM_GFX_VTX_RETYPE"); g.retype_keep = e && *e ? atoi(e) != 0 : g.props.vendorID != 0x5143; }
     { const char *e = getenv("DM_GFX_SPV_OPT"); g.spv_opt = e && *e ? atoi(e) : 0; if (g.spv_opt > 0) xbg_spvopt_init((g.base + "/spvopt").c_str(), g.spv_opt); }
-    g.pos_on = vkn_policy_load(int(g.policy)) != 0;   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with)
+    {   // [stage 5.2 B1] (the same reader vkn_pass resolves its switch with) [frame F0] ... and the same FAMILY: the render-pass tilers of
+        // vkn_policy_tile_pass (Maleoon, Adreno on Qualcomm's own driver, driverID 8) get LOAD=1 by default in vkn_pass.c's pol_resolve, so
+        // the position programs its proofs read must be built for them too. Before: the stock-Qualcomm capture of 22.11 refused every
+        // proof ("no position program" 31 a frame, 0 proven) - 22 attachments a frame were loaded for nothing.
+        uint32_t drv = 0;
+        if (g.props.apiVersion >= VK_API_VERSION_1_2) {
+            VkPhysicalDeviceDriverProperties dp; memset(&dp, 0, sizeof dp); dp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+            VkPhysicalDeviceProperties2 p2; memset(&p2, 0, sizeof p2); p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; p2.pNext = &dp;
+            vkGetPhysicalDeviceProperties2(g.c.physical, &p2); drv = uint32_t(dp.driverID);
+        }
+        const int pf = vkn_policy_tile_pass(int(g.policy), drv) && !vkn_policy_tiler(int(g.policy)) ? VKN_FAM_MALI : int(g.policy);
+        g.pos_on = vkn_policy_load(pf) != 0;
+        g.pos_drv = drv;
+    }
     g.noout = vkn_policy_env_or("DM_GFX_NOOUT_MASK", vkn_policy_noout_mask_default(int(g.policy)), nullptr) != 0;   // [stage 5.3 V2] (vkn_drv.c reads it the same way)
     g.psk_on = vkn_preskin_switch && vkn_preskin_switch(int(g.policy)) != 0;   // [stage 5.3 V1] (vkn_preskin.c's own reader)
     g.ready = true;
@@ -871,6 +885,19 @@ extern "C" int vkn_shlib_vs_vindex(const void *shader) {
 extern "C" const nr_cv_prog *vkn_shlib_vs_pos(const void *shader) {
     const Sh *s = static_cast<const Sh *>(shader);
     return s && s->stage == 0 ? s->pos.get() : nullptr;
+}
+// [P10] the program of a vertex shader object's output at `location` (xbg_spirv_out_prog of the final words: the kept ones, else the
+// bundle read again through the same chain - a file read, so the caller keeps the answer). 0 = *out filled, 1 = no such program.
+extern "C" int vkn_shlib_out_prog(const void *shader, uint32_t location, nr_cv_prog *out) {
+    if (!shader || !out) return 1;
+    std::lock_guard<std::mutex> lock(g_mu); const Sh *s = static_cast<const Sh *>(shader);
+    if (!g.ready || s->stage != 0 || !s->unusable.empty()) return 1;
+    std::vector<uint32_t> reloaded; uint32_t stage = 0;
+    if (s->words.empty() && (!words_of(s->key, reloaded, stage) || stage != 0)) return 1;
+    const std::vector<uint32_t> &w = s->words.empty() ? reloaded : s->words;
+    nr_cv_prog pr; xbg_spirv_out_prog(w.data(), w.size(), location, &pr);
+    if (!pr.ok) return 1;
+    *out = pr; return 0;
 }
 extern "C" int64_t vkn_shlib_fs_outputs(const void *shader) {
     const Sh *s = static_cast<const Sh *>(shader);

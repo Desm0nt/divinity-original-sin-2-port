@@ -108,6 +108,7 @@ inline int xbg_safe_switches_mode(int step,XbgGpuFamily f,bool native,XbgSafeSwi
     add("DM_VK_NATIVE_RT","0");add("DM_VK_NATIVE_POST","0");add("DM_VK_NATIVE_UIPASS","0");add("DM_VK_NATIVE_MAT","0");add("DM_VK_NATIVE_XLQ","0");
     add("DM_VK_NATIVE_PREPASS","0");add("DM_VK_NATIVE_PRESKIN","0");
     add("DM_VK_NATIVE_LOAD","0");add("DM_VK_NATIVE_STORE","0");add("DM_VK_NATIVE_FRESH","0");add("DM_VK_NATIVE_TILEBAR","0");
+    add("DM_VK_NATIVE_TILELIGHT","0");   // [P10] the merged tile pass (docs/dos2/nr/VK-P10.md)
     if(step>=2){
         // [stage 5.3 V3] the backend's conservative basics (still on the backend)
         add("DM_VK_NATIVE_WARM","0");add("DM_VK_NATIVE_BCGPU","0");add("DM_VK_NATIVE_MIRROR","0");add("DM_GFX_PIPE_SERIAL","1");

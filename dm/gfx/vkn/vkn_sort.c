@@ -18,10 +18,10 @@ typedef struct vst {
     uint8_t vok;                         // bit b: vertex binding b known
 } vst;
 enum { OK_PIPE = 1, OK_SET = 2, OK_IB = 4, OK_VP = 8, OK_SC = 16 };
-typedef struct pkt { vst s; uint8_t idx, draw; uint32_t count, inst, first, finst; int32_t voff; } pkt;   // draw 0: binds of a draw that ended before its command
+typedef struct pkt { vst s; uint8_t idx, draw, list; uint32_t count, inst, first, finst; int32_t voff; } pkt;   // draw 0: binds of a draw that ended before its command; list: [frame F2] a triangle list
 
-int vkn_sort_on, vkn_sort_cap; uint32_t vkn_sort_n;
-static int g_mode;
+int vkn_sort_on, vkn_sort_cap, vkn_sort_list; uint32_t vkn_sort_n;
+static int g_mode, g_merge;   // g_merge: [frame F2] DM_VK_NATIVE_DRAWMERGE
 static vst g_r, g_b;                     // the command buffer's real state / what the draw path believes is bound
 static uint32_t g_rdyn[MAXDYN], g_bdyn[MAXDYN];   // their dynamic offsets
 static pkt *g_p; static uint32_t *g_pool; static uint32_t g_npool;
@@ -44,6 +44,12 @@ void vkn_sort_mode_set(int mode) {
              g_alloc_fail ? " - no memory for the window: off" : "");
 }
 int vkn_sort_mode(void) { return g_mode; }
+void vkn_sort_merge_set(int mode) {   // [frame F2]
+    g_merge = mode == 1 || mode == 2 ? mode : 0;
+    vkn_logf("sort: DM_VK_NATIVE_DRAWMERGE=%d (%s)", g_merge, g_merge == 1 ? "adjacent index ranges of equal-state triangle-list draws of a window joined into one draw" :
+             g_merge == 2 ? "count only" : "off");
+}
+int vkn_sort_merge(void) { return g_merge; }
 
 // ---- emission against the real state ----
 static void put(VkCommandBuffer cb, const vst *w, const uint32_t *wd, int count_set) {   // record what of w differs from g_r; g_r = w (known parts)
@@ -63,6 +69,19 @@ static void put(VkCommandBuffer cb, const vst *w, const uint32_t *wd, int count_
     if ((w->ok & OK_IB) && (!(g_r.ok & OK_IB) || g_r.ib != w->ib || g_r.io != w->io || g_r.it != w->it)) { vkCmdBindIndexBuffer(cb, w->ib, w->io, w->it); g_r.ib = w->ib; g_r.io = w->io; g_r.it = w->it; g_r.ok |= OK_IB; g_cmds++; }
     if ((w->ok & OK_VP) && (!(g_r.ok & OK_VP) || memcmp(&g_r.vp, &w->vp, sizeof w->vp))) { vkCmdSetViewport(cb, 0, 1, &w->vp); g_r.vp = w->vp; g_r.ok |= OK_VP; g_cmds++; }
     if ((w->ok & OK_SC) && (!(g_r.ok & OK_SC) || memcmp(&g_r.sc, &w->sc, sizeof w->sc))) { vkCmdSetScissor(cb, 0, 1, &w->sc); g_r.sc = w->sc; g_r.ok |= OK_SC; g_cmds++; }
+}
+// [frame F2] b draws the indices right after the run that began with a (count indices so far) under the very same state
+static int can_join(const pkt *a, uint32_t count, const pkt *b) {
+    if (!b->draw || !b->idx || !b->list || (count % 3u) || b->first != a->first + count || a->first + count < a->first || b->voff != a->voff || b->inst != a->inst || b->finst != a->finst) return 0;
+    const vst *x = &a->s, *y = &b->s;
+    if (x->ok != y->ok || x->vok != y->vok) return 0;
+    if ((x->ok & OK_PIPE) && x->pipe != y->pipe) return 0;
+    if ((x->ok & OK_SET) && (x->lay != y->lay || x->set != y->set || x->ndyn != y->ndyn || memcmp(g_pool + x->dyn0, g_pool + y->dyn0, x->ndyn * sizeof *g_pool))) return 0;
+    for (uint32_t v = 0; v < VBN; v++) if ((x->vok >> v & 1) && (x->vb[v] != y->vb[v] || x->vo[v] != y->vo[v])) return 0;
+    if ((x->ok & OK_IB) && (x->ib != y->ib || x->io != y->io || x->it != y->it)) return 0;
+    if ((x->ok & OK_VP) && memcmp(&x->vp, &y->vp, sizeof x->vp)) return 0;
+    if ((x->ok & OK_SC) && memcmp(&x->sc, &y->sc, sizeof x->sc)) return 0;
+    return 1;
 }
 VkCommandBuffer vkn_cb_peek(void);   // vkn_frame.c (no flush)
 void vkn_sort_flush(void) {
@@ -104,12 +123,22 @@ void vkn_sort_flush(void) {
         for (uint32_t j = 0; j < m; j++) if (g_p[g_ord[j]].s.pipe != p) { g_s.pipe_sort++; p = g_p[g_ord[j]].s.pipe; }
     }
     if (g_mode != 1) { m = n; for (uint32_t i = 0; i < n; i++) g_ord[i] = (uint16_t)i; }   // mode 2: every packet, as recorded
+    const pkt *run = NULL; uint32_t runc = 0;   // [frame F2] mode 2: the run a join would be building
     for (uint32_t j = 0; j < m; j++) {
         const pkt *p = &g_p[g_ord[j]];
         put(cb, &p->s, g_pool + p->s.dyn0, 1);
         if (!p->draw) continue;
-        if (p->idx) vkCmdDrawIndexed(cb, p->count, p->inst, p->first, p->voff, p->finst);
-        else vkCmdDraw(cb, p->count, p->inst, p->first, p->finst);
+        uint32_t count = p->count;
+        if (g_merge == 1 && g_mode == 1 && p->idx && p->list) {   // [frame F2] the next packets continue this one's index range under its state: one draw
+            const uint32_t j0 = j;
+            while (j + 1 < m && can_join(p, count, &g_p[g_ord[j + 1]])) { count += g_p[g_ord[j + 1]].count; j++; }
+            if (j != j0) { g_s.merged += j - j0; g_s.merge_runs++; g_s.merge_idx += count; }
+        } else if (g_merge == 2 && g_mode == 1) {
+            if (run && can_join(run, runc, p)) { runc += p->count; g_s.merge_would++; }
+            else { run = p->idx && p->list ? p : NULL; runc = p->count; }
+        }
+        if (p->idx) vkCmdDrawIndexed(cb, count, p->inst, p->first, p->voff, p->finst);
+        else vkCmdDraw(cb, count, p->inst, p->first, p->finst);
     }
     // back to what the draw path believes (its g_b): its next bind decisions stay the ones of mode 0
     const uint64_t c0 = g_cmds;
@@ -161,7 +190,7 @@ static void capture(uint8_t draw, uint8_t idx, uint32_t count, uint32_t inst, ui
     if (vkn_sort_n == WIN || g_npool + g_b.ndyn > DYNPOOL) { g_s.full++; vkn_sort_flush(); }
     pkt *p = &g_p[vkn_sort_n++];
     p->s = g_b; p->s.dyn0 = g_npool; memcpy(g_pool + g_npool, g_bdyn, g_b.ndyn * sizeof *g_bdyn); g_npool += g_b.ndyn;
-    p->draw = draw; p->idx = idx; p->count = count; p->inst = inst; p->first = first; p->voff = voff; p->finst = finst;
+    p->draw = draw; p->idx = idx; p->list = (uint8_t)(vkn_sort_list != 0); p->count = count; p->inst = inst; p->first = first; p->voff = voff; p->finst = finst;
 }
 void vkn_sort_nodraw(void) { if (vkn_sort_cap) { capture(0, 0, 0, 0, 0, 0, 0); vkn_sort_cap = 0; } }
 void vkn_sort_draw(VkCommandBuffer cb, uint32_t count, uint32_t instances, uint32_t first, uint32_t first_instance) {
@@ -206,6 +235,8 @@ void vkn_sort_census(void) {
              "set binds: recorded order %llu, emitted %llu; restores %llu, full windows %llu; not taken: nested %llu, colour %llu, depth op %llu, stencil %llu, storage %llu, query %llu, "
              "first of a pass %llu, rewritten %llu", g_mode, D(windows), D(packets), D(moved), D(pipe_rec), D(pipe_sort), D(pipe_emit), D(set_rec), D(set_emit), D(restores), D(full),
              D(why_not[0]), D(why_not[1]), D(why_not[2]), D(why_not[3]), D(why_not[4]), D(why_not[5]), D(why_not[6]), D(why_not[7]));
+    if (g_merge) vkn_logf("draw merge (DM_VK_NATIVE_DRAWMERGE=%d, since the last line): draws of the windows %llu: joined into an earlier draw %llu (%llu runs, %llu indices in them), would join %llu",
+                          g_merge, D(packets), D(merged), D(merge_runs), D(merge_idx), D(merge_would));
 #undef D
     o = s;
 }

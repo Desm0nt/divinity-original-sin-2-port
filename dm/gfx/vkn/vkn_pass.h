@@ -193,6 +193,39 @@ void vkn_pass_before_ev(vkn_pass_ev_fn fn);
 // 1 + its value (take = 1: it leaves the record - the texture keeps what it holds), 0 = none.
 int vkn_pass_clear_take(vkn_tex *t, float rgba[4], int take);
 
+// ==== [P10] the merged tile pass (vkn_pass_tile.inc; docs/dos2/nr/VK-P10.md; DM_VK_NATIVE_TILELIGHT 0 / 1 / 2 verify / 3 poison) ====
+// The draw path's side. vkn_tile_hook != 0: ask vkn_tile_twin before the draw's textures are bound (a full-screen draw of the chain is
+// drawn with the input-attachment twin of its shader; NULL = as it is). vkn_pass_input: the view and layout of an INPUT_ATTACHMENT
+// binding of a twin (0 = ok). vkn_tile_prime_*: while a learned chain's pipelines are built ahead, the class and pass of its subpass 0
+// (compat 0 = nothing to do for this pass); the draw path asks vkn_tile_prime_budget before a build and reports with _note.
+struct vkn_shader; struct vkn_fx_out; struct vkn_draw_in;
+extern int vkn_tile_hook; extern uint16_t vkn_tile_prime_compat; extern VkRenderPass vkn_tile_prime_rp;
+const struct vkn_shader *vkn_tile_twin(const struct vkn_shader *s, const struct vkn_draw_in *in, const struct vkn_fx_out *fx, uint64_t retype);
+int vkn_pass_input(vkn_tex *t, VkImageView *view, VkImageLayout *layout);
+int vkn_tile_prime_budget(void); void vkn_tile_prime_note(int built, uint64_t ns);
+// Mode 2 (verify): vkn_tile_redraw_on != 0 while a chain is recorded whose full-screen draws are compared with their classic form.
+// The draw path, right after it recorded a draw: vkn_tile_redraw_begin() = 1 -> the same draw once more under vkn_fx_force with the same
+// effect output (no twin is handed out, the pass answers a scratch pass), then vkn_tile_redraw_end(). vkn_tile_verify_every(n): every
+// n-th chain is verified (default 16; host tests 1).
+extern int vkn_tile_redraw_on; int vkn_tile_redraw_begin(void); void vkn_tile_redraw_end(void); void vkn_tile_verify_every(uint32_t n);
+int vkn_tile_usage(void);                    // 1 = targets are created with the input-attachment usage (the switch is on for this device)
+void vkn_tile_mode_set(int mode);            // host tests: the switch as given (-1 = from the environment / family again)
+const char *vkn_tile_reason(int miss, int i);
+typedef struct vkn_pass_stats5 {
+    int mode; uint32_t streak, primed, nsub, natt;                          // in effect; the learned chain
+    uint64_t learned, twins, tried, begun, hits, bans, refused[12], miss[12];   // chains learned / twins made / begins tried, begun, complete; by reason
+    uint64_t subpasses, foreign, passes_saved;                              // of complete chains: subpasses, foreign passes run before them, passes fewer
+    uint64_t base_bytes, merged_bytes, saved_bytes;                         // the traffic model: the same passes apart / the merged pass / the difference
+    uint64_t primed_pipes, poison, verify_targets, verify_bytes, verify_differ, verify_skipped, dropped;
+} vkn_pass_stats5;
+void vkn_pass_stats5_get(vkn_pass_stats5 *s);
+// Host tests: where twin modules and the two shader-library facts come from (NULL = the library): the twin's fragment module, declared
+// bindings and input table for (base object, variant); the vertex output program of location `loc`; "the support block of this viewport
+// has render scale 1" (0 = yes).
+struct nr_cv_prog; struct vkn_tile_var;
+void vkn_tile_twin_fn(int (*fn)(const struct vkn_shader *base, char v, VkShaderModule *fs, uint64_t declared[4], struct vkn_tile_var *var));
+void vkn_tile_test_fns(int (*uv)(const struct vkn_shader *s, uint32_t loc, struct nr_cv_prog *out), int (*scale1)(float w, float h));
+
 #ifdef __cplusplus
 }
 #endif
