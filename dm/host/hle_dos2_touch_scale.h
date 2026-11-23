@@ -33,6 +33,7 @@
 #define TS_MM_MAX 1.0f             // minimap_p (anchor topright): the iPad's ring (~24 % of the height) at every size (owner 20.11)
 #define TS_SIDE_COL 92.0f          // dmSide_p (anchor topright, the iPad's places): the panel column's left edge from the screen's right edge
 #define TS_SIDE_BOT 896.0f         // its stack's bottom (options 20..94 in the corner, the helmet 310..415 under the map, six panels from 422 every 80)
+#define TS_SIDE_FOOT 62.0f         // screen px kept free under that stack (owner 23.11: the last button went into the screen's rounded corner; x1.196 -> x1.136 = 5 % smaller)
 #define TS_PI_W 180.0f             // playerInfo_p (anchor topleft, class 1.1): the portraits' right edge (container_mc.x 25 + portrait + statuses)
 #define TS_DIALOG_W 1160.0f        // dialog_p (anchor bottom, centred): the iPad's window 1160 x 400 (tools/dos2_ppanel_trade.py; the PC's was 1352 x 398)
 #define TS_DIALOG_H 400.0f
@@ -94,7 +95,7 @@ static inline void ts_compute(float mm, float aspect, float hud_given, int cell_
     float pre = ts_clampf(fminf(o->want, TS_HUD_MAX), 1.0f, TS_HUD_MAX);
     if (hud_given > 0) pre = ts_clampf(hud_given, 0.5f, 2.0f);
     // the right column (its places fixed, growing from the corner): as the HUD, while its stack stays on the screen
-    float side = fminf(pre, (1080.0f - TS_MARGIN_Y) / TS_SIDE_BOT);
+    float side = fminf(pre, (1080.0f - TS_SIDE_FOOT) / TS_SIDE_BOT);
     o->side = side < 0.5f ? 0.5f : side;
     // the hot bar row (centred): between the left strip and the right column (the column reaches down beside the row)
     o->cap_row = fminf((sw / 2 - TS_MARGIN_X) / TS_HB_HALF, (sw / 2 - TS_SIDE_COL * o->side - TS_GAP) / TS_HB_HALF);

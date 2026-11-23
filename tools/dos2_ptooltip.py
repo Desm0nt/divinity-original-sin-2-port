@@ -149,7 +149,7 @@ def instance_names(swf):
 
 
 # ---------------------------------------------------------------- the build
-def build(tt, kb):
+def build(tt, kb, diag=True):
     """tooltip.swf + tooltipHelper_kb.swf bytes -> (tooltip_p.swf bytes, report)"""
     T = Swf(tt); K = Swf(kb); rn = Renamer(top_names(K)); rep = dict(strings=0, place3=0, dropped=[], kept=[], symbols=0)
     # stage 1: tooltip.swf itself - its ABC / SymbolClass / PlaceObject3 class names renamed, the library import swapped for the library's imports
@@ -186,7 +186,52 @@ def build(tt, kb):
     k = next(i for i, t in enumerate(S.tags) if t[0] == T_SYMCLASS)
     S.tags[k:k] = [[T_SYMCLASS, symclass_bytes(ent), True]]
     rep['stage1'] = stage1; rep['rn'] = rn; rep['map'] = dict(g.map)
+    rep['diag'] = diag_wrap(S) if diag else []
     return S.write(compress=True), rep
+
+
+# ---------------------------------------------------------------- diagnostics (phone 23.11: the engine calls addTooltip x54 / addFormattedTooltip x7
+# but the movie never reaches its own ExternalInterface calls after them - no keepUIinScreen, no setTooltipSize: the code throws inside, and
+# Iggy reports nothing). Each method below is wrapped: the engine (or the frame) calls the wrapper under the old name, the wrapper calls the
+# original (kept as dmOrig_<name>) inside try / catch; a throw is reported as ExternalInterface dmTipErr_<name>(String(error)) (the host's
+# DM_DOS2_TOUCHUI_EI log shows its text: "TypeError: Error #1009 ..." / "ReferenceError ..."), a return as dmTipOk_<name>() - then returns.
+DIAG = ('frame1', 'addTooltip', 'addFormattedTooltip', 'INTshowTooltip', 'showFormattedTooltipAfterPos')
+DIAG_STATE = ('tooltip_mc', 'tooltip_array', 'formatTooltip', 'compareTooltip', 'offhandTooltip', 'defaultTooltip', 'statusTooltip', 'tf', 'compareShowTimer', 'events')
+def diag_wrap(S):
+    for n, pre, abc in S.abcs():
+        try: ci = abc.class_index('tooltip_fla.MainTimeline')
+        except KeyError: continue
+        ei = abc.pub('ExternalInterface', 'flash.external'); call = abc.pub('call'); done = []
+        for name in DIAG:
+            t = abc.trait(ci, name)
+            if t is None or t.kind & 15 != 1: continue
+            om = abc.methods[t.b]; ob = om.body; np_ = len(om.params)
+            keep = A.Trait(abc.pub('dmOrig_' + name), t.kind & 0x0f, 0, t.b)   # the original, under a new public name (no override / final bits)
+            orig = keep.name
+            head = A.asm([('getlocal0',), ('pushscope',)])
+            body = A.asm([('getlocal0',)] + [('getlocal', k) for k in range(1, np_ + 1)] + [('callpropvoid', orig, np_)])
+            ok = A.asm([('getlex', ei), ('pushstring', abc.string('dmTipOk_' + name)), ('callpropvoid', call, 1), ('returnvoid',)])
+            # the report: String(e), e.message, e.errorID, then for each member of DIAG_STATE whether it is null (1) - frame1 makes them (run 23.11b:
+            # every addTooltip / addFormattedTooltip threw a bare "TypeError": a member the frame script never made is the suspect)
+            st = []
+            for m in DIAG_STATE:
+                tr = abc.trait(ci, m)
+                st += [('getlocal0',), ('getproperty', tr.name if tr else abc.pub(m)), ('pushnull',), ('equals',), ('convert_i',)]
+            ex = A.asm([('setlocal', np_ + 1), ('getlocal0',), ('pushscope',), ('getlex', ei), ('pushstring', abc.string('dmTipErr_' + name)),
+                        ('getlocal', np_ + 1), ('convert_s',), ('getlocal', np_ + 1), ('getproperty', abc.pub('message')), ('convert_s',),
+                        ('getlocal', np_ + 1), ('getproperty', abc.pub('errorID')), ('convert_s',)] + st +
+                       [('callpropvoid', call, 4 + len(DIAG_STATE)), ('returnvoid',)])
+            f, to = len(head), len(head) + len(body)
+            wb = abc.add_method('dmDiag_' + name, om.params, om.ret, head + body + ok + ex, max(8 + len(DIAG_STATE), np_ + 2), np_ + 2, ob.init_scope, ob.init_scope + 1)
+            wm = abc.methods[wb]
+            if om.flags & 0x08: wm.flags |= 0x08; wm.options = list(om.options)
+            abc.methods[wb].body.exc = [(f, to, to + len(ok), 0, 0)]
+            abc.instances[ci]['traits'].append(keep); t.b = wb; done.append(name)
+        bad = verify_all(abc)
+        assert not bad, bad
+        S.tags[n][1] = pre + abc.write()
+        return done
+    raise AssertionError('no tooltip_fla.MainTimeline')
 
 
 # ---------------------------------------------------------------- sources, hook
@@ -206,6 +251,7 @@ def sources(path):
 
 
 def make(src): return {OUT: build(src[SRC], src[LIB])[0]}
+def dis_names(abc): return {abc.short(t.name) for i in abc.instances for t in i['traits']}
 
 
 _host = None
@@ -316,11 +362,14 @@ def check(src, main_raw=None, all_dir=None):
         nonlocal bad; bad += not ok; print('%-4s %s' % ('ok' if ok else 'FAIL', text))
     print('-- tools/dos2_ptooltip.py: the PC tooltip window as one movie (tooltip_p.swf)')
     tt, kb = src[SRC], src[LIB]
-    after, rep = build(tt, kb); rn = rep['rn']
+    after, rep = build(tt, kb, diag=False); rn = rep['rn']   # the checks below are about the movie itself; the diag wrappers: last check
     print('%s + %s -> %s: %d B + %d B -> %d B, sha256 %s' % (SRC, LIB, OUT, len(tt), len(kb), len(after), hashlib.sha256(after).hexdigest()[:16]))
     P = Swf(after); T0 = Swf(tt); K0 = Swf(kb)
     say(Swf(P.write()).body() == P.body(), 'the movie parses and round-trips')
-    say(make(src)[OUT] == after, 'the build is deterministic')
+    d, drep = build(tt, kb); D = Swf(d); dabc = [abc for _, _, abc in D.abcs() if 'tooltip_fla.MainTimeline' in class_names(abc)][0]
+    say(make(src)[OUT] == d and build(tt, kb)[0] == d, 'the build is deterministic (the packed movie = with the diag wrappers)')
+    say(drep['diag'] == list(DIAG) and not verify_all(dabc) and all('dmOrig_' + m in dis_names(dabc) for m in DIAG),
+        'diag wrappers (phone 23.11, the movie throws silently): %s -> try / catch around dmOrig_<name>, EI dmTipErr_<name>(error) / dmTipOk_<name>' % ', '.join(drep['diag']))
     g = gr.check(rep['stage1'], after, quiet=True)
     say(g == [], 'graft: every tag of tooltip.swf kept in order, every character id unique and defined before its use%s' % ('' if not g else ': %s' % g[:5]))
     # imports
