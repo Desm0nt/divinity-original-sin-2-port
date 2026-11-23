@@ -566,12 +566,64 @@ static int romi_open(const romi_ent *ce) {
     atomic_fetch_add_explicit(&g_ri_dups, 1, memory_order_relaxed);
     return fcntl(m, F_DUPFD_CLOEXEC, 3);
 }
+// [DOS2] owner 23.11: "the last 25 % of a level load take so long - is it like that on the Switch, or does our disk read badly?". The reads
+// are fast (1-2.4 GB/s from shared storage, 0.1 s of pread in a whole load), but a level load opens and closes tens of thousands of rom
+// files (38 k "opens by dup" by the menu), and close() of each dup goes to the FUSE daemon as a FLUSH request (MediaProvider) and waits for
+// its answer: simpleperf off-CPU profile of one load (run 23.11 14:04, 37 s) = 8.0 s of guest-thread time in h_fs_CloseFile -> close, spread
+// over the 5-6 loader threads (0.4-2 s each), against 0.03 s in OpenFile and 0.1 s in ReadFile. On Horizon closing a RomFS file is a table
+// operation of fsp-srv. Now the close of a read-only rom-index descriptor (a dup of a kept one) goes to one closer thread: the guest call
+// returns at once; the descriptor number stays taken until the closer has closed it, so no new open can get it before. Saves and every
+// descriptor opened for writing are closed at once, as before. The queue holds RC_Q; when it is full the close is done at once.
+// DM_FS_ROM_ASYNC_CLOSE=0: every close at once (as before). Counts in the rom index line.
+#ifdef DM_GAME_DOS2
+enum { RC_Q = 4096 };
+static int g_rc_q[RC_Q]; static unsigned g_rc_head, g_rc_tail; static int g_rc_on = -1;
+static pthread_mutex_t g_rc_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_rc_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_rc_async, g_rc_sync, g_rc_ns, g_rc_max_ns;
+static void *rc_main(void *a) {
+    (void)a;
+#if defined(__linux__) || defined(__ANDROID__)
+    pthread_setname_np(pthread_self(), "dm-romclose");
+#endif
+    for (;;) {
+        pthread_mutex_lock(&g_rc_mu);
+        while (g_rc_head == g_rc_tail) pthread_cond_wait(&g_rc_cv, &g_rc_mu);
+        const int fd = g_rc_q[g_rc_tail % RC_Q]; g_rc_tail++;
+        pthread_mutex_unlock(&g_rc_mu);
+        const uint64_t t0 = now_ns(); close(fd); const uint64_t d = now_ns() - t0;
+        atomic_fetch_add(&g_rc_ns, d); uint64_t mx = atomic_load(&g_rc_max_ns); while (d > mx && !atomic_compare_exchange_weak(&g_rc_max_ns, &mx, d)) {}
+    }
+    return NULL;
+}
+static int rc_push(int fd) {   // 1 = queued for the closer, 0 = close it now
+    if (g_rc_on < 0) { const char *e = getenv("DM_FS_ROM_ASYNC_CLOSE"); int on = !(e && *e == '0');
+        if (on) { pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+                  if (pthread_create(&t, &at, rc_main, NULL)) on = 0; pthread_attr_destroy(&at); }
+        LOG("[fs] rom file closes: %s", on ? "by a closer thread (a close of a shared-storage file waits for the FUSE daemon; the guest call returns at once; DM_FS_ROM_ASYNC_CLOSE=0 = at once)"
+                                           : "at once (DM_FS_ROM_ASYNC_CLOSE=0 or no thread)");
+        g_rc_on = on; }
+    if (!g_rc_on) return 0;
+    pthread_mutex_lock(&g_rc_mu);
+    const int ok = g_rc_head - g_rc_tail < RC_Q;
+    if (ok) { g_rc_q[g_rc_head % RC_Q] = fd; g_rc_head++; pthread_cond_signal(&g_rc_cv); }
+    pthread_mutex_unlock(&g_rc_mu);
+    atomic_fetch_add(ok ? &g_rc_async : &g_rc_sync, 1);
+    return ok;
+}
+#endif
 static void romi_stats(void) {   // every 1000 lookups after the first, one line (counts, no timing)
     static _Atomic uint64_t next = 1000; uint64_t t = atomic_load(&g_ri_hits) + atomic_load(&g_ri_misses);
     uint64_t nx = atomic_load(&next);
     if (t >= nx && atomic_compare_exchange_strong(&next, &nx, nx * 4))
+    {
         LOG("[fs] rom index: %llu lookups found, %llu not found (no FUSE request either way), %llu opens by dup, %d files kept open, %d mismatches",
             (unsigned long long)atomic_load(&g_ri_hits), (unsigned long long)atomic_load(&g_ri_misses), (unsigned long long)atomic_load(&g_ri_dups), atomic_load(&g_ri_kept), atomic_load(&g_ri_mism));
+#ifdef DM_GAME_DOS2
+        const uint64_t na = atomic_load(&g_rc_async);
+        if (na) LOG("[fs] rom file closes by the closer thread: %llu (%llu at once: queue full), %.0f ms of close() taken off the guest threads (avg %.2f ms, max %.1f ms)",
+                    (unsigned long long)na, (unsigned long long)atomic_load(&g_rc_sync), atomic_load(&g_rc_ns) / 1e6, atomic_load(&g_rc_ns) / 1e6 / (double)na, atomic_load(&g_rc_max_ns) / 1e6);
+#endif
+    }
 }
 
 // ---------- 挂载 ----------
@@ -1152,10 +1204,17 @@ HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv；宿主 write 已�
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
     if (!h) return;
     if (g_fsave[(int)h & 0xffff] && (g_fmode[(int)h & 0xffff] & (MODE_WRITE | MODE_APPEND))) { atomic_fetch_sub(&g_save_wopen, 1); atomic_store(&g_save_last_ns, now_ns()); }
+    const uint8_t g_fmode_was = g_fmode[(int)h & 0xffff]; (void)g_fmode_was;
     g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
     int d2s = g_fd2s[(int)h & 0xffff]; g_fd2s[(int)h & 0xffff] = 0;
+#ifdef DM_GAME_DOS2
+    const int rom_ro = (int)h >= 0 && (int)h < 4096 && g_fd_romi[(int)h] && !(g_fmode_was & (MODE_WRITE | MODE_APPEND)) && !d2s;   // a dup of a kept rom descriptor, read only
+#endif
     if ((int)h >= 0 && (int)h < 4096) g_fd_romi[(int)h] = 0;
     if ((int)h >= 0 && (int)h < 4096 && g_hm[(int)h]) { holemap *m = g_hm[(int)h]; g_hm[(int)h] = NULL; free(m->log); free(m->len); free(m->phys); free(m); }
+#ifdef DM_GAME_DOS2
+    if (rom_ro && rc_push((int)h)) return;   // the closer thread closes it (rc_main)
+#endif
     close((int)h); if (d2s) atomic_store(&g_d2s_wseq, dm_seq_next()); }   // 先关再取号：取号时内容已落到文件 | Close first, then take the number: by then the content is in the file
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv；打开方式由宿主记录", int, h_fs_GetFileOpenMode, uint64_t h) { return g_fmode[(int)h & 0xffff]; }
 
