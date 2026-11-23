@@ -22,3 +22,8 @@ for Mali / PowerVR / Xclipse phones. Built, **not run on a phone**.
   is in Download/DivinityOriginalSin2Mobile/drivers); bundled ones have none (the next start would copy them again).
 - **To check on a phone:** Adreno: list + default as before; Mali: PanVK listed, system default, `[vk] MESA_GRALLOC_LINEAR=1` in boot.log
   with PanVK; fallback: `DM_VK_FAKE_INIT_FAIL=1` in dm/env with a custom driver -> dialog, saved choice = system.
+- **Issue #7 (23.11, branch `issue7-panvk`):** PanVK JimVulkan (panvk-jim-1.6.0 = r10) emulates BC on phone Malis without a BC decoder
+  (`panvk_bc_emu.c`: BC1/2/3/7 -> ASTC 4x4, BC4/5 -> EAC, BC6H -> RGBA16F in a hidden plane, transcoded after every copy) and reports
+  `textureCompressionBC=1`, so the engine handed it raw BC; the reporter (Mali-G77, Dimensity 8050) saw wrong colours that the stock driver
+  does not show. `vk_driver.c` now sets `PANVK_NO_BC_EMU=1` for Mali packages (`DM_VK_PANVK_BC_EMU=1` keeps the emulation; a dm/env value
+  wins): the engine takes the stock-driver BC route. boot.log: `[vk] PANVK_NO_BC_EMU=1` and `[vk] gpu 0 features: ... bc 0`. Not run on a Mali.
