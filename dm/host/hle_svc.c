@@ -283,6 +283,67 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
     uint64_t hi = alias_run_end(p, g_alias_cap >> 12, *mapped);
     *base = (uintptr_t)g_alias + (lo << 12); *size = (hi - lo) << 12;
 }
+static _Atomic uint64_t g_alias_zeroed;   // bytes alias_initialize cleared with memset (the "[mem] alias region" line)
+// [DOS2] run 23.11 14:37 (64e39013): dropping the pages at unmap did not shorten the load (32.2 s): the zeroing may have moved into the
+// kernel's first-touch faults. Why the game maps and unmaps so much while it loads is the question: this counts it. Every 2 s with
+// any call, one line "[mem] alias 2 s: map N calls / X MB (Y MB new), unmap M / Z MB, memset W MB (W ms), mapped now V MB, sizes ...".
+static struct { uint64_t t0, nmap, nunmap, bmap, bnew, bunmap, zero0, zns, sz[6]; } g_als;
+// [DOS2] run 23.11 15:20 (433db3d9, the counts above): for 15 s of a level load the game maps and unmaps ~7 MB of physical memory
+// about 300 times a second (600 maps + 600 unmaps per 2 s, ~4 GB each way, 100 MB mapped at any time) - its own pattern; Horizon clears
+// each mapping too. Here each cycle cost an mprotect pair + madvise, and the zeroing hit freshly dropped / lazily freed pages: a fault
+// per 4 KiB page (memset of MADV_FREE pages ran at ~3 GB/s; with MADV_DONTNEED the kernel's first-touch faults did the same work).
+// Now an unmapped range stays resident and accessible while the kept pages total at most DM_ALIAS_KEEP_MB (DOS2 256, 0 = off): no
+// mprotect, no madvise; QueryMemory still reports it free (g_alias_bits). The next MapPhysicalMemory of a fully kept range skips the
+// mprotect and clears the resident pages with one memset (no faults). Beyond the cap a range takes the old way (PROT_NONE + drop).
+static uint64_t *g_alias_keep;   // one bit per host page: unmapped by the guest but kept resident and accessible (g_map_lock)
+static uint64_t g_alias_kept, g_alias_keep_cap;   // bytes kept now / the cap (0 = off)
+static unsigned long long g_alias_nkeep, g_alias_nreuse;
+static void alias_keep_init(void) {
+    static int done; if (done) return; done = 1;
+#ifdef DM_GAME_DOS2
+    const char *e = getenv("DM_ALIAS_KEEP_MB"); long mb = e && *e ? atol(e) : 256;
+#else
+    const char *e = getenv("DM_ALIAS_KEEP_MB"); long mb = e && *e ? atol(e) : 0;
+#endif
+    if (mb > 0) { g_alias_keep = calloc(g_alias_cap / (size_t)getpagesize() / 64 + 1, sizeof *g_alias_keep); if (!g_alias_keep) mb = 0; }
+    g_alias_keep_cap = mb > 0 ? (uint64_t)mb << 20 : 0;
+    LOG("[mem] UnmapPhysicalMemory keeps up to %ld MB resident for the next MapPhysicalMemory (DM_ALIAS_KEEP_MB; 0 = every unmap gives the pages back)", mb > 0 ? mb : 0L);
+}
+static uint64_t als_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+static void alias_stat(int commit, uint64_t size, int64_t changed, uint64_t zns) {   // g_map_lock held
+    const uint64_t t = als_ns();
+    if (!g_als.t0) g_als.t0 = t;
+    if (commit) { g_als.nmap++; g_als.bmap += size; g_als.bnew += (uint64_t)(changed > 0 ? changed : 0); }
+    else { g_als.nunmap++; g_als.bunmap += size; }
+    g_als.zns += zns;
+    g_als.sz[size < 0x10000 ? 0 : size < 0x100000 ? 1 : size < 0x400000 ? 2 : size < 0x1000000 ? 3 : size < 0x4000000 ? 4 : 5]++;
+    if (t - g_als.t0 < 2000000000ull) return;
+    const uint64_t z = atomic_load(&g_alias_zeroed);
+    LOG("[mem] alias 2 s: map %llu calls / %.0f MB (%.0f MB not mapped before), unmap %llu / %.0f MB, memset %.0f MB in %.0f ms, mapped now %.0f MB; "
+        "kept resident %.0f MB (unmaps kept %llu, maps that reused kept pages %llu, total); calls by size <64K %llu <1M %llu <4M %llu <16M %llu <64M %llu more %llu",
+        (unsigned long long)g_als.nmap, g_als.bmap / 1048576.0, g_als.bnew / 1048576.0, (unsigned long long)g_als.nunmap, g_als.bunmap / 1048576.0,
+        (z - g_als.zero0) / 1048576.0, g_als.zns / 1e6, atomic_load(&g_alias_mapped) / 1048576.0, g_alias_kept / 1048576.0, g_alias_nkeep, g_alias_nreuse,
+        (unsigned long long)g_als.sz[0], (unsigned long long)g_als.sz[1], (unsigned long long)g_als.sz[2], (unsigned long long)g_als.sz[3], (unsigned long long)g_als.sz[4], (unsigned long long)g_als.sz[5]);
+    memset(&g_als, 0, sizeof g_als); g_als.t0 = t; g_als.zero0 = z;
+}
+// [DOS2] owner 23.11: "a level load stands on one place for long". simpleperf off-CPU profile of one load (run 23.11 14:19, 33.7 s cut by
+// the monotonic clock): one loader thread ON the CPU for 11.6 s, 9.3 s of it in __memset_aarch64 called from svc_dispatch = this zeroing:
+// the game unmaps and maps its physical memory again and again while it loads, UnmapPhysicalMemory gave the pages back with MADV_FREE
+// (cheap, but the pages may keep their old bytes), so every MapPhysicalMemory of those pages had to memset all of them, used or not.
+// Horizon hands out cleared pages without that cost to the program. Now (DOS2) UnmapPhysicalMemory drops the host pages it fully owns
+// with MADV_DONTNEED (anonymous private memory: they read as zero again, the kernel clears only the pages the game touches, on first touch)
+// and forgets that they were opened, so the next MapPhysicalMemory of them needs no memset. DM_ALIAS_UNMAP_DROP=0: MADV_FREE + memset (old).
+#ifdef DM_GAME_DOS2
+static int alias_unmap_drop(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_ALIAS_UNMAP_DROP"); v = !(e && *e == '0');
+        LOG("[mem] UnmapPhysicalMemory: %s", v ? "the host pages are dropped (MADV_DONTNEED): a later MapPhysicalMemory of them needs no memset (DM_ALIAS_UNMAP_DROP=0 = MADV_FREE + memset)"
+                                              : "MADV_FREE, a later MapPhysicalMemory clears them with memset (DM_ALIAS_UNMAP_DROP=0)"); }
+    return v;
+}
+#else
+static int alias_unmap_drop(void) { return 0; }
+#endif
 // Zero the pages of [off, off+size) that are not mapped yet but whose host page was opened before (never-opened pages are still the
 // mmap's zero pages)
 static void alias_initialize(uint64_t off, size_t size) {
@@ -297,12 +358,12 @@ static void alias_initialize(uint64_t off, size_t size) {
                 uint64_t host = q / ratio, stop = (host + 1) * ratio;
                 if (stop > next) stop = next;
                 if (!(g_alias_exposed[host >> 6] & (UINT64_C(1) << (host & 63)))) {
-                    if (clear < q) memset(g_alias + (clear << 12), 0, (q - clear) << 12);
+                    if (clear < q) { memset(g_alias + (clear << 12), 0, (q - clear) << 12); atomic_fetch_add(&g_alias_zeroed, (q - clear) << 12); }
                     clear = stop;
                 }
                 q = stop;
             }
-            if (clear < next) memset(g_alias + (clear << 12), 0, (next - clear) << 12);
+            if (clear < next) { memset(g_alias + (clear << 12), 0, (next - clear) << 12); atomic_fetch_add(&g_alias_zeroed, (next - clear) << 12); }
         }
         p = next;
     }
@@ -497,7 +558,22 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((lo - mlo) / 4096 != (uint64_t)alias_unmapped(mlo - (uintptr_t)g_alias, lo - mlo)) mlo += pg;
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
-        if (changed && mhi > mlo) {
+        alias_keep_init();
+        int keep_all = 0;   // MapPhysicalMemory of a range whose host pages are all kept: no mprotect (they are accessible)
+        if (g_alias_keep_cap && changed && mhi > mlo) {
+            const uint64_t h0 = (mlo - (uintptr_t)g_alias) / pg, h1 = (mhi - (uintptr_t)g_alias) / pg;
+            if (commit) {
+                uint64_t nk = 0;
+                for (uint64_t h = h0; h < h1; ++h) if (g_alias_keep[h >> 6] & (UINT64_C(1) << (h & 63))) { nk++; g_alias_keep[h >> 6] &= ~(UINT64_C(1) << (h & 63)); }
+                g_alias_kept -= nk * pg < g_alias_kept ? nk * pg : g_alias_kept;
+                keep_all = nk == h1 - h0; if (nk) g_alias_nreuse++;
+            } else if (g_alias_kept + (mhi - mlo) <= g_alias_keep_cap) {
+                for (uint64_t h = h0; h < h1; ++h) if (!(g_alias_keep[h >> 6] & (UINT64_C(1) << (h & 63)))) { g_alias_keep[h >> 6] |= UINT64_C(1) << (h & 63); g_alias_kept += pg; }
+                g_alias_nkeep++;
+                keep_all = 1;   // kept: no mprotect, no madvise; the exposed bits stay set, so the next map clears them with memset
+            }
+        }
+        if (changed && mhi > mlo && !keep_all) {
             // ENOMEM (vm.max_map_count, see hle_vma.c): svc_mprotect has the dirty tracker give VMAs back and retries. Still failing:
             // MapPhysicalMemory answers ResultOutOfMemory (0xD001) as the kernel does when it cannot map, instead of a host abort;
             // UnmapPhysicalMemory, which Horizon does not fail, drops the pages (they read as zero) and leaves them accessible.
@@ -507,14 +583,22 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 LOG("【红】MapPhysicalMemory %p+%#zx: mprotect errno=%d after the VMA relief: ResultOutOfMemory", (void *)a, size, e);
                 regs[0] = 0xD001; return 0; }
             if (e) { static int said; if (!said++) LOG("【红】UnmapPhysicalMemory %p+%#zx: mprotect errno=%d: pages dropped (MADV_DONTNEED) but left accessible", (void *)a, size, e); }
-            if (!commit) (void)madvise((void *)mlo, mhi - mlo, e ? MADV_DONTNEED : MADV_FREE);
+            if (!commit) {
+                const int drop = e || alias_unmap_drop();
+                const int r = madvise((void *)mlo, mhi - mlo, drop ? MADV_DONTNEED : MADV_FREE);
+                if (drop && !r)   // these host pages read as zero again: never opened, as far as the next MapPhysicalMemory is concerned
+                    for (uint64_t h = (mlo - (uintptr_t)g_alias) / pg, hl = (mhi - (uintptr_t)g_alias) / pg; h < hl; ++h) g_alias_exposed[h >> 6] &= ~(UINT64_C(1) << (h & 63));
+            }
         }
+        uint64_t zt0 = als_ns();
         if (commit && changed) alias_initialize(off, size);   // newly committed pages read as zero, as on Horizon
+        alias_stat(commit, size, changed, als_ns() - zt0);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);
         alias_ring_add(a, size, commit);
         { int64_t d = alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
           pthread_mutex_unlock(&g_map_lock);
-          if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (alias region %.2f GB)", after / 1073741824.0, g_alias_cap / 1073741824.0); }
+          if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (alias region %.2f GB); cleared by memset so far %.2f GB", after / 1073741824.0, g_alias_cap / 1073741824.0,
+                                               atomic_load(&g_alias_zeroed) / 1073741824.0); }
         regs[0] = 0; return 0;
     }
 #else
