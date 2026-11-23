@@ -1,29 +1,35 @@
-"""[DOS2] UI mode TOUCH, the inventory, the character sheet and the equipment view in the iPad's layout, fitted to a phone: the player's own
-PC movies (Switch Game.pak partyInventory.swf, characterSheet.swf) transformed into partyInventory_p.swf / characterSheet_p.swf
-(docs/dos2/TOUCH_MODES_PLAN.md "Implemented: iPad layout - inventory / character" and "... - phone fit"; the iPad's numbers:
-docs/dos2/TOUCH_LAYOUT.md section 5). No iPad file is read; the backgrounds are the player's own bitmaps re-cut into pieces (new DefineShapes
-with bitmap fills), the one new drawing is the doll button from our own assets/touchui. Static only: nothing here was played or run on a phone.
+"""[DOS2] UI mode TOUCH, the character sheet and the inventory with the iPad's STRUCTURE, drawn with our art: the player's own PC movies (Switch
+Game.pak partyInventory.swf, characterSheet.swf) transformed into partyInventory_p.swf / characterSheet_p.swf (docs/dos2/TOUCH_MODES_PLAN.md
+"Implemented: лист персонажа и инвентарь — структура iPad нашей графикой"; the iPad's numbers: docs/dos2/TOUCH_LAYOUT.md section 5). No iPad file
+is read (the iPad movies were only measured); the backgrounds are the player's own bitmaps re-cut into pieces (new DefineShapes with bitmap
+fills), the one new drawing is the window button from our own assets/touchui. Static only: nothing here was played or run on a phone.
 
-The geometry is NOT fixed numbers: every window is laid out by dmLay() from three document variables - dmCell (the cell px the host wants on
-the screen; 76 = the iPad's), dmState (0 = the plain window, 1 = its half of the equipment view), dmW (the screen width in stage px at height
-1080, from onEventResolution). The layout is written once, as data (Spec / Ex below): this tool evaluates it (the placements baked into the
-movie = dmLay at cell 76 on a 16:9 screen, the checks, the pictures) and compiles the same statements to AVM2 (dmLay at run time). The host
-sets the cell with dmSetCell(px), or through an invoke name the engine class registers: setAnchor(1000000 + px) for the inventory,
-setHelmetOptionState(1000000 + px) for the sheet; 1000000 + 0 / 1 = the state. dmLay ends with setMcSize(w, 1080) + setPosition(topleft) (phone 23.11: 'center' cut the window).
+The geometry is NOT fixed numbers: every window is laid out by dmLay() from document variables - dmCell (the cell px the host wants on the
+screen; 76 = the iPad's), dmState (0 / 1, below), dmW (the screen width in stage px at height 1080, from onEventResolution), dmB (the hot bar's
+top). The layout is written once, as data (Spec / Ex below): this tool evaluates it (the placements baked into the movie = dmLay at cell 76 on
+a 16:9 screen, the checks, the pictures) and compiles the same statements to AVM2 (dmLay at run time). The host sets the numbers with
+dmSetCell(px), or through an invoke name the engine class registers: setAnchor(1000000 + px) for the inventory, setHelmetOptionState(1000000 +
+px) for the sheet; 1000000 + 0 / 1 = the state. dmLay ends with setMcSize(w, 1080) + setPosition(topleft) (phone 23.11: 'center' cut the window).
 
-  partyInventory_p   the window clip x S = cell / 50 x INV_K (0.88, owner 23.11: the window 12 % smaller; rows still from the full cell). 13 columns of pitch 56 own px (the iPad's 13 x 86 px; the engine reads
-                     the grid from the movie once: inventory_mc.invColW / cSpacing / cSize, main+0x13aa5b0), so the window is 770 own px wide
-                     (PC 680: the background gets a stretched plain band, the bag header grows) = 1170 px (iPad 1160). Rows: as many as fit
-                     1080 (7 at cell 76; the list scrolls); the background's body is one plain piece stretched to the list. A bigger cell =
-                     a bigger window with fewer rows; never wider than the screen less 80 px margins (then S is clamped).
-  characterSheet_p   state 0, the sheet (iPad characterSheet_t: no doll in it): x 1.70 (a stat row 26 -> 44 px, iPad 46), 1156 px wide, two
-                     stat columns - attributes + resistances | secondary stats + experience (PC: one column 700 own px tall, more than the
-                     screen holds at this size) - so the list panel needs 375..735 own px and the sheet can grow to x 1.89.
-                     state 1, the doll panel of the EQUIPMENT VIEW (iPad equipmentPanel_t): the clip is cropped (scrollRect) to its doll
-                     half, x 1.20 (409 x 1080 px, a slot 77 px; iPad doll 422 x 678, slot 82), at the left edge of the stage.
-  equipment view     the doll panel + the inventory right of it as one centred block (host: dmSide(8) from the doll button of either
-                     window, dm/host/hle_dos2_touchui_hud.c hu_view_plan): the bag keeps its 13 columns, so the block is 1580 px at cell 76
-                     (iPad: 1160 with a 5 x 6 bag) - a phone screen is 1920..2520 wide, the iPad's 1440.
+ONE grid for both windows (win_lets: the same statements in both movies, checked equal for every cell / screen): the window WW x WH centred
+above the hot bar; a title bar across; row A (IH); the doll column (LX, PY, LW x PH) | the right column (RX, PY, RW x PH); margin GM, gutter GG.
+The frame = the PC sheet background re-cut (frame_groups / frame_spec): the spiked top / bottom strips repeat their 135 px period (n copies,
+each x 0.9..1.1: no ornament stretched), rails and plain edges stretch, the parchment frame is 9 pieces, the black body fills only the gutters
+and row A (bg_mc is drawn OVER the panels: their rects stay open).
+
+  characterSheet_p   state 0 = THE SHEET (iPad characterSheet_t): title bar (name - level centred = charInfo_mc, close on the right tile, the
+                     sheet -> inventory button on the left tile), row A = the HP / AP / Source box (the PC's infoStatList, type 0 of
+                     addSecondaryStat, moved out of equip_mc) | the 5 tabs x F + the tab title on the wood plaque; the doll column (frame +
+                     equip_mc x D) | ONE parchment panel (x S: a stat row 26 -> 44 px) - the attributes tab in two columns, the tab lists
+                     flowed into two columns every frame (dmFlow), one-finger scroll on the lists (dmScDown).
+                     state 1 = THE INVENTORY WINDOW's frame and left part: the same title bar (its button goes back to the sheet), the same HP
+                     box and doll, and the stat strip in row A's right part (dmStripTick: the PC's secondaryStatList / resistanceStatList as
+                     value + icon cells, two rows); the right column under the strip is left OPEN for partyInventory_p.
+  partyInventory_p   the inventory's part of that window (any state; the host opens it with the sheet in state 1 - dm/host hu_inv_code): the
+                     filter row (the PC header's ornate bar; party tabs, All, party view | sort, sort by, gold, x SB) and the bag (the PC list x
+                     SQ = cell / 50 x INV_K, 11 columns - the engine reads the grid from the movie once: inventory_mc.invColW / cSpacing,
+                     main+0x13aa5b0 - centred in the column, scrolling). The two movies' drawings never overlap: their order is the engine's.
+                     State 0 (alone, a fallback only): a black ground under the whole window with the PC title and close.
 
 Everything else is the PC movie's own mouse code driven by the gesture layer (tap, double tap = double click = use / equip, long press =
 right click = context menu, still finger = hover = tooltip, drag = drag - onto a doll slot too -, two fingers = wheel = list scroll).
@@ -44,67 +50,94 @@ STAGE_H = 1080
 STAGE_WMAX = 2560     # the movies' stage width (SWF header): wider than any screen in stage px - the movie spans the screen, the window is placed in it
 # ---- partyInventory (PC: inventory_mc at 0,20 on a 682 x 1152 stage; the window = bgFrame_mc 680 x 1056 at the clip's origin). Own px of the clip:
 INV_W0, INV_H0 = 680, 1056
-INV_COLS, INV_PITCH = 13, 56     # the iPad's 13 columns; cell 50 + spacing 6 (PC 11 columns, spacing 8): x 1.52 = cell 76, pitch 85 (iPad 76 / 86)
-INV_ADD = 90                     # the window is this much wider than the PC's: 13 x 56 against 11 x 58
-INV_W = INV_W0 + INV_ADD
-INV_BAND = (226, 296)            # background columns that are plain in every row of the header: stretched to fill the extra width
+INV_COLS, INV_PITCH = 11, 56     # 11 columns of cell 50 + spacing 6 (PC 11 x 58; iPad 8 x 86 in a narrower bag): the engine reads the grid from
+                                 # the movie once (inventory_mc.invColW / cSpacing / cSize, main+0x13aa5b0); 11 fill the bag column at the phone's cell
+INV_ADD = INV_COLS * INV_PITCH - 11 * 58   # the list is this much wider than the PC's (-22: narrower)
 INV_LIST_Y, INV_LIST_W0, INV_LIST_H0 = 202, 650, 827   # listHolder_mc.y, partyInventory_1.invW / invH
 INV_LIST_W = INV_LIST_W0 + INV_ADD
-INV_BAG_HEAD, INV_LIST_REST, INV_BOT = 56, 4, 27       # a bag's header, the PC's rest under the rows, the window under the list (PC: 1056 - 1029)
-INV_ROWS_MAX = 12
-INV_HEAD_ART, INV_BODY_SRC, INV_BODY_ART, INV_BOT_ART = 235, 400, 56, 100   # background rows: the header, plain body rows (stretched), the bottom edge
-INV_SORT_BOT = 612               # the sort popup's own bottom (its y + 607 + 5)
-INV_HEAD_S = 1.19                # the header's scale cap (dm/host/hle_dos2_touch_scale.h TS_INV_HEAD_S): 202 own px -> 240 px, so 7 rows of 76 make the iPad's
-                                 # 968 px window (was 1.52: 1035 px; owner 21.11 'header lower, like the iPad'); the list takes the cell's scale
-INV_K = 0.88                     # owner 23.11 (phone shot_inv2, cell 102 on 20:9: 1571 x 989 px, the title cut at the top): the whole window
-                                 # 10-15 % smaller. The rows are still decided at the full cell (the host's rule, hle_dos2_touch_scale.h
-                                 # ts_inv_rows, stays exact), then everything - bag cells, header, buttons, background - is drawn x INV_K
-INV_RIGHT = ('close_mc', 'minimise_mc', 'autosortBtn_mc', 'sortByBtn_mc', 'allBtn_mc', 'totalGold_mc')   # stand at the header's right end
+INV_BAG_HEAD = 56                # a bag's header (playerInventory: name, gold, weight)
+INV_K = 0.88                     # owner 23.11: the bag drawn x 0.88 of the cell the host asks (rows still decided at the full cell)
+INV_CLOSE = 50                   # screen px of the close button (state 0 only: the window's own close is the sheet's)
+INV_BTN = 'dmDoll_mc'            # the sheet's window button (characterSheet_p; the inventory has none: the title bar is the sheet's)
+INV_BAG = (600, 710, 40, 40)     # a flat near-black patch of the PC inventory background: the bag's ground
+INV_BAR = (8, 172, 30, [(48, 1, 8), (262, 0, 56), (270, 0, 362), (40, 1, 632)])   # the PC header's ornate bar (x y h, pieces: w, kept 1 /
+                                 # stretched 0, source x): the filter row's ground; the two end ornaments keep their shape, the two plain spans
+                                 # take the rest (the centre ornament is left out: an item stood on it)
+INV_TABS_W = 184                 # own px kept for the party tabs (4 x 46: a party of four; the PC header kept ~133 before its All button)
+INV_HEAD_ITEMS = 980             # own px of the filter row's items in a line: the party tabs, All, the party view check, sort, sort by, gold
 TOP_M = 8                        # screen px kept free above the window
-COL_RES = 40                     # the equipment view: px kept free at each side beyond MARGIN (the right column at the iPad's place: 92 x 1.2 + a gap)
-INV_CLOSE = 50                   # screen px of the close button at the header's scale (iPad mcBtnCloseTouch 50 x 50), also after INV_K
-INV_BTN, INV_BTN_AT = 'dmDoll_mc', (20, 84, 61)        # the doll button: own x, y, size (x 1.19 = 73 px, the iPad's)
+COL_RES = 40                     # px kept free at each side beyond MARGIN (the right column of the touch HUD: 92 x 1.2 + a gap)
 BTN_ART = 148.0                  # px of our plate drawing (set from the asset when it is embedded)
 # ---- characterSheet (PC: stats_mc at 0,20 on a 680 x 1152 stage; the window = bg_mc 680 x 1056, one bitmap with holes for the two halves). Own px of the clip:
 CS_W, CS_H0 = 680, 1056
 CS_S0 = (17, 10)                 # 1.70 at the iPad's cell: 680 -> 1156 px wide (iPad 1160), a stat row 26 -> 44 px (iPad 46)
-CS_STRIP = (50, 174)             # background rows of the party portrait strip (cut out); the two corner tiles reach down to row 74
-CS_TILE = (58, 626, 74)          # the corner tiles: left one ends at x 58, right one starts at x 626, both end at row 74
-CS_UP = CS_STRIP[1] - CS_STRIP[0]                 # 124: everything under the strip moves up
-CS_SPLIT = 339                   # own x between the list half and the doll half
-CS_ROW1, CS_EQ_BAR = 253, 205    # background rows: the doll's top (= the tab title bar's top), the equipment title bar's top
-CS_COL_Y, CS_BODY_Y = CS_ROW1 - CS_UP, CS_ROW1 - CS_UP + 87   # own y of the columns' art; of the stretched plain rows under the panel's top
-CS_BODY_SRC, CS_BODY_ART, CS_FOOT_ART = 500, 56, 40           # plain rows of the list half (stretched by dmLay), the bottom edge
-CS_HEAD, CS_BOT = 293 - CS_UP, 28                 # own y of the list panel; the window under it
-CS_PB0, CS_PB_MIN = 735, 375     # the list panel's height: PC; the least that shows attributes + resistances / secondary stats + experience
-CS_RES_Y = 205                   # resistances in mainStats_mc (PC 510): under the attributes; secondary stats go to the second column
+CS_PB0, CS_PB_MIN = 735, 360     # the list panel's height: PC; the least that shows attributes + resistances / secondary stats + experience
+CS_RES_Y = 196                   # resistances in mainStats_mc (PC 510): 10 own under the 6 attributes; secondary stats go to the second column
 CS_HIT_H = 1085.0
-CS_EQ_Y, CS_EQ_Y_DOLL = CS_ROW1 - CS_UP, CS_STRIP[0] + CS_ROW1 - CS_EQ_BAR   # equip_mc.y on the sheet (off it: x far) / in the doll panel
-CS_DOLL_W = CS_W - CS_SPLIT
-CS_DOLL_H = CS_EQ_Y_DOLL + CS_H0 - CS_ROW1        # 901 own: the title bar, the equipment bar, the doll with its numbers
-# owner 23.11 (phone, his picture of the equipment view): the doll panel = the doll's body only - no title bar, no "equipment" bar with a
-# second close / doll button - standing beside the other window with ITS top and height (the bag's in the equipment view, the sheet's on the
-# sheet, where the doll now stands left of the stat columns as on the iPad's characterSheet_t). The body = doll-frame rows CS_EQ_Y_DOLL..
-DOLL_BODY_H = CS_DOLL_H - CS_EQ_Y_DOLL            # 803 own: the doll, its slots and numbers
-DOLL_GAP = 10                    # screen px between the doll panel and the window beside it
-DOLL_FILL = (93, 100)            # the bag's height / the band above dmB, about (its rows are whole): the doll panel's width allowance
-DOLL_PX = CS_DOLL_W * 967.0 * 0.93 / DOLL_BODY_H  # the doll panel's width allowance in the equipment view at the default bottom
-def eq_block(a, C, DW, BT):
-    """the equipment view's shared numbers, the SAME statements in both movies (so the two halves are one block): DP the doll panel's width
-    allowance (the gap included; its height follows the bag's), SQ the bag's scale, MQ the block's width"""
-    DP = a.let('DP', CS_DOLL_W * fmax(600, fmin(1080, BT)) * R(*DOLL_FILL) / DOLL_BODY_H)
-    SQ = a.let('SQ', fmin(C / 50, (DW - 2 * MARGIN - 2 * COL_RES - DP) / INV_W) * INV_K)   # = the inventory's S in state 1 (INV_K: owner 23.11)
-    a.let('MQ', ffloor(DP + INV_W * SQ + R(999, 1000)))
-CS_TITLE_X = (42, CS_SPLIT + CS_DOLL_W // 2 - 299)             # title_txt.x (a 598 px centred field): on the sheet / centred in the doll panel
-CS_BTN_AT = (626, 40)            # the doll button: own x, size (on the equipment title bar)
 CS_LISTS = [('combatAbilityHolder_mc', 270, 705), ('civicAbilityHolder_mc', 270, 705), ('talentHolder_mc', 328, 705), ('tagsHolder_mc', 328, 705),
             ('visualHolder_mc', 328, 705)]        # holder, list frame width, scroll bar length (the PC init values)
 CS_OFF = ['leftCycleBtn_mc', 'rightCycleBtn_mc', 'onePlayerOverlay_mc', 'charList_mc', 'alignments_mc', 'aiSel_mc', 'dragHit_mc']   # the strip's content and the drag bar
-CS_STAY = ['hitArea_mc', 'bg_mc', 'title_txt', 'close_mc']     # above the strip
+CS_STAY = ['hitArea_mc', 'bg_mc', 'title_txt', 'close_mc']
 CS_FAR = -4000                   # own px: where hidden things go (the PC code still finds every instance)
 CS_CLOSE = 50                    # screen px of the close button at the iPad's cell
 CS_PM_HIT = (-6, -3, 32, 26)     # the + / - buttons' invisible hit sprite in the button's own px (PC: 0,1 18 x 18): x, y, w, h
 CS_HELMET = (205, 24, 2.0)       # helmet toggle: x, y in equip_mc, scale (PC: a 21 px badge on the helmet slot at 176,49; iPad: its own 71 px button)
+
+# ---- the WINDOW of the sheet and the inventory (owner 23.11: "the iPad's structure, sizes and arrangement, drawn with OUR art"; not an open
+# book). ONE grid for both windows, computed by the same statements in both movies (win_lets): the window WW x WH at WX, WY; a title bar across;
+# under it row A (IH high: the sheet's HP / AP / Source box | its tabs + tab title; the inventory's stat strip + its filter row); then the body:
+# the doll column (LX, PY, LW x PH: the doll in the SAME place and size in both windows) | the right column (RX, PY, RW x PH: the sheet's one
+# parchment panel / the bag). The frame is the PC sheet background (characterSheet.swf bg_mc, 680 x 1056) re-cut: art px below.
+SA_TOP_H = 50                    # rows 0..50: the spikes + the title bar
+SA_L, SA_R, SA_P = 205, 475, 135 # the top / bottom strips: the left end is x 0..205, the right end 475..680, the repeated period 135 px (big spike
+                                 # centre to big spike centre); the period is REPEATED (n copies, each scaled n x 135 -> the exact width, 0.9..1.1):
+                                 # no ornament is stretched
+SA_TILE = (58, 622, 74)          # the title bar's corner tiles hang below it: left x 0..58, right 622..680, rows 50..74
+SA_BOT, SA_BOT_H, SA_BOTP = 1030, 26, 475   # the bottom border rows 1030..1056; its period from x 475 (no column divider in it)
+SA_BOT_BAR = 11                  # the bottom border's opaque bar (rows 1030..1041); the spikes under it stand on nothing
+SA_RAIL = 8                      # the side rails x 0..8 / 672..680 (plain: stretched)
+SA_BODY = (420, 900, 160, 100)   # a plain black patch (under the PC doll): the window body between the panels (gutters, row A, under the panels)
+SA_BOX = (8, 202, 331, 46, 6)    # the black framed bar of the PC tab row: x y w h, the edge rows kept at top / bottom (the middle stretches):
+                                 # the HP / AP / Source box, the inventory's stat strip and filter row
+SA_PLAQUE = (341, 202, 336, 48)  # the wood plaque with notched ends (PC "equipment" title): the tab title
+SA_PANEL = (22, 290, 317, 740, 56)   # the parchment panel's ornate frame (x y w h, corner): 9 pieces, the edges plain (stretched), no centre (a hole)
+SA_DOLL = (341, 253, 337, 627)   # the doll frame (black, ornament corners, the slots' frames baked in): scaled as one (D)
+NPER = 20                        # period copies made (the widest window needs < 20)
+STRETCH = 0.999                  # the static scale of a piece dmLay stretches (any scale but 1: pieces_sprite draws it without the bleed pixel)
+GM, GG = 12, 12                  # the grid: outer margin inside the rails, gutter between the columns (screen px)
+WIN_FMAX = (13, 10)              # the frame art's scale cap (title bar 65 px, iPad ~75)
+ROWA = 108                       # row A height in frame art px (x F): the sheet's tabs 56 + 4 + the plaque 48
+PADP = 10                        # the panel content's inset inside the parchment frame (frame art px, x F)
+PANEL_W = 680                    # the panel content width in the sheet's own px: two stat columns of 340
+COL2 = 340                       # own x of the second column
+DOLL_W, DOLL_H = SA_DOLL[2], SA_DOLL[3]
+INFO_W = 262                     # own px of an InfoStat row (icon at -13 .. the value's right end at 248)
+STRIP_H = 62                     # frame art px (x F) of the inventory's stat strip (two rows: secondary stats / resistances); the filter row
+                                 # under it gets the rest of row A
+def win_lets(a, C, DW, BT, OXK):
+    """the shared window grid (both movies, any state): variables F TB BB SR IH CT PY PZ PH D LW LX RX S RW WW WX WY WH"""
+    B = a.let('WB', fmax(600, fmin(1080, BT)))
+    WH = a.let('WH', B - TOP_M - 2)
+    F = a.let('F', fmin(R(*WIN_FMAX), WH / 720))
+    a.let('TB', SA_TOP_H * F); BB = a.let('BB', SA_BOT_H * F); SR = a.let('SR', SA_RAIL * F)
+    IH = a.let('IH', ROWA * F)
+    SH = a.let('SH', STRIP_H * F)                                # the inventory's row A: the stat strip (the sheet draws it, state 1) ...
+    a.let('FH', IH - SH - 4)                                     # ... over the filter row (the inventory movie draws it)
+    CT = a.let('CT', SA_TILE[2] * F + 6)                         # row A: under the title bar's corner tiles (they hang to art row 74)
+    a.let('FT', CT + SH + 4)
+    PY = a.let('PY', CT + IH + GG)
+    PZ = a.let('PZ', WH - BB - GM)
+    PH = a.let('PH', PZ - PY)
+    D = a.let('D', PH / DOLL_H)                                  # the doll fills the body's height
+    LW = a.let('LW', DOLL_W * D); LX = a.let('LX', SR + GM)
+    RX = a.let('RX', LX + LW + GG)
+    # the content scale: a stat row 26 own -> 44 px at the iPad's cell (x 1.7), no more than the panel's height holds, no wider than the screen
+    S = a.let('S', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (PH - 2 * PADP * F) / CS_PB_MIN),
+                        (DW - 2 * MARGIN - 2 * COL_RES - (RX + GM + SR) - 2 * PADP * F) / PANEL_W))
+    RW = a.let('RW', PANEL_W * S + 2 * PADP * F)
+    WW = a.let('WW', ffloor(RX + RW + GM + SR + R(999, 1000)))
+    a.let('WX', (DW - WW) / 2 - OXK); a.let('WY', TOP_M)
+    return F, S, D, WW, WH
 
 
 # ---------------------------------------------------------------- SWF helpers (static edits of the player's movie)
@@ -278,8 +311,9 @@ class Ex:
         if s.op == 'floor': return s.a[0].asm(cx) + [('convert_i',), ('convert_d',)]
         if s.op in ('min', 'max'):
             t, u = cx.tmp(), cx.tmp(); a, b = cx.label(), cx.label()
-            return s.a[0].asm(cx) + [('convert_d',), ('setlocal', t)] + s.a[1].asm(cx) + [('convert_d',), ('setlocal', u), ('getlocal', t), ('getlocal', u),
+            o = s.a[0].asm(cx) + [('convert_d',), ('setlocal', t)] + s.a[1].asm(cx) + [('convert_d',), ('setlocal', u), ('getlocal', t), ('getlocal', u),
                     ('ifnlt' if s.op == 'min' else 'ifngt', a), ('getlocal', t), ('convert_d',), ('jump', b), ('L', a), ('getlocal', u), ('convert_d',), ('L', b)]
+            cx.free(t, u); return o
         return s.a[0].asm(cx) + s.a[1].asm(cx) + [(s.op,)]
 def V(name): return Ex('v', name)
 def fmin(a, b): return Ex('min', Ex.of(a), Ex.of(b))
@@ -324,7 +358,7 @@ class Spec:
     # ---- AVM2
     def asm(s, c, inputs):
         """lines of a method body (after HEAD): inputs = [(variable, document slot)] read first; locals: 1 the object, 2.. Numbers"""
-        s._v = {}; s._n = 2; s._l = 0; s._c = c
+        s._v = {}; s._n = 2; s._l = 0; s._c = c; s._free = []
         o = [('pushnull',), ('coerce_a',), ('setlocal', 1)]
         for name, slot in inputs: o += [('getlocal0',), ('getproperty', c.P(slot)), ('convert_d',), ('setlocal', s.var(name))]
         body = s._lines(s.st)
@@ -334,7 +368,10 @@ class Spec:
     def var(s, name):
         if name not in s._v: s._v[name] = s._n; s._n += 1
         return s._v[name]
-    def tmp(s): s._n += 1; return s._n - 1
+    def tmp(s):
+        if s._free: return s._free.pop()
+        s._n += 1; return s._n - 1
+    def free(s, *ts): s._free.extend(ts)   # temps are reused once their min / max is done (a long layout ran out of the 255 locals)
     def label(s): s._l += 1; return 'x%d' % s._l
     def _lines(s, st):
         c = s._c; o = []
@@ -430,7 +467,7 @@ BOTTOM0 = 967          # dmB: the bottom limit the host sets (the hot bar's top;
                        # (21.11: with it the baked inventory is the iPad's 1170 x 968, 7 rows; 1080 = no limit)
 HEAD_PADS = [(('inventory_mc', 'autosortBtn_mc'), 48), (('inventory_mc', 'sortByBtn_mc'), 48), (('inventory_mc', 'allBtn_mc'), 48), (('inventory_mc', 'view_mc'), 48)]
                        # header buttons (own px at the header's scale 1.19 x INV_K = 1.05: 28..31 own = 29..33 px): invisible pads 48 own = 50 px tall (LSButton hits its own graphics)
-def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pads=()):
+def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pads=(), extra=None):
     """the document class of a `_p` window: vars dmCell (cell px, CELL0 = the iPad's), dmState, dmW (the screen width in stage px, height 1080);
     dmLay() = `spec`; dmSetCell(px) / dmSetState(n) for the host; `cmd`(CMD + n) = the same two through a name the engine class registers;
     onEventInit = original + dmHook (drag bar `off` hidden, the doll button `btn` armed: dmSide(8) = the equipment view, dmSide(back) from it)
@@ -467,9 +504,10 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pad
         for p in path: hook += [('getlocal', 1), ('getproperty', P(p)), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'h%d' % k)]
         hook += [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'h%d' % k)]
     if btn:
-        hook += [('getlocal0',), ('pushstring', d.S(btn)), ('callproperty', P('getChildByName'), 1), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nb'),
-                 ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseChildren')),
-                 ('getlocal', 1), ('pushstring', d.S('mouseUp')), ('getlocal0',), ('getproperty', P('dmBtnUp')), ('callpropvoid', P('addEventListener'), 2), ('L', 'nb')]
+        for k, nm in enumerate(btn if isinstance(btn, (list, tuple)) else [btn]):
+            hook += [('getlocal0',), ('pushstring', d.S(nm)), ('callproperty', P('getChildByName'), 1), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nb%d' % k),
+                     ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseChildren')),
+                     ('getlocal', 1), ('pushstring', d.S('mouseUp')), ('getlocal0',), ('getproperty', P('dmBtnUp')), ('callpropvoid', P('addEventListener'), 2), ('L', 'nb%d' % k)]
         d.method('dmBtnUp', 1, HEAD + d.ei('PlaySound', [('pushstring', d.S('UI_Generic_Click'))]) + [('getlocal0',), ('getproperty', P('dmState')), ('iftrue', 'back')] +
                  d.ei('dmSide', [('pushbyte', 8)]) + [('returnvoid',), ('L', 'back')] + d.ei('dmSide', [('pushbyte', back)]) + [('returnvoid',)])
     if ctx:
@@ -488,6 +526,7 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pad
         hook += [('getlocal0',), ('coerce_a',), ('setlocal', 1)]
         for q in path: hook += [('getlocal', 1), ('getproperty', P(q)), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nx')]
         hook += [('getlocal', 1), ('pushstring', d.S('rightMouseUp')), ('getlocal0',), ('getproperty', P('dmCtxUp')), ('callpropvoid', P('addEventListener'), 2), ('L', 'nx')]
+    if extra: hook += extra(d)
     d.method('dmHook', 0, hook + [('returnvoid',)])
     d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.call_orig('dmInitOrig', n) + [('getlocal0',), ('callpropvoid', P('dmHook'), 0)] + lay + [('returnvoid',)])
     d.wrap('onEventResolution', 'dmResOrig', lambda n: HEAD + d.call_orig('dmResOrig', n) + [('getlocal2',), ('pushbyte', 0), ('ifngt', 'z'),
@@ -543,95 +582,87 @@ def swap_char(swf, holder, frame, old, new):
     edit_places(swf, holder, fn, frame); assert len(hit) == 1, 'character %d is not placed once in frame %d of sprite %d' % (old, frame, holder)
 
 
-def doll_button(swf, name, glyph='pan_helmet'):
-    """the equipment (doll) button: our own art (assets/touchui: the copper plate + a glyph), placed on the root timeline by name at 0,0 scale 1
-    (dmLay / bake place it). -> (the plate's px, n new definition tags)"""
+def doll_button(swf, buttons):
+    """the window buttons: our own art (assets/touchui: the copper plate + a glyph each), placed on the root timeline by name at 0,0 scale 1
+    (dmLay / bake place them). buttons = [(name, glyph)], one plate bitmap for all. -> (the plate's px, n new definition tags)"""
     import dos2_touchart as ta
-    g = gr.Graft(swf); art = ta.Art(g); sq, qb = art.png('plate_square_copper'); ic, ib = art.png(glyph)
-    pw = float(qb[2] - qb[0]); ki = 0.72 * pw / (ib[2] - ib[0])
-    spr = g.sprite([(sq, 1, (0, 0), None), (ic, 2, (pw / 2 - (ib[2] - ib[0]) * ki / 2, pw / 2 - (ib[3] - ib[1]) * ki / 2, ki), None)])
-    g.place(spr, 0, 0, name); g.finish()
+    g = gr.Graft(swf); art = ta.Art(g); sq, qb = art.png('plate_square_copper'); pw = float(qb[2] - qb[0])
+    for name, glyph in buttons:
+        ic, ib = art.png(glyph); ki = 0.72 * pw / max(ib[2] - ib[0], ib[3] - ib[1])
+        spr = g.sprite([(sq, 1, (0, 0), None), (ic, 2, (pw / 2 - (ib[2] - ib[0]) * ki / 2, pw / 2 - (ib[3] - ib[1]) * ki / 2, ki), None)])
+        g.place(spr, 0, 0, name)
+    g.finish()
     return pw, len(g.new_defs)
 
 
 # ---------------------------------------------------------------- partyInventory_p
 INV_CLIP = 'inventory_mc'
-def inv_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
+def inv_geom(C=CELL0, ST=1, DW=SCREEN0, BT=BOTTOM0):
     """the numbers dmLay computes (the same Spec, run here): dict of the Spec's variables"""
     env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); inv_spec(None).run(env); return env
 
 
-def bag_lets(s, p, C, BT, AV):
-    """the bag window's numbers (inv_spec; the doll panel of the equipment view computes the SAME with p = 'Q' to stand beside it with its top
-    and height): variables p + S0 SH0 S SH RR EX B ROWS LH H HS Y0; AV = the width the window may take"""
-    S0 = s.let(p + 'S0', fmin(C / 50, AV / INV_W))                        # the full cell's scale: decides the rows (= the host's ts_inv_rows)
-    SH0 = s.let(p + 'SH0', fmin(S0, INV_HEAD_S))
-    S = s.let(p + 'S', S0 * INV_K)                                               # owner 23.11: the window drawn INV_K smaller, header and all
-    SH = s.let(p + 'SH', SH0 * INV_K)
-    RR = s.let(p + 'RR', S / SH)
-    EX = s.let(p + 'EX', INV_W * (RR - 1))
-    B = s.let(p + 'B', fmax(600, fmin(1080, BT)))
-    # rows: the cells end above B, the whole window (with its bottom edge INV_BOT) inside the screen - at the full cell, so the smaller
-    # window keeps them and gets ~(1 - INV_K) of its height free: its title stays on the screen (phone 23.11: Y0 clamped to 0, title cut)
-    rows = s.let(p + 'ROWS', fmax(1, fmin(INV_ROWS_MAX, ffloor(fmin(B - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST) * S0,
-                                                                1080 - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST + INV_BOT) * S0) / (INV_PITCH * S0)))))
-    LH = s.let(p + 'LH', INV_BAG_HEAD + INV_LIST_REST + rows * INV_PITCH)
-    H = s.let(p + 'H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
-    HS = s.let(p + 'HS', H * SH)                                                 # screen px
-    # centred in the band above B; the whole window (its bottom rim too) above B where it fits (21.11: nothing under the hot bar), else from the top
-    Y0 = s.let(p + 'Y0', fmax(0, fmin(fmin(1080 - HS, B - HS), TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
-    return S, SH, RR, EX, B, rows, LH, H, HS, Y0
-
-
 def inv_spec(k):
-    """dmLay of partyInventory_p. k = the PC placements of the window's children (None: only the variables are wanted).
-    Two scales (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: physical scale for fingers"): the list (bags, cells) at S = cell / 50, the header
-    (title, tabs, buttons, gold: own y < INV_LIST_Y) at SH = min(S, INV_HEAD_S) - the clip is scaled SH and the list part R = S / SH inside it,
-    so a phone cell does not make the header eat the rows (cell 110: header 444 px -> 307). The list part is R times wider in clip px: the
-    background's plain bands stretch (EX) and what stands at the header's right end moves with it. Rows: as many as fit between the top margin
-    and dmB (the host's bottom limit: the hot bar's top; 1080 = none), the window centred in that band."""
-    s = Spec(); C, ST, DW, BT = V('C'), V('ST'), V('DW'), V('BT')
-    # the equipment view is the widest block: it also keeps clear of the right column (tools/dos2_pchud_touch.py dmSide_p: 92 px x its factor
-    # <= 1.2 from the right edge), on both sides because the block is centred
-    eq_block(s, C, DW, BT)
-    s.state('ST', lambda a: a.let('AV', DW - 2 * MARGIN - 2 * COL_RES - V('DP')), lambda a: a.let('AV', DW - 2 * MARGIN))
-    S, SH, RR, EX, B, rows, LH, H, HS, Y0 = bag_lets(s, '', C, BT, V('AV'))
-    s.state('ST', lambda a: a.let('X0', V('DP')), lambda a: a.let('X0', 0))
-    MW = s.let('MW', ffloor(V('X0') + INV_W * S + R(999, 1000)))
-    # phone 21.11 (inv2.png): the engine anchored the movie top right (its rect = setMcSize's width) and the window shifted left inside it was cut
-    # at the rect's edge. Now the movie spans the screen (setMcSize(SW): SW = the screen width, the header STAGE_WMAX), so any anchor puts its
-    # origin at 0 (or where the host says: dmOX) and the window is centred INSIDE it: X1 = (DW - MW) / 2 - dmOX
-    SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
-    X0 = s.let('X1', V('X0') + (DW - MW) / 2 - V('OK') * V('OX'))
-    s.let('PX', 50 * S)
+    """dmLay of partyInventory_p (owner 23.11: the iPad's inventory, one window - title bar, stat strip, filter row, the doll left and the bag
+    right). The window is the SHARED grid (win_lets, the same statements as the sheet): the sheet movie in its state 1 draws the frame, the title
+    bar, the HP box, the doll and the stat strip; this movie draws only what stands in the open right column from the filter row down - the
+    filter row (its ground = the PC header's ornate bar; party tabs, All, the party view check, sort, sort by, the gold) and the bag (the PC
+    list x SQ, centred in the column, as many rows as the height holds, scrolling). State 0 (the inventory alone - the host opens the pair, so
+    only a fallback): a plain black ground under the whole window, the PC title and close button on it."""
+    s = Spec(); C, DW, ST = V('C'), V('DW'), V('ST'); OXK = V('OK') * V('OX')
+    F, S, D, WW, WH = win_lets(s, C, DW, V('BT'), OXK)
+    WX, WY, RX, RW, PY, PH, PZ, FT, FH = [V(n) for n in ('WX', 'WY', 'RX', 'RW', 'PY', 'PH', 'PZ', 'FT', 'FH')]
+    s.state('ST', lambda a: a.let('XS', 1), lambda a: a.let('XS', 0)); XS = V('XS')
+    BP = 6 * F
+    SQ = s.let('SQ', fmin(C / 50 * INV_K, (RW - 2 * BP) / (INV_LIST_W + 24)))   # the bag: the host's cell x INV_K, narrower when the column is
+    LH = s.let('LH', (PH - 2 * BP) / SQ)                                            # the list frame's height (own px; it scrolls)
+    s.let('ROWS', ffloor((LH - INV_BAG_HEAD) / INV_PITCH))
+    BX = s.let('BX', RX + (RW - INV_LIST_W * SQ) / 2); BY = s.let('BY', PY + BP)
+    SB = s.let('SB', fmin(F, fmin((FH - 6) / 41, (RW - 2 * INV_BAR[3][0][0] * FH / INV_BAR[2]) / INV_HEAD_ITEMS)))   # the filter row's items
+    s.let('SW', ffloor(fmax(DW, WW) + R(999, 1000)))
+    s.let('S', SQ); s.let('X1', WX); s.let('Y0', WY); s.let('MW', WW); s.let('HS', WH); s.let('PX', 50 * SQ)
     if k is None: return s
-    w = (INV_CLIP,)
-    a, b = INV_BAND
-    s.on(w, [('scaleX', SH), ('scaleY', SH), ('x', X0), ('y', Y0)])
-    for g in (('at', 0), ('nm', 'b'), ('nm', 'f')):   # the head, body and bottom pieces of the background: the plain band takes the extra width
-        s.on(w + ('bgFrame_mc', ('at', 0), g, ('at', 1)), [('scaleX', (INV_ADD + EX) / (b - a))])
-        s.on(w + ('bgFrame_mc', ('at', 0), g, ('at', 2)), [('x', b + INV_ADD + EX)])
-    s.on(w + ('bgFrame_mc', ('at', 0), ('nm', 'b')), [('scaleY', (H - INV_BOT_ART - INV_HEAD_ART) / INV_BODY_ART)])
-    s.on(w + ('bgFrame_mc', ('at', 0), ('nm', 'f')), [('y', H - INV_BOT_ART)])
-    for name in ('listHolder_mc', 'faderTop'):
-        s.on(w + (name,), [('scaleX', k[name][3] * RR), ('scaleY', k[name][4] * RR)])
-    s.on(w + ('faderBot',), [('y', INV_LIST_Y + LH * RR), ('scaleX', k['faderBot'][3] * RR), ('scaleY', k['faderBot'][4] * RR)])
-    s.on(w + ('keyHintsHolder_mc',), [('y', H - (INV_H0 - k['keyHintsHolder_mc'][2]) * RR), ('x', k['keyHintsHolder_mc'][1] + EX / 2)])
-    s.on(w + ('hitArea_mc',), [('scaleX', k['hitArea_mc'][3] * (INV_W + EX - 4) / (INV_W - 4)), ('scaleY', k['hitArea_mc'][4] * (H - 40) / (INV_H0 - 40))])
-    s.on(w + ('sortByBg_mc',), [('scaleX', k['sortByBg_mc'][3] * RR), ('scaleY', k['sortByBg_mc'][4] * LH / INV_LIST_H0 * RR)])
-    s.on(w + ('sortBy_mc',), [('y', fmin(k['sortBy_mc'][2], H - INV_SORT_BOT)), ('x', k['sortBy_mc'][1] + EX / 2)])     # the sort popup stays inside a short window
-    s.on(w + ('title_txt',), [('x', k['title_txt'][1] + EX / 2)])
-    for name in INV_RIGHT: s.on(w + (name,), [('x', k[name][1] + EX)])
+    w = (INV_CLIP,); bg = w + ('bgFrame_mc', ('at', 0))
+    s.on(w, [('scaleX', 1), ('scaleY', 1), ('x', WX), ('y', WY)])
+    FAR0 = (1 - XS) * CS_FAR * 2; FAR1 = XS * CS_FAR * 2
+    def pc(g, kk, x, y, kx, ky): s.on(bg + (('nm', g), ('at', kk)), [('x', x), ('y', y), ('scaleX', kx), ('scaleY', ky)])
+    gw, gh = INV_BAG[2], INV_BAG[3]
+    pc('j0', 0, RX, FT + FH, RW / gw, (PZ - FT - FH) / gh)                      # the bag's ground (under the gap above the bag too)
+    pc('j0', 1, 0 + FAR1, 0, WW / gw, WH / gh)                                   # state 0: the whole window
+    # the filter row's ornate bar: ornaments x FH / bar height, the two plain spans share the rest of RW
+    bx, by, bh, parts = INV_BAR; kb = FH / bh; fixed = sum(w_ for w_, keep, _ in parts if keep); x = RX
+    nplain = len([1 for _, keep, _ in parts if not keep]); EM = s.let('EM', parts[0][0] * kb)   # the end ornament: the row's inner margin
+    for kk, (w_, keep, _) in enumerate(parts):
+        kx = kb if keep else (RW - fixed * kb) / (nplain * w_)
+        pc('j1', kk, x, FT, kx, kb); x = x + w_ * kx
+    # the bag
+    s.on(w + ('listHolder_mc',), [('x', BX), ('y', BY), ('scaleX', SQ), ('scaleY', SQ)])
+    s.on(w + ('faderTop',), [('x', BX), ('y', BY), ('scaleX', k['faderTop'][3] * SQ * INV_LIST_W / INV_LIST_W0), ('scaleY', k['faderTop'][4] * SQ)])
+    s.on(w + ('faderBot',), [('x', BX), ('y', BY + LH * SQ), ('scaleX', k['faderBot'][3] * SQ * INV_LIST_W / INV_LIST_W0), ('scaleY', k['faderBot'][4] * SQ)])
     s.on(w + (('dyn', 'list'),), calls=[('setFrame', [INV_LIST_W, LH])])
     s.on(w + (('dyn', 'list'), ('dyn', 'm_scrollbar_mc')), calls=[('scrollbarVisible', [])])
-    s.on((('nm', INV_BTN),), [('x', X0 + INV_BTN_AT[0] * SH), ('y', Y0 + INV_BTN_AT[1] * SH), ('scaleX', INV_BTN_AT[2] * SH / BTN_ART), ('scaleY', INV_BTN_AT[2] * SH / BTN_ART)])
-    # keepCustomInScreen: the part of the stage the engine keeps on the screen (PC: uiLeft 0, uiRight 680, uiTop 45, uiMinHeight 190, uiMinWidth 150)
-    for prop, e in (('uiLeft', X0), ('uiRight', X0 + INV_W * S), ('uiTop', Y0 + 45 * SH), ('uiMinHeight', 190 * SH), ('uiMinWidth', 150 * SH)): s.root(prop, ffloor(e + R(1, 2)))
-    s.let('DX', X0 - V('X0'))
-    # phone 23.11 (run1123): with 'center' the engine still put both movies at x 881 (its centring does not use setMcSize), the window shifted
-    # left inside the movie (X1 < 0) and Iggy cut it at the movie's left edge; the inventory also sat ~70 px too high. 'topleft' = origin 0, 0
-    # whatever size the engine believes; the window centres itself inside (dmOX still corrects a non-zero origin)
-    s.ei('setMcSize', SW, 1080); s.ei('setPosition', 'topleft', 'screen', 'topleft')
+    s.on(w + ('sortByBg_mc',), [('x', RX), ('y', FT), ('scaleX', RW / 665), ('scaleY', (PZ - FT) / 827)])
+    SP = s.let('SP', fmin(F, PH / 470))
+    s.on(w + ('sortBy_mc',), [('x', RX + RW / 2 - (k['sortBy_mc'][1] + 158) * 0 - 331 * SP), ('y', PY + (PH - 444 * SP) / 2 - 163 * SP), ('scaleX', SP), ('scaleY', SP)])
+    # the filter row: party tabs and All at the left, the party view check after them, sort / sort by / the gold at the right
+    CY_ = FT + FH / 2
+    s.on(w + ('tabs_mc',), [('x', RX + EM), ('y', CY_ - 20 * SB), ('scaleX', SB), ('scaleY', SB)])
+    s.on(w + ('allBtn_mc',), [('x', RX + EM + (INV_TABS_W + 8) * SB), ('y', CY_ - 13 * SB), ('scaleX', SB), ('scaleY', SB)])
+    s.on(w + ('view_mc',), [('x', RX + EM + (INV_TABS_W + 100) * SB), ('y', CY_ - 14 * SB), ('scaleX', SB), ('scaleY', SB)])
+    GX = RX + RW - EM - 138 * SB
+    s.on(w + ('totalGold_mc',), [('x', GX), ('y', CY_ - 18 * SB), ('scaleX', SB), ('scaleY', SB)])
+    s.on(w + ('sortByBtn_mc',), [('x', GX - 10 * SB - 140 * SB), ('y', CY_ - 14 * SB), ('scaleX', SB), ('scaleY', SB)])
+    s.on(w + ('autosortBtn_mc',), [('x', GX - 10 * SB - 280 * SB), ('y', CY_ - 14 * SB), ('scaleX', SB), ('scaleY', SB)])
+    # the clicks this window eats: the filter row and the bag (the rest is the sheet's); state 0: the whole window
+    hx, hy, hw, hh = RX - GG / 2 + FAR0 * 0, FT, RW + GG, PZ - FT + GM
+    s.on(w + ('hitArea_mc',), [('x', XS * hx), ('y', XS * hy), ('scaleX', k['hitArea_mc'][3] * (XS * hw + (1 - XS) * WW) / 676), ('scaleY', k['hitArea_mc'][4] * (XS * hh + (1 - XS) * WH) / 1016)])
+    # the PC title, close and minimise: state 0 only (in state 1 the sheet's title bar is the window's)
+    s.on(w + ('title_txt',), [('x', WW / 2 - 252 + FAR1), ('y', 14)])
+    s.on(w + ('close_mc',), [('x', WW - 12 - INV_CLOSE + FAR1), ('y', 12), ('scaleX', R(INV_CLOSE, 23)), ('scaleY', R(INV_CLOSE, 23))])
+    for n in ('minimise_mc', 'keyHintsHolder_mc'): s.on(w + (n,), [('x', CS_FAR * 2)])
+    for prop, e in (('uiLeft', WX), ('uiRight', WX + WW), ('uiTop', WY), ('uiMinHeight', 190), ('uiMinWidth', 150)): s.root(prop, ffloor(e + R(1, 2)))
+    s.let('DX', WX)
+    s.ei('setMcSize', V('SW'), 1080); s.ei('setPosition', 'topleft', 'screen', 'topleft')
     return s
 
 
@@ -643,36 +674,24 @@ def _kids(swf, sprite):
 
 
 def party(data, env=None):
-    """env = dict(C, ST, DW) the baked layout (default: the iPad's cell on a 16:9 screen, the plain window); dmLay computes the same at run time"""
+    """env = dict(C, ST, DW, BT) the baked layout (default: the iPad's cell on a 16:9 screen, the inventory window); dmLay computes the same at run time"""
     swf = Swf(data); mv = gr.Movie(swf)
     root = _root_names(swf); win = root[INV_CLIP]['char']; assert _mat(root[INV_CLIP]) == (0.0, 20.0, 1.0, 1.0), 'inventory_mc is not at 0,20'
     kids = _kids(swf, win)
     need = ['bgFrame_mc', 'hitArea_mc', 'faderTop', 'faderBot', 'close_mc', 'keyHintsHolder_mc', 'sortByBg_mc', 'sortBy_mc', 'listHolder_mc', 'minimise_mc', 'dragHit_mc', 'title_txt',
             'tabs_mc', 'view_mc', 'autosortBtn_mc', 'sortByBtn_mc', 'allBtn_mc', 'totalGold_mc']
     assert all(n in kids for n in need), 'partyInventory_1 children: %s' % sorted(kids)
-    assert kids['listHolder_mc'][2] == INV_LIST_Y and kids['faderBot'][2] == INV_LIST_Y + INV_LIST_H0, 'list / fader place'
-    # the background: frame 1 of bgFrame_mc is one 680 x 1056 bitmap -> head (3 columns: left, a band of the plain middle stretched, right),
-    # body (56 plain rows, stretched to the list's height by dmLay), bottom edge (moved by dmLay)
+    assert kids['listHolder_mc'][2] == INV_LIST_Y, 'list place'
+    # the background: frame 1 of bgFrame_mc is one 680 x 1056 bitmap -> the bag's ground (j0: the bag, the whole window in state 0) and the
+    # filter row's ornate bar (j1, 5 pieces); everything else of the window is the sheet movie's (state 1)
     holder = kids['bgFrame_mc'][0]; shape = list(gr.frame_state(swf.tags[_def_index(swf, holder)][1], 1).values()); assert len(shape) == 1; shape = shape[0]['char']
     bid, bw, bh = bitmap_of(swf, shape); assert (bw, bh) == (INV_W0, INV_H0), 'background %d x %d' % (bw, bh)
-    a, b = INV_BAND; ax = INV_ADD / float(b - a)
-    def cols(sy, h): return [(0, 0, 0, sy, b, h, 1.0), (b, 0, a, sy, b - a, h, ax), (b + INV_ADD, 0, b, sy, bw - b, h, 1.0)]
-    new, ndef = pieces_sprite(swf, holder, bid, bw, bh, [(None, 0, 0, cols(0, INV_HEAD_ART)), ('b', 0, INV_HEAD_ART, cols(INV_BODY_SRC, INV_BODY_ART)), ('f', 0, 0, cols(bh - INV_BOT_ART, INV_BOT_ART))])
+    gx, gy, gw, gh = INV_BAG; bx, by, bhh, parts = INV_BAR
+    bar = [(0, 0, sx, by, w_, bhh, 1.0 if keep else STRETCH) for w_, keep, sx in parts]
+    new, ndef = pieces_sprite(swf, holder, bid, bw, bh, [('j0', 0, 0, [(0, 0, gx, gy, gw, gh, STRETCH)] * 2), ('j1', 0, 0, bar)])
     swap_char(swf, holder, 1, shape, new)
-    # the wider window: what stands right of the band moves with the right part, what is centred moves half way, what spans the window grows
-    kx = INV_W / float(INV_W0); lx = INV_LIST_W / float(INV_LIST_W0)
-    def fix(name, rec):
-        x, y, sx, sy = _mat(rec)
-        if name in ('close_mc', 'minimise_mc', 'autosortBtn_mc', 'sortByBtn_mc', 'allBtn_mc', 'totalGold_mc'): _set(rec, dx=INV_ADD)
-        elif name in ('title_txt', 'sortBy_mc', 'keyHintsHolder_mc'): _set(rec, dx=INV_ADD / 2.0)
-        elif name == 'hitArea_mc': _set(rec, sx=sx * (INV_W - 4) / (INV_W0 - 4.0))
-        elif name in ('faderTop', 'faderBot'): _set(rec, sx=sx * lx)
-        elif name == 'sortByBg_mc': _set(rec, sx=sx * (INV_LIST_W + 15) / (INV_LIST_W0 + 15.0))
-    edit_places(swf, win, fix)
-    kids = _kids(swf, win)
-    cs = INV_CLOSE / (INV_HEAD_S * INV_K * 23.0)   # the close button: INV_CLOSE screen px at the header's scale (every cell >= 60), centred on the PC one
-    edit_places(swf, win, lambda name, rec: _set(rec, x=kids['close_mc'][1] + 11.5 - 11.5 * cs, y=kids['close_mc'][2] + 11.5 - 11.5 * cs, sx=cs, sy=cs) if name == 'close_mc' else None)
-    # a bag's header (playerInventory): its frame, body and drop mark grow with the grid, gold / weight / the fold mark stay at the right end
+    # a bag's header (playerInventory): its frame, body and drop mark follow the list's width, gold / weight / the fold mark stay at the right end
+    lx = INV_LIST_W / float(INV_LIST_W0)
     bag = [c for c, n in mv.classes.items() if n == 'playerInventory']; assert len(bag) == 1
     bk = _kids(swf, bag[0]); assert all(n in bk for n in ('invBg_mc', 'frame_mc', 'drop_mc', 'weightAndGoldIcons_mc', 'gold_txt', 'weight_txt', 'toggleInd_mc')), sorted(bk)
     def bagfix(name, rec):
@@ -680,30 +699,28 @@ def party(data, env=None):
         if name in ('invBg_mc', 'frame_mc', 'drop_mc'): _set(rec, sx=sx * lx)
         elif name in ('weightAndGoldIcons_mc', 'gold_txt', 'weight_txt', 'toggleInd_mc'): _set(rec, dx=INV_ADD)
     edit_places(swf, bag[0], bagfix)
-    global BTN_ART
-    BTN_ART, nbtn = doll_button(swf, INV_BTN)
 
-    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
+    env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 1); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
     spec = inv_spec(_kids(swf, win)); res = spec.run(env); rest = bake(swf, res)
     swf.head = rect_bytes(STAGE_WMAX, STAGE_H) + swf.head[-4:]
 
     code = Code(swf)
-    d = window_doc(code, spec, [(INV_CLIP, 'minimise_mc'), (INV_CLIP, 'dragHit_mc')], INV_BTN, 4, ctx=((INV_CLIP,), 'partyInventory_1'), pads=HEAD_PADS)
+    window_doc(code, spec, [(INV_CLIP, 'minimise_mc'), (INV_CLIP, 'dragHit_mc')], None, 3, ctx=((INV_CLIP,), 'partyInventory_1'), pads=HEAD_PADS)
     # the sort popup: its OK sends setSortFilter (handled) and applySortFilters (NOT in main.raw: nothing would be sorted) -> then `autosort`,
     # the call of the sort button, which the class handles (main+0x13a77f0)
     sp = code.of('sortPopup_21', 'okPressed')
     sp.wrap('okPressed', 'dmOkOrig', lambda n: HEAD + sp.call_orig('dmOkOrig', n) + sp.ei('autosort') + [('returnvoid',)])
     # a cell's tooltip rectangle in stage px (the PC code passes the cell's own 50 x 50)
     w = code.of('partyInventory_1', 'onCellCreate')
-    px = [('getlocal0',), ('getproperty', w.P('scaleX')), ('getlocal0',), ('getproperty', w.P('listHolder_mc')), ('getproperty', w.P('scaleX')), ('multiply',)] + num(50) + [('multiply',)]   # the cells' scale: clip (header) x list part
+    px = [('getlocal0',), ('getproperty', w.P('scaleX')), ('getlocal0',), ('getproperty', w.P('listHolder_mc')), ('getproperty', w.P('scaleX')), ('multiply',)] + num(50) + [('multiply',)]   # the cells' scale: clip x list
     w.wrap('onCellCreate', 'dmCellOrig', lambda n: HEAD + w.call_orig('dmCellOrig', n) + [('getlocal1',), ('iffalse', 'end')] +
            w.setp(1, 'tooltipOverrideW', px) + w.setp(1, 'tooltipOverrideH', px) + [('L', 'end'), ('returnvoid',)])
-    # the grid the engine reads once from inventory_mc (main+0x13aa5b0: cSize, cSpacing, bgDiscrap, invColW, portraitH / W): the iPad's 13 columns, pitch 56
+    # the grid the engine reads once from inventory_mc (main+0x13aa5b0: cSize, cSpacing, bgDiscrap, invColW, portraitH / W)
     for name, v in (('invColW', INV_COLS), ('cSpacing', INV_PITCH - 50), ('invW', INV_LIST_W), ('invH', int(inv_geom()['LH']))): set_const(w, name, v)
     made = code.done()
-    S = env['S']
-    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['X1'], env['Y0'], env['X1'] + INV_W * S, env['Y0'] + env['HS']), bitmap=bid, shape=new,
-                             stage=(STAGE_WMAX, STAGE_H), spec=spec)
+    e = env
+    return swf.write(), dict(placed=[], defs=ndef, methods=made, env=env, rest=rest, window=(e['WX'] + e['RX'], e['WY'] + e['FT'], e['WX'] + e['RX'] + e['RW'], e['WY'] + e['PZ']),
+                             bitmap=bid, shape=new, stage=(STAGE_WMAX, STAGE_H), spec=spec)
 
 
 # ---------------------------------------------------------------- characterSheet_p
@@ -712,65 +729,161 @@ def cs_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
     env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); cs_spec(None).run(env); return env
 
 
+def frame_groups(prefix=''):
+    """the window frame's pieces of the PC sheet background (art px, SA_*): [(group name, 0, 0, pieces)] for pieces_sprite. Every piece is
+    placed at 0,0 here and put in its place / size by dmLay (frame_spec). Depth order = drawing order: the body first, the top strip last."""
+    bx, by, bw, bh = SA_BODY; dx, dy, dw, dh = SA_DOLL; ox, oy, ow, oh, oe = SA_BOX; px, py, pw, ph, pc = SA_PANEL; lx, rx, ty = SA_TILE
+    one = lambda x, y, w, h: (0, 0, x, y, w, h, 1.0)          # drawn 1 px larger (no hairline seam to its neighbour)
+    st = lambda x, y, w, h: (0, 0, x, y, w, h, STRETCH)       # stretched by dmLay: exactly its px (a bleed pixel x 30 overshoots)
+    box = [one(ox, oy, ow, oe), st(ox, oy + oe, ow, oh - 2 * oe), one(ox, oy + oh - oe, ow, oe)]
+    groups = [('w0', [st(bx, by, bw, bh) for _ in range(6)]),                                           # the body: 6 rectangles round the panels
+              ('w7', [one(dx, dy, dw, dh)]),                                                             # the doll frame
+              ('w6', [one(px, py, pc, pc), st(px + pc, py, pw - 2 * pc, pc), one(px + pw - pc, py, pc, pc),    # the parchment frame: TL T TR
+                      st(px, py + pc, pc, ph - 2 * pc), st(px + pw - pc, py + pc, pc, ph - 2 * pc),             # L R
+                      one(px, py + ph - pc, pc, pc), st(px + pc, py + ph - pc, pw - 2 * pc, pc), one(px + pw - pc, py + ph - pc, pc, pc)]),   # BL B BR
+              ('w4', box + box),                                                                         # the black boxes: HP / AP / Source; the stat strip
+              ('w5', [one(*SA_PLAQUE)]),
+              ('w3', [st(0, ty, SA_RAIL, SA_BOT - ty), st(CS_W - SA_RAIL, ty, SA_RAIL, SA_BOT - ty)]),
+              ('w2', [one(0, SA_BOT, SA_L, SA_BOT_H), one(SA_R, SA_BOT, CS_W - SA_R, SA_BOT_H)] + [one(SA_BOTP, SA_BOT, SA_P, SA_BOT_H) for _ in range(NPER)]),
+              ('w1', [one(0, 0, SA_L, SA_TOP_H), one(0, SA_TOP_H, lx, ty - SA_TOP_H), one(SA_R, 0, CS_W - SA_R, SA_TOP_H), one(rx, SA_TOP_H, CS_W - rx, ty - SA_TOP_H)] +
+                     [one(SA_L, 0, SA_P, SA_TOP_H) for _ in range(NPER)])]
+    return [(prefix + n, 0, 0, p) for n, p in groups]
+
+
+def frame_spec(s, bg):
+    """dmLay statements of the frame pieces (win_lets' variables; window px; XS = the state): bg = the path of the pieces' outer sprite.
+    State 0 (the sheet): the body black fills row A and the gutters round the doll and the parchment panel. State 1 (the inventory window):
+    the parchment and the plaque go, the stat strip's box comes, and the right column from the filter row down (FT .. PZ) stays OPEN - the
+    inventory movie draws the filter row and the bag there (the two movies' drawings never overlap: their order on the screen is the engine's)."""
+    F, WW, WH, PY, PZ, PH, LX, LW, RX, RW, D, CT, IH, SR, XS, FT = [V(n) for n in ('F', 'WW', 'WH', 'PY', 'PZ', 'PH', 'LX', 'LW', 'RX', 'RW', 'D', 'CT', 'IH', 'SR', 'XS', 'FT')]
+    FAR = XS * CS_FAR * 2
+    def pc(g, k, x, y, kx, ky): s.on(bg + (('nm', g), ('at', k)), [('x', x), ('y', y), ('scaleX', kx), ('scaleY', ky)])
+    bw, bh = SA_BODY[2], SA_BODY[3]
+    TB = SA_TOP_H * F; Y1 = s.let('BY1', PY + XS * (FT - PY)); H1 = PZ - Y1
+    for k, (x, y, w, h) in enumerate(((SR, TB, WW - 2 * SR, Y1 - TB), (SR, PZ, WW - 2 * SR, WH - (SA_BOT_H - SA_BOT_BAR) * F - PZ), (SR, Y1, LX - SR, H1),
+                                      (LX + LW, Y1, RX - LX - LW, H1), (RX + RW, Y1, WW - SR - RX - RW, H1), (LX + (1 - XS) * CS_FAR * 2, FT, LW, PY - FT))):
+        pc('w0', k, x, y, w / bw, h / bh)
+    pc('w7', 0, LX, PY, D, D)
+    pw, ph, c = SA_PANEL[2], SA_PANEL[3], SA_PANEL[4]
+    X1, Y2 = RX + RW - c * F + FAR, PY + PH - c * F; ew, eh = (RW - 2 * c * F) / (pw - 2 * c), (PH - 2 * c * F) / (ph - 2 * c)
+    for k, (x, y, kx, ky) in enumerate(((RX + FAR, PY, F, F), (RX + c * F + FAR, PY, ew, F), (X1, PY, F, F), (RX + FAR, PY + c * F, F, eh), (X1, PY + c * F, F, eh),
+                                         (RX + FAR, Y2, F, F), (RX + c * F + FAR, Y2, ew, F), (X1, Y2, F, F))):
+        pc('w6', k, x, y, kx, ky)
+    # the side rails, the bottom and top strips (the period repeated n times, each scaled to the exact width: 0.9..1.1)
+    rt = SA_TILE[2]
+    pc('w3', 0, 0, rt * F, F, (WH - SA_BOT_H * F - rt * F) / (SA_BOT - rt)); pc('w3', 1, WW - SR, rt * F, F, (WH - SA_BOT_H * F - rt * F) / (SA_BOT - rt))
+    n = s.let('NP', fmax(1, ffloor((WW / F - SA_L - (CS_W - SA_R)) / SA_P + R(1, 2))))
+    kk = s.let('KP', (WW / F - SA_L - (CS_W - SA_R)) / (n * SA_P))
+    for g, y0, k0 in (('w2', WH - SA_BOT_H * F, 2), ('w1', 0, 4)):
+        pc(g, 0, 0, y0, F, F); pc(g, 1 if g == 'w2' else 2, WW - (CS_W - SA_R) * F, y0, F, F)
+        for k in range(NPER):
+            vis = V('NV%d' % k) if g == 'w1' else s.let('NV%d' % k, fmax(0, fmin(1, n - k)))   # 1: copy k is drawn, 0: it waits off the window
+            pc(g, k0 + k, vis * (SA_L * F + k * SA_P * F * kk) + (1 - vis) * CS_FAR * 2, y0, F * kk, F)
+    pc('w1', 1, 0, SA_TOP_H * F, F, F); pc('w1', 3, WW - (CS_W - SA_TILE[1]) * F, SA_TOP_H * F, F, F)
+
+
+def box_spec(s, bg, k3, x, y, w, h):
+    """the black box (3 pieces of group w4 from index k3): x, y, w, h window px; its edge rows at the frame's scale"""
+    ow, oh, oe = SA_BOX[2], SA_BOX[3], SA_BOX[4]; F = V('F')
+    def pc(k, yy, ky): s.on(bg + (('nm', 'w4'), ('at', k3 + k)), [('x', x), ('y', yy), ('scaleX', w / ow), ('scaleY', ky)])
+    pc(0, y, F); pc(1, y + oe * F, (h - 2 * oe * F) / (oh - 2 * oe)); pc(2, y + h - oe * F, F)
+
+
+CS_PANEL0 = (24, 293)            # the PC list panel's top left (own px of stats_mc): what the panel content keeps its place to
+CS_CONTENT = ['mainStats_mc', 'combatAbilityHolder_mc', 'civicAbilityHolder_mc', 'talentHolder_mc', 'tagsHolder_mc', 'visualHolder_mc', 'customStats_mc',
+              'invTabHolder_mc', 'skillTabHolder_mc', 'panelBg2_mc']   # (the last three: the game master's; they keep the content's transform)
+CS_WARN = ['attrPointsWrn_mc', 'combatAbilityPointsWrn_mc', 'civilAbilityPointsWrn_mc', 'talentPointsWrn_mc']   # the tabs' "points to spend" glows
+CS_TABS0 = (4, 205)              # tabsHolder_mc (own px of stats_mc); a tab 76 x 56 at x 66 k, y 21 / 23 (deselected / selected)
+CS_TABS_W = 340                  # 5 tabs, 76 wide at a 66 pitch
+CS_SB = (342 - 293, 12)          # the lists' scroll bars (in scrollbarHolder_mc, PC at 9,342): their top below the panel's top; px left of the
+                                 # content's right end (the PC had them in the frame's left groove)
+CS_TOGGLE = 'dmDoll_mc'          # the window button: the sheet <-> the inventory (our plate + glyph, on the title bar's left tile)
+CS_TILE_C = (33, 48)             # art px: the centre of the title bar's left tile (the PC window icon) - the toggle; the right tile centre is
+                                 # mirrored (CS_W - 33): the close button
+TOGGLE_PX = 54                   # frame art px of the toggle plate (x F; iPad 73 at its 1.0)
+CS_TOGGLE2 = 'dmDoll2_mc'        # the same button in the inventory window (state 1): back to the sheet (its own glyph)
+STRIP_PITCH = 30                 # own px between the strip's two rows (secondary stats / resistances)
 def cs_spec(k, glow=None):
-    """dmLay of characterSheet_p. Owner 23.11 (phone shots against the iPad's characterSheet_t): state 0 = the sheet as the iPad shows it - the
-    doll panel (the doll's body: slots, the 3D character, its numbers) on the LEFT, the stat columns / tab lists on the right, one block, the
-    doll as tall as the sheet; state 1 = the doll panel of the equipment view, beside the bag with the bag's top and height (bag_lets 'Q').
-    The clip shows its own px RX..RX+RW, RY..RY+RH (scrollRect); a clip px p is on the screen at CX + (p - RX) * S, Y0 + (q - RY) * S. The doll's
-    pieces (bg d0, equip_mc, dmDollBg) are placed from their doll-frame px (x from CS_SPLIT, y from CS_EQ_Y_DOLL = the body's top) at XA, YA
-    scaled KD: state 1 = the PC places (KD 1, the crop starts at the body's top), state 0 = left of the sheet's px 0, the body's top at 0."""
-    s = Spec(); C, DW = V('C'), V('DW'); OXK = V('OK') * V('OX')
-    AVH = s.let('AVH', fmax(600, fmin(1080, V('BT'))) - TOP_M)            # the height above the host's bottom limit (the hot bar's top)
-    HX0, HSX = (k['hitArea_mc'][1], k['hitArea_mc'][3]) if k else (0.0, 1.0)
-    def sheet(a):
-        S1 = a.let('S1', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (DW - 2 * MARGIN) / CS_W), AVH / (CS_HEAD + CS_BOT + CS_PB_MIN)))
-        PB = a.let('PB', fmax(CS_PB_MIN, fmin(CS_PB0, ffloor(AVH / S1 - CS_HEAD - CS_BOT))))
-        H = a.let('H', CS_HEAD + PB + CS_BOT)
-        KD = a.let('KD', H / DOLL_BODY_H)                                    # the doll as tall as the sheet
-        S = a.let('S', fmin(S1, (DW - 2 * MARGIN - 2 * COL_RES - DOLL_GAP) / (CS_W + CS_DOLL_W * KD)))   # the block (doll + sheet) fits the screen
-        MW = a.let('MW', ffloor(CS_DOLL_W * KD * S + DOLL_GAP + CS_W * S + R(999, 1000)))
-        RX = a.let('RX', 0 - CS_DOLL_W * KD - DOLL_GAP / S)
-        a.let('CX', (DW - MW) / 2 - OXK); a.let('Y0', TOP_M + (AVH - H * S) / 2)
-        for n, v in (('RY', 0), ('RW', CS_W - RX), ('RH', H), ('XA', RX), ('YA', 0), ('XS', 0), ('XB', CS_BTN_AT[0]), ('HX', RX), ('HK', HSX * (CS_W - RX) / CS_W)): a.let(n, v)
-    def doll(a):
-        eq_block(a, C, DW, V('BT'))
-        bag_lets(a, 'Q', C, V('BT'), DW - 2 * MARGIN - 2 * COL_RES - V('DP'))
-        S = a.let('S', fmin((V('DP') - DOLL_GAP) / CS_DOLL_W, V('QHS') / DOLL_BODY_H))
-        a.let('PB', CS_PB_MIN); a.let('H', DOLL_BODY_H); a.let('KD', 1); a.let('MW', V('MQ'))
-        a.let('CX', (DW - V('MQ')) / 2 - OXK + V('DP') - DOLL_GAP - CS_DOLL_W * S)   # its right edge DOLL_GAP left of the bag (bag X1 = block + DP)
-        a.let('Y0', V('QY0') + (V('QHS') - DOLL_BODY_H * S) / 2)
-        for n, v in (('RX', CS_SPLIT), ('RY', CS_EQ_Y_DOLL), ('RW', CS_DOLL_W), ('RH', DOLL_BODY_H), ('XA', CS_SPLIT), ('YA', CS_EQ_Y_DOLL),
-                     ('XS', CS_FAR), ('XB', CS_FAR), ('HX', HX0), ('HK', HSX)): a.let(n, v)
-    s.state('ST', doll, sheet)
-    S, PB, H, MW, CX, Y0, RX, RY, RW, RH, XA, YA, XS, KD = [V(n) for n in ('S', 'PB', 'H', 'MW', 'CX', 'Y0', 'RX', 'RY', 'RW', 'RH', 'XA', 'YA', 'XS', 'KD')]
-    SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
-    s.let('DX', CX)
+    """dmLay of characterSheet_p (owner 23.11: the iPad's characterSheet_t structure in our art). The clip stats_mc stands at the window's top
+    left at scale 1, every child is placed in window px (win_lets): the frame pieces (frame_spec), the HP / AP / Source box (the PC's infoStatList,
+    moved out of the doll to row A), the doll (equip_mc + its frame, scale D), the 5 tabs and the tab title plaque, ONE parchment panel with
+    the content (mainStats / the tab lists, scale S, two columns).
+    State 1 = the INVENTORY window's frame and left part (the inventory movie, partyInventory_p, draws its filter row and bag in the open
+    right column): the same title bar (its button now goes back to the sheet), the same HP box and doll in the same place, and the stat strip
+    in row A's right part - mainStats_mc's secondary stats and resistances laid out as two rows of value + icon (dmStrip, every frame)."""
+    s = Spec(); C, DW, ST = V('C'), V('DW'), V('ST'); OXK = V('OK') * V('OX')
+    F, S, D, WW, WH = win_lets(s, C, DW, V('BT'), OXK)
+    WX, WY, LX, LW, RX, RW, PY, PH, CT, IH, SH, FT = [V(n) for n in ('WX', 'WY', 'LX', 'LW', 'RX', 'RW', 'PY', 'PH', 'CT', 'IH', 'SH', 'FT')]
+    # the HP / AP / Source rows (InfoStat: 22 + 4 own a row, INFO_W wide) at SI: as big as the box (row A x the doll column) holds, not over S
+    BP = 8 * F
+    SI = s.let('SI', fmin(S, fmin((IH - 2 * BP) / 76, (LW - 2 * BP) / INFO_W)))
+    SS = s.let('SS', fmin(S, (SH - BP) / (2 * STRIP_PITCH)))      # the stat strip's two rows in its box
+    PBo = s.let('PB', (PH - 2 * PADP * F) / S)                     # the tab lists' frame height in their own px (cs_lists)
+    PCX, PCY = s.let('PCX', RX + PADP * F), s.let('PCY', PY + PADP * F)
+    s.state('ST', lambda a: a.let('XS', 1), lambda a: a.let('XS', 0))
+    XS = V('XS'); FAR = XS * CS_FAR * 2
+    s.let('CX', WX); s.let('CY', WY)
+    s.let('SW', ffloor(fmax(DW, WW) + R(999, 1000)))
+    s.let('DX', WX)
     if k is None: return s
-    w = (CS_CLIP,)
-    s.on(w, [('scaleX', S), ('scaleY', S), ('x', CX), ('y', Y0)])
-    s.rect(w, RX, RY, RW, RH)
-    bg = w + ('bg_mc', ('at', 0))
-    s.on(bg + (('nm', 's0'),), [('x', XS)])
-    s.on(bg + (('nm', 'sb'),), [('x', XS), ('scaleY', (H - CS_FOOT_ART - CS_BODY_Y) / CS_BODY_ART)])
-    s.on(bg + (('nm', 'sf'),), [('x', XS), ('y', H - CS_FOOT_ART)])
-    # the doll: doll-frame px (x - CS_SPLIT, y - CS_EQ_Y_DOLL) x KD from XA, YA (the d0 group's own rows above the body - title, equipment bar - are cropped)
-    s.on(bg + (('nm', 'd0'),), [('x', XA), ('y', YA - CS_EQ_Y_DOLL * KD), ('scaleX', KD), ('scaleY', KD)])
-    s.on(w + ('equip_mc',), [('x', XA + (k['equip_mc'][1] - CS_SPLIT) * KD), ('y', YA), ('scaleX', k['equip_mc'][3] * KD), ('scaleY', k['equip_mc'][4] * KD)])
-    s.on(w + (('nm', 'dmDollBg'),), [('x', XA + (k['dmDollBg'][1] - CS_SPLIT) * KD), ('y', YA - KD), ('scaleX', k['dmDollBg'][3] * KD), ('scaleY', k['dmDollBg'][4] * KD)])
-    s.on(w + ('equipment_txt',), [('x', CS_FAR)])
-    s.on(w + ('panelBg1_mc',), [('scaleY', PB / CS_PB0)])
-    s.on(w + (('nm', 'dmPanel2'),), [('x', k['dmPanel2'][1] + XS), ('scaleY', PB / CS_PB0)])
-    s.on(w + ('mainStats_mc',), [('x', k['mainStats_mc'][1] + XS)])
-    s.on(w + ('charInfo_mc',), [('x', k['charInfo_mc'][1] + XS)])
-    s.on(w + ('title_txt',), [('x', CS_TITLE_X[0])])
-    s.on(w + ('hitArea_mc',), [('x', V('HX')), ('scaleX', V('HK')), ('scaleY', k['hitArea_mc'][4] * (H - 17) / CS_HIT_H)])
+    w = (CS_CLIP,); bg = w + ('bg_mc', ('at', 0))
+    s.on(w, [('scaleX', 1), ('scaleY', 1), ('x', WX), ('y', WY)])
+    s.rect(w, 0, 0, WW, WH)                                         # nothing of the clip outside the window (the PC's other parts wait far off)
+    frame_spec(s, bg)
+    box_spec(s, bg, 0, LX, CT, LW, IH)
+    box_spec(s, bg, 3, RX + (1 - XS) * CS_FAR * 2, CT, RW, SH)     # the stat strip's box (state 1)
+    s.on(bg + (('nm', 'w5'), ('at', 0)), [('x', RX + RW / 2 - SA_PLAQUE[2] / 2 * F + FAR), ('y', CT + IH - SA_PLAQUE[3] * F), ('scaleX', F), ('scaleY', F)])
+    # the doll: its frame piece, equip_mc and the backdrop from the doll frame's art origin (SA_DOLL = equip_mc's PC place 341, 253)
+    s.on(w + ('equip_mc',), [('x', LX), ('y', PY), ('scaleX', k['equip_mc'][3] * D), ('scaleY', k['equip_mc'][4] * D)])
+    s.on(w + (('nm', 'dmDollBg'),), [('x', LX + (k['dmDollBg'][1] - SA_DOLL[0]) * D), ('y', PY + (k['dmDollBg'][2] - SA_DOLL[1]) * D),
+                                      ('scaleX', k['dmDollBg'][3] * D), ('scaleY', k['dmDollBg'][4] * D)])
+    # the info rows: equip_mc's infoStatHolder_mc, in equip_mc's px (D): the rows' block centred in the box, the icon 13 own right of the edge
+    s.on(w + ('equip_mc', 'infoStatHolder_mc'), [('x', (BP + 13 * SI) / D), ('y', (CT + (IH - 74 * SI) / 2 + 3 * SI - PY) / D), ('scaleX', SI / D), ('scaleY', SI / D)])
+    # the tabs (F), their glows, the tab title plaque with the title, the points left (right of the plaque); off in state 1
+    TX, TY = s.let('TX', RX + RW / 2 - CS_TABS_W / 2 * F), s.let('TY', CT - 21 * F)
+    s.on(w + ('tabsHolder_mc',), [('x', TX + FAR), ('y', TY), ('scaleX', F), ('scaleY', F)])
+    for i, n in enumerate(CS_WARN):   # tab i of the PC's order (attributes, combat, civil, talents): its top right corner
+        s.on(w + (n,), [('x', TX + (66 * i + 64) * F + FAR), ('y', TY + 26 * F), ('scaleX', k[n][3] * F * R(6, 10)), ('scaleY', k[n][4] * F * R(6, 10))])
+    QY = CT + IH - SA_PLAQUE[3] * F
+    s.on(w + ('tabTitle_txt',), [('x', RX + RW / 2 - 165 * F + FAR), ('y', QY + 6 * F), ('scaleX', F), ('scaleY', F)])
+    s.on(w + ('pointsFrame_mc',), [('x', RX + RW - PADP * F - 223 * F + FAR), ('y', QY + 7 * F), ('scaleX', F), ('scaleY', F)])
+    # the panel: ONE parchment under the frame's hole (two halves, even mirrored, met in a dark fold: the 'open book' the owner rejected)
+    IN = 4 * F
+    s.on(w + ('panelBg1_mc',), [('x', RX + IN + FAR), ('y', PY + IN), ('scaleX', (RW - 2 * IN) / 314), ('scaleY', (PH - 2 * IN) / CS_PB0)])
+    for n in CS_CONTENT[1:]:   # the panel's content keeps its PC place to the panel's top left, x S
+        s.on(w + (n,), [('x', PCX + (k[n][1] - CS_PANEL0[0]) * S + FAR), ('y', PCY + (k[n][2] - CS_PANEL0[1]) * S), ('scaleX', k[n][3] * S), ('scaleY', k[n][4] * S)])
+    s.on(w + ('scrollbarHolder_mc',), [('x', PCX + (PANEL_W - CS_SB[1]) * S + FAR), ('y', PCY + CS_SB[0] * S), ('scaleX', S), ('scaleY', S)])
+    # mainStats_mc: the attributes tab's content (state 0) / the stat strip (state 1: two rows, dmStrip lays each list out as value + icon
+    # cells and centres the block on dmStX + dmStW / 2)
+    ms = w + ('mainStats_mc',); m = 'mainStats_mc'
+    def sheet_ms(a):
+        a.on(ms, [('x', PCX + (k[m][1] - CS_PANEL0[0]) * S), ('y', PCY + (k[m][2] - CS_PANEL0[1]) * S), ('scaleX', k[m][3] * S), ('scaleY', k[m][4] * S)])
+        a.on(ms + ('statHolder_mc',), [('x', 20), ('y', 30)]); a.on(ms + ('secStatHolder_mc',), [('x', 20 + COL2), ('y', 30)])
+        a.on(ms + ('resistancesStatHolder_mc',), [('x', 20), ('y', CS_RES_Y)])
+    def strip_ms(a):
+        a.on(ms, [('x', RX + BP), ('y', CT + (SH - 2 * STRIP_PITCH * SS) / 2 + 2 * SS), ('scaleX', SS), ('scaleY', SS)])
+        a.on(ms + ('statHolder_mc',), [('x', CS_FAR * 4), ('y', 30)]); a.on(ms + ('secStatHolder_mc',), [('x', 0), ('y', 0)])
+        a.on(ms + ('resistancesStatHolder_mc',), [('x', 0), ('y', STRIP_PITCH)])
+    s.state('ST', strip_ms, sheet_ms)
+    s.root('dmStX', RX + BP); s.root('dmStW', RW - 2 * BP)
     s.raw('lists', cs_lists)
-    for h, sy in sorted((glow or {}).items()):   # a tab list's glow behind it (PC: the 735 px panel) - else it shows under a shorter window
-        s.on(w + (h, 'bgGlow_mc'), [('scaleY', sy * PB / CS_PB0)])
-    # the doll button (to the equipment view) on the second column's head bar; the equipment view has the bag's own button (this one off)
-    s.on((('nm', INV_BTN),), [('x', CX + (V('XB') - RX) * S), ('y', Y0 + (CS_EQ_Y - 45 - RY) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
-    for prop, e in (('uiLeft', CX), ('uiRight', CX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
-    s.ei('setMcSize', SW, STAGE_H); s.ei('setPosition', 'topleft', 'screen', 'topleft')   # phone 23.11: see inv_spec ('center' put it at x 881, cut)
+    for h, sy in sorted((glow or {}).items()):   # a tab list's glow behind it (PC: the 735 px panel)
+        s.on(w + (h, 'bgGlow_mc'), [('scaleY', sy * PBo / CS_PB0)])
+    # the title bar: name - level centred (charInfo_mc: its text is centred on the clip's origin by setPlayerInfo), the close button on the right tile
+    TF = F * R(11, 10)
+    s.on(w + ('charInfo_mc',), [('x', WW / 2), ('y', 35 * F - 16 * TF), ('scaleX', TF), ('scaleY', TF)])
+    s.on(w + ('title_txt',), [('x', CS_FAR)]); s.on(w + ('equipment_txt',), [('x', CS_FAR)])
+    s.on(w + ('close_mc',), [('x', WW - CS_TILE_C[0] * F - CS_CLOSE / 2), ('y', CS_TILE_C[1] * F - CS_CLOSE / 2), ('scaleX', R(CS_CLOSE, 23)), ('scaleY', R(CS_CLOSE, 23))])
+    # the clicks the window eats: all of it on the sheet; in the inventory window its top (title bar + row A over the filter row) - the doll's
+    # own hit, slots and the inventory movie's hit area cover the rest
+    hy = XS * 0 + (1 - XS) * WH + XS * FT
+    s.on(w + ('hitArea_mc',), [('x', 0), ('y', 0), ('scaleX', k['hitArea_mc'][3] * WW / CS_W), ('scaleY', k['hitArea_mc'][4] * hy / CS_HIT_H)])
+    # the window button on the left tile: sheet -> inventory (state 0), inventory -> sheet (state 1)
+    TP = TOGGLE_PX * F
+    for name, far in ((INV_BTN, FAR), (CS_TOGGLE2, (1 - XS) * CS_FAR * 2)):
+        s.on((('nm', name),), [('x', WX + CS_TILE_C[0] * F - TP / 2 + far), ('y', WY + CS_TILE_C[1] * F - TP / 2), ('scaleX', TP / BTN_ART), ('scaleY', TP / BTN_ART)])
+    for prop, e in (('uiLeft', WX), ('uiRight', WX + WW), ('uiTop', WY), ('uiMinHeight', 190), ('uiMinWidth', 150)): s.root(prop, ffloor(e + R(1, 2)))
+    s.ei('setMcSize', V('SW'), STAGE_H); s.ei('setPosition', 'topleft', 'screen', 'topleft')   # phone 23.11: see inv_spec ('center' put it at x 881, cut)
     return s
 
 
@@ -784,7 +897,7 @@ def cs_lists(sp, c):
                 ('getlocal', o), ('getproperty', P('list')), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', e),
                 ('getlocal', o), ('getproperty', P('m_scrollbar_mc')), ('coerce_a',), ('setlocal', bar), ('getlocal', bar), ('iffalse', e),
                 ('getlocal', bar), ('getproperty', P('x')), ('convert_d',), ('setlocal', x), ('getlocal', bar), ('getproperty', P('y')), ('convert_d',), ('setlocal', y),
-                ('getlocal', o)] + num(w) + [('getlocal', pb), ('callpropvoid', P('setFrame'), 2),
+                ('getlocal', o)] + num(w + COL2) + [('getlocal', pb), ('callpropvoid', P('setFrame'), 2),
                 ('getlocal', bar), ('getlocal', x), ('setproperty', P('x')), ('getlocal', bar), ('getlocal', y), ('setproperty', P('y')),
                 ('getlocal', bar)] + num(ln - CS_PB0) + [('getlocal', pb), ('add',), ('callpropvoid', P('setLength'), 1), ('L', e)]
     return out
@@ -805,45 +918,30 @@ def sheet(data, env=None):
     swf = Swf(data); mv = gr.Movie(swf)
     root = _root_names(swf); win = root[CS_CLIP]['char']; assert _mat(root[CS_CLIP]) == (0.0, 20.0, 1.0, 1.0), 'stats_mc is not at 0,20'
     kids = _kids(swf, win)
-    need = CS_OFF + CS_STAY + ['panelBg1_mc', 'panelBg2_mc', 'equip_mc', 'charInfo_mc', 'tabsHolder_mc', 'mainStats_mc', 'equipment_txt'] + [h for h, _, _ in CS_LISTS]
+    need = CS_OFF + CS_STAY + CS_CONTENT + CS_WARN + ['panelBg1_mc', 'equip_mc', 'charInfo_mc', 'tabsHolder_mc', 'tabTitle_txt', 'pointsFrame_mc', 'equipment_txt',
+                                                     'scrollbarHolder_mc'] + [h for h, _, _ in CS_LISTS]
     assert all(n in kids for n in need), 'stats_1 children: %s' % sorted(kids)
-    assert kids['bg_mc'][1:3] == (0.0, 0.0) and kids['charInfo_mc'][2] == CS_STRIP[1] - 1 and kids['panelBg1_mc'][1:3] == (24.0, 293.0) and kids['equip_mc'][1:3] == (341.0, 253.0), 'bg / name bar / panel / doll place'
-    # ---- the background: one bitmap (+ four grille tiles over the portrait strip: dropped with it) -> the sheet's pieces and the doll panel's pieces
+    assert kids['bg_mc'][1:3] == (0.0, 0.0) and kids['panelBg1_mc'][1:3] == CS_PANEL0 and kids['equip_mc'][1:3] == SA_DOLL[:2] and kids['tabsHolder_mc'][1:3] == CS_TABS0, \
+        'bg / panel / doll / tabs place'
+    # ---- the background: one bitmap (+ four grille tiles over the portrait strip: dropped with it) -> the window frame's pieces (frame_groups)
     holder = kids['bg_mc'][0]; shape = list(gr.frame_state(swf.tags[_def_index(swf, holder)][1], 1).values()); assert len(shape) == 1; shape = shape[0]['char']
     bid, bw, bh = bitmap_of(swf, shape, True); assert (bw, bh) == (CS_W, CS_H0), 'background %d x %d' % (bw, bh)
-    a, b = CS_STRIP; lx, rx, ty = CS_TILE; th = ty - a; r1 = CS_ROW1; L, Rw = CS_SPLIT + 2, CS_W - CS_SPLIT - 2
-    def two(sy, h): return [(0, 0, 0, sy, L, h, 1.0), (L, 0, 2, sy, Rw, h, 1.0)]      # the list column's art twice: the second stat column looks like the first
-    s0 = [(0, 0, 0, 0, CS_W, a, 1.0), (0, a, 0, a, lx, th, 1.0), (lx, a, lx, b, rx - lx, th, 1.0), (rx, a, rx, a, CS_W - rx, th, 1.0),   # title; the two corner tiles end, the name bar between them
-          (0, ty, 0, b + th, CS_W, r1 - (b + th), 1.0)] + [(x, CS_COL_Y, sx, r1, w, CS_BODY_Y - CS_COL_Y, 1.0) for x, _, sx, _, w, _, _ in two(0, 0)]
-    assert ty + r1 - (b + th) == CS_COL_Y
-    d0 = [(0, 0, 0, 0, lx, a, 1.0), (lx, 0, CS_W - (CS_DOLL_W - lx), 0, CS_DOLL_W - lx, a, 1.0),          # the title bar's two ends
-          (0, a, CS_SPLIT, CS_EQ_BAR, CS_DOLL_W, r1 - CS_EQ_BAR, 1.0), (0, a + r1 - CS_EQ_BAR, CS_SPLIT, r1, CS_DOLL_W, bh - r1, 1.0)]
-    assert a + r1 - CS_EQ_BAR == CS_EQ_Y_DOLL and CS_EQ_Y_DOLL + bh - r1 == CS_DOLL_H
-    new, ndef = pieces_sprite(swf, holder, bid, bw, bh, [('s0', 0, 0, s0), ('sb', 0, CS_BODY_Y, two(CS_BODY_SRC, CS_BODY_ART)), ('sf', 0, 0, two(bh - CS_FOOT_ART, CS_FOOT_ART)), ('d0', CS_SPLIT, 0, d0)])
+    new, ndef = pieces_sprite(swf, holder, bid, bw, bh, frame_groups())
     swap_char(swf, holder, 1, shape, new)
-    # drop the overlays of the old background shape's holder (the grille tiles are other fills of the same shape: gone with it)
-    cs = CS_CLOSE / (CS_S0[0] / float(CS_S0[1])) / 23.0; moved = []
-    hb = gr.bounds(swf, kids['hitArea_mc'][0]); assert hb[1] == 0 and abs(hb[3] - CS_HIT_H) < 0.01
+    moved = []
     def fix(name, rec):
         x, y, sx, sy = _mat(rec)
         if name in CS_OFF: _set(rec, y=CS_FAR)
-        elif name == 'close_mc': _set(rec, x=x + 11.5 - 11.5 * cs, y=y + 11.5 - 11.5 * cs, sx=cs, sy=cs)
-        elif name in CS_STAY: pass
-        else:
-            assert y >= CS_STRIP[1] - 1, '%s at y %.1f: inside the strip' % (name, y)
-            _set(rec, dy=-CS_UP)
-            if name is None and (x, y) == (341.0, 252.0): rec['name'] = b'dmDollBg\0'; moved.append('dmDollBg')   # the doll's backdrop: named, so dmLay can move it
-            if name: moved.append(name)
+        elif name is None and (x, y) == (341.0, 252.0): rec['name'] = b'dmDollBg\0'; moved.append('dmDollBg')   # the doll's backdrop: named, so dmLay can move it
     edit_places(swf, win, fix); assert 'dmDollBg' in moved, 'the doll backdrop (an unnamed shape at 341,252) is not in stats_1'
-    # the second stat column: a list panel backing under it (the shape of panelBg1_mc's frame 1), secondary stats + experience there, resistances under the attributes
-    pshape = [r['char'] for r in gr.frame_state(swf.tags[_def_index(swf, kids['panelBg1_mc'][0])][1], 1).values()]; assert len(pshape) == 1
-    add_place(swf, win, 6, pshape[0], 24 + CS_SPLIT + 0.0, 293 - CS_UP, 'dmPanel2')
+    # the attributes tab in two columns: attributes + resistances | secondary stats + experience (PC: one column 700 own px tall)
     ms = _kids(swf, kids['mainStats_mc'][0]); assert ms['statHolder_mc'][1:3] == (20.0, 30.0) and ms['secStatHolder_mc'][1:3] == (20.0, 200.0) and ms['resistancesStatHolder_mc'][1:3] == (20.0, 510.0), ms
     def stats(name, rec):
-        if name == 'secStatHolder_mc': _set(rec, x=20 + CS_SPLIT, y=30)
+        if name == 'secStatHolder_mc': _set(rec, x=20 + COL2, y=30)
         elif name == 'resistancesStatHolder_mc': _set(rec, y=CS_RES_Y)
     edit_places(swf, kids['mainStats_mc'][0], stats)
-    # + / - : a finger-sized invisible hit sprite (the listeners sit on hit_mc); the helmet toggle: beside the helmet slot, twice the size
+    # + / - : a finger-sized invisible hit sprite (the listeners sit on hit_mc); the helmet toggle: beside the helmet slot, twice the size;
+    # the close button's invisible hit_mc x 2 round its drawing (50 px drawn -> a 100 px pad)
     hx, hy, hw, hh = CS_PM_HIT; pm = []
     for cls in ('plusButton_62', 'minusButton_65'):
         cid = [c for c, n in mv.classes.items() if n.endswith('.' + cls)]; assert len(cid) == 1, cls
@@ -852,9 +950,12 @@ def sheet(data, env=None):
         edit_places(swf, cid[0], hit)
     def helm(name, rec):
         if name == 'helmet_mc': assert _mat(rec)[:2] == (176.0, 49.0); _set(rec, x=CS_HELMET[0], y=CS_HELMET[1], sx=CS_HELMET[2], sy=CS_HELMET[2]); pm.append(name)
-    edit_places(swf, kids['equip_mc'][0], helm); assert len(pm) == 3
+    edit_places(swf, kids['equip_mc'][0], helm)
+    def chit(name, rec):
+        if name == 'hit_mc': ox, oy, osx, osy = _mat(rec); _set(rec, x=ox - 11.5, y=oy - 11.5, sx=osx * 2, sy=osy * 2); pm.append('close')   # it covers the 23 px from its origin
+    edit_places(swf, kids['close_mc'][0], chit); assert len(pm) == 4, pm
     global BTN_ART
-    BTN_ART, nbtn = doll_button(swf, INV_BTN)
+    BTN_ART, nbtn = doll_button(swf, [(INV_BTN, 'ico_inventory'), (CS_TOGGLE2, 'ico_charsheet')])
 
     kids = _kids(swf, win)
     env = dict(env or {}); env.setdefault('C', CELL0); env.setdefault('ST', 0); env.setdefault('DW', SCREEN0); env.setdefault('BT', BOTTOM0); env.setdefault('OX', 0); env.setdefault('OK', 0)
@@ -865,14 +966,166 @@ def sheet(data, env=None):
     spec = cs_spec(kids, glow); res = spec.run(env); rest = bake(swf, res)
     swf.head = rect_bytes(STAGE_WMAX, STAGE_H) + swf.head[-4:]
     code = Code(swf)
-    window_doc(code, spec, [(CS_CLIP, 'dragHit_mc')], INV_BTN, 3, 'setHelmetOptionState', ctx=((CS_CLIP, 'equip_mc'), 'equipment_41'))
+    window_doc(code, spec, [(CS_CLIP, 'dragHit_mc')], [INV_BTN, CS_TOGGLE2], 3, 'setHelmetOptionState', ctx=((CS_CLIP, 'equip_mc'), 'equipment_41'),
+               extra=lambda d: list_scroll(d, [(CS_CLIP, h, 'list') for h, _, _ in CS_LISTS]) + list_flow(d, [(CS_CLIP, h) for h, _, _ in CS_LISTS]) + stat_strip(d))
     # The doll turns under the finger by the PC class's own means, nothing is changed here: equipment_41.onDown sends dollDown (handled,
     # main+0x12a59c8: byte [object+0x3f8] = 1 + the mouse capture); the class's input handler main+0x12af270 turns it on the events 0x6a /
     # 0x6b (FlashMouseMoveLeft / Right: [object+0x3fc] = the turn) and STOPS it on event 1 (FlashLeftMouse, the button's release:
     # [+0x3f8] = 0, capture off). dollUp / dollOut of the movie are not in main.raw and are not needed: the engine stops on the release itself.
-    made = code.done(); S = env['S']
-    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['CX'] - env['RX'] * S, env['Y0'], env['CX'] + (CS_W - env['RX']) * S, env['Y0'] + env['H'] * S), bitmap=bid, shape=new, moved=moved,
-                             stage=(STAGE_WMAX, STAGE_H), spec=spec)
+    made = code.done()
+    return swf.write(), dict(placed=[INV_BTN, CS_TOGGLE2], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['WX'], env['WY'], env['WX'] + env['WW'], env['WY'] + env['WH']),
+                             bitmap=bid, shape=new, moved=moved, stage=(STAGE_WMAX, STAGE_H), spec=spec)
+
+
+SCROLL_SLOP = 8      # list-local px of finger travel before a press on a list becomes a scroll (tools/dos2_ppanel_skills.py SCROLL_SLOP)
+def list_scroll(d, paths):
+    """one-finger scroll of scroll lists (tools/dos2_ppanel_skills.py doc_scroll, the same code on this tool's Cls): dmScDown(e) on the list's
+    mouseDown remembers the list, the finger's list y and the bar's scrolledY; dmScMove follows the finger on ENTER_FRAME (stage MOUSE_MOVE is
+    not reliable on the touch path) and, past SCROLL_SLOP list px, scrolls with the bar's public scrollTo(y, false, false) (it clamps) and takes
+    the mouse from the rows (mouseChildren off: the release does not click the row under the finger); dmScUp (stage mouseUp) ends it.
+    -> the dmHook lines that hang dmScDown on each list"""
+    P, S_ = d.P, d.S
+    for n, v in (('dmScY', 0), ('dmScS', 0)): add_slot(d, n, v)
+    d.inst['traits'].append(Trait(P('dmScL'), 0, 0, 0)); d.inst['traits'].append(Trait(P('dmScOn'), 0, 0, 0))
+    stage = [('getlocal0',), ('getproperty', P('stage'))]
+    c = HEAD + [('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('setproperty', P('dmScL')),
+        ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('mouseY')), ('setproperty', P('dmScY')),
+        ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('m_scrollbar_mc')), ('getproperty', P('scrolledY')), ('setproperty', P('dmScS')),
+        ('getlocal0',), ('pushfalse',), ('setproperty', P('dmScOn'))]
+    c += [('getlocal0',), ('pushstring', S_('enterFrame')), ('getlocal0',), ('getproperty', P('dmScMove')), ('callpropvoid', P('addEventListener'), 2)]
+    c += stage + [('pushstring', S_('mouseUp')), ('getlocal0',), ('getproperty', P('dmScUp')), ('callpropvoid', P('addEventListener'), 2)]
+    d.method('dmScDown', 1, c + [('returnvoid',)])
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushbyte', 0), ('convert_d',), ('setlocal', 3), ('pushbyte', 0), ('convert_d',), ('setlocal', 4),
+        ('getlocal0',), ('getproperty', P('dmScL')), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'end'),
+        ('getlocal', 2), ('getproperty', P('mouseY')), ('getlocal0',), ('getproperty', P('dmScY')), ('subtract',), ('convert_d',), ('setlocal', 3),
+        ('getlocal0',), ('getproperty', P('dmScOn')), ('iftrue', 'go'),
+        ('getlex', d.abc.pub('Math')), ('getlocal', 3), ('callproperty', P('abs'), 1)] + num(SCROLL_SLOP) + [('ifngt', 'end'),
+        ('getlocal0',), ('pushtrue',), ('setproperty', P('dmScOn')), ('getlocal', 2), ('pushfalse',), ('setproperty', P('mouseChildren')),
+        ('L', 'go'),
+        ('getlocal0',), ('getproperty', P('dmScS')), ('getlocal', 3), ('subtract',), ('convert_d',), ('setlocal', 4),
+        ('getlocal', 2), ('getproperty', P('m_scrollbar_mc')), ('getlocal', 4), ('pushfalse',), ('pushfalse',), ('callpropvoid', P('scrollTo'), 3),
+        ('L', 'end'), ('returnvoid',)]
+    d.method('dmScMove', 1, c)
+    c = HEAD + [('getlocal0',), ('pushstring', S_('enterFrame')), ('getlocal0',), ('getproperty', P('dmScMove')), ('callpropvoid', P('removeEventListener'), 2)]
+    c += stage + [('pushstring', S_('mouseUp')), ('getlocal0',), ('getproperty', P('dmScUp')), ('callpropvoid', P('removeEventListener'), 2)]
+    c += [('getlocal0',), ('getproperty', P('dmScL')), ('iffalse', 'end'), ('getlocal0',), ('getproperty', P('dmScL')), ('pushtrue',), ('setproperty', P('mouseChildren')),
+          ('getlocal0',), ('pushnull',), ('setproperty', P('dmScL')), ('L', 'end'), ('returnvoid',)]
+    d.method('dmScUp', 1, c)
+    out = []
+    for k, path in enumerate(paths):
+        out += [('getlocal0',), ('coerce_a',), ('setlocal', 1)]
+        for p in path: out += [('getlocal', 1), ('getproperty', P(p)), ('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'sc%d' % k)]
+        out += [('getlocal', 1), ('pushstring', S_('mouseDown')), ('getlocal0',), ('getproperty', P('dmScDown')), ('callpropvoid', P('addEventListener'), 2), ('L', 'sc%d' % k)]
+    return out
+
+
+def list_flow(d, holders):
+    """two columns in each tab list (owner 23.11, iPad: abilities, talents, tags in two columns of the one panel): dmFlow(holder) - when the
+    holder is shown and its list's last element is still in the first column (the PC's positionElements puts every element at x SIDE_SPACING,
+    one under the other), the elements from the first one whose middle is past the half of the column move to x + COL2 and up by that
+    element's y less the first's: two columns, the second starting at the first's top; the bar's content height = the taller column (until
+    the PC re-positions: then the next frame flows again). dmFlowTick (ENTER_FRAME) does it for every holder. Elements: the list's public
+    length / getAt (listDisplay; the grouped ability lists' elements are the groups). -> the dmHook lines that start the tick"""
+    P = d.P
+    L, N, EL, Y0, TOT, HALF, I, DY, J, C1 = range(2, 12)
+    def at(i): return [('getlocal', L), ('getlocal', i), ('callproperty', P('getAt'), 1), ('coerce_a',), ('setlocal', EL)]
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', L), ('pushnull',), ('coerce_a',), ('setlocal', EL)] + \
+        [x for v in (N, Y0, TOT, HALF, I, DY, J, C1) for x in (('pushbyte', 0), ('convert_d',), ('setlocal', v))] + [
+        ('getlocal1',), ('iffalse', 'end'), ('getlocal1',), ('getproperty', P('visible')), ('iffalse', 'end'),
+        ('getlocal1',), ('getproperty', P('list')), ('coerce_a',), ('setlocal', L), ('getlocal', L), ('iffalse', 'end'),
+        ('getlocal', L), ('getproperty', P('length')), ('convert_d',), ('setlocal', N), ('getlocal', N), ('pushbyte', 2), ('iflt', 'end'),
+        ('getlocal', N), ('pushbyte', 1), ('subtract',), ('convert_d',), ('setlocal', J)] + at(J) + [('getlocal', EL), ('iffalse', 'end'),
+        ('getlocal', EL), ('getproperty', P('x'))] + num(COL2 // 2) + [('ifge', 'end'),          # already in two columns
+        ('getlocal', EL), ('getproperty', P('y')), ('getlocal', EL), ('getproperty', P('height')), ('add',), ('convert_d',), ('setlocal', TOT),
+        ('pushbyte', 0), ('convert_d',), ('setlocal', J)] + at(J) + [('getlocal', EL), ('iffalse', 'end'),
+        ('getlocal', EL), ('getproperty', P('y')), ('convert_d',), ('setlocal', Y0),
+        ('getlocal', Y0), ('getlocal', TOT), ('getlocal', Y0), ('subtract',), ('pushbyte', 2), ('divide',), ('add',), ('convert_d',), ('setlocal', HALF),
+        ('pushbyte', 1), ('convert_d',), ('setlocal', I),
+        ('L', 'find'), ('getlocal', I), ('getlocal', N), ('ifge', 'end')] + at(I) + [('getlocal', EL), ('iffalse', 'next'),
+        ('getlocal', EL), ('getproperty', P('y')), ('getlocal', EL), ('getproperty', P('height')), ('pushbyte', 2), ('divide',), ('add',),
+        ('getlocal', HALF), ('ifgt', 'found'),
+        ('L', 'next'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'find'),
+        ('L', 'found'), ('getlocal', EL), ('getproperty', P('y')), ('getlocal', Y0), ('subtract',), ('convert_d',), ('setlocal', DY),
+        ('getlocal', EL), ('getproperty', P('y')), ('convert_d',), ('setlocal', C1),                        # the first column's bottom, about
+        ('getlocal', I), ('convert_d',), ('setlocal', J),
+        ('L', 'move'), ('getlocal', J), ('getlocal', N), ('ifge', 'moved')] + at(J) + [('getlocal', EL), ('iffalse', 'skip'),
+        ('getlocal', EL), ('getlocal', EL), ('getproperty', P('x'))] + num(COL2) + [('add',), ('setproperty', P('x')),
+        ('getlocal', EL), ('getlocal', EL), ('getproperty', P('y')), ('getlocal', DY), ('subtract',), ('setproperty', P('y')),
+        ('L', 'skip'), ('getlocal', J), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', J), ('jump', 'move'),
+        ('L', 'moved'), ('getlocal', TOT), ('getlocal', DY), ('subtract',), ('convert_d',), ('setlocal', TOT),
+        ('getlocal', C1), ('getlocal', TOT), ('ifngt', 'c2'), ('getlocal', C1), ('convert_d',), ('setlocal', TOT), ('L', 'c2'),
+        ('getlocal', L), ('getproperty', P('m_scrollbar_mc')), ('coerce_a',), ('setlocal', EL), ('getlocal', EL), ('iffalse', 'end'),
+        ('getlocal', EL), ('getlocal', TOT), ('setproperty', P('m_contentHeight')),
+        ('getlocal', EL), ('callpropvoid', P('scrollbarVisible'), 0),
+        ('L', 'end'), ('returnvoid',)]
+    d.method('dmFlow', 1, c)
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 2)]
+    for k, path in enumerate(holders):
+        c += [('getlocal0',), ('coerce_a',), ('setlocal', 2)]
+        for q in path: c += [('getlocal', 2), ('getproperty', P(q)), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'f%d' % k)]
+        c += [('getlocal0',), ('getlocal', 2), ('callpropvoid', P('dmFlow'), 1), ('L', 'f%d' % k)]
+    d.method('dmFlowTick', 1, c + [('returnvoid',)])
+    return [('getlocal0',), ('pushstring', d.S('enterFrame')), ('getlocal0',), ('getproperty', P('dmFlowTick')), ('callpropvoid', P('addEventListener'), 2)]
+
+
+def stat_strip(d):
+    """the inventory window's stat strip (owner 23.11, iPad: armour, damage, crit, accuracy, dodge, movement, initiative, resistances in a strip
+    over the bag): in state 1 dmStripTick (ENTER_FRAME) lays the sheet's own lists out as cells of value + icon - stats_mc.secondaryStatList
+    (row 1) and resistanceStatList (row 2, its holder one row lower: dmLay) - every element cropped by scrollRect to its value and icon (the label
+    stays in it, unseen) and put at x = the cells before it; the block is centred on the strip (dmStX, dmStW: dmLay). expStatList is hidden
+    there. In state 0 the crops go and the PC's positionElements puts the lists back (once: the last element's crop tells). The data is the
+    PC's: whatever addSecondaryStat sent (type 1 / 2), so the strip shows the stats the Switch sends, nothing invented.
+    -> the dmHook lines that start the tick"""
+    P = d.P; Rc = d.abc.pub('Rectangle', 'flash.geom')
+    for n in ('dmStX', 'dmStW'): add_slot(d, n, 0)
+    N, I, EL, TM, TT, X0, W, CUR = range(3, 11)
+    def at(i): return [('getlocal1',), ('getlocal', i), ('callproperty', P('getAt'), 1), ('coerce_a',), ('setlocal', EL)]
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', EL), ('pushnull',), ('coerce_a',), ('setlocal', TM), ('pushnull',), ('coerce_a',), ('setlocal', TT)] + \
+        [x for v in (N, I, X0, W, CUR) for x in (('pushbyte', 0), ('convert_d',), ('setlocal', v))] + [
+        ('getlocal1',), ('iffalse', 'ret'), ('getlocal1',), ('getproperty', P('length')), ('convert_d',), ('setlocal', N),
+        ('getlocal', N), ('pushbyte', 0), ('ifngt', 'ret'),
+        ('getlocal2',), ('iftrue', 'on'),
+        ('getlocal', N), ('pushbyte', 1), ('subtract',), ('convert_d',), ('setlocal', I)] + at(I) + [('getlocal', EL), ('iffalse', 'ret'),
+        ('getlocal', EL), ('getproperty', P('scrollRect')), ('iffalse', 'ret'),
+        ('pushbyte', 0), ('convert_d',), ('setlocal', I),
+        ('L', 'off'), ('getlocal', I), ('getlocal', N), ('ifge', 'offd')] + at(I) + [('getlocal', EL), ('iffalse', 'offn'),
+        ('getlocal', EL), ('pushnull',), ('setproperty', P('scrollRect')),
+        ('L', 'offn'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'off'),
+        ('L', 'offd'), ('getlocal1',), ('callpropvoid', P('positionElements'), 0),
+        ('L', 'ret'), ('pushbyte', 0), ('returnvalue',),
+        ('L', 'on'), ('pushbyte', 0), ('convert_d',), ('setlocal', I),
+        ('L', 'loop'), ('getlocal', I), ('getlocal', N), ('ifge', 'done')] + at(I) + [('getlocal', EL), ('iffalse', 'next'),
+        ('getlocal', EL), ('getproperty', P('texts_mc')), ('coerce_a',), ('setlocal', TM), ('getlocal', TM), ('iffalse', 'next'),
+        ('getlocal', TM), ('getproperty', P('text_txt')), ('coerce_a',), ('setlocal', TT), ('getlocal', TT), ('iffalse', 'next'),
+        ('getlocal', TM), ('getproperty', P('x')), ('getlocal', TT), ('getproperty', P('x')), ('add',), ('pushbyte', 4), ('subtract',), ('convert_d',), ('setlocal', X0),
+        ('getlocal', EL), ('getproperty', P('icon_mc')), ('getproperty', P('visible')), ('iffalse', 'noic'),
+        ('getlocal', EL), ('getproperty', P('icon_mc')), ('getproperty', P('x')), ('pushbyte', 32), ('add',), ('getlocal', X0), ('subtract',), ('convert_d',), ('setlocal', W),
+        ('jump', 'cell'),
+        ('L', 'noic'), ('getlocal', TT), ('getproperty', P('width')), ('pushbyte', 8), ('add',), ('convert_d',), ('setlocal', W),
+        ('L', 'cell'), ('getlocal', EL), ('getproperty', P('scrollRect')), ('iftrue', 'put'),
+        ('getlocal', EL), ('findpropstrict', Rc), ('getlocal', X0), ('pushbyte', 3), ('negate',), ('getlocal', W), ('pushbyte', 32), ('constructprop', Rc, 4),
+        ('setproperty', P('scrollRect')),
+        ('L', 'put'), ('getlocal', EL), ('getlocal', CUR), ('setproperty', P('x')), ('getlocal', EL), ('pushbyte', 0), ('setproperty', P('y')),
+        ('getlocal', CUR), ('getlocal', W), ('add',), ('pushbyte', 12), ('add',), ('convert_d',), ('setlocal', CUR),
+        ('L', 'next'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'loop'),
+        ('L', 'done'), ('getlocal', CUR), ('returnvalue',)]
+    d.method('dmStripRow', 2, c)
+    SM, A, B, MS = 2, 3, 4, 5
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', SM), ('pushbyte', 0), ('convert_d',), ('setlocal', A), ('pushbyte', 0), ('convert_d',), ('setlocal', B),
+        ('pushnull',), ('coerce_a',), ('setlocal', MS),
+        ('getlocal0',), ('getproperty', P(CS_CLIP)), ('coerce_a',), ('setlocal', SM), ('getlocal', SM), ('iffalse', 'end'),
+        ('getlocal0',), ('getlocal', SM), ('getproperty', P('secondaryStatList')), ('getlocal0',), ('getproperty', P('dmState')), ('callproperty', P('dmStripRow'), 2), ('convert_d',), ('setlocal', A),
+        ('getlocal0',), ('getlocal', SM), ('getproperty', P('resistanceStatList')), ('getlocal0',), ('getproperty', P('dmState')), ('callproperty', P('dmStripRow'), 2), ('convert_d',), ('setlocal', B),
+        ('getlocal', SM), ('getproperty', P('expStatList')), ('coerce_a',), ('setlocal', MS), ('getlocal', MS), ('iffalse', 'nx'),
+        ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmState')), ('not',), ('setproperty', P('visible')),
+        ('L', 'nx'), ('getlocal0',), ('getproperty', P('dmState')), ('iffalse', 'end'),
+        ('getlocal', SM), ('getproperty', P('mainStats_mc')), ('coerce_a',), ('setlocal', MS), ('getlocal', MS), ('iffalse', 'end'),
+        ('getlocal', A), ('getlocal', B), ('ifnlt', 'wa'), ('getlocal', B), ('convert_d',), ('setlocal', A), ('L', 'wa'),
+        ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmStX')), ('getlocal0',), ('getproperty', P('dmStW')), ('getlocal', A), ('getlocal', MS), ('getproperty', P('scaleX')),
+        ('multiply',), ('subtract',), ('pushbyte', 2), ('divide',), ('add',), ('setproperty', P('x')),
+        ('L', 'end'), ('returnvoid',)]
+    d.method('dmStripTick', 1, c)
+    return [('getlocal0',), ('pushstring', d.S('enterFrame')), ('getlocal0',), ('getproperty', P('dmStripTick')), ('callpropvoid', P('addEventListener'), 2)]
 
 
 MAKE = {'partyInventory_p.swf': party, 'characterSheet_p.swf': sheet}
@@ -898,7 +1151,9 @@ def fits(geom, width_own, state=0):
     out = []
     for C in CELLS:
         for DW, _ in SCREENS:
-            e = geom(C, state, DW); hs = e.get('HS', e['H'] * e['S']); ok = e['MW'] <= DW - 2 * MARGIN + 1 and e['Y0'] + hs <= STAGE_H + 0.01 and e['Y0'] >= -0.01
+            e = geom(C, state, DW)
+            if 'WW' in e: ok = e['WW'] <= DW - 2 * MARGIN - 2 * COL_RES + 1 and e['WY'] + e['WH'] <= e['WB'] + 0.01 and e['WX'] >= MARGIN + COL_RES - 1
+            else: hs = e.get('HS', e['H'] * e['S']); ok = e['MW'] <= DW - 2 * MARGIN + 1 and e['Y0'] + hs <= STAGE_H + 0.01 and e['Y0'] >= -0.01
             out.append((C, DW, e, ok))
     return out
 
@@ -921,14 +1176,16 @@ def check(o, data, out, rep, say):
         elif ida[cid] != (code, d): changed.append(cid)
     mv = gr.Movie(a); nm = lambda c: mv.classes.get(c, '#%d' % c).split('.')[-1]
     want = {'partyInventory_p.swf': {'partyInventory_1', 'bgFrame_3', 'playerInventory'},
-            'characterSheet_p.swf': {'stats_1', 'bg_22', 'plusButton_62', 'minusButton_65', 'equipment_41', '#456',
+            'characterSheet_p.swf': {'stats_1', 'bg_22', 'plusButton_62', 'minusButton_65', 'equipment_41', '#456', 'CloseButton_58',
                                      'abilitiesholder_9', 'tagsholder_13', 'talentsHolder_11', 'visualsHolder_18'}}[o]   # the holders: their glow's height (21.11)
     say(not g and {nm(c) for c in changed} == want and len(new) == rep['defs'],
         'tags: ids unique, uses after definitions; of %d PC definitions %d rebuilt (%s), +%d new (background pieces, the doll button); the rest byte for byte%s' % (
         len(ida), len(changed), ', '.join(sorted(nm(c) for c in changed)), len(new), '' if not g else ': ' + str(g)))
     bitmaps = lambda s: sorted(hashlib.sha256(d[2:]).hexdigest() for c, d, _ in s.tags if c in gr.T_BITMAPS)
     ba, bb = bitmaps(a), bitmaps(b); extra = [h for h in bb if h not in ba]
-    say(all(h in bb for h in ba) and len(extra) == 2, 'art: the PC movie\'s %d bitmaps + %d of our own drawings (assets/touchui plate_square_copper, pan_helmet: the doll button); no iPad file is read' % (len(ba), len(extra)))
+    nx = 3 if o == 'characterSheet_p.swf' else 0   # the plate + two glyphs
+    say(all(h in bb for h in ba) and len(extra) == nx, 'art: the PC movie\'s %d bitmaps + %d of our own drawings (%s); no iPad file is read' % (len(ba), len(extra),
+        'assets/touchui plate_square_copper + ico_inventory / ico_charsheet: the window button' if nx else 'none: the window button is the sheet movie\'s'))
     say(b.head[:-4] == rect_bytes(*rep['stage']), 'stage %d x %d: wider than any screen; dmLay sets the movie to the screen width (setMcSize) and centres the window inside it (phone 21.11: a window shifted inside a window-wide movie was cut at the movie rect)' % rep['stage'])
     ea, eb = _ei(A), _ei(B); added = sorted(set(eb) - set(ea))
     say(set(ea) <= set(eb) and set(added) <= {'dmSide', 'setMcSize'}, 'ExternalInterface: the PC movie\'s %d names kept; added: %s (dmSide = the host\'s; setMcSize = the engine\'s own, as the PC inventory calls it)' % (len(ea), ' '.join(added)))
@@ -956,58 +1213,107 @@ def check(o, data, out, rep, say):
     say(not bad, 'dmLay: all %d object paths are placed instances of the built movie%s' % (len(list(rep['spec'].paths())), '' if not bad else ': ' + str(bad)))
     w = _walk(out); x0, y0, x1, y1 = rep['window']; env = rep['env']; S = env['S']
     if o == 'partyInventory_p.swf':
-        bgb = w['inventory_mc.bgFrame_mc']['stage']
-        say(max(abs(u - v) for u, v in zip(bgb, rep['window'])) < 1.6, 'baked (cell %d): window %.0f,%.0f..%.0f,%.0f = %.0f x %.0f px, x %.2f; iPad -3,0..1165,968 (1160 x 968); PC 680 x 1056 at the screen corner' % (
-            env['C'], bgb[0], bgb[1], bgb[2], bgb[3], bgb[2] - bgb[0], bgb[3] - bgb[1], S))
-        say(abs(50 * S - CELL0 * INV_K) < 0.01, 'cell 50 -> %.0f px = the cell asked x INV_K %.2f (owner 23.11: window 12 %% smaller), pitch %d -> %.1f (iPad 76 / 86); %d columns (iPad 13; the engine reads invColW / cSpacing from the movie: main+0x13aa5b0) x %d rows visible (iPad 8)' % (
-            50 * S, INV_K, INV_PITCH, INV_PITCH * S, INV_COLS, env['ROWS']))
-        cl = w['inventory_mc.close_mc']['stage']; bt = w[INV_BTN]['stage']
-        say(abs((cl[2] - cl[0]) - INV_CLOSE) < 1 and abs((bt[2] - bt[0]) - INV_BTN_AT[2] * env['SH']) < 1, 'close button %.0f px (iPad 50), the doll button %.0f px at %.0f,%.0f (iPad 73)' % (cl[2] - cl[0], bt[2] - bt[0], bt[0], bt[1]))
-        sizes = [(n, w['inventory_mc.' + n]['stage']) for n in ('autosortBtn_mc', 'sortByBtn_mc', 'view_mc', 'allBtn_mc')]
-        h = dis('MainTimeline', 'dmHook'); padh = min(p[1] for p in HEAD_PADS) * env['SH']
-        say(all(bx[2] <= x1 for _, bx in sizes) and h.count('drawRect') == len(HEAD_PADS) and padh >= 49.5 and all(p[0][-1] in h for p in HEAD_PADS),
-            'buttons: ' + ', '.join('%s %.0f x %.0f' % (n[:-3], bx[2] - bx[0], bx[3] - bx[1]) for n, bx in sizes) + ' px drawn, finger pads %.0f px tall (dmHook); a tab 41 -> %.0f px' % (padh, 41 * env['SH']))
+        e = env; X, Y = e['WX'], e['WY']
+        def box(n): return w['inventory_mc.' + n]['stage']
+        rx0, ft, rx1, pz = X + e['RX'], Y + e['FT'], X + e['RX'] + e['RW'], Y + e['PZ']
+        hb = box('hitArea_mc'); tb = box('tabs_mc') if box('tabs_mc') else (rx0, ft)
+        say(e['ST'] == 1 and hb[0] < rx0 and hb[2] > rx1 and abs(hb[1] - ft) < 1.5 and not rep['placed'] and box('title_txt')[0] < -1000 and box('close_mc')[0] < -1000,
+            'baked (cell %d, %d px screen, the inventory window = state 1): this movie draws only the open right column of the shared window: %.0f,%.0f..%.0f,%.0f '
+            '(the filter row + the bag); the frame, title bar, HP box, doll and stat strip are the sheet movie\'s (its state 1), no doll button here' % (e['C'], e['DW'], rx0, ft, rx1, pz))
+        bad = []
+        for C in CELLS:
+            for DW, _ in SCREENS:
+                a_, b_ = inv_geom(C, 1, DW), cs_geom(C, 1, DW)
+                if any(abs(a_[n] - b_[n]) > 0.001 for n in ('WX', 'WY', 'WW', 'WH', 'RX', 'RW', 'FT', 'FH', 'PY', 'PZ', 'LX', 'LW')): bad.append((C, DW))
+        say(not bad, 'one grid: both movies compute the same window, columns, row A split and bag rect (win_lets) for every cell / screen%s' % ('' if not bad else ': NOT ' + str(bad)))
+        lo = w['inventory_mc.listHolder_mc']['origin']
+        say(abs(lo[0] - (X + e['BX'])) < 1 and abs((lo[0] - rx0) - (rx1 - lo[0] - INV_LIST_W * e['SQ'])) < 1.5 and e['SQ'] <= e['C'] / 50 * INV_K + 1e-9,
+            'the bag: cell 50 -> %.0f px (the cell asked x INV_K %.2f, smaller only when the column is narrow), pitch %.1f, %d columns (iPad 8; the engine reads invColW / cSpacing '
+            'from the movie once: main+0x13aa5b0) x %d rows in view, centred in the right column; the list scrolls' % (50 * e['SQ'], INV_K, INV_PITCH * e['SQ'], INV_COLS, e['ROWS']))
+        items = [('tabs_mc', INV_TABS_W), ('allBtn_mc', 80), ('view_mc', 268), ('autosortBtn_mc', 140), ('sortByBtn_mc', 140), ('totalGold_mc', 138)]
+        xs = [(w['inventory_mc.' + n]['origin'][0], w['inventory_mc.' + n]['origin'][0] + wd * e['SB'], w['inventory_mc.' + n]['origin'][1]) for n, wd in items]
+        say(all(xs[i][1] <= xs[i + 1][0] + 0.5 for i in range(len(xs) - 1)) and xs[0][0] >= rx0 and xs[-1][1] <= rx1 + 0.5 and all(ft <= q[2] <= ft + e['FH'] for q in xs),
+            'the filter row %.0f px under the stat strip (the PC header\'s ornate bar, its plain spans stretched): party tabs, All, party view | sort, sort by, gold - in one line x%.2f, none over another' % (
+            e['FH'], e['SB']))
+        h = dis('MainTimeline', 'dmHook'); padh = min(p_[1] for p_ in HEAD_PADS) * e['SB']
+        say(h.count('drawRect') == len(HEAD_PADS) and all(p_[0][-1] in h for p_ in HEAD_PADS),
+            'buttons: invisible finger pads %d own = %.0f px tall on sort / sort by / All / party view (dmHook); a party tab 41 -> %.0f px' % (HEAD_PADS[0][1], padh, 41 * e['SB']))
+        sp = box('sortBy_mc'); hb = box('hitArea_mc')
+        say(sp[0] >= rx0 - 1 and sp[2] <= rx1 + 1 and sp[1] >= Y + e['PY'] - 1 and sp[3] <= pz + 1 and abs(hb[1] - ft) < 1.5 and abs(hb[3] - (pz + GM)) < 2 and hb[0] < rx0 and hb[2] > rx1,
+            'the sort popup inside the bag; the window\'s hit area = the filter row + the bag (the sheet movie eats the rest: no overlap of the two movies\' parts)')
         t = dis('sortPopup_21', 'okPressed'); say('dmOkOrig' in t and "'autosort'" in t, 'the sort popup: OK = original (setSortFilter; applySortFilters is not in main.raw) + autosort (handled: the sort button\'s call)')
         t = dis('partyInventory_1', 'onContextMenuInputUp'); u = dis('MainTimeline', 'dmCtxUp'); h = dis('MainTimeline', 'dmHook')
         say('dmCtxOrig' in t and 'getTimer' in t and 'onContextMenuInputUp' in u and "'rightMouseUp'" in h, 'long press: right mouse up on the window -> onContextMenuInputUp (openContextMenu, handled by the class: main+0x13a7690), at most once in %d ms with the engine\'s own event' % CTX_GUARD_MS)
         t = dis('partyInventory_1', 'onCellCreate'); say('dmCellOrig' in t and 'tooltipOverrideW' in t and 'scaleX' in t, 'onCellCreate = original + the tooltip rectangle = the cell on the screen (50 x the window scale)')
-        geom, wown = inv_geom, INV_W
+        geom, wown = inv_geom, INV_LIST_W
     else:
-        org = w['stats_mc']['origin']; hit = w['stats_mc.hitArea_mc']['stage']
-        say(abs(org[0] - x0) < 0.6 and abs(org[1] - y0) < 0.6 and abs(hit[3] - y1) < 1.6 and abs(x1 - x0 - CS_W * S) < 1 and y1 <= STAGE_H + 0.01, 'baked (cell %d): the sheet %.0f,%.0f..%.0f,%.0f = %.0f x %.0f px, x %.2f; iPad -3,0..1165,1068; PC 680 x 1056 at the screen corner' % (
-            env['C'], x0, y0, x1, y1, x1 - x0, y1 - y0, S))
+        e = env; X, Y = e['WX'], e['WY']
+        def box(n): return w['stats_mc.' + n]['stage']
+        def near(u, v, tol=1.6): return all(abs(p - q) < tol for p, q in zip(u, v))
+        hit = box('hitArea_mc')
+        say(near(w['stats_mc']['origin'], (X, Y), 0.6) and near(hit, (X, Y, X + e['WW'], Y + e['WH']), 2.5) and Y + e['WH'] <= e['WB'] + 0.01,
+            'baked (cell %d, %d px screen, hot bar top %d): ONE window %.0f x %.0f at %.0f,%.0f (iPad characterSheet_t 1168 x 1068), above the hot bar; the clip at scale 1, every part placed in window px' % (
+            e['C'], e['DW'], e['BT'], e['WW'], e['WH'], X, Y))
         off = [n for n in CS_OFF if not (w['stats_mc.' + n]['origin'][1] < -1000)]
-        say(not off, 'the portrait strip\'s content and the drag bar are off the screen: %s' % ' '.join(CS_OFF))
-        eq = w['stats_mc.equip_mc']['origin']; p2 = w['stats_mc.dmPanel2']['stage']; p1 = w['stats_mc.panelBg1_mc']['stage']
-        say(eq[0] < -1000 and abs((p2[0] - p1[0]) - CS_SPLIT * S) < 1 and abs((p1[3] - p1[1]) - env['PB'] * S) < 1.5 and p1[3] <= y1,
-            'two stat columns: list panels %.0f x %.0f px at x %.0f and %.0f; a stat row 26 -> %.0f px (iPad 46); the doll is off the sheet (its own view)' % (p1[2] - p1[0], p1[3] - p1[1], p1[0], p2[0], 26 * S))
-        d = cs_geom(CELL0, 1, SCREEN0); mvb = gr.Movie(b); hits = []
-        iq = inv_geom(CELL0, 1, SCREEN0)
-        say(abs(d['S'] * CS_DOLL_W - DOLL_PX) < 0.01 and abs(d['H'] * d['S'] - BOTTOM0) < 0.01 and d['MW'] == iq['MW'] and abs(d['DX'] - (iq['X1'] - iq['X0'])) < 0.01,
-            'the doll panel (state 1): %.0f x %.0f px (above the hot bar), a slot 64 -> %.0f px (iPad: doll 422 x 678 in a 1160 x 1040 window, slot 82); block %d px, both movies compute the same width and left edge' % (DOLL_PX, d['H'] * d['S'], 64 * d['S'], d['MW']))
+        say(not off, 'the PC portrait strip\'s content and the drag bar are off the window: %s' % ' '.join(CS_OFF))
+        # the grid: the doll column, the right column, row A
+        eq = box('equip_mc.container_mc'); dl = (X + e['LX'], Y + e['PY'], X + e['LX'] + e['LW'], Y + e['PY'] + e['PH'])
+        say(eq[0] >= dl[0] - 1 and eq[2] <= dl[2] + 1 and eq[1] >= dl[1] - 1 and eq[3] <= dl[3] + 1 and abs(e['RX'] - e['LX'] - e['LW'] - GG) < 0.01 and
+            abs(e['WW'] - (e['RX'] + e['RW'] + GM + e['SR'])) < 1.01,
+            'grid: margin %d, gutter %d px; the doll column %.0f,%.0f %.0f x %.0f (doll x%.2f: a slot 64 -> %.0f px; iPad 422 x 678, slot 82), the right column x %.0f, %.0f wide' % (
+            GM, GG, dl[0], dl[1], e['LW'], e['PH'], e['D'], 64 * e['D'], X + e['RX'], e['RW']))
+        tb = w['stats_mc.tabsHolder_mc']['origin']; ci = w['stats_mc.charInfo_mc']['origin']; cl = box('close_mc.bg_mc'); tg = w[INV_BTN]['stage']
+        say(abs(tb[0] + CS_TABS_W / 2 * e['F'] - (X + e['RX'] + e['RW'] / 2)) < 1 and abs(ci[0] - (X + e['WW'] / 2)) < 1 and abs(cl[2] - cl[0] - CS_CLOSE) < 1 and
+            cl[2] <= X + e['WW'] and tg[0] >= X and tg[1] >= Y,
+            'title bar: name - level centred (charInfo_mc at %.0f), close %.0f px at the right tile (hit x2: %.0f px), the sheet <-> inventory button %.0f px on the left tile; '
+            'the 5 tabs x%.2f (a tab %.0f x %.0f px) centred over the panel, the tab title on the plaque under them' % (
+            ci[0], cl[2] - cl[0], 2 * (cl[2] - cl[0]), tg[2] - tg[0], e['F'], 76 * e['F'], 56 * e['F']))
+        ih = w['stats_mc.equip_mc.infoStatHolder_mc']['origin']
+        say(X + e['LX'] < ih[0] < X + e['LX'] + 30 * e['F'] and Y + e['CT'] < ih[1] < Y + e['CT'] + e['IH'] and e['SI'] * INFO_W <= e['LW'] - 16 * e['F'] + 0.01,
+            'HP / AP / Source (the PC\'s infoStatList, type 0 of addSecondaryStat; equip_mc.infoStatHolder_mc) in the box of row A over the doll: rows of %.0f px, x%.2f (iPad: 3 rows of 36 px top left)' % (
+            26 * e['SI'], e['SI']))
+        pb = box('panelBg1_mc'); ms = w['stats_mc.mainStats_mc']['origin']
+        say(near(pb, (X + e['RX'] + 4 * e['F'], Y + e['PY'] + 4 * e['F'], X + e['RX'] + e['RW'] - 4 * e['F'], Y + e['PY'] + e['PH'] - 4 * e['F']), 2.5) and 'stats_mc.dmPanel2' not in w and
+            abs(ms[0] - (X + e['PCX'] + 20 * e['S'])) < 1,
+            'ONE parchment panel %.0f x %.0f under one frame (9 pieces: plain edges stretched, corners whole; no second page, no fold); content x%.2f: a stat row 26 -> %.0f px (iPad 46), '
+            'two columns %d own apart' % (e['RW'], e['PH'], e['S'], 26 * e['S'], COL2))
+        hits = []
         for cls in ('plusButton_62', 'minusButton_65'):
-            cid = [k for k, n in mvb.classes.items() if n.endswith('.' + cls)][0]
+            cid = [q for q, n in gr.Movie(b).classes.items() if n.endswith('.' + cls)][0]
             st = gr.frame_state(b.tags[_def_index(b, cid)][1], 1); hm = [_mat(r) for r in st.values() if r['name'] == b'hit_mc\0'][0]
             hits.append((hm[0], hm[1], 18 * hm[2], 18 * hm[3]))
         say(all(abs(u - v) < 0.01 for hh in hits for u, v in zip(hh, CS_PM_HIT)), '+ / - buttons: hit area %d x %d own = %.0f x %.0f px (PC 18 x 18; drawing 20 -> %.0f px; iPad 34)' % (
-            CS_PM_HIT[2], CS_PM_HIT[3], CS_PM_HIT[2] * S, CS_PM_HIT[3] * S, 20 * S))
+            CS_PM_HIT[2], CS_PM_HIT[3], CS_PM_HIT[2] * e['S'], CS_PM_HIT[3] * e['S'], 20 * e['S']))
         t = dis('equipment_41', 'onDown'); say("'dollDown'" in t, 'the doll turns under the finger: onDown is the PC body (dollDown, handled: main+0x12a59c8); the class stops it on the left button\'s release itself (main+0x12af270, event 1 FlashLeftMouse)')
         t = dis('equipment_41', 'onContextMenuInputUp'); u = dis('MainTimeline', 'dmCtxUp'); h = dis('MainTimeline', 'dmHook')
         say('dmCtxOrig' in t and 'getTimer' in t and 'onContextMenuInputUp' in u and "'rightMouseUp'" in h, 'long press on a doll slot: right mouse up -> equip_mc.onContextMenuInputUp (openContextMenu, handled by the class: main+0x12a56e4), at most once in %d ms' % CTX_GUARD_MS)
-        t = dis('MainTimeline', 'dmLay'); say(all(h in t for h, _, _ in CS_LISTS) and t.count('setFrame') == len(CS_LISTS) and t.count('setLength') == len(CS_LISTS) and 'scrollRect' in t,
-            'dmLay: the %d tab lists get the panel height and their scroll bars the PC length less the cut; the window clip is cropped by scrollRect (the doll panel = its right half)' % len(CS_LISTS))
+        t = dis('MainTimeline', 'dmLay'); fl = dis('MainTimeline', 'dmFlow'); sc = dis('MainTimeline', 'dmScMove')
+        say(all(hh in t for hh, _, _ in CS_LISTS) and t.count('setFrame') == len(CS_LISTS) and t.count('setLength') == len(CS_LISTS) and 'scrollRect' in t and
+            h.count("'mouseDown'") == len(CS_LISTS) and "'enterFrame'" in h and 'getAt' in fl and 'm_contentHeight' in fl and 'scrollTo' in sc and 'getContDiff' not in sc,
+            'the %d tab lists: frames two columns wide, the panel\'s height; dmFlow (every frame) puts the second half in the second column and the bar\'s content height to the taller one; '
+            'ONE-FINGER scroll on the list itself (dmScDown / dmScMove: the bar\'s public scrollTo, followed on ENTER_FRAME) + the PC bar at the panel\'s right edge' % len(CS_LISTS))
+        bad = []
+        for C in CELLS:
+            for DW, _ in SCREENS:
+                a0, a1 = cs_geom(C, 0, DW), cs_geom(C, 1, DW)
+                if any(abs(a1[n] - a0[n]) > 1e-9 for n in ('WX', 'WY', 'WW', 'WH', 'LX', 'LW', 'PY', 'PH', 'D', 'SI', 'CT', 'IH')): bad.append((C, DW))
+        say(not bad, 'the window, its title bar, the HP box and the doll stand in the SAME place at the same size on the sheet and in the inventory window (state 1) for every cell / screen%s' % (
+            '' if not bad else ': NOT ' + str(bad)))
+        ph = cs_geom(103, 0, 2400, 949)
+        say(26 * ph['S'] >= 43.5 and 64 * ph['D'] >= 64 and 76 * ph['F'] >= 95 and ph['WY'] + ph['WH'] <= 949,
+            'phone (cell 103, 2400 x 1080, hot bar top 949): window %.0f x %.0f, stat row %.0f px, info row %.0f px, tab %.0f x %.0f, doll slot %.0f, close pad %.0f, + / - %.0f x %.0f px' % (
+            ph['WW'], ph['WH'], 26 * ph['S'], 26 * ph['SI'], 76 * ph['F'], 56 * ph['F'], 64 * ph['D'], 2 * CS_CLOSE, CS_PM_HIT[2] * ph['S'], CS_PM_HIT[3] * ph['S']))
         geom, wown = cs_geom, CS_W
     # the fit: every cell the host may ask, every screen, both states
-    for st, what in ((0, 'the window'), (1, 'the equipment view (doll + bag)')):
+    for st, what in (((1, 'the inventory window'),) if o == 'partyInventory_p.swf' else ((0, 'the sheet'), (1, 'the inventory window (this movie: frame, doll, strip)'))):
         f = fits(geom, wown, st); bad = [(C, DW) for C, DW, e, ok in f if not ok]
         say(not bad, 'fit, %s: inside the screen with %d px side margins and <= 1080 high for cells %s on %s%s' % (what, MARGIN, ' / '.join(map(str, CELLS)), ' '.join(n for _, n in SCREENS), '' if not bad else ': NOT ' + str(bad)))
         for C in CELLS:
             row = []
             for C2, DW, e, ok in f:
                 if C2 != C: continue
-                if o == 'partyInventory_p.swf': row.append('%d: cell %.0f, %d rows, %.0f x %.0f, header x%.2f' % (DW, 50 * e['S'], e['ROWS'], INV_W * e['S'], e['HS'], e['SH']))
-                elif st == 0: row.append('%d: row %.0f, %.0f x %.0f' % (DW, 26 * e['S'], CS_W * e['S'], e['H'] * e['S']))
-                else: row.append('%d: slot %.0f, pair %.0f wide' % (DW, 64 * e['S'], e['MW']))
+                if o == 'partyInventory_p.swf': row.append('%d: cell %.0f, %d x %d, filter row x%.2f' % (DW, 50 * e['SQ'], INV_COLS, e['ROWS'], e['SB']))
+                else: row.append('%d: %.0f x %.0f, row %.0f, slot %.0f' % (DW, e['WW'], e['WH'], 26 * e['S'], 64 * e['D']))
             print('       asked %3d -> %s' % (C, '; '.join(row)))
 
 
@@ -1029,37 +1335,124 @@ def _walk(data, name=None, depth=4):
 
 
 # ---------------------------------------------------------------- pictures
-def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None):
-    """the screen (DW x 1080, a flat backdrop) with the window(s) of a view the way dmLay places them: 'inv', 'sheet' or 'equip' (the doll panel + the
-    bag). The windows are the movies' frame 1 (lists, icons and text are the engine's); with grid the bag's cells are drawn by this tool to show their size."""
+def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None, mock=True):
+    """the screen (DW x 1080, a flat backdrop) with the window of a view the way dmLay places it: 'sheet' (characterSheet_p state 0) or 'inv' /
+    'equip' (the inventory window: characterSheet_p state 1 + partyInventory_p). The windows are the movies' frame 1; what the engine fills in
+    at run time (tabs, rows, icons, text, bag cells) is drawn over them by this tool when mock / grid (mock_*: NOT in the movies)."""
     from PIL import Image, ImageDraw
     import dos2_swf_render as rn
     img = base.copy() if base is not None else Image.new('RGBA', (DW, STAGE_H), (58, 66, 60, 255)); dr = ImageDraw.Draw(img)
     if base is None: dr.rectangle([0, 0, MARGIN - 1, STAGE_H], fill=(46, 52, 48, 255)); dr.rectangle([DW - MARGIN, 0, DW, STAGE_H], fill=(46, 52, 48, 255))   # the side margins (notch)
-    st = 1 if view == 'equip' else 0; note = []
-    for o, f in MAKE.items():
-        if (view == 'inv' and o != 'partyInventory_p.swf') or (view == 'sheet' and o != 'characterSheet_p.swf'): continue
-        dta, rep = f(src[SRC[o]], dict(C=C, ST=st, DW=DW, BT=BT)); e = rep['env']
+    st = 0 if view == 'sheet' else 1; note = []
+    for o in ('characterSheet_p.swf', 'partyInventory_p.swf'):
+        if view == 'sheet' and o != 'characterSheet_p.swf': continue
+        dta, rep = MAKE[o](src[SRC[o]], dict(C=C, ST=st, DW=DW, BT=BT)); e = rep['env']
         swf = Swf(dta)
-        if 'RY' in e: edit_places(swf, None, lambda name, rec: _set(rec, dx=-e['RX'] * e['S'], dy=-e['RY'] * e['S']) if name == CS_CLIP else None)   # the scrollRect crop, for the picture
         # what the PC code keeps hidden is not in the picture: the sort popup (until "sort by" is tapped), the game master's tabs of the sheet
-        hide = ('sortBy_mc',) if o == 'partyInventory_p.swf' else ('invTabHolder_mc', 'customStats_mc', 'skillTabHolder_mc', 'panelBg2_mc')
+        hide = ('sortBy_mc', 'sortByBg_mc') if o == 'partyInventory_p.swf' else ('invTabHolder_mc', 'customStats_mc', 'skillTabHolder_mc', 'panelBg2_mc')
         edit_places(swf, _root_names(swf)[INV_CLIP if o == 'partyInventory_p.swf' else CS_CLIP]['char'], lambda name, rec: False if name in hide else None)
-        # the movie spans the screen from x 0 (setMcSize(screen width)); the window stands where dmLay put it inside
-        pic, org = rn.render(swf, 'root', 1.0); x0 = 0
-        if 'RY' in e:   # the scrollRect crop: only RX..RX+RW, RY..RY+RH of the clip is drawn
-            dx, dy = int(round(e['CX'])), int(round(e['Y0'])); pic = pic.crop((dx, dy, dx + int(e['RW'] * e['S']), dy + int(e['RH'] * e['S']))); img.alpha_composite(pic, (dx, dy))
-        else: img.alpha_composite(pic.crop((0, 0, DW, STAGE_H)), (0, 0))
-        if o == 'partyInventory_p.swf':
-            S = e['S']; gx = x0 + e['X1'] + 8 * e['SH'] + 12 * S; gy = e['Y0'] + INV_LIST_Y * e['SH'] + INV_BAG_HEAD * S
+        # both movies span the screen from x 0 (setMcSize(screen width)); only the window is drawn (the sheet's scrollRect = the window)
+        x0, y0 = int(round(e['WX'])), int(round(e['WY'])); bx = (x0, y0, x0 + int(e['WW']) + 1, y0 + int(e['WH']) + 1)
+        pic, org = rn.render(swf, 'root', 1.0, box=bx); img.alpha_composite(pic, (x0, y0))
+        if o == 'characterSheet_p.swf':
+            if mock: (mock_strip if st else mock_sheet)(img, swf, e)
+            if st: note.append('the inventory window %.0f x %.0f at %.0f,%.0f: doll %.0f x %.0f (slot %.0f px), stat strip x%.2f' % (e['WW'], e['WH'], e['WX'], e['WY'], e['LW'], e['PH'], 64 * e['D'], e['SS']))
+            else: note.append('sheet %.0f x %.0f at %.0f,%.0f, stat row %.0f px, info row %.0f px, doll %.0f x %.0f (slot %.0f px), tabs x%.2f' % (
+                e['WW'], e['WH'], e['WX'], e['WY'], 26 * e['S'], 26 * e['SI'], e['LW'], e['PH'], 64 * e['D'], e['F']))
+        else:
+            S = e['SQ']; gx = e['WX'] + e['BX'] + 12 * S; gy = e['WY'] + e['BY'] + INV_BAG_HEAD * S
             if grid:
                 for r in range(int(e['ROWS'])):
                     for c in range(INV_COLS):
                         x = gx + c * INV_PITCH * S; y = gy + r * INV_PITCH * S; dr.rectangle([x, y, x + 50 * S, y + 50 * S], outline=(150, 132, 104, 255), fill=(30, 26, 24, 255))
-            note.append('bag: cell %.0f px, %d x %d, window %.0f x %.0f, header x%.2f' % (50 * S, INV_COLS, e['ROWS'], INV_W * S, e['HS'], e['SH']))
-        elif st: note.append('doll panel %.0f x %.0f, slot %.0f px' % (e['RW'] * e['S'], e['H'] * e['S'], 64 * e['S']))
-        else: note.append('doll + sheet %.0f x %.0f, row %.0f px, doll slot %.0f px' % (e['RW'] * e['S'], e['H'] * e['S'], 26 * e['S'], 64 * e['KD'] * e['S']))
+            if mock: mock_inv(img, swf, e)
+            note.append('bag: cell %.0f px, %d x %d in view, filter row x%.2f' % (50 * S, INV_COLS, e['ROWS'], e['SB']))
     return img, '%s, cell asked %d, screen %d x 1080: %s' % (view, C, DW, '; '.join(note))
+
+
+def _font(px):
+    from PIL import ImageFont
+    for n in ('arial.ttf', 'DejaVuSans.ttf'):
+        try: return ImageFont.truetype(n, max(8, int(px)))
+        except OSError: pass
+    return ImageFont.load_default()
+
+
+def _sym(img, swf, name, k, x, y, frame=1):
+    import dos2_swf_render as rn
+    mv = gr.Movie(swf); cid = [c for c, n in mv.classes.items() if n.split('.')[-1] == name][0]; im, org = rn.render(swf, cid, k, frame)
+    img.alpha_composite(im, (int(x + org[0] * k), int(y + org[1] * k)))
+
+
+MOCK_STRIP = [[('0/0', 11), ('0/0', 12), ('1-2', 14), ('5%', 13), ('95%', 20), ('0%', 18), ('5.0', 15), ('10', 16)], [('0%', 5), ('0%', 6), ('0%', 7), ('0%', 8), ('0%', 9)]]
+def mock_strip(img, swf, e):
+    """the inventory window's stat strip as dmStripTick lays it out (value + icon cells, two rows, centred) - drawn here (the engine's data)"""
+    from PIL import ImageDraw
+    dr = ImageDraw.Draw(img); SS = e['SS']; fs = _font(19 * SS); X, Y = e['WX'], e['WY']
+    cells = [[(v, ic, dr.textlength(v, font=fs) / SS + 8 + 32) for v, ic in row] for row in MOCK_STRIP]
+    tot = max(sum(c[2] + 12 for c in row) for row in cells)
+    x0 = X + e['RX'] + 8 * e['F'] + (e['RW'] - 16 * e['F'] - tot * SS) / 2; y0 = Y + e['CT'] + (e['SH'] - 2 * STRIP_PITCH * SS) / 2 + 2 * SS
+    for r, row in enumerate(cells):
+        x = x0
+        for v, ic, wd in row:
+            dr.text((x + 4 * SS, y0 + r * STRIP_PITCH * SS), v, font=fs, fill=(220, 210, 190, 255))
+            _sym(img, swf, 'statIcon_125', SS, x + (wd - 24) * SS, y0 + (r * STRIP_PITCH + 3) * SS, ic)
+            x += (wd + 12) * SS
+    mock_info(img, swf, e)
+    ft = _font(26 * e['F']); dr.text((X + e['WW'] / 2, Y + 35 * e['F']), 'FANE - LEVEL 1', font=ft, fill=(220, 210, 190, 255), anchor='mm')
+
+
+def mock_inv(img, swf, e):
+    """the inventory's run-time parts: the party tabs (the movie's own Tab), the bag header's name / gold / weight"""
+    from PIL import ImageDraw
+    dr = ImageDraw.Draw(img); X, Y = e['WX'], e['WY']; SB, SQ = e['SB'], e['SQ']
+    cy = Y + e['FT'] + e['FH'] / 2
+    for i in range(4): _sym(img, swf, 'Tab', SB, X + e['RX'] + e['EM'] + i * 46 * SB, cy - 20 * SB)
+    f = _font(20 * SQ); hy = Y + e['BY'] + 18 * SQ
+    dr.text((X + e['BX'] + 58 * SQ, hy), 'Fane', font=f, fill=(220, 210, 190, 255))
+    dr.text((X + e['BX'] + (423 + INV_ADD) * SQ, hy), '0', font=f, fill=(220, 210, 190, 255)); dr.text((X + e['BX'] + (544 + INV_ADD) * SQ, hy), '6/100', font=f, fill=(220, 210, 190, 255))
+
+
+def mock_info(img, swf, e):
+    from PIL import ImageDraw
+    dr = ImageDraw.Draw(img); X, Y = e['WX'], e['WY']; SI = e['SI']
+    fi = _font(19 * SI); ry0 = e['CT'] + (e['IH'] - 74 * SI) / 2 + 3 * SI; ix = e['LX'] + 8 * e['F'] + 13 * SI
+    for r, (lab, val, ic) in enumerate(MOCK_INFO):
+        y = ry0 + r * 26 * SI
+        _sym(img, swf, 'statIcon_125', SI, X + ix + 3 * SI, Y + y + 3 * SI, ic)
+        dr.text((X + ix + 48 * SI, Y + y), lab, font=fi, fill=(200, 190, 170, 255)); dr.text((X + ix + 240 * SI, Y + y), val, font=fi, fill=(230, 220, 200, 255), anchor='ra')
+
+
+MOCK_INFO = [('Vitality', '32/32', 1), ('Action Points', '6 (+4)', 2), ('Source Points', '0/1', 3)]
+MOCK_ATTR = ['Strength', 'Finesse', 'Intelligence', 'Constitution', 'Memory', 'Wits']
+MOCK_SEC = ['Damage', 'Critical Chance', 'Accuracy', 'Dodging', 'Physical Armour', 'Magic Armour', '', 'Movement', 'Initiative']
+MOCK_RES = ['Fire', 'Water', 'Earth', 'Air', 'Poison']
+def mock_sheet(img, swf, e):
+    """what the engine fills in, drawn over the picture to judge the layout (NOT in the movie): the tabs (the movie's own StatsTabButton), the
+    HP / AP / Source rows (InfoStat), the attributes tab's rows - in the places and scales dmLay gives their holders; text in a plain font"""
+    from PIL import ImageDraw, ImageFont
+    import dos2_swf_render as rn
+    dr = ImageDraw.Draw(img); mv = gr.Movie(swf); X, Y = e['WX'], e['WY']
+    def font(px):
+        for n in ('arial.ttf', 'DejaVuSans.ttf'):
+            try: return ImageFont.truetype(n, int(px))
+            except OSError: pass
+        return ImageFont.load_default()
+    def sym(name, k, x, y, frame=1):
+        cid = [c for c, n in mv.classes.items() if n.split('.')[-1] == name][0]; im, org = rn.render(swf, cid, k, frame)
+        img.alpha_composite(im, (int(X + x + org[0] * k), int(Y + y + org[1] * k)))
+    F, S, SI = e['F'], e['S'], e['SI']
+    for i in range(5): sym('StatsTabButton', F, e['TX'] + 66 * i * F, e['TY'] + (23 if i == 0 else 21) * F)
+    mock_info(img, swf, e)
+    ft = font(26 * F); dr.text((X + e['WW'] / 2, Y + 35 * F), 'FANE - LEVEL 1', font=ft, fill=(220, 210, 190, 255), anchor='mm')
+    dr.text((X + e['RX'] + e['RW'] / 2, Y + e['CT'] + e['IH'] - 24 * F), 'Attributes', font=ft, fill=(220, 210, 190, 255), anchor='mm')
+    fs = font(19 * S); ink = (60, 40, 30, 255)
+    def rows(x, y, labels, pitch):
+        for r, lab in enumerate(labels):
+            if lab: dr.text((X + x, Y + y + r * pitch), lab, font=fs, fill=ink); dr.text((X + x + 250 * S, Y + y + r * pitch), str(10 + r), font=fs, fill=ink, anchor='ra')
+    mx, my = e['PCX'] + 20 * S, e['PCY'] + 9 * S
+    rows(mx + 20 * S, my + 30 * S, MOCK_ATTR, 26 * S); rows(mx + 20 * S, my + CS_RES_Y * S, MOCK_RES, 30 * S)
+    rows(mx + (20 + COL2) * S, my + 30 * S, MOCK_SEC, 28 * S); rows(mx + (20 + COL2) * S, my + (30 + 240) * S, ['Experience', 'Next level'], 28 * S)
 
 
 def render(src, out, ipad=None):

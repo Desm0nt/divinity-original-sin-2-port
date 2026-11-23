@@ -44,6 +44,11 @@ static inline int hu_side_panel(int code) {
 // inventory stands right of it (both in their state 1, tools/dos2_ppanel_inv.py). Bits of the group / the PC hot bar id that toggles each:
 enum { HU_P_SHEET = 1, HU_P_INV = 2, HU_P_SKILLS = 4, HU_P_CRAFT = 8, HU_P_JOURNAL = 16, HU_P_ALL = 31, HU_VIEW_EQUIP = 8, HU_PAIR_GRACE_MS = 400 };
 static inline int hu_panel_pc(int bit) { return bit == HU_P_SHEET ? 1 : bit == HU_P_INV ? 1 : bit == HU_P_SKILLS ? 2 : bit == HU_P_CRAFT ? 3 : bit == HU_P_JOURNAL ? 5 : -1; }
+// Owner 23.11 (the iPad's inventory: one window - the doll left, the bag right): the inventory IS the equipment view. The column's inventory
+// button (dmSide 4) opens the pair (the sheet movie in its state 1 draws the window's frame, title bar, HP box, doll and stat strip; the
+// inventory movie the filter row and the bag: tools/dos2_ppanel_inv.py); the same button while the pair is up closes it. inv_pair 0
+// (DM_DOS2_TOUCH_INV_PAIR=0): dmSide 4 = the inventory alone, as before.
+static inline int hu_inv_code(int code, int inv_pair) { return inv_pair && code == 4 ? 8 : code; }
 static inline int hu_view_want(int code) {
     return code == 3 ? HU_P_SHEET : code == 4 ? HU_P_INV : code == 5 ? HU_P_SKILLS : code == 6 ? HU_P_CRAFT : (code == 2 || code == 7) ? HU_P_JOURNAL : code == HU_VIEW_EQUIP ? HU_P_SHEET | HU_P_INV : 0;
 }
@@ -98,9 +103,9 @@ static inline int hu_corner_code(int vis, int view, float x, float y, float sw, 
     if (vis & HU_P_JOURNAL) { w = 1197; code = 7; }
     else if (vis & HU_P_SKILLS) { w = 1211; code = 5; }
     else if (vis & HU_P_CRAFT) { w = 612; code = 6; }
-    else if (pair && view == HU_VIEW_EQUIP) { float s = cell / 50.0f, a = (mx - doll) / 770.0f; w = doll + 770.0f * (s < a ? s : a); top = 0; code = 8; }
-    else if (vis & HU_P_INV) { float s = cell / 50.0f, a = mx / 770.0f; w = 770.0f * (s < a ? s : a); top = 0; code = 4; }
-    else if (vis & HU_P_SHEET) { float s = 1.7f * cell / 76.0f, a = mx / 680.0f, b = 1080.0f / 572.0f; s = s < a ? s : a; s = s < b ? s : b; w = 680.0f * s; top = 0; code = 3; }
+    // the sheet / the inventory (23.11): one window on the movies' own grid (tools/dos2_ppanel_inv.py win_lets) with its close on the title
+    // bar's right tile and a 100 px pad - no corner rule (it would be a second, differently computed, close)
+    (void)pair; (void)mx; (void)doll; (void)cell; (void)view;
     if (!code) return 0;
     const float right = sw / 2 + w / 2;
     return x >= right - HU_CORNER && x <= right + 30 && y >= top - 10 && y <= top + HU_CORNER ? code : 0;

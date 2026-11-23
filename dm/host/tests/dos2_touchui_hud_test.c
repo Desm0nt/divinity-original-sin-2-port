@@ -46,9 +46,9 @@ int main(void) {
         const float sw = 2400;
         assert(hu_corner_code(HU_P_JOURNAL, 0, 1200 + 598 - 40, 40, sw, 93) == 7 && hu_corner_code(HU_P_JOURNAL, 0, 1200 + 598 - 200, 40, sw, 93) == 0);
         assert(hu_corner_code(HU_P_SKILLS, 0, 1200 + 605, 60, sw, 93) == 5 && hu_corner_code(HU_P_SKILLS, 0, 1200 + 605, 300, sw, 93) == 0);
-        assert(hu_corner_code(HU_P_INV, 0, 1200 + 716 - 30, 30, sw, 93) == 4);                 // the inventory: 770 x 1.86 = 1432 wide
-        assert(hu_corner_code(HU_P_INV, 0, 1200 - 716 + 30, 30, sw, 93) == 0);                 // its LEFT corner is not a close
-        assert(hu_corner_code(HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, 1200 + 920, 20, sw, 93) == 8);
+        assert(hu_corner_code(HU_P_INV, 0, 1200 + 716 - 30, 30, sw, 93) == 0);                 // 23.11: the sheet / inventory windows: no corner rule
+        assert(hu_corner_code(HU_P_SHEET, 0, 1200 + 700, 30, sw, 93) == 0);                    // (their own close: a 100 px pad on the title bar)
+        assert(hu_corner_code(HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, 1200 + 920, 20, sw, 93) == 0);
         assert(hu_corner_code(0, 0, 2300, 20, sw, 93) == 0);
     }
     // the aimed point: where the cursor rested before the finger went to the button
@@ -102,6 +102,12 @@ int main(void) {
       assert(hu_view_plan(7, HU_P_INV, 0, &c, &o, &pr, &st) == 0 && c == HU_P_INV && o == 0 && pr == 1 && st == -1);            // journal / map: the engine's own toggle
       assert(hu_view_plan(2, HU_P_JOURNAL, 0, &c, &o, &pr, &st) == 0 && c == 0 && pr == 1);
       assert(hu_view_plan(1, HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == HU_VIEW_EQUIP && !c && !o && !pr && st == -1);       // not a panel code
+      // 23.11: the inventory button = the inventory window (the pair); the same button again closes it; the window's button goes to the sheet
+      assert(hu_inv_code(4, 1) == HU_VIEW_EQUIP && hu_inv_code(4, 0) == 4 && hu_inv_code(3, 1) == 3 && hu_inv_code(5, 1) == 5);
+      assert(hu_view_plan(hu_inv_code(4, 1), 0, 0, &c, &o, &pr, &st) == HU_VIEW_EQUIP && c == 0 && o == (HU_P_SHEET | HU_P_INV) && st == 1);
+      assert(hu_view_plan(hu_inv_code(4, 1), HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == 0 && c == (HU_P_SHEET | HU_P_INV) && o == 0);
+      assert(hu_view_plan(hu_inv_code(4, 1), HU_P_SHEET, 0, &c, &o, &pr, &st) == HU_VIEW_EQUIP && c == 0 && o == HU_P_INV && st == 1);   // from the sheet
+      assert(hu_view_plan(3, HU_P_SHEET | HU_P_INV, HU_VIEW_EQUIP, &c, &o, &pr, &st) == 0 && c == HU_P_INV && st == 0);                    // back to the sheet
       for (int b = 1; b <= HU_P_JOURNAL; b <<= 1) assert(hu_panel_pc(b) >= 0 && hu_panel_pc(b) <= 5);
       assert(hu_panel_pc(HU_P_SHEET) == hu_side_panel(3) && hu_panel_pc(HU_P_INV) == hu_side_panel(4) && hu_panel_pc(HU_P_SKILLS) == hu_side_panel(5) &&
              hu_panel_pc(HU_P_CRAFT) == hu_side_panel(6) && hu_panel_pc(HU_P_JOURNAL) == hu_side_panel(7));

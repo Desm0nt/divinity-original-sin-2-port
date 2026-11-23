@@ -129,6 +129,8 @@
 //   DM_DOS2_TOUCH_ONE_PANEL=0        the PC's free windows: dmSide(2..7) only sends the button's own toggle, dmSide(8) does nothing (default 1: one
 //                                    panel window at a time as on the iPad; dmSide(8) = the equipment view: the sheet movie's doll panel + the
 //                                    inventory, both told their look 1 through setHelmetOptionState / setAnchor(1000000 + n), rules hu_view_plan)
+//   DM_DOS2_TOUCH_INV_PAIR=0         the column's inventory button opens the inventory alone (default 1, owner 23.11: the inventory window IS
+//                                    the pair - the sheet movie's frame + doll + stat strip and the inventory's bag: hu_inv_code)
 //   DM_DBG=1                         every switch asked / refused (state, blocking type), every object made or destroyed, timing, EI calls
 #ifdef DM_GAME_DOS2
 #include "hle.h"
@@ -245,6 +247,7 @@ static hu_aim g_aimp;                     // the aimed point (game thread)
 static _Atomic int g_aim_set; static _Atomic uint64_t g_aim_xy;   // dm_dos2_touchui_hud_aim_at from another thread: two floats
 static struct { int kind, step; float x, y; uint64_t t; uint32_t key; } g_act;   // a host click on its way: kind 1 left, 2 right, 3 a key (raw id in key)
 static int g_one = 1;                     // DM_DOS2_TOUCH_ONE_PANEL: one panel window at a time + the equipment view (0 = the PC's free windows)
+static int g_inv_pair = 1;                // DM_DOS2_TOUCH_INV_PAIR: the inventory button opens the pair (the iPad-like inventory window)
 static int g_plate = 1, g_plate_on, g_pick_mode;   // the action plate: enabled, shown now, DM_DOS2_TOUCH_T_PICK
 static hu_pick g_pick;
 static int g_view; static uint16_t g_view_who; static uint64_t g_view_t;   // the host's last view of the panel group (HU_VIEW_EQUIP while the pair is up)
@@ -662,7 +665,7 @@ int dm_dos2_touchui_hud_panel(void *ui, int code, int only_open, const char *who
         uint8_t *mgr = hu_mgr(), *o[5];
         uint8_t *hb = hu_hotbar(mgr, ui ? *(const volatile uint16_t *)((const uint8_t *)ui + HU_OBJ_PLAYER) : 0);
         if (hb) {
-            const int want = hu_view_want(code), vis = hu_panels(mgr, *(volatile uint16_t *)(hb + HU_OBJ_PLAYER), o);
+            const int want = hu_view_want(hu_inv_code(code, g_inv_pair)), vis = hu_panels(mgr, *(volatile uint16_t *)(hb + HU_OBJ_PLAYER), o);
             if (only_open && want && (vis & want) == want) { if (g_dbg || g_nside++ < 12) LOG("[hud] %s: open already, nothing sent", who_asks ? who_asks : "panel"); return 0; }
             dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)code;
             hu_ei_side(NULL, NULL, ui, "dmSide", 1, &v);
@@ -722,7 +725,7 @@ static int hu_pair_apply(uint8_t *hb, int vis, int want) {
 // g_view / g_view_who / g_view_t: declared with the file state above (hu_destroy resets them)
 static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmSide(code)
     (void)ctx; (void)player; (void)name;
-    const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1;
+    const int code = hu_inv_code(n && a && a[0].type == 4 ? (int)a[0].d : -1, g_one && g_inv_pair);
     static const char *const k_nm[9] = {"?", "options", "map", "character", "inventory", "skills", "crafting", "journal", "equipment"};
     if (code < 1 || code > 8) { if (g_nside++ < 20) LOG("[hud] dmSide(%d): no such button (1..8)", code); return 1; }
     const uint32_t from = ui ? *(const volatile uint32_t *)((const uint8_t *)ui + HU_OBJ_TYPE) : 0;
@@ -1254,6 +1257,7 @@ void dm_dos2_touchui_hud_install(void) {
     g_plate = !((v = getenv("DM_DOS2_TOUCH_T_PLATE")) && *v == '0');
     g_pick_mode = hu_pick_parse(getenv("DM_DOS2_TOUCH_T_PICK"));
     { const char *one = getenv("DM_DOS2_TOUCH_ONE_PANEL"); if (one && *one) g_one = atoi(one) != 0; }
+    { const char *ip = getenv("DM_DOS2_TOUCH_INV_PAIR"); if (ip && *ip) g_inv_pair = atoi(ip) != 0; }
     LOG("[hud] action plate %s; object picking DM_DOS2_TOUCH_T_PICK=%s (auto: the tap's pick, then the engine's PC hover pick, then the short long press when the picking is dead)",
         g_plate ? "on" : "OFF (DM_DOS2_TOUCH_T_PLATE=0)", hu_pick_name(g_pick_mode));
     v = getenv("DM_DOS2_TOUCH_HUD_SCALE"); g_tune = hu_tune(v && *v ? (float)atof(v) : 0, v && *v);
