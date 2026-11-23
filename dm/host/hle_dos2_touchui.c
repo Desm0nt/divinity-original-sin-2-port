@@ -240,6 +240,9 @@ static const tu_def k_touch[] = {
     // the loading screen: one of our own touch tips before every second engine tip (tools/dos2_ptouch_tips.py; the keyboard-only engine tips
     // leave the pick in hle_dos2_touch_tips.c)
     {0x17, 0, "loadingScreen_p", "GUI/loadingScreen.swf"},
+    // the tutorial window: a tap anywhere on a pop-up / pointer bubble closes it (as its X), anywhere on the modal box = OK (the iPad way;
+    // tools/dos2_ptutorial.py; the tutorials about keys are not queued at all: hle_dos2_touch_tuts.c)
+    {0x37, 0, "tutorialBox_p", "GUI/tutorialBox.swf"},
     // the PC tooltip window (made by hle_dos2_touchui_hud.c hu_tip_make): tooltip.swf with everything of its library tooltipHelper_kb.swf
     // inside, under its own class names (tools/dos2_ptooltip.py) - no Flash library is registered for it
     {0x2c, 0, "tooltip_p", "GUI/tooltip.swf"},

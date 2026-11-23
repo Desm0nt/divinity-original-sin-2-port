@@ -87,7 +87,9 @@ void dm_dos2_touch_tips_poll(void) {
 }
 
 void dm_dos2_touch_tips_install(void);   // main.c host_preload, after dm_dos2_touch_gaps_install
+void dm_dos2_touch_tuts_install(void);   // hle_dos2_touch_tuts.c: the tutorial windows about keys (UI mode touch), its own switch
 void dm_dos2_touch_tips_install(void) {
+    dm_dos2_touch_tuts_install();
     const char *e = getenv("DM_DOS2_TOUCH_TIPS"), *d = getenv("DM_DBG");
     g_dbg = d && *d && *d != '0';
     if (e && *e == '0') { LOG("[tips] DM_DOS2_TOUCH_TIPS=0: the loading screen keeps the keyboard tips in UI mode touch"); return; }

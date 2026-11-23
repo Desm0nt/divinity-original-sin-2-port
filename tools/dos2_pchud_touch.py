@@ -682,6 +682,8 @@ import dos2_ptouch_tips; dos2_ptouch_tips.install(sys.modules[__name__])
 # the PC tooltip window as one self-contained movie (tooltip_p: tooltip.swf + its library tooltipHelper_kb.swf inside, own class names, no
 # global library registration): tools/dos2_ptooltip.py adds its movie
 import dos2_ptooltip; dos2_ptooltip.install(sys.modules[__name__])
+# the tutorial window (tutorialBox_p: a tap on the whole pop-up / bubble = its X, on the modal box = OK): tools/dos2_ptutorial.py adds its movie
+import dos2_ptutorial; dos2_ptutorial.install(sys.modules[__name__])
 
 
 def main():
