@@ -795,6 +795,33 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
     if (i == g_nmnt || g_mnt[i].unmounted) { pthread_mutex_unlock(&g_lock); LOG("fs Commit %s: not mounted", name); return RES_NOT_MOUNTED; }
 #endif
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // 非事务挂载：无可提交 | non-transactional mount: nothing to commit
+#ifdef DM_GAME_DOS2
+    {   // [DOS2] owner 23.11: "Continue in the main menu works only after 3-7 s, as if the game hung". The game calls Commit after reading each
+        // save while it lists them for the menu (16 saves: 51 commits from boot to the menu, writes since boot 0), and every commit here cloned
+        // the whole save tree (~97 MB, 0.3-0.4 s each: ~11 s after the menu was up); the touch mode also holds a main menu press back while
+        // the save was busy in the last 1.2 s (hle_dos2_touch.c DT_MM_QUIET_MS, the Continue crash of runs t3k / t3l), so the tap waited for the
+        // whole chain. On the console a commit with nothing written since the last one changes nothing and is about free: so is it here - with
+        // no save write / create / delete / rename since the last commit (g_save_dirty, set by RW() / WriteFile), one transactional mount, no
+        // pre-commit hook (none is linked into DOS2) and no failed write pending, Commit answers success at once. The call still counts as
+        // save activity (g_save_last_ns), so the Continue guard still waits for the end of the listing, which is now short.
+        // DM_FS_EMPTY_COMMIT=1: every commit clones again, as before.
+        static int empty_skip = -1; static unsigned n_skip; static uint64_t last_skip;
+        if (empty_skip < 0) { const char *e = getenv("DM_FS_EMPTY_COMMIT"); empty_skip = !(e && *e == '1');
+            LOG("[fs] save commits with nothing changed since the last one: %s", empty_skip ? "answered at once, no clone (as the console; DM_FS_EMPTY_COMMIT=1 clones every one)" : "cloned as every other one (DM_FS_EMPTY_COMMIT=1)"); }
+        int hooks = 0, ntxn = 0;
+        for (int k = 0; k < 5; k++) hooks |= g_dm_pre_commit_hook[k] != NULL;
+        for (int k = 0; k < g_nmnt; k++) ntxn += g_mnt[k].commit[0] && !g_mnt[k].unmounted;
+        if (empty_skip && !hooks && ntxn == 1 && !atomic_load(&g_save_dirty) && !atomic_load(&g_save_poison)) {
+            const uint64_t t = now_ns(); n_skip++;
+            if (n_skip <= 3 || n_skip % 25 == 0)
+                LOG("[fs] save commit #%u with nothing changed since the last one: done at once, no clone (%llu ms after the previous empty one; commits so far %llu)",
+                    n_skip, last_skip ? (unsigned long long)((t - last_skip) / 1000000u) : 0ull, (unsigned long long)atomic_load(&g_save_commits));
+            last_skip = t; atomic_store(&g_save_last_ns, t); atomic_fetch_add(&g_save_commits, 1);   // a successful commit for whoever waits for one (dm_fs_commit_count)
+            pthread_mutex_unlock(&g_lock);
+            return RES_OK;
+        }
+    }
+#endif
     uint64_t tc0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
     for (int k = 0; k < 5; k++) if (g_dm_pre_commit_hook[k]) g_dm_pre_commit_hook[k](g_mnt[i].dir);
     uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC);   // 写进工作目录的旁路文件随这次提交一起原子换入 | side files written into the working directory are swapped in atomically together with this commit
