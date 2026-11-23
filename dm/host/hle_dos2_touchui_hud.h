@@ -4,7 +4,9 @@
 #define HLE_DOS2_TOUCHUI_HUD_H
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 #include "hle_dos2_uimode.h"
+#include "hle_dos2_touchui_ei.h"
 
 // Does the host make the PC HUD when a player UI set is built with the mode byte 0: UI mode TOUCH (requested or still running its HUD part), or
 // the old switch DM_DOS2_TOUCHUI_HUD=1 in any mode; DM_DOS2_TOUCHUI_HUD=0 (env_hud 0) = never. env_hud: -1 unset, 0, 1.
@@ -121,6 +123,14 @@ static inline void hu_aim_feed(hu_aim *a, float x, float y, uint64_t now_ms) {
 }
 static inline void hu_aim_set(hu_aim *a, float x, float y) { a->rx = x; a->ry = y; a->rest = 1; }   // a gesture names the aimed point itself
 static inline int hu_aim_point(const hu_aim *a, float *x, float *y) { if (!a->rest) return 0; *x = a->rx; *y = a->ry; return 1; }
+// UI mode TOUCH, "something waits for a target" (owner 23.11: a world tap only aims, CONFIRM casts). Three sources: slot = hotBar_p's dmAim(1)
+// (the engine's showActiveSkill(slot >= 0): a skill of the visible deck), act = dmAim(2) (the engine's setActionPreview("ActionAttackGround",
+// true): the hot bar's update main+0x1233360 asks main+0x109b500 for the character and invokes it on each change), eng = the input controller's
+// task facts (hle_dos2_touch_world.c: a skill from the book / another deck, an inventory Throw; hle_dos2_touch_gesture.h dt_aim_latch).
+// The movie shows CONFIRM / cancel by itself for `slot`; for the other two the host tells it (showActiveSkill(HU_AIM_SHOW / HU_AIM_HIDE)).
+enum { HU_AIM_SHOW = 1999998, HU_AIM_HIDE = 1999997 };   // tools/dos2_pchud_touch.py AIM_SHOW / AIM_HIDE (below the plate's 1999999)
+static inline int hu_aim_any(int slot, int act, int eng) { return slot || act || eng; }
+static inline int hu_aim_host_show(int slot, int act, int eng) { return !slot && (act || eng); }
 // The action plate: who says "an object is under the finger" (DM_DOS2_TOUCH_T_PICK). Sources, in the order `auto` asks them:
 //   PC     the pick hle_dos2_touch_world.c noted while a world finger was down (its "hover" flag; what the hybrid's long press uses)
 //   HOVER  the engine's own PC pick right now: [PlayerPickingHelper+0x80] as the helper's ray set-up left it with the mode byte 0 - in the PC
@@ -152,4 +162,75 @@ static inline int hu_pick_tap(hu_pick *p, int mode, int pc, int hover, int *died
 }
 // does the short long press put the plate up now
 static inline int hu_pick_long_on(const hu_pick *p, int mode) { return mode == HU_PICK_LONG || (mode == HU_PICK_AUTO && p->dead); }
+
+// ---- the PC tooltip window's size (phone run 23.11: a hot bar skill tooltip ran off the screen's bottom, an item tooltip sat low; docs/dos2/
+// TOUCH_MODES_PLAN.md "Подсказки касания: размер, тело, удержание"). The engine places the window itself: setTooltipSize(w, h) (main+0x111e490)
+// -> main+0x110e2c0 works in screen px = stage px x s2, s2 = S x H / 1080 (the mode byte 0) - the class scale is NOT in it. A hot bar tooltip
+// (requester type 0x28) is put at y = H - (h + HU_TIP_HB) x s2 (main+0x110e3bc `add w14,w11,#0x9e`), any other one is clamped to y + h x s2 <= H.
+// So the host leaves type 0x2c at class scale 1 (the movie's stage px = the engine's) and the movie (tools/dos2_ptooltip.py touch_fit) scales
+// its own tooltip by f and tells the engine f x w, f x h. The host sends it, through the invoke setAnchor the tooltip class registers:
+// HU_TIP_CMD + 1000 f, 2 HU_TIP_CMD + the most height, 3 HU_TIP_CMD + the most width (stage px). f = the window factor F (hle_dos2_touch_scale.h
+// ts.tooltip: the size of the hybrid's console tooltip, 1.3 on a 6.7" phone) / S, so one design px is F x H / 1080 screen px as every touch
+// window; the height leaves the hot bar branch's 158 and two margins, the width the side strips.
+enum { HU_TIP_CMD = 1000000, HU_TIP_HB = 158, HU_TIP_MARGIN = 8, HU_TIP_SIDE = 80 };
+typedef struct { float f; int max_h, max_w; } hu_tip_fit;
+static inline hu_tip_fit hu_tip_numbers(float F, float s, unsigned sw, unsigned sh) {
+    hu_tip_fit r;
+    if (!(s >= 0.2f && s <= 4.0f)) s = 1.0f;
+    if (!(F >= 0.5f && F <= 3.0f)) F = 1.0f;
+    const float uh = 1080.0f / s, uw = sw && sh ? (float)sw * 1080.0f / ((float)sh * s) : uh * 16.0f / 9.0f;   // the screen in stage px
+    r.f = F / s < 0.5f ? 0.5f : F / s > 3.0f ? 3.0f : F / s;
+    r.max_h = (int)floorf(uh - HU_TIP_HB - 2 * HU_TIP_MARGIN);
+    r.max_w = (int)floorf(uw - 2 * HU_TIP_SIDE);
+    return r;
+}
+// the three setAnchor values (each < HU_TIP_CMD apart: f 0.5..3 -> 500..3000)
+static inline void hu_tip_cmds(const hu_tip_fit *t, double out[3]) {
+    out[0] = HU_TIP_CMD + floor(t->f * 1000.0f + 0.5f); out[1] = 2.0 * HU_TIP_CMD + t->max_h; out[2] = 3.0 * HU_TIP_CMD + t->max_w;
+}
+// the movie's rule (twin of tools/dos2_ptooltip.py touch_fit checkTooltipBoundaries): its scale for a w x h tooltip (stage px at scale 1)
+static inline float hu_tip_movie_f(float f, float max_h, float max_w, float w, float h) {
+    if (!(f > 0)) f = 1;
+    if (max_h > 0 && h > 0 && h * f > max_h) f = max_h / h;
+    if (max_w > 0 && w > 0 && w * f > max_w) f = max_w / w;
+    return f < 0.5f ? 0.5f : f;
+}
+// the engine's vertical placement (twin of main+0x110e2c0 for the two cases above): the top in screen px of a tooltip the engine believes is
+// h_told stage px high; y0 = where the anchor put it (the general case)
+static inline float hu_tip_engine_top(int hot_bar, float h_told, float s2, float H, float y0) {
+    if (hot_bar) { float y = H - (h_told + HU_TIP_HB) * s2; if (y + h_told * s2 > H) y = H - h_told * s2; return y; }
+    return y0 + h_told * s2 > H ? H - h_told * s2 : y0 < 0 ? 0 : y0;
+}
+
+// ---- the tooltip stays after the finger is lifted (owner 23.11, the iPad's ShortLongPress): a HUD element's still hold is let go with the cursor
+// parked off the screen (hle_dos2_touch.c: a release on the element would click it), and the movie answered the hover's end at once
+// (hotBar_p: SlotHoverOut(slot) + hideTooltip() -> main+0x10a6f20 removes the tooltip). From that lift until the next finger lands the host keeps
+// those two calls (only numbers / booleans as arguments) and sends them to the same UI object when the next finger comes - the tooltip goes then
+// and the new touch is handled as usual. One call per (object, name) - the newest arguments; at most HU_PIN_MAX.
+enum { HU_PIN_MAX = 6 };
+typedef struct { void *ui; uint32_t type; char name[16]; unsigned n; dm_ei_val a[2]; } hu_pin_rec;
+typedef struct { int on, n; hu_pin_rec r[HU_PIN_MAX]; } hu_pin;
+static inline int hu_pin_name(const char *name) { return name && (!strcmp(name, "hideTooltip") || !strcmp(name, "SlotHoverOut")); }
+static inline void hu_pin_arm(hu_pin *p) { p->on = 1; p->n = 0; }
+// a movie -> engine call while pinned: 1 = kept for later (the engine does not get it now)
+static inline int hu_pin_take(hu_pin *p, void *ui, uint32_t type, const char *name, unsigned n, const dm_ei_val *a) {
+    if (!p->on || !ui || !hu_pin_name(name) || n > 2 || (n && !a)) return 0;
+    for (unsigned i = 0; i < n; i++) if (a[i].type != 3 && a[i].type != 4) return 0;
+    int k = -1;
+    for (int i = 0; i < p->n; i++) if (p->r[i].ui == ui && !strcmp(p->r[i].name, name)) k = i;
+    if (k < 0) { if (p->n >= HU_PIN_MAX) return 0; k = p->n++; }
+    hu_pin_rec *r = &p->r[k];
+    r->ui = ui; r->type = type; r->n = n;
+    { size_t i = 0; for (; name[i] && i + 1 < sizeof r->name; i++) r->name[i] = name[i]; r->name[i] = 0; }
+    memset(r->a, 0, sizeof r->a);
+    for (unsigned i = 0; i < n; i++) r->a[i] = a[i];
+    return 1;
+}
+// the next finger: the kept calls in their order (out: HU_PIN_MAX), the pin off
+static inline int hu_pin_release(hu_pin *p, hu_pin_rec *out) {
+    const int n = p->on ? p->n : 0;
+    for (int i = 0; i < n; i++) out[i] = p->r[i];
+    p->on = 0; p->n = 0;
+    return n;
+}
 #endif

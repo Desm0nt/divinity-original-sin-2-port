@@ -77,6 +77,9 @@
 //                    click on the PC hot bar's own button does. Run 21.11: the sheet / inventory alone = that one toggle + the engine's hide of
 //                    the other half (hu_pair_ops: main+0x10c01d0 / 0x10c7b30) - id 0 opened the pause menu, id 1 both windows.
 //   dmAim(0 | 1)     hotBar_p: the engine marks / unmarks a prepared skill (showActiveSkill). dm_dos2_touchui_hud_aiming() tells the gestures.
+//   dmAim(2 | 3)     hotBar_p: the engine's setActionPreview("ActionAttackGround", on / off). With the input controller's task facts
+//                    (hle_dos2_touch_world.c dm_dos2_touch_world_aiming: a skill from the book, a throw) any of the three = aiming (owner 23.11:
+//                    a world tap only aims, CONFIRM casts); for the last two the host shows CONFIRM / cancel (showActiveSkill(HU_AIM_SHOW)).
 //   dmAimBtn(1 | 0)  hotBar_p: CONFIRM = the PC's left click at the aimed point, cancel = the PC's right click there (PC: right click drops a
 //                    prepared skill). The aimed point = the world point of dm_dos2_touchui_hud_aim_at(x, y) (an aim tap / the action plate)
 //                    since the skill was prepared, else the world under the button (run 21.11: no more "where the cursor rested"). CONFIRM
@@ -108,7 +111,10 @@
 //                                    bar); 0 = class scales left to the engine. Default: the physical scale (hle_dos2_touch_scale.h) from
 //   DM_DOS2_TOUCH_MM_PER_1080=<mm>   the mm 1080 design px span (Java DmActivity sets it from DisplayMetrics; dm/env wins); unset = the iPad's sizes
 //   DM_DOS2_TOUCH_CELL=<px> | off    testing: the panels' cell (40..160) instead of the physical one; off = not sent (the movies keep 76)
-//   DM_DOS2_TOUCH_WIN_SCALE=0        the windows the game makes (reward, splitter, dialog, tooltip) keep the engine's size
+//   DM_DOS2_TOUCH_WIN_SCALE=0        the windows the game makes (reward, splitter, dialog, tooltip) keep the engine's size (the tooltip: factor 1)
+//   DM_DOS2_TOUCH_TIP_FIT=0          the tooltip movie is not told its factor / the screen (phone 23.11: the tooltip is never class-scaled any
+//                                    more - the engine places it by the size the movie reports; tools/dos2_ptooltip.py touch_fit scales it)
+//   DM_DOS2_TOUCH_TIP_HOLD=0         a HUD hold's tooltip goes when the finger is lifted (default: it stays until the next finger, hu_pin)
 //   DM_DOS2_TOUCHUI_HUD_TIP=0        no PC tooltip window (and no init guard): tooltip calls are dropped in the PC UI. Default on since 21.11
 //                                    (2nd pass): the window plays GUI/tooltip_p.swf, a self-contained movie (tools/dos2_ptooltip.py) - no Flash
 //                                    library is registered for it (the global registration of d5013e4 crashed the console menus, main+0x3c56b4)
@@ -226,7 +232,9 @@ static int g_nstates = 1, g_nblock = 6;
 static unsigned g_nswitch, g_nrefused, g_nside, g_naim;
 static module_t *g_main;
 static hu_fn g_create_all_orig, g_destroy_all_orig;
-static _Atomic int g_aim;                 // a skill is prepared (hotBar_p's dmAim)
+static _Atomic int g_aim;                 // a skill is prepared (hotBar_p's dmAim(1): showActiveSkill(slot >= 0))
+static _Atomic int g_aim_act;             // hotBar_p's dmAim(2 | 3): the engine's setActionPreview("ActionAttackGround", on)
+static int g_aim_all, g_aim_shown;        // the last combined state (hu_aim_sync); the host told hotBar_p to show CONFIRM / cancel (HU_AIM_SHOW)
 static hu_aim g_aimp;                     // the aimed point (game thread)
 static _Atomic int g_aim_set; static _Atomic uint64_t g_aim_xy;   // dm_dos2_touchui_hud_aim_at from another thread: two floats
 static struct { int kind, step; float x, y; uint64_t t; uint32_t key; } g_act;   // a host click on its way: kind 1 left, 2 right, 3 a key (raw id in key)
@@ -457,8 +465,10 @@ static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
 }
 
 // ---- the host's objects ----
+static void hu_tip_drop_pin(void);
 static void hu_destroy(const char *why) {
     uint8_t *mgr = hu_mgr();
+    hu_tip_drop_pin();   // the kept hover-out calls name objects that go now
     if (!g_nobj) return;
     const uint64_t t0 = hu_us(); int gone = 0;
     for (int i = g_nobj - 1; i >= 0 && mgr; i--) {
@@ -479,7 +489,8 @@ static void hu_destroy(const char *why) {
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
-    g_nobj = 0; atomic_store(&g_aim, 0); g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
+    g_nobj = 0; atomic_store(&g_aim, 0); atomic_store(&g_aim_act, 0); g_aim_all = g_aim_shown = 0; g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
+    { void dm_dos2_touch_world_aim_hold(int on, float x, float y); dm_dos2_touch_world_aim_hold(0, 0, 0); }
     g_view = 0; g_view_who = 0;   // run 20.11 review: the equipment view's state of the old set must not steer the first dmSide of the next one
 }
 static void hu_create(uint8_t *ui, const char *why) {
@@ -732,14 +743,36 @@ static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsig
                                      (void *)hb, st, told, g_view);
     return 1;
 }
-static int hu_ei_aim(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmAim(0 | 1)
+// the combined "something waits for a target" (game thread, every poll): on a change the aimed point is forgotten (run 21.11:
+// CONFIRM aims where the player taps the world from now on, else under itself), the end lets the picking follow the cursor again, and the
+// hot bar is told to show / hide CONFIRM and cancel for the states its own showActiveSkill does not see (hle_dos2_touchui_hud.h hu_aim_*)
+static void hu_aim_sync(const char *why) {
+    int dm_dos2_touch_world_aiming(void); void dm_dos2_touch_world_aim_hold(int on, float x, float y);
+    const int slot = atomic_load(&g_aim), act = atomic_load(&g_aim_act), eng = dm_dos2_touch_world_aiming();
+    const int all = hu_aim_any(slot, act, eng), show = hu_aim_host_show(slot, act, eng);
+    if (all != g_aim_all) {
+        g_aim_all = all;
+        memset(&g_aimp, 0, sizeof g_aimp); atomic_store(&g_aim_set, 0);
+        if (!all) dm_dos2_touch_world_aim_hold(0, 0, 0);
+        static unsigned n; if (g_dbg || n++ < 24) LOG("[hud] TOUCH aim %s (%s; hot bar slot %d, attack ground %d, engine task %d): %s", all ? "ON" : "off", why, slot, act, eng,
+                                                    all ? "a world tap / drag only aims (the preview there), CONFIRM casts, cancel drops it" : "a world tap is the PC click again");
+    }
+    if (show == g_aim_shown) return;
+    uint8_t *hb = hu_hotbar(hu_mgr(), g_obj[0].player); uint8_t *fp = hb ? *(uint8_t *volatile *)(hb + HU_OBJ_FP) : NULL;
+    if (!fp) return;
+    dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = show ? HU_AIM_SHOW : HU_AIM_HIDE;
+    if (!dm_dos2_touchui_invoke(fp, "showActiveSkill", &v, 1)) return;
+    g_aim_shown = show; if (show) g_plate_on = 0;   // the movie put CONFIRM back to its own place
+    static unsigned n; if (g_dbg || n++ < 24) LOG("[hud] CONFIRM / cancel %s by the host (%s)", show ? "SHOWN" : "hidden", act ? "attack ground" : eng ? "the engine's prepared skill / target mode" : "nothing prepared");
+}
+static int hu_ei_aim(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmAim(0 | 1 slot, 2 | 3 attack ground)
     (void)ctx; (void)player; (void)ui; (void)name;
-    const int on = n && a && a[0].type == 4 && a[0].d != 0;
-    // run 21.11: a newly prepared skill forgets the old aimed point (CONFIRM aims where the player taps the world from now on, else under itself)
-    if (on && !atomic_load(&g_aim)) { memset(&g_aimp, 0, sizeof g_aimp); atomic_store(&g_aim_set, 0); }
-    atomic_store(&g_aim, on);
-    static unsigned cnt; if (g_dbg || cnt++ < 12) LOG("[hud] dmAim(%d): the hot bar %s a prepared skill; CONFIRM / cancel %s", on, on ? "marks" : "has no", on ? "shown" : "hidden");
-    return 1;
+    const int code = n && a && a[0].type == 4 ? (int)a[0].d : 0;
+    if (code >= 2) atomic_store(&g_aim_act, code == 2);
+    else atomic_store(&g_aim, code == 1);
+    static unsigned cnt; if (g_dbg || cnt++ < 12) LOG("[hud] dmAim(%d): the hot bar %s", code, code == 1 ? "marks a prepared skill (showActiveSkill(slot))" : code == 0 ? "has no prepared slot skill" :
+                                                     code == 2 ? "shows the attack-ground preview (setActionPreview)" : "drops the attack-ground preview");
+    return 1;   // hu_aim_sync on the next poll (no movie invoke from inside the ExternalInterface drain)
 }
 static int hu_ei_aimbtn(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmAimBtn(1 confirm | 0 cancel)
     (void)ctx; (void)player; (void)name;
@@ -766,6 +799,7 @@ static int hu_ei_aimbtn(void *ctx, void *player, void *ui, const char *name, uns
         hu_act_start(ok ? 1 : 2, ok ? "dmAimBtn(1 CONFIRM)" : "dmAimBtn(0 cancel)");
     }
     if (ok) g_plate_on = 0;   // the movie hid the plate itself
+    { void dm_dos2_touch_world_aim_used(void); if (g_aim_all) dm_dos2_touch_world_aim_used(); }   // the engine's lingering facts do not show CONFIRM again
     return 1;
 }
 static int hu_ei_key(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmKey(1 quick save | 2 tactical camera)
@@ -830,7 +864,7 @@ void dm_dos2_touchui_hud_plate_off(const char *why) {
     uint8_t *mgr = hu_mgr(), *hb = NULL;
     for (int i = 0; i < g_nobj && mgr && !hb; i++) if (g_obj[i].type == HU_T_HOTBAR) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_HOTBAR) hb = o; }
     uint8_t *fp = hb ? *(uint8_t *volatile *)(hb + HU_OBJ_FP) : NULL;
-    if (!fp || atomic_load(&g_aim)) return;   // a prepared skill owns CONFIRM / cancel now: leave them
+    if (!fp || g_aim_all) return;   // a prepared skill owns CONFIRM / cancel now: leave them
     dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = 1999999;   // PLATE_HIDE (dm_dos2_touchui_hud_plate)
     dm_dos2_touchui_invoke(fp, "showActiveSkill", &v, 1);
     static unsigned n; if (g_dbg || n++ < 20) LOG("[hud] action plate hidden (%s): its point would be stale", why ? why : "?");
@@ -867,7 +901,10 @@ int dm_dos2_touchui_hud_corner(float x, float y) {
 }
 // for the gestures (hle_dos2_touch.c; any thread): is a skill prepared (CONFIRM / cancel on screen), and "the player aimed here" (window px)
 int dm_dos2_touchui_hud_aiming(void);
-int dm_dos2_touchui_hud_aiming(void) { return g_nobj > 0 && atomic_load(&g_aim); }
+int dm_dos2_touchui_hud_aiming(void) {   // live: the gestures may ask between two polls
+    int dm_dos2_touch_world_aiming(void);
+    return g_nobj > 0 && hu_aim_any(atomic_load(&g_aim), atomic_load(&g_aim_act), dm_dos2_touch_world_aiming());
+}
 void dm_dos2_touchui_hud_aim_at(float x, float y);
 void dm_dos2_touchui_hud_aim_at(float x, float y) {
     uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4);
@@ -940,12 +977,101 @@ static void hu_tell_cell(uint8_t *mgr) {   // inventory / sheet: dmSetCell(cell)
     }
     g_cell_vis = vis;
 }
+// ---- the PC tooltip window: its size and its stay (phone run 23.11; hle_dos2_touchui_hud.h "the PC tooltip window's size" / "the tooltip stays";
+// docs/dos2/TOUCH_MODES_PLAN.md "Подсказки касания: размер, тело, удержание") ----
+// DM_DOS2_TOUCH_TIP_FIT=0: the movie is not told (tooltip.swf's own size, f = 1, still at class scale 1 = placed right); DM_DOS2_TOUCH_TIP_HOLD=0:
+// the tooltip of a HUD hold goes when the finger is lifted (as before 23.11)
+static int g_tip_fit = 1, g_tip_hold = 1;
+static struct { void *fp; double v[3]; } g_tip_told;
+static unsigned g_tip_nfit, g_tip_nset, g_tip_nheld, g_tip_nfree;
+static void hu_tip_unit(uint8_t *mgr, uint64_t h, const char *why) {   // class scale 1 for the tooltip object (game thread)
+    if (!g_hooked || !g_scale_ok || !mgr || *hu_mode() != 0) return;
+    uint8_t *o = hu_obj(mgr, h);
+    if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != HU_TIP_T) return;
+    const float was = *(volatile float *)(o + HU_OBJ_C);
+    if (was == 1.0f) return;
+    ((void (*)(void *, float))(void *)(g_main->base + HU_SETSCALE))(o, 1.0f);
+    ((void (*)(void *))(void *)(g_main->base + HU_RESIZE_NOW))(o);
+    static unsigned n; if (g_dbg || n++ < 8)
+        LOG("[scale] type 0x2c (%s): class scale %.4f -> 1 - the engine places the tooltip by the size the movie reports (main+0x110e2c0: px = stage px x S x H / 1080, "
+            "no class scale), so the movie scales itself and reports the scaled size (tools/dos2_ptooltip.py touch_fit)", why, (double)was);
+}
+static void hu_tip_tell(uint8_t *ui, uint8_t *mgr) {   // every pad poll (game thread): the movie's factor and the screen, when they change
+    uint8_t *o = hu_tip_obj(ui, mgr);
+    if (!o || !hu_fp_root(o)) return;
+    uint8_t *fp = *(uint8_t *volatile *)(o + HU_OBJ_FP);
+    if (!fp) return;
+    hu_tip_unit(mgr, *(volatile uint64_t *)(ui + HU_TIP_SLOT), "kept at 1");   // the engine's own set-up might give it another class scale later
+    if (!g_tip_fit) return;
+    const float F = g_win_scale && g_scale_ok && g_tune != 0 ? g_ts.tooltip : 1.0f;
+    void dm_dos2_wide_size(unsigned *w, unsigned *h); unsigned sw = 0, sh = 0; dm_dos2_wide_size(&sw, &sh);
+    const float s = hu_cfg_s();
+    const hu_tip_fit t = hu_tip_numbers(F, s, sw, sh);
+    double v[3]; hu_tip_cmds(&t, v);
+    if (fp == g_tip_told.fp && !memcmp(v, g_tip_told.v, sizeof v)) return;
+    int ok = 1;
+    for (int k = 0; k < 3; k++) { dm_ei_val e; memset(&e, 0, sizeof e); e.type = 4; e.d = v[k]; ok &= dm_dos2_touchui_invoke(fp, "setAnchor", &e, 1) != 0; }
+    g_tip_told.fp = fp; memcpy(g_tip_told.v, v, sizeof v);   // not again every poll when the name is missing (logged)
+    LOG("%s[hud] tooltip size: factor %.3f (window factor %.3f / UI scale S %.3f), at most %d x %d stage px (screen %ux%u, the hot bar branch's %d and margins "
+        "kept): setAnchor(%.0f / %.0f / %.0f) %s", ok ? "" : "【红】", (double)t.f, (double)F, (double)s, t.max_w, t.max_h, sw, sh, HU_TIP_HB, v[0], v[1], v[2],
+        ok ? "sent; tooltip_p answers dmTipSet" : "NOT sent: the tooltip class has no setAnchor invoke - the tooltip keeps tooltip.swf's size");
+}
+static int hu_ei_tipfit(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // tooltip_p's log calls
+    (void)ctx; (void)player; (void)ui;
+    const int set = !strcmp(name, "dmTipSet");
+    if (set ? (g_tip_nset++ < 8 || g_dbg) : (g_tip_nfit++ < 16 || g_dbg))
+        LOG("[hud] tooltip_p %s(%.3f, %.1f, %.1f)%s", name, n > 0 && a[0].type == 4 ? a[0].d : -1.0, n > 1 && a[1].type == 4 ? a[1].d : -1.0, n > 2 && a[2].type == 4 ? a[2].d : -1.0,
+            set ? ": its factor / most height / most width" : ": the factor it drew this tooltip at, the tooltip's width / height at factor 1 (the engine was told both x factor)");
+    return 1;
+}
+#include <pthread.h>
+static pthread_mutex_t g_pin_lock = PTHREAD_MUTEX_INITIALIZER;
+static hu_pin g_pin;
+static int hu_ei_pin(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // hideTooltip / SlotHoverOut
+    (void)ctx; (void)player;
+    if (!g_main || *hu_mode() != 0 || !ui) return 0;
+    pthread_mutex_lock(&g_pin_lock);
+    const int kept = hu_pin_take(&g_pin, ui, *(volatile uint32_t *)((uint8_t *)ui + HU_OBJ_TYPE), name, n, a);
+    pthread_mutex_unlock(&g_pin_lock);
+    if (kept && (g_tip_nheld++ < 12 || g_dbg)) LOG("[hud] tooltip stays: %s from UI type %#x kept until the next finger (a HUD hold's lift)", name, *(volatile uint32_t *)((uint8_t *)ui + HU_OBJ_TYPE));
+    return kept;
+}
+// hle_dos2_touch.c, game thread: a HUD element's still hold was lifted (the tooltip was up) / a finger landed
+void dm_dos2_touchui_hud_tip_hold(void);
+void dm_dos2_touchui_hud_tip_hold(void) {
+    if (!g_tip_hold || !g_main || *hu_mode() != 0) return;
+    pthread_mutex_lock(&g_pin_lock); hu_pin_arm(&g_pin); pthread_mutex_unlock(&g_pin_lock);
+}
+static int hu_obj_live(uint8_t *mgr, const void *o, uint32_t type) {   // still one of the manager's objects, of that type
+    if (!mgr || !o) return 0;
+    const uint32_t n = *(volatile uint32_t *)(mgr + HU_OBJS_N); uint8_t **objs = *(uint8_t **volatile *)(mgr + HU_OBJS);
+    if (!objs || n > 0x10000) return 0;
+    for (uint32_t i = 0; i < n; i++) if (objs[i] == o) return *(volatile uint32_t *)((const uint8_t *)o + HU_OBJ_TYPE) == type;
+    return 0;
+}
+void dm_dos2_touchui_hud_tip_free(const char *why);
+void dm_dos2_touchui_hud_tip_free(const char *why) {
+    hu_pin_rec r[HU_PIN_MAX]; int n;
+    pthread_mutex_lock(&g_pin_lock); n = hu_pin_release(&g_pin, r); pthread_mutex_unlock(&g_pin_lock);
+    if (!n || !g_main) return;
+    uint8_t *mgr = hu_mgr(); int sent = 0;
+    for (int i = 0; i < n; i++) {
+        if (!hu_obj_live(mgr, r[i].ui, r[i].type)) continue;   // the object is gone (a load, a mode switch): nothing to tell
+        void **vt = *(void ***)r[i].ui;
+        ((void (*)(void *, const char *, uint32_t, void *))vt[0])(r[i].ui, r[i].name, r[i].n, r[i].n ? r[i].a : NULL);
+        sent++;
+    }
+    if (g_tip_nfree++ < 12 || g_dbg) LOG("[hud] tooltip stays -> goes (%s): %d of %d kept call(s) sent to their UI object (%s%s%s)", why, sent, n, r[0].name, n > 1 ? ", " : "", n > 1 ? r[1].name : "");
+}
+static void hu_tip_drop_pin(void) { pthread_mutex_lock(&g_pin_lock); g_pin.on = 0; g_pin.n = 0; pthread_mutex_unlock(&g_pin_lock); }
+
 // hle_dos2_touchui.c tu_create_hook: a UI object the game made itself (game thread). The windows of UI mode TOUCH that grow while they fit
 // (reward 0x88, item splitter 0x15, dialog 0xe, tooltip 0x2c) get their factor; the rest keep the engine's own size.
 void dm_dos2_touchui_hud_created(void *mgr, uint64_t h, uint32_t type);
 void dm_dos2_touchui_hud_created(void *mgr, uint64_t h, uint32_t type) {
+    if (type == HU_TIP_T) { hu_tip_unit(mgr, h, "made"); return; }   // phone 23.11: class scale 1, the movie sizes itself (hu_tip_tell)
     if (!g_hooked || !g_win_scale || !g_scale_ok || g_tune == 0 || !mgr) return;
-    if (type != 0x88 && type != 0x15 && type != 0x0e && type != 0x2c) return;
+    if (type != 0x88 && type != 0x15 && type != 0x0e) return;
     if (!hu_on() || *hu_mode() != 0) return;
     const float f = hu_type_factor(type);
     if (f == 1.0f) return;
@@ -1011,7 +1137,9 @@ void dm_dos2_touchui_hud_poll(void) {
     // the aimed point: named by the gestures, else where the cursor rested
     if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v; float x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); hu_aim_set(&g_aimp, x, y); }
     // (run 21.11: no more "where the cursor rested" - that was the hot bar slot or the CONFIRM circle; see hu_ei_aimbtn)
+    hu_aim_sync("poll");
     hu_tip_make(ui, mgr, "the touch HUD is up and the tooltip object is gone");
+    if (*hu_mode() == 0) hu_tip_tell(ui, mgr);
     hu_act_step();
 }
 
@@ -1112,6 +1240,13 @@ void dm_dos2_touchui_hud_install(void) {
     if (dm_dos2_touchui_ei_on()) {
         dm_dos2_touchui_ei_register("dmSide", hu_ei_side, NULL); dm_dos2_touchui_ei_register("dmAim", hu_ei_aim, NULL); dm_dos2_touchui_ei_register("dmAimBtn", hu_ei_aimbtn, NULL);
         dm_dos2_touchui_ei_register("dmKey", hu_ei_key, NULL);
+        // the PC tooltip window (phone 23.11): its log calls; the hover-out calls a HUD hold's lift keeps until the next finger
+        g_tip_fit = !((v = getenv("DM_DOS2_TOUCH_TIP_FIT")) && *v == '0'); g_tip_hold = !((v = getenv("DM_DOS2_TOUCH_TIP_HOLD")) && *v == '0');
+        dm_dos2_touchui_ei_register("dmTipFit", hu_ei_tipfit, NULL); dm_dos2_touchui_ei_register("dmTipSet", hu_ei_tipfit, NULL);
+        if (g_tip_hold) { dm_dos2_touchui_ei_register("hideTooltip", hu_ei_pin, NULL); dm_dos2_touchui_ei_register("SlotHoverOut", hu_ei_pin, NULL); }
+        LOG("[hud] tooltip: %s; %s", g_tip_fit ? "its size from the host (factor of the windows, fitted to the screen; class scale 1 so the engine places what is drawn)"
+                                               : "DM_DOS2_TOUCH_TIP_FIT=0: tooltip.swf's own size (class scale 1)",
+            g_tip_hold ? "after a still hold on the HUD it stays until the next finger (hideTooltip / SlotHoverOut kept)" : "DM_DOS2_TOUCH_TIP_HOLD=0: it goes when the finger is lifted");
     } else LOG("【红】[hud] the ExternalInterface hook is off (DM_DOS2_TOUCHUI_EI=0 or its sites differ): dmSide / dmAim / dmAimBtn of the touch HUD movies do nothing");
     {   // the PC tooltip window (run 20.11 review, the section above hu_tip_make)
         static const hu_site k_tip[] = {{HU_TIP_GET, 4, k_hu_tip_get}, {HU_TIP_REG, 3, k_hu_tip_reg}};

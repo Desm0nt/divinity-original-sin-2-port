@@ -44,6 +44,29 @@ static inline int dt_target_task(int preview_type, int running_type, int place_o
     if (running_type >= 0 && running_type < 32 && (aim_mask >> running_type & 1)) return running_type;
     return -1;
 }
+// UI mode TOUCH (owner 23.11: "a tap should only pick the direction / target, the cast should happen on the confirm button"): is something
+// prepared that waits for a target? Two task facts of the character's input controller (hle_dos2_touch_world.c tw_update reads them every frame):
+//   - DT_TASK_SKILL (3, made at main+0xe23e50, vtable main+0x29c9e98): run 21.11 shows it previewed AND running from the hot bar's SlotPressed
+//     until the cast, even while the cursor is on the UI (the CONFIRM circle) - a prepared skill, wherever it was taken from (the hot bar's own
+//     mark showActiveSkill(slot) dropped to -1 the moment a finger landed on the world, run 21.11 27960, and the tap then cast at once);
+//   - DT_TASK_AIM (2, the attack / skill-cast task) previewed while NOTHING is under the cursor: run 23.11 "ActionAttackGround" previews it over
+//     the bare ground, as the inventory "Throw" does (dos2-touch6); over the ground an unprepared PC cursor previews the walk (0), so type 2
+//     there means a target mode. Over a character it may be the plain attack of the hover, so it only keeps a mode seen before (the latch).
+// dt_aim_latch: the target-mode latch after one frame. obj_under: 1 a character / item under the cursor, 0 nothing, -1 unknown (no fresh pick).
+// The latch drops on any other known preview (the walk, talk, use ...: the mode ended); -1 / the skill task keep it.
+#define DT_TASK_SKILL 3
+static inline int dt_aim_latch(int latched, int preview_type, int obj_under) {
+    if (preview_type == DT_TASK_AIM) return latched || obj_under == 0;
+    if (preview_type >= 0 && preview_type != DT_TASK_SKILL) return 0;
+    return latched;
+}
+// After the host sent CONFIRM / cancel for that controller the facts may linger a few frames while the cast starts (or stay while it runs):
+// they count again only after one frame without either (blocked -> 0). 1 = this frame shows a prepared state (skill task or latch).
+static inline int dt_aim_frame(int preview_type, int running_type, int latched, int *blocked) {
+    const int seen = preview_type == DT_TASK_SKILL || running_type == DT_TASK_SKILL || preview_type == DT_TASK_AIM || running_type == DT_TASK_AIM;
+    if (*blocked) { if (!seen) *blocked = 0; return 0; }
+    return preview_type == DT_TASK_SKILL || running_type == DT_TASK_SKILL || latched;
+}
 // DM_DOS2_TOUCH_AIM_TYPES: "2" / "2,11" / "" (none) -> mask; bad items are skipped, types >= 32 ignored
 static inline uint32_t dt_aim_mask(const char *s) {
     uint32_t m = 0; int v = -1;
@@ -280,6 +303,11 @@ static inline int dt_tui_state(uint64_t held_ms, int slong_ms, int long_ms) {
     if (held_ms >= (uint64_t)(long_ms > 0 ? long_ms : 0)) return DT_TUI_LONG;
     return slong_ms > 0 && slong_ms < long_ms && held_ms >= (uint64_t)slong_ms ? DT_TUI_TIP : DT_TUI_CLICK;
 }
+// Where the left is let go after a still HUD hold (the tooltip): above the window (off_y < 0: no element there, so no click), at the finger's
+// OWN x. Phone run 23.11 ("a long press on a hot bar icon also flips the skill deck"): the park was (-64, -64) and hotBar_p's swipe over the
+// slots (dmSwUp: the x at the release - the x at the press > 130 stage px = the next / previous deck) took that jump for a swipe - nextHotbar
+// after every short long press on a slot. With x kept, a hold measures no travel; a real swipe moved the finger and is no hold (tui 0).
+static inline void dt_tui_park(float finger_x, float off_y, float *px, float *py) { *px = finger_x; *py = off_y < 0 ? off_y : -64.0f; }
 static inline int dt_pc_menu_type(uint32_t ty) {
     switch (ty) { case 0x74: case 0x77: case 0x29: case 0x66: case 0x16: case 0x68: case 0x2e: case 0x2f: case 0x0e: case 0x88: case 0x15: case 0x0a: case 0x0b: return 1; default: return 0; }
 }

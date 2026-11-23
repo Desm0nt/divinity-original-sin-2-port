@@ -4,6 +4,7 @@
 #include "../hle_dos2_touchui_hud.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #ifdef NDEBUG
 #error "Build this test with assertions enabled"
 #endif
@@ -62,6 +63,11 @@ int main(void) {
     hu_aim_feed(&a, 300, 300, 1700); hu_aim_feed(&a, 900, 500, 1710);             // a fast pass (10 ms at 300,300) is not a rest: the button (200 ms) was
     assert(hu_aim_point(&a, &x, &y) && x == 1200 && y == 790);
     hu_aim_set(&a, 640, 360); assert(hu_aim_point(&a, &x, &y) && x == 640 && y == 360);   // the gestures name the point themselves
+    // UI mode TOUCH, prepared (owner 23.11): any source aims; the host shows CONFIRM / cancel only where the hot bar's slot mark does not
+    assert(!hu_aim_any(0, 0, 0) && hu_aim_any(1, 0, 0) && hu_aim_any(0, 1, 0) && hu_aim_any(0, 0, 1));
+    assert(!hu_aim_host_show(0, 0, 0) && !hu_aim_host_show(1, 0, 1) && !hu_aim_host_show(1, 1, 0));
+    assert(hu_aim_host_show(0, 1, 0) && hu_aim_host_show(0, 0, 1));   // attack ground / a skill from the book / a throw: the host shows them
+    assert(HU_AIM_SHOW < 1999999 && HU_AIM_HIDE < HU_AIM_SHOW && HU_AIM_HIDE > 1000000);   // below the plate's hide (tools/dos2_pchud_touch.py)
     // the action plate's pick chain (DM_DOS2_TOUCH_T_PICK)
     assert(hu_pick_parse(NULL) == HU_PICK_AUTO && hu_pick_parse("") == HU_PICK_AUTO && hu_pick_parse("pc") == HU_PICK_PC && hu_pick_parse("hover") == HU_PICK_HOVER);
     assert(hu_pick_parse("hybrid") == HU_PICK_HYBRID && hu_pick_parse("long") == HU_PICK_LONG && hu_pick_parse("x") == HU_PICK_AUTO);
@@ -101,6 +107,49 @@ int main(void) {
              hu_panel_pc(HU_P_CRAFT) == hu_side_panel(6) && hu_panel_pc(HU_P_JOURNAL) == hu_side_panel(7));
       assert(!hu_pair_broken(HU_VIEW_EQUIP, HU_P_SHEET | HU_P_INV, 5000) && !hu_pair_broken(HU_VIEW_EQUIP, HU_P_INV, 100) && hu_pair_broken(HU_VIEW_EQUIP, HU_P_INV, 400));
       assert(hu_pair_broken(HU_VIEW_EQUIP, 0, 1000) && !hu_pair_broken(0, HU_P_INV, 1000)); }
+    {   // the PC tooltip window (phone run 23.11, 6.7" 2400 x 1080, window factor 1.3): the movie's size and the engine's placement keep it on the screen
+        const hu_tip_fit t = hu_tip_numbers(1.3f, 1.0f, 2400, 1080);
+        assert(near(t.f, 1.3f) && t.max_h == 1080 - 158 - 16 && t.max_w == 2400 - 160);
+        double v[3]; hu_tip_cmds(&t, v);
+        assert(v[0] == 1001300 && v[1] == 2000000 + 906 && v[2] == 3000000 + 2240);
+        { const hu_tip_fit u = hu_tip_numbers(1.3f, 0.9f, 2400, 1080); assert(near(u.f, 1.3f / 0.9f) && u.max_h == (int)floorf(1080.0f / 0.9f - 174)); }   // S 0.9
+        { const hu_tip_fit u = hu_tip_numbers(1.3f, 0, 0, 0); assert(near(u.f, 1.3f) && u.max_h == 906 && u.max_w == 1920 - 160); }             // no S / no screen yet
+        { const hu_tip_fit u = hu_tip_numbers(99, 1, 2400, 1080); assert(near(u.f, 1)); }                                                      // a nonsense factor = 1
+        // the run's two tooltips: an inventory item (~254 stage px at factor 1), a hot bar skill (~460); a long weapon ~800; huge ones
+        const float hs[] = {120, 254, 460, 700, 800, 1200, 1800};
+        for (unsigned i = 0; i < sizeof hs / sizeof *hs; i++) {
+            const float h = hs[i], w = 413, f = hu_tip_movie_f(t.f, (float)t.max_h, (float)t.max_w, w, h);
+            assert(f <= 1.3f + 1e-4f && f >= 0.5f && (h * f <= t.max_h + 1e-3f || near(f, 0.5f)));
+            const float s2 = 1.0f, H = 1080;   // c = 1: the drawn tooltip IS the size the engine was told
+            const float y = hu_tip_engine_top(1, h * f, s2, H, 0), y2 = hu_tip_engine_top(0, h * f, s2, H, 700);
+            if (h * f <= t.max_h + 1e-3f) assert(y >= 0 && y + h * f * s2 <= H - HU_TIP_HB + 0.01f && y2 >= 0 && y2 + h * f * s2 <= H + 0.01f);
+            // the bug of the run: the window drawn x1.3 by the class scale, the engine told the factor-1 size -> its bottom under the screen's edge
+            // (clamped by the engine to y + h = H: always 0.3 h too low; the hot bar branch's 158 hid it up to h = 527)
+            if (h >= 120) assert(hu_tip_engine_top(0, h, s2, H, 1000) + h * 1.3f > H);   // a slot near the bottom: clamped
+            if (h >= 600) assert(hu_tip_engine_top(1, h, s2, H, 0) + h * 1.3f > H);
+        }
+        assert(near(hu_tip_movie_f(1.3f, 906, 2240, 413, 460), 1.3f) && near(hu_tip_movie_f(1.3f, 906, 2240, 413, 800), 906.0f / 800));
+        assert(near(hu_tip_movie_f(0, 0, 0, 413, 460), 1) && near(hu_tip_movie_f(1.3f, 906, 300, 413, 100), 300.0f / 413));   // nothing told = 1; the width fit
+    }
+    {   // the tooltip stays after a HUD hold's lift until the next finger
+        hu_pin p; memset(&p, 0, sizeof p); hu_pin_rec r[HU_PIN_MAX]; int hb, pi;
+        dm_ei_val slot; memset(&slot, 0, sizeof slot); slot.type = 4; slot.d = 8;
+        dm_ei_val str; memset(&str, 0, sizeof str); str.type = 5;
+        assert(!hu_pin_take(&p, &hb, 0x28, "hideTooltip", 0, NULL));                    // not armed: the engine gets it at once
+        hu_pin_arm(&p);
+        assert(hu_pin_take(&p, &hb, 0x28, "SlotHoverOut", 1, &slot) && hu_pin_take(&p, &hb, 0x28, "hideTooltip", 0, NULL));
+        assert(!hu_pin_take(&p, &hb, 0x28, "SlotHover", 1, &slot) && !hu_pin_take(&p, &hb, 0x28, "nextHotbar", 0, NULL));   // only the hover's end is kept
+        assert(!hu_pin_take(&p, &hb, 0x28, "SlotHoverOut", 1, &str));                   // a string argument is not kept (an engine string)
+        slot.d = 9; assert(hu_pin_take(&p, &hb, 0x28, "SlotHoverOut", 1, &slot) && p.n == 2);   // one per (object, name), the newest arguments
+        assert(hu_pin_take(&p, &pi, 0x26, "hideTooltip", 0, NULL) && p.n == 3);
+        const int n = hu_pin_release(&p, r);
+        assert(n == 3 && !strcmp(r[0].name, "SlotHoverOut") && r[0].n == 1 && r[0].a[0].d == 9 && r[0].ui == &hb && r[0].type == 0x28);
+        assert(!strcmp(r[1].name, "hideTooltip") && r[1].n == 0 && r[2].ui == &pi);
+        assert(!p.on && hu_pin_release(&p, r) == 0 && !hu_pin_take(&p, &hb, 0x28, "hideTooltip", 0, NULL));   // the next finger ends it
+        hu_pin_arm(&p); int objs[HU_PIN_MAX + 2];
+        for (int i = 0; i < HU_PIN_MAX + 2; i++) assert(hu_pin_take(&p, &objs[i], 0x28, "hideTooltip", 0, NULL) == (i < HU_PIN_MAX));   // full: passed on
+        hu_pin_arm(&p); assert(p.n == 0);                                                // a new hold starts empty
+    }
     printf("dos2_touchui_hud_test: ok\n");
     return 0;
 }

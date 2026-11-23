@@ -46,6 +46,30 @@ int main(void) {
     assert(dt_target_task(2, -1, 1, 0) == -1);                                                      // DM_DOS2_TOUCH_AIM=0
     assert(dt_target_task(0, -1, 1, m2) == -1 && dt_target_task(25, 0, 1, m2) == -1 && dt_target_task(4, 6, 1, m2) == -1 && dt_target_task(-1, -1, 1, m2) == -1);
     assert(dt_target_task(10, 2, 1, m2) == 10);                                                     // the move wins
+    // UI mode TOUCH (owner 23.11): a prepared skill / target mode = a world tap only aims (dt_aim_latch / dt_aim_frame)
+    {   int L = 0, blk = 0;
+        // run 23.11 "ActionAttackGround": the attack / cast task (2) previewed over the bare ground = a target mode; it stays over a character
+        L = dt_aim_latch(L, DT_TASK_AIM, 0); assert(L == 1);
+        L = dt_aim_latch(L, DT_TASK_AIM, 1); assert(L == 1);           // aiming at an enemy: still the mode
+        L = dt_aim_latch(L, -1, -1); assert(L == 1);                   // a transient frame without a preview keeps it
+        L = dt_aim_latch(L, 0, 0); assert(L == 0);                     // the walk previewed over the ground: the mode is over
+        // no mode: the attack preview of the hovered enemy is the plain PC attack (a tap attacks at once)
+        L = dt_aim_latch(0, DT_TASK_AIM, 1); assert(L == 0);
+        L = dt_aim_latch(0, DT_TASK_AIM, -1); assert(L == 0);          // unknown under the cursor: not a mode
+        assert(dt_aim_latch(1, DT_TASK_SKILL, 0) == 1 && dt_aim_latch(1, 4, 1) == 0 && dt_aim_latch(1, 6, 1) == 0);   // talk / use end it
+        // run 21.11: a hot bar skill = task 3 previewed and running (also while the cursor is on CONFIRM, and after the bar's own mark dropped)
+        assert(dt_aim_frame(DT_TASK_SKILL, DT_TASK_SKILL, 0, &blk) == 1 && !blk);
+        assert(dt_aim_frame(-1, DT_TASK_SKILL, 0, &blk) == 1);         // the finger landed on the world: preview -1, still running 3
+        assert(dt_aim_frame(DT_TASK_AIM, -1, 1, &blk) == 1);           // the latched target mode
+        assert(dt_aim_frame(DT_TASK_AIM, -1, 0, &blk) == 0);           // task 2 alone (the hover attack): nothing prepared
+        assert(dt_aim_frame(0, -1, 0, &blk) == 0 && dt_aim_frame(-1, -1, 0, &blk) == 0);
+        // CONFIRM / cancel sent: the lingering facts count again only after one frame without them
+        blk = 1;
+        assert(dt_aim_frame(DT_TASK_SKILL, DT_TASK_SKILL, 0, &blk) == 0 && blk == 1);
+        assert(dt_aim_frame(-1, DT_TASK_AIM, 1, &blk) == 0 && blk == 1);   // the cast runs
+        assert(dt_aim_frame(0, -1, 0, &blk) == 0 && blk == 0);             // over
+        assert(dt_aim_frame(DT_TASK_SKILL, DT_TASK_SKILL, 0, &blk) == 1);  // the next prepared skill counts at once
+    }
     // dos2-touch7: bottomBar_d (stage mouseDown / mouseUp listener since touch6) answers "handled" for every press; the host keeps it only
     // inside the movie's own HUD rects. Rects as the phone reported them (2400x1080 window, run C_base 18.11) + the hint row of touch6.
     {
@@ -120,6 +144,15 @@ int main(void) {
         assert(dt_radial_release(ZL, 0, T, &sup) == ZL && sup == 0);             // a new ZL press opens the wheel again
         assert(dt_radial_release(A, 1, T, &sup) == A && sup == 0);               // a choose with no trigger held: nothing to let go
     }
-    puts("PASS: dos2 touch gestures (tap / hold / swipe, rotation steps, placement task, aim / throw modes, stage-listener press vs HUD rects, ZL / ZR wheels)");
+    {   // phone run 23.11: a still hold on a hot bar slot flipped the deck - the no-click lift went to -64,-64 and hotBar_p's swipe took the jump
+        // for one (x at the release - x at the press > 130 stage px). The park keeps the finger's x, so a hold measures no travel
+        float px, py;
+        dt_tui_park(1458, -64, &px, &py); assert(px == 1458 && py < 0);
+        dt_tui_park(10, 0, &px, &py); assert(px == 10 && py < 0);                  // the park is always above the window: never an element
+        const float swipe = 130, landed = 1458;
+        dt_tui_park(landed, -64, &px, &py); assert(!(px - landed > swipe) && !(px - landed < -swipe));   // no travel from a hold
+        assert(-64 - landed < -swipe);                                             // the old park: a 'swipe' of 1522 px (nextHotbar)
+    }
+    puts("PASS: dos2 touch gestures (tap / hold / swipe, rotation steps, placement task, aim / throw modes, TOUCH prepared skill / target mode, stage-listener press vs HUD rects, ZL / ZR wheels, the hold park keeps x)");
     return 0;
 }

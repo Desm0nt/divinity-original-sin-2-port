@@ -19,7 +19,14 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        hit area; the CONFIRM circle and the cancel button (root instances dmConfirm_mc / dmCancel_mc at the iPad's place)
       showActiveSkill(slot)  the original, then CONFIRM / cancel are shown while the engine marks a prepared skill (slot >= 0) and
                        ExternalInterface dmAim(0 | 1) tells the host; a tap on them = dmAimBtn(1 confirm | 0 cancel) (host: the PC's left
-                       click at the aimed point / right click = cancel)
+                       click at the aimed point / right click = cancel). showActiveSkill(AIM_SHOW | AIM_HIDE) from the host: CONFIRM /
+                       cancel for a prepared state the movie does not see (a skill from the book / another deck, a throw: the host reads the
+                       input controller's tasks; owner 23.11 "a tap only aims, the confirm button casts")
+      setActionPreview(id, on)  the original, then for "ActionAttackGround" ExternalInterface dmAim(2 | 3) (the engine marks / drops the
+                       attack-ground preview: its hot bar update main+0x1233360 invokes this on each change of main+0x109b500)
+      CONFIRM / cancel art (owner 23.11: "the iPad's was white, round, airy, semi-transparent; ours a big dull dark metal one"): our own,
+                       drawn in code (aim_art): a soft white glass disc, a thin double white ring, a dotted inner ring, a white check / cross;
+                       the iPad's sizes and places (statusConsole_t: 118 at (W/2, 788), 69 at (W/2 + 201, 816))
       HUD extras ("Implemented: touch HUD extras"): the deck list (the iPad's deck switcher) - the PC deck number cycleHotBar_mc is the button (arrows hidden, a
                        plate under the number), a tap opens / closes the backing dmDeckBg_mc with the PC lock moved in and five plates dmDeck1..5_mc
                        (k pips = deck k), a tap on one runs the PC cycleHotBar as many times as it takes (nextHotbar) and closes the list; the
@@ -98,6 +105,7 @@ ROW_HALF, HB_FRAME_TOP, HB_END_TOP = 695, 875, 849   # the row's half width, its
 ACT_FOOT = HB_FRAME_TOP - 2      # stage px: dmTick keeps the actions list's foot on the bar frame's top whatever its height (phone 23.11)
 PLATE_UP = 110                   # the action plate's centre above the tapped point
 PLATE_BASE, PLATE_HIDE, PLATE_MUL = 2000000, 1999999, 2000
+AIM_SHOW, AIM_HIDE = 1999998, 1999997   # the host's CONFIRM / cancel show / hide (dm/host/hle_dos2_touchui_hud.h HU_AIM_SHOW / HU_AIM_HIDE)
 # ---- minimap (PC stage 420 x 2000, anchored topright)
 MM_MOVE = [('hit_mc', -42, 29), ('map_mc', -42, 29), ('tension_mc', -42, 29), ('north_mc', -42, 29), ('armourDoll_mc', -42, 29),
            ('tensionHit_mc', -42, 29), ('title_txt', -42, 29), ('pingButton_mc', -4, -61), ('homestead_mc', 136 - 111, 47 - 94),
@@ -223,16 +231,52 @@ def arm(d, loc, code, kids=False):
 
 
 # ---------------------------------------------------------------- hot bar
+def aim_art(size, glyph):
+    """CONFIRM (glyph 'check') / cancel ('cross'): our own drawing, made here at 2x (ta.PX) as straight RGBA - a soft white glass disc
+    (white ~20..32 %, lighter at the top), a thin white ring (90 %) with a fainter inner one, a faint dark halo outside it (legible on snow / fog),
+    on CONFIRM a dotted ring, and the glyph in white (96 %) over a soft drop shadow. size = stage px (the hit area: the whole square)."""
+    import numpy as np
+    n = int(round(size / ta.PX)); R = n / 2.0; s = n / 236.0
+    yy, xx = (np.mgrid[0:n, 0:n].astype(np.float32) + 0.5)
+    dx, dy = xx - R, yy - R; r = np.hypot(dx, dy)
+    img = np.zeros((n, n, 4), np.float32)   # premultiplied while drawing
+    def over(rgb, a):
+        a = np.clip(a, 0, 1)[..., None]; col = np.array(rgb, np.float32) / 255.0
+        img[..., :3] = col * a + img[..., :3] * (1 - a); img[..., 3:] = a + img[..., 3:] * (1 - a)
+    def band(r0, w): return np.clip(np.minimum(r0 - r, r - (r0 - w)) + 0.5, 0, 1)   # a ring of width w ending at radius r0 (1 px soft edges)
+    def seg(p, q, w):   # a stroke from p to q (units of R about the centre), width w px, round caps
+        px, py, qx, qy = p[0] * R, p[1] * R, q[0] * R, q[1] * R; vx, vy = qx - px, qy - py
+        t = np.clip(((dx - px) * vx + (dy - py) * vy) / (vx * vx + vy * vy), 0, 1)
+        return np.clip(w / 2.0 - np.hypot(dx - px - t * vx, dy - py - t * vy) + 0.5, 0, 1)
+    ring_o = R - 5 * s
+    over((0, 0, 0), 0.24 * np.clip((R - 0.5 - r) / (4 * s), 0, 1) * np.clip((r - (ring_o - 6 * s)) / (4 * s), 0, 1))   # halo
+    over((255, 255, 255), (0.20 + 0.12 * (1 - yy / n)) * np.clip(ring_o - 1 - r + 0.5, 0, 1))                         # glass
+    over((255, 255, 255), 0.90 * band(ring_o, 3.5 * s))
+    over((255, 255, 255), 0.50 * band(ring_o - 7 * s, 2.0 * max(s, 0.75)))
+    if glyph == 'check':
+        rd, k = R * 0.70, 48
+        a = np.arctan2(dy, dx); near = np.round(a / (2 * np.pi / k)) * (2 * np.pi / k)
+        over((255, 255, 255), 0.55 * np.clip(1.8 * s - np.hypot(dx - rd * np.cos(near), dy - rd * np.sin(near)) + 0.5, 0, 1))
+        pts, w = [(-0.36, 0.02), (-0.10, 0.27), (0.38, -0.25)], 0.13 * R
+    else:
+        pts, w = None, 0.15 * R
+    strokes = [(pts[0], pts[1]), (pts[1], pts[2])] if pts else [((-0.30, -0.30), (0.30, 0.30)), ((-0.30, 0.30), (0.30, -0.30))]
+    m = np.zeros((n, n), np.float32)
+    for p, q in strokes: m = np.maximum(m, seg(p, q, w))
+    sh = np.roll(np.roll(m, int(round(3 * s)) or 1, 0), int(round(1 * s)), 1)
+    over((0, 0, 0), 0.30 * sh)
+    over((255, 255, 255), 0.96 * m)
+    a = img[..., 3:4]
+    rgb = np.divide(img[..., :3], a, out=np.zeros_like(img[..., :3]), where=a > 1e-6)
+    return (np.concatenate([np.clip(rgb, 0, 1), np.clip(a, 0, 1)], -1) * 255 + 0.5).astype(np.uint8)
+
+
 def hotbar_art(swf):
     g = gr.Graft(swf); art = ta.Art(g); placed = []
-    rp, rb = art.png('plate_round_copper'); pw = rb[2] - rb[0]
-    k = CONFIRM[2] / pw
-    tick, tb = ta.poly_shape(g, [(-22, 2), (-13, -8), (-5, 2), (17, -21), (26, -11), (-5, 21)], (236, 226, 200))   # our own check mark (vec)
-    c = g.sprite([(rp, 1, (0, 0, k), None), (tick, 2, (CONFIRM[2] / 2.0, CONFIRM[2] / 2.0), None)])
-    g.place(c, CONFIRM[0] - CONFIRM[2] / 2.0, CONFIRM[1] - CONFIRM[2] / 2.0, 'dmConfirm_mc'); placed.append(('dmConfirm_mc', CONFIRM))
-    sp, sb = art.png('plate_round_steel', centre=True); ic, ib = art.png('glyph_cancel', centre=True)
-    x = g.sprite([(sp, 1, (0, 0), None), (ic, 2, (0, 0), None)])
-    g.place(x, CANCEL[0], CANCEL[1], 'dmCancel_mc', CANCEL[2] / (sb[2] - sb[0])); placed.append(('dmCancel_mc', CANCEL))
+    cf, cb = ta.bitmap_shape(g, aim_art(CONFIRM[2], 'check'))
+    g.place(g.sprite([(cf, 1, (0, 0), None)]), CONFIRM[0] - CONFIRM[2] / 2.0, CONFIRM[1] - CONFIRM[2] / 2.0, 'dmConfirm_mc'); placed.append(('dmConfirm_mc', CONFIRM))
+    xf, xb = ta.bitmap_shape(g, aim_art(CANCEL[2], 'cross'), centre=True)
+    g.place(g.sprite([(xf, 1, (0, 0), None)]), CANCEL[0], CANCEL[1], 'dmCancel_mc', 1.0); placed.append(('dmCancel_mc', CANCEL))
     # the deck list: our plates (assets/touchui) + pips / bars drawn in code
     sq, qb = art.png('plate_square_copper'); qw = qb[2] - qb[0]; ink = (236, 226, 200)
     def rect(x0, y0, w, h, rgb=ink): return ta.poly_shape(g, [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)], rgb)[0]
@@ -253,6 +297,8 @@ def hotbar_art(swf):
 
 def hotbar(data):
     swf = Swf(data); placed, ndefs = hotbar_art(swf); d = Doc(swf); P, S, abc = d.P, d.S, d.abc
+    def aimvis(first, lab):   # lines: push Boolean(first || this.dmAimH) - CONFIRM / cancel shown for the movie's own mark or the host's
+        return first + [('convert_b',), ('dup',), ('iftrue', lab), ('pop',)] + d.get('dmAimH') + [('convert_b',), ('L', lab)]
     Rect = abc.pub('Rectangle', 'flash.geom')
     def setn(loc, prop, val): return [('getlocal', loc)] + val + [('setproperty', P(prop))]
     # dmLay(): locals 1 hotbar_mc, 2 a child
@@ -271,9 +317,13 @@ def hotbar(data):
     code += setn(2, 'scaleX', frac(HB_S)) + setn(2, 'scaleY', frac(HB_S)) + setn(2, 'x', num(ACT_X)) + setn(2, 'y', num(ACT_Y)) + [('L', 'na')]
     code += d.ei('updateSlots', num(SLOTS)) + [('L', 'end'), ('returnvoid',)]
     d.method('dmLay', 0, code)
-    # the swipe over the slots: dmSwDown(e) / dmSwUp(e); locals 2 stage, 3 dx
+    # the swipe over the slots: dmSwDown(e) / dmSwUp(e); locals 2 stage, 3 dx. Phone run 23.11 (owner: "a long press on a hot bar icon also
+    # flips the skill deck"): a still hold's lift is sent with the cursor parked off the screen (the host's no-click release, window -64,-64), and
+    # dmSwUp took that jump for a swipe (nextHotbar after every short long press). The travel is now the finger's: dmSwL = the cursor's x as
+    # dmTick sampled it on the frames while the press was down (SWIPE_TRACK), not the x at the release; the host also keeps x at the release
     code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 2)] + d.get('stage') + [('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'end'),
         ('getlocal0',), ('getlocal', 2), ('getproperty', P('mouseX')), ('setproperty', P('dmSwX')),
+        ('getlocal0',), ('getlocal', 2), ('getproperty', P('mouseX')), ('setproperty', P('dmSwL')), ('getlocal0',), ('pushtrue',), ('setproperty', P('dmSwOn')),
         ('getlocal', 2), ('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmSwUp')), ('callpropvoid', P('addEventListener'), 2),
         ('L', 'end'), ('returnvoid',)]
     d.method('dmSwDown', 1, code)
@@ -281,7 +331,7 @@ def hotbar(data):
     code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushbyte', 0), ('convert_d',), ('setlocal', 3)] + d.get('stage') + [('coerce_a',), ('setlocal', 2),
         ('getlocal', 2), ('iffalse', 'end'),
         ('getlocal', 2), ('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmSwUp')), ('callpropvoid', P('removeEventListener'), 2),
-        ('getlocal', 2), ('getproperty', P('mouseX'))] + d.get('dmSwX') + [('subtract',), ('convert_d',), ('setlocal', 3)] + d.get('isDragging') + [('iftrue', 'end'),
+        ('getlocal0',), ('pushfalse',), ('setproperty', P('dmSwOn'))] + d.get('dmSwL') + d.get('dmSwX') + [('subtract',), ('convert_d',), ('setlocal', 3)] + d.get('isDragging') + [('iftrue', 'end'),
         ('getlocal', 3)] + num(SWIPE) + [('ifngt', 'left')] + cycle(True) + [('returnvoid',),
         ('L', 'left'), ('getlocal', 3)] + num(-SWIPE) + [('ifnlt', 'end')] + cycle(False) + [('L', 'end'), ('returnvoid',)]
     d.method('dmSwUp', 1, code)
@@ -296,7 +346,7 @@ def hotbar(data):
     act += [('L', 'pd'), ('getlocal0',), ('pushfalse',), ('setproperty', P('dmDeckOpen')), ('getlocal0',), ('callpropvoid', P('dmDeckShow'), 0), ('returnvoid',),
             ('L', 'aim')] + d.get('dmPlate') + [('iffalse', 'send'), ('getlocal1',), ('pushbyte', 1), ('ifne', 'send'),
             ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate'))] + d.child('dmConfirm_mc', 3) + [('getlocal', 3), ('iffalse', 'send'),
-            ('getlocal', 3)] + d.get('dmAimV') + [('convert_b',), ('setproperty', P('visible')),
+            ('getlocal', 3)] + aimvis(d.get('dmAimV'), 'bv') + [('setproperty', P('visible')),
             ('L', 'send')] + d.ei('dmAimBtn', [('getlocal1',)])
     press_code(d, act)
     code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1)]
@@ -308,6 +358,10 @@ def hotbar(data):
     d.method('dmDeckShow', 0, code + [('returnvoid',)])
     # dmTick(e): the indicator follows the PC's current deck. locals 2 current, 3 mc
     code = HEAD + [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3), ('pushnull',), ('coerce_a',), ('setlocal', 4)]
+    # SWIPE_TRACK: while a press on the slots is down, the cursor's x of this frame is the swipe's end (dmSwUp; the release's own x may be the
+    # host's off-screen park)
+    code += d.get('dmSwOn') + [('iffalse', 'nsw')] + d.get('stage') + [('coerce_a',), ('setlocal', 3), ('getlocal', 3), ('iffalse', 'nsw'),
+        ('getlocal0',), ('getlocal', 3), ('getproperty', P('mouseX')), ('setproperty', P('dmSwL')), ('pushnull',), ('coerce_a',), ('setlocal', 3), ('L', 'nsw')]
     # phone 23.11: the actions list (attack / weapon / sneak) covered its own button and could not be closed - the PC's
     # actionSkillHolder_31.positionElements puts its foot at originalPosY + hotbar_mc.y - (bottom_mc.y + height) in its OWN px, so at our scale
     # x1.56 the list hung ~100 px lower, over the bar. Every frame its foot is put back on the bar's top: y = ACT_FOOT - (bottom.y + h) x scaleY
@@ -380,10 +434,19 @@ def hotbar(data):
         a, m = n + 1, n + 2
         v = n + 3
         c = HEAD + [('pushfalse',), ('setlocal', a), ('pushnull',), ('coerce_a',), ('setlocal', m), ('pushbyte', 0), ('convert_i',), ('setlocal', v)]
+        # the host's AIM_SHOW / AIM_HIDE (a prepared state the movie does not see): dmAimH, CONFIRM back at its own place
+        c += [('getlocal1',), ('pushint', d.abc_int(AIM_HIDE)), ('ifnge', 'nh'), ('getlocal1',), ('pushint', d.abc_int(PLATE_HIDE)), ('ifnlt', 'nh'),
+              ('getlocal0',), ('getlocal1',), ('pushint', d.abc_int(AIM_SHOW)), ('equals',), ('setproperty', P('dmAimH')),
+              ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate'))]
+        for k, name in enumerate(('dmConfirm_mc', 'dmCancel_mc')):
+            c += d.child(name, m) + [('getlocal', m), ('iffalse', 'h%d' % k), ('getlocal', m)] + aimvis(d.get('dmAimV'), 'hv%d' % k) + [('setproperty', P('visible'))]
+            if not k: c += [('getlocal', m)] + num(CONFIRM[0] - CONFIRM[2] // 2) + [('setproperty', P('x')), ('getlocal', m)] + num(CONFIRM[1] - CONFIRM[2] // 2) + [('setproperty', P('y'))]
+            c += [('L', 'h%d' % k)]
+        c += [('returnvoid',), ('L', 'nh')]
         # the host's action plate (never a slot number): PLATE_HIDE, or PLATE_BASE + stageX * PLATE_MUL + stageY
         c += [('getlocal1',), ('pushint', d.abc_int(PLATE_HIDE)), ('ifnge', 'slot')] + d.child('dmConfirm_mc', m) + [('getlocal', m), ('iffalse', 'pe'),
               ('getlocal1',), ('pushint', d.abc_int(PLATE_HIDE)), ('ifne', 'pshow'),
-              ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate')), ('getlocal', m)] + d.get('dmAimV') + [('convert_b',), ('setproperty', P('visible')), ('returnvoid',),
+              ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate')), ('getlocal', m)] + aimvis(d.get('dmAimV'), 'pv') + [('setproperty', P('visible')), ('returnvoid',),
               ('L', 'pshow'), ('getlocal1',), ('pushint', d.abc_int(PLATE_BASE)), ('subtract',), ('convert_i',), ('setlocal', v),
               ('getlocal', m), ('getlocal', v)] + num(PLATE_MUL) + [('divide',), ('convert_i',)] + num(CONFIRM[2] // 2) + [('subtract',), ('setproperty', P('x')),
               ('getlocal', m), ('getlocal', v)] + num(PLATE_MUL) + [('modulo',)] + num(CONFIRM[2] // 2 + PLATE_UP) + [('subtract',), ('setproperty', P('y')),
@@ -391,13 +454,16 @@ def hotbar(data):
               ('L', 'pe'), ('returnvoid',), ('L', 'slot')]
         c += d.call_orig('dmSasOrig', n) + [('getlocal1',), ('pushbyte', 0), ('greaterequals',), ('setlocal', a), ('getlocal0',), ('pushfalse',), ('setproperty', P('dmPlate'))]
         for k, name in enumerate(('dmConfirm_mc', 'dmCancel_mc')):
-            c += d.child(name, m) + [('getlocal', m), ('iffalse', 'v%d' % k), ('getlocal', m), ('getlocal', a), ('setproperty', P('visible'))]
+            c += d.child(name, m) + [('getlocal', m), ('iffalse', 'v%d' % k), ('getlocal', m)] + aimvis([('getlocal', a)], 'sv%d' % k) + [('setproperty', P('visible'))]
             if not k: c += [('getlocal', m)] + num(CONFIRM[0] - CONFIRM[2] // 2) + [('setproperty', P('x')), ('getlocal', m)] + num(CONFIRM[1] - CONFIRM[2] // 2) + [('setproperty', P('y'))]
             c += [('L', 'v%d' % k)]
         c += d.get('dmAimV') + [('getlocal', a), ('ifstricteq', 'end'), ('getlocal0',), ('getlocal', a), ('setproperty', P('dmAimV')),
             ('getlocal', a), ('iffalse', 'off')] + d.ei('dmAim', num(1)) + [('returnvoid',), ('L', 'off')] + d.ei('dmAim', num(0)) + [('L', 'end'), ('returnvoid',)]
         return c
     d.wrap('showActiveSkill', 'dmSasOrig', sas)
+    # setActionPreview(id, on): the original; "ActionAttackGround" on / off -> dmAim(2 | 3) (the host aims taps while it is on)
+    d.wrap('setActionPreview', 'dmSapOrig', lambda n: HEAD + d.call_orig('dmSapOrig', n) + [('getlocal1',), ('pushstring', S('ActionAttackGround')), ('ifne', 'end'),
+        ('getlocal2',), ('iffalse', 'off')] + d.ei('dmAim', num(2)) + [('returnvoid',), ('L', 'off')] + d.ei('dmAim', num(3)) + [('L', 'end'), ('returnvoid',)])
     # phone run 21.11: no PC keyboard labels (the iPad's hot bar has none) - the slot numbers 1..9 0 - = (hotbar_mc.hotkeys_mc, filled by the
     # engine through setText / setAllText) are hidden in dmHook and get no text, the buttons' letters (M L X: setButton(id, text, tooltip) ->
     # hotBarButton.btn_txt) get an empty text; the tooltips stay
@@ -580,6 +646,10 @@ def check(src):
             say(abs(LOG_Y - HB_END_TOP) <= 1 and abs(HB_Y + 54 * _s - HB_FRAME_TOP) <= 2, 'tops: the frame %.0f, the log button %d (stage; TS_HB_TOP 125 / TS_HB_TOP_R 151 above the bottom)' % (HB_Y + 54 * _s, LOG_Y))
             say('dmLay' in dis('onEventResolution') and 'dmInitOrig' in dis('onEventInit') and 'dmHook' in dis('onEventInit'), 'onEventInit = original + dmLay + dmHook; onEventResolution = dmLay')
             t = dis('dmSwUp'); say('cycleHotBar' in t and 'isDragging' in t, 'swipe over the slots (%d px, not while dragging) -> cycleHotBar' % SWIPE)
+            tk = dis('dmTick'); td = dis('dmSwDown')
+            say('dmSwL' in t and 'mouseX' not in t and 'dmSwOn' in t and 'dmSwL' in tk and 'mouseX' in tk and 'dmSwOn' in tk and 'dmSwL' in td and 'dmSwOn' in td,
+                "swipe travel = the cursor x the frames saw while the press was down (dmTick -> dmSwL), never the release's x (phone 23.11: the host's "
+                'off-screen park after a long press flipped the deck)')
             t = dis('showActiveSkill'); say('dmSasOrig' in t and "'dmAim'" in t and 'visible' in t, 'showActiveSkill: original, CONFIRM / cancel visible, dmAim(0 | 1)')
             say("'dmAimBtn'" in dis('dmBAct') and all((n.encode() + b'\0') in names for n in ('dmConfirm_mc', 'dmCancel_mc')), 'CONFIRM %s / cancel %s on the root, tap -> dmAimBtn(1 | 0)' % (CONFIRM, CANCEL))
             t = dis('dmBAct'); say('dmDeckShow' in t and 'cycleHotBar' in t and all((('dmDeck%d_mc' % k).encode() + b'\0') in names and (('dmInd%d_mc' % k).encode() + b'\0') in names for k in range(1, 6))
@@ -590,6 +660,15 @@ def check(src):
             say('dmSetButtonOrig' in dis('setButton') and "''" in dis('setButton') and 'dmSetTextOrig' not in dis('setText').split('returnvoid')[0] and 'hotkeys_mc' in dis('dmHook'),
                 'no PC keyboard labels: slot numbers hidden (hotkeys_mc), setText / setAllText dropped, setButton with an empty letter')
             t = dis('showActiveSkill'); say('dmPlate' in t and str(PLATE_BASE) in t and str(PLATE_HIDE) in t, 'action plate: showActiveSkill(%d + x * %d + y) puts CONFIRM %d px above the point, %d hides' % (PLATE_BASE, PLATE_MUL, PLATE_UP, PLATE_HIDE))
+            say('dmAimH' in t and str(AIM_SHOW) in t and str(AIM_HIDE) in t and t.count('dmAimH') >= 4, 'host aim: showActiveSkill(%d | %d) shows / hides CONFIRM / cancel (dmAimH), every path shows them for dmAimV || dmAimH' % (AIM_SHOW, AIM_HIDE))
+            t = dis('setActionPreview'); say('dmSapOrig' in t and "'ActionAttackGround'" in t and "'dmAim'" in t, 'setActionPreview: original, "ActionAttackGround" -> dmAim(2 | 3)')
+            art_ok = True
+            for nm, sz, gl in (('dmConfirm_mc', CONFIRM[2], 'check'), ('dmCancel_mc', CANCEL[2], 'cross')):
+                im = aim_art(sz, gl); al = im[..., 3].astype(float) / 255; c0 = im.shape[0] // 2
+                ring = max(al[c0, :c0 // 3].max(), al[:c0 // 3, c0].max())          # the ring on the left / top
+                glass = al[int(c0 * 0.55), int(c0 * 1.45)]                           # inside, off the glyph
+                art_ok &= im.shape[:2] == (int(round(sz / ta.PX)),) * 2 and al[0, 0] == 0 and 0.75 <= ring <= 0.97 and 0.12 <= glass <= 0.45 and im[c0, c0, :3].min() >= 200
+            say(art_ok, 'CONFIRM / cancel art: our white glass discs %d / %d px (ring ~90 %%, glass 20..32 %%, transparent corners, white glyph)' % (CONFIRM[2], CANCEL[2]))
         elif o == 'combatLog_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and "'center'" in t and "'center'" in dis('onEventResize'), 'onEventInit = original + setPosition center / screen / center; onEventResize the same unless moved')
         elif o == 'minimap_p.swf':

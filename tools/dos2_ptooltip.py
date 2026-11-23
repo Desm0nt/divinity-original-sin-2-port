@@ -250,7 +250,119 @@ def sources(path):
     return _pak_read(path, need)
 
 
-def make(src): return {OUT: build(src[SRC], src[LIB])[0]}
+def build_console_lib(tt):
+    """owner 23.11 ("why does the hybrid mode show tooltips fine? borrow from there"): the PC tooltip.swf as it is, its one import
+    tooltipHelper_kb.swf (never registered on the Switch) swapped for the console library tooltipHelper.swf that the Switch's loader
+    registers for the console tooltip (the hybrid's, which works). Every library class tooltip.swf names (tt_tooltipObj + 8 looked up by
+    getDefinitionByName) is in tooltipHelper.swf with the same traits; only LSTooltipClass / tt_groupHolder / tt_EquipHeader bodies differ
+    (pad button hints). The grafted single movie (build above, the 21.11 route) threw TypeError on every call on the phone (run 23.11b)."""
+    T = Swf(tt); n = 0
+    for t in T.tags:
+        if t[0] == T_IMPORT2 and import_url(t[1]) == LIB:
+            t[1] = CONSOLE_LIB.encode() + t[1][t[1].index(b'\0'):]; n += 1
+    assert n == 1, 'tooltip.swf imports %s once' % LIB
+    if TOUCH_FIT: touch_fit(T)
+    return T.write(compress=True)
+CONSOLE_LIB = 'tooltipHelper.swf'
+ROUTE = 'console_lib'   # what the pak gets: 'console_lib' (above) or 'graft' (build: one self-contained movie, with the diag wrappers)
+
+
+# ---------------------------------------------------------------- the size and the body (phone run 23.11, 6.7" 2400 x 1080, after the console_lib route)
+# (a) a hot bar skill tooltip ran off the bottom of the screen, (b) an inventory item tooltip showed its header, ONE line of its body and its
+# footer, low and partly off the screen. Causes (static, docs/dos2/TOUCH_MODES_PLAN.md "Подсказки касания: размер, тело, удержание"):
+#   size  the engine places the tooltip window itself: setTooltipSize(w, h) (main+0x111e490) stores w, h and runs the placement main+0x110e2c0,
+#         which works in screen px = w, h x s2 with s2 = S x screen height / 1080 (S = the "UI scale" setting while the mode byte is 0) - no class
+#         scale in it. The host gave type 0x2c the class scale c = 1.3 (the window drawn 30 % bigger than the engine believed): a hot bar
+#         tooltip is put at y = H - (h + 158) x s2 (the hot bar branch, requester type 0x28) and any other one is clamped to y + h x s2 <= H,
+#         so the drawn one ended 0.3 h lower, under the screen's edge.
+#   body  the console library's tt_bgMid.setBgWSubsections(h, maxH + tooltipPaddingB, list) sets the body's height to min(h, maxH + 26) (the
+#         keyboard library's sets h): the console panels give their tooltip a maxH, tooltip.swf never does (0), so every tooltip with
+#         sub-sections (most items) got a 26 px body = one line (LSTooltipClass.resetBackground, scaleH = true, hasSubSections).
+# Fix in the movie (the host: class scale 1 for type 0x2c, so the engine's numbers ARE the drawn ones - hle_dos2_touchui_hud.c):
+#   addFormattedTooltip  the original, after maxH = TIP_MAXH on the three LSTooltipClass objects (formatTooltip / compareTooltip /
+#                        offhandTooltip .tooltip_mc): the body keeps its full height (no cap, so no scrolling a finger cannot do)
+#   checkTooltipBoundaries(w, h, x, y)  (the one place that sends setTooltipSize) the window's own scale f = dmTipF (the host's factor, the
+#                        hybrid's console tooltip size: 1.3 on a phone), lowered so f x h <= dmTipMaxH and f x w <= dmTipMaxW (the screen in
+#                        stage px less the hot bar branch's 158 and margins), never under 1/2; tooltip_mc scaled by f and the ENGINE told
+#                        f x w, f x h - so its placement keeps the whole tooltip on the screen. h of an empty / simple-text tooltip is
+#                        tooltip_mc.height (already scaled): divided back first. EI dmTipFit(f, w, h) for the host's log.
+#   setAnchor(v)         (an invoke name the tooltip class registers, absent from tooltip.swf) the host's numbers: 1000000 + 1000 f, 2000000 +
+#                        max height, 3000000 + max width (stage px); anything else is ignored. EI dmTipSet(f, max h, max w) answers.
+# Nothing told (an old host): f = 1, no fit - tooltip.swf's own behaviour.
+TOUCH_FIT = True
+TIP_MAXH = 100000
+TIP_CMD = 1000000
+TIP_EI = ('dmTipFit', 'dmTipSet')
+
+
+def _doc_kit():
+    """tools/dos2_pchud_touch.py's Doc / HEAD / num (the host module when installed, else imported)"""
+    if _host is not None and hasattr(_host, 'Doc'): return _host
+    import dos2_pchud_touch as ph
+    return ph
+
+
+def touch_fit(T):
+    """tooltip.swf's document class patched in place (methods appended, two traits re-pointed with the originals kept, one method added)"""
+    ph = _doc_kit(); d = ph.Doc(T); P, HEAD, num = d.P, ph.HEAD, ph.num
+    half = [('pushbyte', 1), ('pushbyte', 2), ('divide',)]
+    # addFormattedTooltip(x, y, show): locals n + 1 an object
+    def aft(n):
+        o = n + 1; c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', o)]
+        for k, p in enumerate(('formatTooltip', 'compareTooltip', 'offhandTooltip')):
+            c += d.get(p) + [('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', 'x%d' % k),
+                             ('getlocal', o), ('getproperty', P('tooltip_mc')), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', 'x%d' % k),
+                             ('getlocal', o), ('pushint', d.abc_int(TIP_MAXH)), ('setproperty', P('maxH')), ('L', 'x%d' % k)]
+        return c + d.call_orig('dmTipAftOrig', n) + [('returnvoid',)]
+    d.wrap('addFormattedTooltip', 'dmTipAftOrig', aft)
+    # checkTooltipBoundaries(w, h, x, y): locals 5 f, 6 h0, 7 s, 8 a limit, 9 tooltip_mc
+    def ctb(n):
+        assert n == 4, 'checkTooltipBoundaries(w, h, x, y)'
+        F, H0, S_, LIM, MC = 5, 6, 7, 8, 9
+        c = HEAD + [('pushbyte', 1), ('convert_d',), ('setlocal', F), ('getlocal2',), ('convert_d',), ('setlocal', H0), ('pushbyte', 1), ('convert_d',), ('setlocal', S_),
+                    ('pushbyte', 0), ('convert_d',), ('setlocal', LIM), ('pushnull',), ('coerce_a',), ('setlocal', MC)]
+        c += d.get('tooltip_mc') + [('coerce_a',), ('setlocal', MC), ('getlocal', MC), ('iffalse', 'plain')]
+        # f = the host's factor when it is a positive number
+        c += d.get('dmTipF') + [('convert_d',), ('setlocal', LIM), ('getlocal', LIM), ('pushbyte', 0), ('ifngt', 'nf'), ('getlocal', LIM), ('setlocal', F), ('L', 'nf')]
+        # h0: unscaled (getTooltipHeight measures tf.tooltip_mc when there is one, else tooltip_mc.height = already x its scale)
+        c += [('getlocal', MC), ('getproperty', P('scaleY')), ('convert_d',), ('setlocal', S_), ('getlocal', S_), ('pushbyte', 0), ('ifgt', 'sok'),
+              ('pushbyte', 1), ('convert_d',), ('setlocal', S_), ('L', 'sok')]
+        c += d.get('tf') + [('iffalse', 'disp')] + d.get('tf', 'tooltip_mc') + [('iftrue', 'fmt'),
+              ('L', 'disp'), ('getlocal', H0), ('getlocal', S_), ('divide',), ('convert_d',), ('setlocal', H0), ('L', 'fmt')]
+        # the fit: f x h0 <= dmTipMaxH, f x w <= dmTipMaxW (positive numbers only)
+        for k, (prop, size) in enumerate((('dmTipMaxH', [('getlocal', H0)]), ('dmTipMaxW', [('getlocal1',), ('convert_d',)]))):
+            c += d.get(prop) + [('convert_d',), ('setlocal', LIM), ('getlocal', LIM), ('pushbyte', 0), ('ifngt', 'nl%d' % k)] + size + [('pushbyte', 0), ('ifngt', 'nl%d' % k)] + \
+                 size + [('getlocal', F), ('multiply',), ('getlocal', LIM), ('ifngt', 'nl%d' % k), ('getlocal', LIM)] + size + [('divide',), ('convert_d',), ('setlocal', F), ('L', 'nl%d' % k)]
+        c += [('getlocal', F)] + half + [('ifnlt', 'fmin')] + half + [('convert_d',), ('setlocal', F), ('L', 'fmin')]
+        c += [('getlocal', MC), ('getlocal', F), ('setproperty', P('scaleX')), ('getlocal', MC), ('getlocal', F), ('setproperty', P('scaleY'))]
+        c += d.ei('dmTipFit', [('getlocal', F)], [('getlocal1',)], [('getlocal', H0)])
+        c += [('getlocal0',), ('getlocal1',), ('getlocal', F), ('multiply',), ('getlocal', H0), ('getlocal', F), ('multiply',), ('getlocal3',), ('getlocal', 4),
+              ('callpropvoid', P('dmTipCtbOrig'), 4), ('returnvoid',)]
+        c += [('L', 'plain')] + d.call_orig('dmTipCtbOrig', n) + [('returnvoid',)]
+        return c
+    d.wrap('checkTooltipBoundaries', 'dmTipCtbOrig', ctb)
+    # setAnchor(v = null, ...rest): locals 1 v, 2 rest, 3 the number, 4 the command
+    big = lambda v: [('pushint', d.abc_int(v))]
+    c = HEAD + [('pushbyte', 0), ('convert_d',), ('setlocal', 3), ('pushbyte', 0), ('convert_i',), ('setlocal', 4),
+                ('getlocal1',), ('convert_d',), ('setlocal', 3), ('getlocal', 3)] + big(TIP_CMD) + [('ifnge', 'end'), ('getlocal', 3)] + big(4 * TIP_CMD) + [('ifnlt', 'end'),
+                ('getlocal', 3)] + big(TIP_CMD) + [('divide',), ('convert_i',), ('setlocal', 4),
+                ('getlocal', 3), ('getlocal', 4)] + big(TIP_CMD) + [('multiply',), ('subtract',), ('convert_d',), ('setlocal', 3),
+                ('getlocal', 4), ('pushbyte', 1), ('ifne', 'c2'), ('getlocal0',), ('getlocal', 3)] + num(1000) + [('divide',), ('setproperty', P('dmTipF')), ('jump', 'ack'),
+                ('L', 'c2'), ('getlocal', 4), ('pushbyte', 2), ('ifne', 'c3'), ('getlocal0',), ('getlocal', 3), ('setproperty', P('dmTipMaxH')), ('jump', 'ack'),
+                ('L', 'c3'), ('getlocal', 4), ('pushbyte', 3), ('ifne', 'end'), ('getlocal0',), ('getlocal', 3), ('setproperty', P('dmTipMaxW')),
+                ('L', 'ack')] + d.ei('dmTipSet', d.get('dmTipF'), d.get('dmTipMaxH'), d.get('dmTipMaxW')) + [('L', 'end'), ('returnvoid',)]
+    assert d.abc.trait(d.ci, 'setAnchor') is None, 'tooltip.swf has no setAnchor of its own'
+    m = d.add('setAnchor', 1, c)
+    mm = d.abc.methods[m]; mm.flags |= 0x08 | 0x04; mm.options = [(0x0c, 0x0c)]   # HAS_OPTIONAL (v = null) | NEED_REST: any argument count the engine might use
+    b = mm.body; st, sc, loc = d.abc.verify(b); b.local_count = max(loc, 3)
+    d.inst['traits'].append(ph.Trait(P('setAnchor'), 1, 0, m))
+    bad = verify_all(d.abc)
+    assert not bad, bad
+    d.done()
+    return d.made
+
+
+def make(src): return {OUT: build_console_lib(src[SRC]) if ROUTE == 'console_lib' else build(src[SRC], src[LIB])[0]}
 def dis_names(abc): return {abc.short(t.name) for i in abc.instances for t in i['traits']}
 
 
@@ -356,6 +468,69 @@ def _host_src(name):
     return p.read_text(encoding='utf-8') if p.exists() else None
 
 
+def check_fit(src, T0, C, main_raw=None):
+    """the touch fit of the console_lib route (touch_fit above): append-only, the wrappers' contract, the causes it answers, the host's side"""
+    bad = 0
+    def say(ok, text):
+        nonlocal bad; bad += not ok; print('%-4s %s' % ('ok' if ok else 'FAIL', text))
+    (_, _, a0), = T0.abcs(); (_, _, a1), = C.abcs()
+    if not TOUCH_FIT: say(False, 'TOUCH_FIT is off: the tooltip keeps its 26 px body and the engine places it by a size it does not draw'); return bad
+    ci0, ci1 = a0.class_index(DOC), a1.class_index(DOC)
+    tr = lambda a, ci, n: a.trait(ci, n)
+    say(len(a1.methods) == len(a0.methods) + 3 and len(a1.bodies) == len(a0.bodies) + 3 and all(a1.bodies[i].code == a0.bodies[i].code for i in range(len(a0.bodies))),
+        'touch fit: 3 methods appended (addFormattedTooltip / checkTooltipBoundaries wrappers, setAnchor), every body of tooltip.swf byte for byte')
+    ok = True
+    for name, keep in (('addFormattedTooltip', 'dmTipAftOrig'), ('checkTooltipBoundaries', 'dmTipCtbOrig')):
+        t0, t1, k1 = tr(a0, ci0, name), tr(a1, ci1, name), tr(a1, ci1, keep)
+        ok &= bool(t0 and t1 and k1) and k1.b == t0.b and t1.b >= len(a0.methods)
+    sa = tr(a1, ci1, 'setAnchor')
+    ok &= sa is not None and sa.b >= len(a0.methods) and a1.methods[sa.b].flags & 0x0c == 0x0c and tr(a0, ci0, 'setAnchor') is None
+    say(ok, 'traits: addFormattedTooltip / checkTooltipBoundaries -> the wrappers (originals kept as dmTipAftOrig / dmTipCtbOrig); setAnchor(v = null, ...rest) added')
+    vb = verify_all(a1)
+    say(not vb, 'ABC verifies after the fit (%d bodies)%s' % (len(a1.bodies), '' if not vb else ': %s' % vb[:3]))
+    own = a1.owners(); dis = lambda m: '\n'.join(a1.dis(a1.methods[m].body))
+    send = sorted({own.get(b.method, '?') for b in a1.bodies if "'setTooltipSize'" in '\n'.join(a1.dis(b))})
+    callers = sorted({own.get(b.method, '?') for b in a1.bodies if 'checkTooltipBoundaries' in '\n'.join(a1.dis(b)) and b.method < len(a0.methods)})
+    say(send == ['tooltip_fla.MainTimeline::dmTipCtbOrig'] and set(callers) >= {'tooltip_fla.MainTimeline::' + n for n in ('dmTipAftOrig', 'addTooltip', 'setWindow')},
+        'setTooltipSize is sent only by the original checkTooltipBoundaries (now dmTipCtbOrig), every caller of it (%s) names checkTooltipBoundaries = the wrapper' % ', '.join(c.split('::')[-1] for c in callers))
+    w = dis(tr(a1, ci1, 'checkTooltipBoundaries').b)
+    say(all(x in w for x in ('scaleX', 'scaleY', 'dmTipF', 'dmTipMaxH', 'dmTipMaxW', "'dmTipFit'", 'callpropvoid     dmTipCtbOrig, 4')) and w.count('multiply') >= 4,
+        'checkTooltipBoundaries wrapper: tooltip_mc scaled by f = min(dmTipF, dmTipMaxH / h, dmTipMaxW / w) (>= 1/2), the engine told f x w, f x h; EI dmTipFit for the log')
+    w = dis(tr(a1, ci1, 'addFormattedTooltip').b)
+    say(w.count('setproperty      maxH') == 3 and w.count('pushint          %d' % TIP_MAXH) == 3 and 'dmTipAftOrig' in w,
+        'addFormattedTooltip wrapper: maxH = %d on formatTooltip / compareTooltip / offhandTooltip .tooltip_mc before the original' % TIP_MAXH)
+    w = dis(sa.b)
+    say(all('pushint          %d' % v in w for v in (TIP_CMD, 4 * TIP_CMD)) and all(x in w for x in ('dmTipF', 'dmTipMaxH', 'dmTipMaxW', "'dmTipSet'")),
+        'setAnchor(v): %d + 1000 f / %d + max h / %d + max w (stage px) for the host, anything else ignored; EI dmTipSet answers' % (TIP_CMD, 2 * TIP_CMD, 3 * TIP_CMD))
+    # the cause of the one-line body: the console library caps the body at maxH + padding, the keyboard library does not
+    def cap(lib):
+        sw = Swf(src[lib]) if lib in src else None
+        if sw is None: return None
+        for _, _, a in sw.abcs():
+            o = a.owners()
+            for b in a.bodies:
+                if o.get(b.method, '').endswith('::setBgWSubsections'):
+                    lines = a.dis(b); hs = [k for k, l in enumerate(lines) if l.split()[1:3] == ['setproperty', 'height'] and 'bg_mc' in '\n'.join(lines[max(0, k - 12):k])]
+                    return any('ifnlt' in l for k in hs for l in lines[max(0, k - 10):k])
+        return None
+    cc, ck = cap(CONSOLE_LIB), cap(LIB)
+    say(cc is True and ck is False, 'the cause: %s tt_bgMid.setBgWSubsections sets the body to min(h, maxH + padding) (%s), %s sets h (%s) - tooltip.swf never sets maxH (0): a 26 px body'
+        % (CONSOLE_LIB, cc, LIB, ck))
+    b = None
+    for p in [main_raw, _find('work/exefs-update/main.raw')]:
+        if p and os.path.exists(str(p)): b = open(str(p), 'rb').read(); break
+    if b is not None:
+        inv = invokes(b)
+        say(not isinstance(inv, str) and 'setAnchor' in [n for _, n in inv], 'the tooltip class registers the invoke setAnchor (the host\'s carrier)')
+    h = _host_src('hle_dos2_touchui_hud.c'); hh = _host_src('hle_dos2_touchui_hud.h')
+    if h is None or hh is None: print('skip dm/host not found next to tools/: host fit checks skipped')
+    else:
+        say(all('"%s"' % n in h for n in TIP_EI) and '"setAnchor"' in h and 'HU_TIP_CMD = %d' % TIP_CMD in hh,
+            'host: hle_dos2_touchui_hud.c takes EI %s (log) and sends setAnchor(HU_TIP_CMD + ...) (hle_dos2_touchui_hud.h HU_TIP_CMD = %d)' % (' / '.join(TIP_EI), TIP_CMD))
+        say('HU_TIP_HB = 158' in hh, 'host: the hot bar branch\'s 158 stage px (main+0x110e3bc add w14,w11,#0x9e) in the max height (hle_dos2_touchui_hud.h HU_TIP_HB)')
+    return bad
+
+
 def check(src, main_raw=None, all_dir=None):
     bad = 0
     def say(ok, text):
@@ -367,7 +542,13 @@ def check(src, main_raw=None, all_dir=None):
     P = Swf(after); T0 = Swf(tt); K0 = Swf(kb)
     say(Swf(P.write()).body() == P.body(), 'the movie parses and round-trips')
     d, drep = build(tt, kb); D = Swf(d); dabc = [abc for _, _, abc in D.abcs() if 'tooltip_fla.MainTimeline' in class_names(abc)][0]
-    say(make(src)[OUT] == d and build(tt, kb)[0] == d, 'the build is deterministic (the packed movie = with the diag wrappers)')
+    say(build(tt, kb)[0] == d, 'the graft build is deterministic')
+    cl = build_console_lib(tt); C = Swf(cl)
+    say(make(src)[OUT] == (cl if ROUTE == 'console_lib' else d), 'the packed movie = route %s' % ROUTE)
+    say([import_url(t[1]) for t in C.tags if t[0] == T_IMPORT2] == [import_url(t[1]).replace(LIB, CONSOLE_LIB) for t in T0.tags if t[0] == T_IMPORT2]
+        and CONSOLE_LIB in REGISTERED and [t for t in C.tags if t[0] not in (T_IMPORT2, T_ABC)] == [t for t in T0.tags if t[0] not in (T_IMPORT2, T_ABC)],
+        'console_lib route: tooltip.swf byte for byte but its import %s -> %s (registered by the Switch loader) and its DoABC (the touch fit below)' % (LIB, CONSOLE_LIB))
+    bad += check_fit(src, T0, C, main_raw)
     say(drep['diag'] == list(DIAG) and not verify_all(dabc) and all('dmOrig_' + m in dis_names(dabc) for m in DIAG),
         'diag wrappers (phone 23.11, the movie throws silently): %s -> try / catch around dmOrig_<name>, EI dmTipErr_<name>(error) / dmTipOk_<name>' % ', '.join(drep['diag']))
     g = gr.check(rep['stage1'], after, quiet=True)
