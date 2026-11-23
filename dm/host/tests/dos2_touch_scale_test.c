@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
         assert(s.hb_mm <= TS_TARGET_MM + 0.01f || s.hud == 1);   // never grown past the target
     }
     // the hot bar row of tools/dos2_pchud_touch.py: 16:9 holds x ~1.2 (the column at x ~1.2 beside it)
-    ts_compute(80, 16.0f / 9, 0, 0, &s); assert(near(s.cap_row, (960 - 92 * s.side - 10) / 695.0f, 1e-3f));
+    ts_compute(80, 16.0f / 9, 0, 0, &s); assert(near(s.cap_row, (960 - 92 * s.side - 10) / 683.0f, 1e-3f));
     // the representative devices
     for (unsigned i = 0; i < sizeof k_dev / sizeof *k_dev; i++) {
         float mm, r; dev_ui(&k_dev[i], &mm, &r); ts_compute(mm, r, 0, 0, &s);

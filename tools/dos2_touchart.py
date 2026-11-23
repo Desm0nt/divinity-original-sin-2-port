@@ -26,6 +26,9 @@ ASSETS = {
     'ico_journal': (118, 108), 'icon_map': (118, 108),
     'pan_close': (100, 100), 'pan_helmet': (128, 128), 'pan_list': (128, 128), 'pan_multi': (128, 128), 'pan_plus': (68, 68), 'pan_minus': (68, 68),
     'pan_balance': (130, 170), 'pan_info': (80, 56),
+    # touch HUD 23.11 (tools/dos2_pchud_touch.py: the hot bar's chat / combat log plates, the minimap's view menu and quick save)
+    'icon_chat': (112, 105), 'icon_combatlog': (111, 112), 'icon_save': (108, 112), 'icon_view': (112, 61), 'icon_labels': (112, 98),
+    'icon_cones': (112, 67), 'icon_camlock': (83, 112), 'icon_info': (71, 112), 'icon_tactical_s': (104, 108),
 }
 ARROW_RGB = (150, 141, 120)   # the hot bar arrows' flat khaki (the iPad's own arrow is a vector of this colour)
 

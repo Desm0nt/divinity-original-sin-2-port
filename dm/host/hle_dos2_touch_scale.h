@@ -26,10 +26,10 @@
 #define TS_MARGIN_Y 8.0f
 #define TS_GAP 10.0f               // between two HUD objects
 // ---- the HUD movies (tools/dos2_pchud_touch.py; its `check` compares these): stage px at factor 1, each object scales about its anchor
-#define TS_HB_HALF 695.0f          // hotBar_p (anchor bottom): the row (bar .. 12 slots .. the combat log button's frame) is centred, +-695 px
+#define TS_HB_HALF 683.0f          // hotBar_p (anchor bottom): the row (chat plate | bar: deck, 12 slots, actions | combat log plate) centred, +-683 px
 #define TS_HB_TOP 125.0f           // its frame's top above the screen bottom (stage 875 of 1000)
-#define TS_HB_TOP_R 151.0f         // ... at the right end (the combat log button, stage 849)
-#define TS_HB_TOP_L 151.0f         // ... at the left end (the chat button / the deck list button)
+#define TS_HB_TOP_R 125.0f         // ... at the right end (the combat log plate 888..972 is under the frame's top since 23.11)
+#define TS_HB_TOP_L 125.0f         // ... at the left end (the chat plate, the same)
 #define TS_MM_MAX 1.0f             // minimap_p (anchor topright): the iPad's ring (~24 % of the height) at every size (owner 20.11)
 #define TS_SIDE_COL 92.0f          // dmSide_p (anchor topright, the iPad's places): the panel column's left edge from the screen's right edge
 #define TS_SIDE_BOT 896.0f         // its stack's bottom (options 20..94 in the corner, the helmet 310..415 under the map, six panels from 422 every 80)

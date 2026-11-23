@@ -757,6 +757,11 @@ static int g_t_pan_inv, g_t_tips_ms, g_t_cones_ms, g_t_t3f_esc, g_t_tac;   // g_
 static float g_t_bz; static uint32_t g_t_zkey; static int g_t_zoom_ms = 90;   // DM_DOS2_TOUCH_T_ZOOM_MS: hold per pinch step   // pinch zoom: the owed hold of pageup (+) / pagedown (-) in ms and the key held now (0 none)
 static float g_t_bx, g_t_by, g_t_br;      // the keyboard camera's owed hold (ms): pan x / y, rotation (dt_hold_add)
 static unsigned g_t_keys, g_t_tog;        // camera keys down now (DT_K_*); held toggles: 1 = lalt (ShowWorldTooltips), 2 = lshift (ShowSneakCones)
+// what the player WANTS of those two toggles (the minimap's view menu, the 2 / 3-finger taps; 23.11): the keys are let go while a menu / panel
+// is up (run 20.11: a held lshift is also SplitItemToggle / UIContextMenuModifier) and pressed again when the game is back on screen; a load /
+// the main menu / leaving the TOUCH UI drops the wish. g_t_req: button presses from the ExternalInterface drain (bit 1 tooltips, 2 cones), run
+// in dt_t_poll; g_t_camlock: the camera lock (the iPad's lockCamera: CameraCenter = home once, then the pan gestures move nothing)
+static unsigned g_t_want; static _Atomic unsigned g_t_req; static _Atomic int g_t_camlock;
 static uint64_t g_t_tog_until[2], g_t_tick;
 static uint64_t g_t_tap_up; static float g_t_tap_x, g_t_tap_y;   // the last one-finger tap (the double tap's first half)
 static unsigned g_n_t_tap, g_n_t_dtap, g_n_t_tip, g_n_t_long, g_n_t_pan, g_n_t_pinch, g_n_t_rot, g_n_t_pan2, g_n_t_tap2, g_n_t_tap3, g_n_t_sw3, g_n_t_lp;
@@ -767,9 +772,9 @@ static void dt_key(void *mgr, uint32_t id, int down) { dt_send(mgr, DEV_KEYS, id
 static int dt_t_busy(void) { return g_t_keys || g_t_tog || g_t_zkey || g_t_bx != 0 || g_t_by != 0 || g_t_br != 0 || g_t_bz != 0; }
 static void dt_t_toggle(void *mgr, int which, const char *what) {   // which 0 = lalt (world tooltips), 1 = lshift (sneak cones)
     const unsigned bit = 1u << which; const uint32_t id = which ? ID_KEY_LSHIFT : ID_KEY_LALT; const int ms = which ? g_t_cones_ms : g_t_tips_ms;
-    const int on = !(g_t_tog & bit);
-    dt_key(mgr, id, on);
-    if (on) { g_t_tog |= bit; g_t_tog_until[which] = ms > 0 ? dt_ms() + (uint64_t)ms : 0; } else g_t_tog &= ~bit;
+    const int on = !(g_t_want & bit);
+    if (on != !!(g_t_tog & bit)) dt_key(mgr, id, on);
+    if (on) { g_t_tog |= bit; g_t_want |= bit; g_t_tog_until[which] = ms > 0 ? dt_ms() + (uint64_t)ms : 0; } else { g_t_tog &= ~bit; g_t_want &= ~bit; }
     LOG("[touch] TOUCH: %d-finger tap = %s: key %s %s%s", which ? 3 : 2, what, which ? "lshift" : "lalt", on ? "DOWN" : "up",
         on ? ms > 0 ? " (held for DM_DOS2_TOUCH_T_*_MS)" : " (held until the next such tap, a menu or leaving the game)" : "");
 }
@@ -831,6 +836,21 @@ static void dt_kp_poll(void *mgr) {   // dt_drain, every pad poll (also when no 
 // camera (g_t_tac, what the three-finger swipe compares with) flips with it, else the next swipe down / up did nothing (run 20.11 review)
 void dm_dos2_touch_tac_toggled(void);
 void dm_dos2_touch_tac_toggled(void) { g_t_tac = !g_t_tac; }
+// hle_dos2_touchui_hud.c dmKey(3 | 4 | 5): the minimap's view menu (23.11). which 0 = item labels, 1 = sight cones (queued for dt_t_poll, which
+// holds / lets go the key), 2 = the camera lock (now: home = CameraCenter once when it goes on; dt_t_poll keeps the pan at zero). 0 = not TOUCH
+int dm_dos2_touch_t_button(int which);
+int dm_dos2_touch_t_button(int which) {
+    if (!dt_t_mode() || which < 0 || which > 2) return 0;
+    if (which < 2) { atomic_fetch_or(&g_t_req, 1u << which); return 1; }
+    const int on = !atomic_load(&g_t_camlock); atomic_store(&g_t_camlock, on);
+    if (on) dm_dos2_touch_key_pulse(ID_KEY_HOME, 0, "the camera lock: CameraCenter (home)");
+    LOG("[touch] TOUCH: the minimap's camera lock %s", on ? "ON: the camera centres on the character (home) and the pan gestures move nothing" : "off: the pan gestures move the camera again");
+    return 1;
+}
+// the view menu's state for minimap_p (hle_dos2_touchui_hud.c hu_mm_sync, game thread): 1 tactical camera (the host's belief), 2 item labels,
+// 4 sight cones (the wish: held now, or again once the game is back on screen), 8 the camera lock
+unsigned dm_dos2_touch_t_bits(void);
+unsigned dm_dos2_touch_t_bits(void) { return (g_t_tac ? 1u : 0u) | (g_t_want & 1 ? 2u : 0u) | (g_t_want & 2 ? 4u : 0u) | (atomic_load(&g_t_camlock) ? 8u : 0u); }
 // DmActivity.dos2PadB (Java UI thread) through jni nativeDos2Back -> hle_dos2_touchui_hud.c: the Back gesture in UI mode TOUCH = the PC escape (close
 // the window / the pause menu / skip a video: SkipVideo <- escape in the Switch's keyboard_1.json). 1 = taken (also when it had to be dropped:
 // the pad's B does nothing in TOUCH), 0 = not TOUCH (Java sends the pad B). c5957b6 queued it in the touch HUD, which only ran it while its HUD
@@ -847,17 +867,26 @@ static void dt_t_poll(void *mgr) {
     const uint64_t now = dt_ms();
     const float dtm = g_t_tick ? fminf((float)(now - g_t_tick), 50.f) : 0.f;   // at most 50 ms: the poll is skipped while idle (dt_drain), a new hold must not pay for that gap
     g_t_tick = now;
-    if (!dt_t_mode()) { dt_t_release_all(mgr, "not the TOUCH PC UI any more"); return; }
+    if (!dt_t_mode()) { dt_t_release_all(mgr, "not the TOUCH PC UI any more"); g_t_want = 0; atomic_store(&g_t_req, 0); return; }
     const int st = atomic_load(&g_ui_state);
     // run 20.11 review: every held key goes when a menu / panel / dialog comes up or the game is left, not only the toggles - a two-finger
     // rotation holds `delete`, which is also UIDelete (keyboard_1.json), the pan holds w / a / s / d, the pinch pageup / pagedown (ZoomIn / Out)
     if (dt_t_away(st)) {
         if (dt_t_busy()) dt_t_release_all(mgr, (st & 1) ? "a menu / panel is on screen" : "out of game");
-        if (!(st & 2)) g_t_tac = 0;   // a load / the main menu starts with the normal camera
+        if (!(st & 2)) { g_t_tac = 0; g_t_want = 0; }   // a load / the main menu starts with the normal camera and no held toggle
+        atomic_store(&g_t_req, 0);
         dm_dos2_touchui_hud_plate_off((st & 1) ? "a menu / panel is on screen" : "out of game");
         return;
     }
-    for (int w = 0; w < 2; w++) if ((g_t_tog >> w & 1) && g_t_tog_until[w] && now >= g_t_tog_until[w]) { dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 0); g_t_tog &= ~(1u << w); }
+    for (int w = 0; w < 2; w++) if ((g_t_tog >> w & 1) && g_t_tog_until[w] && now >= g_t_tog_until[w]) { dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 0); g_t_tog &= ~(1u << w); g_t_want &= ~(1u << w); }
+    { const unsigned rq = atomic_exchange(&g_t_req, 0);   // the minimap's view menu (hle_dos2_touchui_hud.c dmKey(3 | 4))
+      if (rq & 1) dt_t_toggle(mgr, 0, "the minimap's item labels button = ShowWorldTooltips (the PC's held left Alt)");
+      if (rq & 2) dt_t_toggle(mgr, 1, "the minimap's sight cones button = ShowSneakCones (the PC's held left Shift)"); }
+    for (int w = 0; w < 2; w++) if ((g_t_want >> w & 1) && !(g_t_tog >> w & 1)) {   // back in the game after a menu / panel: the wish is held again
+        dt_key(mgr, w ? ID_KEY_LSHIFT : ID_KEY_LALT, 1); g_t_tog |= 1u << w;
+        static unsigned n; if (g_dbg || n++ < 20) LOG("[touch] TOUCH: %s held again (the game is back on screen)", w ? "lshift (sight cones)" : "lalt (item labels)");
+    }
+    if (atomic_load(&g_t_camlock)) { g_t_bx = g_t_by = 0; }   // the camera lock: no pan (one / two fingers); rotation and zoom stay
     dt_hold_tick(&g_t_bx, dtm); dt_hold_tick(&g_t_by, dtm); dt_hold_tick(&g_t_br, dtm); dt_hold_tick(&g_t_bz, dtm);
     { const uint32_t zk = g_t_bz > 4.f ? ID_KEY_PAGEUP : g_t_bz < -4.f ? ID_KEY_PAGEDOWN : 0;   // the pinch's zoom key follows its owed hold
       if (zk != g_t_zkey) { if (g_t_zkey) dt_key(mgr, g_t_zkey, 0); if (zk) { dt_key(mgr, zk, 1); dm_dos2_touchui_hud_plate_off("the camera zooms"); } g_t_zkey = zk; } }

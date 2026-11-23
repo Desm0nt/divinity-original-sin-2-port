@@ -86,6 +86,12 @@
 //                    is the world tap's own click (hle_dos2_touch.c dm_dos2_touch_world_click: past the UI, one poll per step).
 //   dmKey(code)      minimap_p: 1 = quick save -> the f5 key (PC: QuickSave <- key:f5), 2 = the tactical camera -> the o key (ToggleTacticalCamera
 //                    <- key:o); raw key ids from the engine's name table main+0x2974b10 (index - 2: f5 0x42, o 0x32, as hle_dos2_touch.c's).
+//                    The iPad's view menu (23.11, tools/dos2_pchud_touch.py MM_BTNS): 3 = item labels (ShowWorldTooltips <- lalt, a HELD input:
+//                    its event kind 3 in main+0x108c2b0), 4 = sight cones (ShowSneakCones <- lshift, kind 3), 5 = the camera lock (no engine input:
+//                    CameraCenter = home once, then hle_dos2_touch.c keeps the pan at zero) -> dm_dos2_touch_t_button (held until pressed again;
+//                    let go while a menu / panel is up, held again after). The toggles' state goes back to the movie: hu_mm_sync invokes
+//                    minimap_p's setBtnVisible(HU_MM_STATE + bits) (an invoke name the minimap class registers, main+0x1239a9c id 0xe; the movie
+//                    takes >= HU_MM_STATE as its toggles' state): bits 1 tactical camera, 2 labels, 4 cones, 8 camera lock.
 // The ACTION PLATE (the iPad's overhead_t action button; "Implemented: touch HUD extras"). The iPad's own route - the overhead class's
 //   clickedAction - is not in the Switch main, and the PC acts on the first click. So the host does it: hle_dos2_touch.c asks
 //   dm_dos2_touchui_hud_plate(x, y, object under the finger) on a world tap in UI mode TOUCH. With a character / item there (the picking of
@@ -466,6 +472,7 @@ static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
 
 // ---- the host's objects ----
 static void hu_tip_drop_pin(void);
+static int g_mm_sent = -1; static uint8_t *g_mm_fp;   // hu_mm_sync: the state last told to minimap_p and its player
 static void hu_destroy(const char *why) {
     uint8_t *mgr = hu_mgr();
     hu_tip_drop_pin();   // the kept hover-out calls name objects that go now
@@ -489,6 +496,7 @@ static void hu_destroy(const char *why) {
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
+    g_mm_sent = -1; g_mm_fp = NULL;
     g_nobj = 0; atomic_store(&g_aim, 0); atomic_store(&g_aim_act, 0); g_aim_all = g_aim_shown = 0; g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
     { void dm_dos2_touch_world_aim_hold(int on, float x, float y); dm_dos2_touch_world_aim_hold(0, 0, 0); }
     g_view = 0; g_view_who = 0;   // run 20.11 review: the equipment view's state of the old set must not steer the first dmSide of the next one
@@ -746,6 +754,22 @@ static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsig
 // the combined "something waits for a target" (game thread, every poll): on a change the aimed point is forgotten (run 21.11:
 // CONFIRM aims where the player taps the world from now on, else under itself), the end lets the picking follow the cursor again, and the
 // hot bar is told to show / hide CONFIRM and cancel for the states its own showActiveSkill does not see (hle_dos2_touchui_hud.h hu_aim_*)
+// the minimap's view menu shows the toggles' state (game thread, every poll): on a change, or for a new minimap object, its setBtnVisible(HU_MM_STATE
+// + bits, true) - tools/dos2_pchud_touch.py MM_STATE; bits from hle_dos2_touch.c dm_dos2_touch_t_bits
+enum { HU_MM_STATE = 100, HU_T_MINIMAP = 0x1e };
+static void hu_mm_sync(uint8_t *mgr) {
+    unsigned dm_dos2_touch_t_bits(void);
+    uint8_t *mm = NULL;
+    for (int i = 0; i < g_nobj && mgr && !mm; i++) if (g_obj[i].type == HU_T_MINIMAP) { uint8_t *o = hu_obj(mgr, g_obj[i].h); if (o && *(volatile uint32_t *)(o + HU_OBJ_TYPE) == HU_T_MINIMAP) mm = o; }
+    uint8_t *fp = mm ? *(uint8_t *volatile *)(mm + HU_OBJ_FP) : NULL;
+    if (!fp) return;
+    const int bits = (int)(dm_dos2_touch_t_bits() & 15);
+    if (bits == g_mm_sent && fp == g_mm_fp) return;
+    dm_ei_val v[2]; memset(v, 0, sizeof v); v[0].type = 4; v[0].d = HU_MM_STATE + bits; v[1].type = 4; v[1].d = 1;
+    if (!dm_dos2_touchui_invoke(fp, "setBtnVisible", v, 2)) { if (g_mm_fp != fp) { g_mm_fp = fp; LOG("【红】[hud] minimap_p: setBtnVisible is not an invoke name of its player: the view menu shows no state"); } return; }
+    static unsigned n; if (g_dbg || n++ < 24) LOG("[hud] minimap view menu state %#x (tactical %d, labels %d, cones %d, camera lock %d)", bits, bits & 1, (bits >> 1) & 1, (bits >> 2) & 1, (bits >> 3) & 1);
+    g_mm_sent = bits; g_mm_fp = fp;
+}
 static void hu_aim_sync(const char *why) {
     int dm_dos2_touch_world_aiming(void); void dm_dos2_touch_world_aim_hold(int on, float x, float y);
     const int slot = atomic_load(&g_aim), act = atomic_load(&g_aim_act), eng = dm_dos2_touch_world_aiming();
@@ -802,12 +826,19 @@ static int hu_ei_aimbtn(void *ctx, void *player, void *ui, const char *name, uns
     { void dm_dos2_touch_world_aim_used(void); if (g_aim_all) dm_dos2_touch_world_aim_used(); }   // the engine's lingering facts do not show CONFIRM again
     return 1;
 }
-static int hu_ei_key(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmKey(1 quick save | 2 tactical camera)
+static int hu_ei_key(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // dmKey(1 quick save | 2 tactical camera | 3 labels | 4 cones | 5 camera lock)
     (void)ctx; (void)player; (void)name;
     enum { ID_KEY_O = 0x32, ID_KEY_F5 = 0x42 };   // raw name table main+0x2974b10, index - 2
     const int code = n && a && a[0].type == 4 ? (int)a[0].d : -1;
-    if (code != 1 && code != 2) { LOG("[hud] dmKey(%d): no such key button (1 quick save, 2 tactical camera)", code); return 1; }
+    if (code < 1 || code > 5) { LOG("[hud] dmKey(%d): no such key button (1 quick save, 2 tactical camera, 3 item labels, 4 sight cones, 5 camera lock)", code); return 1; }
     if (!dm_dos2_touchui_may_press(ui)) return 1;
+    if (code >= 3) {
+        int dm_dos2_touch_t_button(int which);
+        const int ok = dm_dos2_touch_t_button(code - 3);
+        static unsigned cnt; if (g_dbg || cnt++ < 24) LOG("[hud] dmKey(%d %s)%s", code, code == 3 ? "item labels: lalt held / let go" : code == 4 ? "sight cones: lshift held / let go" : "camera lock",
+                                                         ok ? "" : ": NOT the TOUCH PC UI, nothing done");
+        return 1;
+    }
     hu_act_start_key(3, code == 1 ? "dmKey(1 quick save: f5)" : "dmKey(2 tactical camera: o)", code == 1 ? ID_KEY_F5 : ID_KEY_O);
     if (code == 2 && g_act.kind == 3) { void dm_dos2_touch_tac_toggled(void); dm_dos2_touch_tac_toggled(); }   // sent: the three-finger swipe's belief follows the button
     return 1;
@@ -1154,6 +1185,7 @@ void dm_dos2_touchui_hud_poll(void) {
     if (atomic_exchange(&g_aim_set, 0)) { const uint64_t v = atomic_load(&g_aim_xy); const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v; float x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4); hu_aim_set(&g_aimp, x, y); }
     // (run 21.11: no more "where the cursor rested" - that was the hot bar slot or the CONFIRM circle; see hu_ei_aimbtn)
     hu_aim_sync("poll");
+    hu_mm_sync(mgr);
     hu_tip_make(ui, mgr, "the touch HUD is up and the tooltip object is gone");
     if (*hu_mode() == 0) hu_tip_tell(ui, mgr);
     hu_act_step();

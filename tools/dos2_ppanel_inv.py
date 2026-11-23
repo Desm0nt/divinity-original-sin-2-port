@@ -82,11 +82,17 @@ CS_HIT_H = 1085.0
 CS_EQ_Y, CS_EQ_Y_DOLL = CS_ROW1 - CS_UP, CS_STRIP[0] + CS_ROW1 - CS_EQ_BAR   # equip_mc.y on the sheet (off it: x far) / in the doll panel
 CS_DOLL_W = CS_W - CS_SPLIT
 CS_DOLL_H = CS_EQ_Y_DOLL + CS_H0 - CS_ROW1        # 901 own: the title bar, the equipment bar, the doll with its numbers
-DOLL_PX = CS_DOLL_W * 967.0 / CS_DOLL_H   # = BOTTOM0  # the doll panel's screen width in the equipment view at the default bottom (its height = dmB)
+# owner 23.11 (phone, his picture of the equipment view): the doll panel = the doll's body only - no title bar, no "equipment" bar with a
+# second close / doll button - standing beside the other window with ITS top and height (the bag's in the equipment view, the sheet's on the
+# sheet, where the doll now stands left of the stat columns as on the iPad's characterSheet_t). The body = doll-frame rows CS_EQ_Y_DOLL..
+DOLL_BODY_H = CS_DOLL_H - CS_EQ_Y_DOLL            # 803 own: the doll, its slots and numbers
+DOLL_GAP = 10                    # screen px between the doll panel and the window beside it
+DOLL_FILL = (93, 100)            # the bag's height / the band above dmB, about (its rows are whole): the doll panel's width allowance
+DOLL_PX = CS_DOLL_W * 967.0 * 0.93 / DOLL_BODY_H  # the doll panel's width allowance in the equipment view at the default bottom
 def eq_block(a, C, DW, BT):
     """the equipment view's shared numbers, the SAME statements in both movies (so the two halves are one block): DP the doll panel's width
-    (its height = the band above dmB, 21.11: it went under the hot bar), SQ the bag's scale, MQ the block's width"""
-    DP = a.let('DP', CS_DOLL_W * fmax(600, fmin(1080, BT)) / CS_DOLL_H)
+    allowance (the gap included; its height follows the bag's), SQ the bag's scale, MQ the block's width"""
+    DP = a.let('DP', CS_DOLL_W * fmax(600, fmin(1080, BT)) * R(*DOLL_FILL) / DOLL_BODY_H)
     SQ = a.let('SQ', fmin(C / 50, (DW - 2 * MARGIN - 2 * COL_RES - DP) / INV_W) * INV_K)   # = the inventory's S in state 1 (INV_K: owner 23.11)
     a.let('MQ', ffloor(DP + INV_W * SQ + R(999, 1000)))
 CS_TITLE_X = (42, CS_SPLIT + CS_DOLL_W // 2 - 299)             # title_txt.x (a 598 px centred field): on the sheet / centred in the doll panel
@@ -196,7 +202,7 @@ class Cls:
     def S(s, text): return s.abc.string(text)
     def add(s, name, nparams, lines, like=None):
         abc = s.abc
-        m = abc.add_method('dm_' + name, [0] * nparams, 0, asm(lines), 64, 64, s.ref.init_scope, s.ref.init_scope + 1)
+        m = abc.add_method('dm_' + name, [0] * nparams, 0, asm(lines), 64, 255, s.ref.init_scope, s.ref.init_scope + 1)
         b = abc.methods[m].body; st, sc, loc = abc.verify(b); b.max_stack = st; b.local_count = loc; abc.verify(b)
         if like is not None:
             abc.methods[m].ret = like.ret
@@ -555,6 +561,28 @@ def inv_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
     env = dict(C=C, ST=ST, DW=DW, BT=BT, OX=0, OK=0); inv_spec(None).run(env); return env
 
 
+def bag_lets(s, p, C, BT, AV):
+    """the bag window's numbers (inv_spec; the doll panel of the equipment view computes the SAME with p = 'Q' to stand beside it with its top
+    and height): variables p + S0 SH0 S SH RR EX B ROWS LH H HS Y0; AV = the width the window may take"""
+    S0 = s.let(p + 'S0', fmin(C / 50, AV / INV_W))                        # the full cell's scale: decides the rows (= the host's ts_inv_rows)
+    SH0 = s.let(p + 'SH0', fmin(S0, INV_HEAD_S))
+    S = s.let(p + 'S', S0 * INV_K)                                               # owner 23.11: the window drawn INV_K smaller, header and all
+    SH = s.let(p + 'SH', SH0 * INV_K)
+    RR = s.let(p + 'RR', S / SH)
+    EX = s.let(p + 'EX', INV_W * (RR - 1))
+    B = s.let(p + 'B', fmax(600, fmin(1080, BT)))
+    # rows: the cells end above B, the whole window (with its bottom edge INV_BOT) inside the screen - at the full cell, so the smaller
+    # window keeps them and gets ~(1 - INV_K) of its height free: its title stays on the screen (phone 23.11: Y0 clamped to 0, title cut)
+    rows = s.let(p + 'ROWS', fmax(1, fmin(INV_ROWS_MAX, ffloor(fmin(B - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST) * S0,
+                                                                1080 - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST + INV_BOT) * S0) / (INV_PITCH * S0)))))
+    LH = s.let(p + 'LH', INV_BAG_HEAD + INV_LIST_REST + rows * INV_PITCH)
+    H = s.let(p + 'H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
+    HS = s.let(p + 'HS', H * SH)                                                 # screen px
+    # centred in the band above B; the whole window (its bottom rim too) above B where it fits (21.11: nothing under the hot bar), else from the top
+    Y0 = s.let(p + 'Y0', fmax(0, fmin(fmin(1080 - HS, B - HS), TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
+    return S, SH, RR, EX, B, rows, LH, H, HS, Y0
+
+
 def inv_spec(k):
     """dmLay of partyInventory_p. k = the PC placements of the window's children (None: only the variables are wanted).
     Two scales (docs/dos2/TOUCH_MODES_PLAN.md "Implemented: physical scale for fingers"): the list (bags, cells) at S = cell / 50, the header
@@ -567,20 +595,7 @@ def inv_spec(k):
     # <= 1.2 from the right edge), on both sides because the block is centred
     eq_block(s, C, DW, BT)
     s.state('ST', lambda a: a.let('AV', DW - 2 * MARGIN - 2 * COL_RES - V('DP')), lambda a: a.let('AV', DW - 2 * MARGIN))
-    S0 = s.let('S0', fmin(C / 50, V('AV') / INV_W))                        # the full cell's scale: decides the rows (= the host's ts_inv_rows)
-    SH0 = s.let('SH0', fmin(S0, INV_HEAD_S))
-    S = s.let('S', S0 * INV_K)                                               # owner 23.11: the window drawn INV_K smaller, header and all
-    SH = s.let('SH', SH0 * INV_K)
-    RR = s.let('RR', S / SH)
-    EX = s.let('EX', INV_W * (RR - 1))
-    B = s.let('B', fmax(600, fmin(1080, BT)))
-    # rows: the cells end above B, the whole window (with its bottom edge INV_BOT) inside the screen - at the full cell, so the smaller
-    # window keeps them and gets ~(1 - INV_K) of its height free: its title stays on the screen (phone 23.11: Y0 clamped to 0, title cut)
-    rows = s.let('ROWS', fmax(1, fmin(INV_ROWS_MAX, ffloor(fmin(B - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST) * S0,
-                                                                1080 - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST + INV_BOT) * S0) / (INV_PITCH * S0)))))
-    LH = s.let('LH', INV_BAG_HEAD + INV_LIST_REST + rows * INV_PITCH)
-    H = s.let('H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
-    HS = s.let('HS', H * SH)                                                 # screen px
+    S, SH, RR, EX, B, rows, LH, H, HS, Y0 = bag_lets(s, '', C, BT, V('AV'))
     s.state('ST', lambda a: a.let('X0', V('DP')), lambda a: a.let('X0', 0))
     MW = s.let('MW', ffloor(V('X0') + INV_W * S + R(999, 1000)))
     # phone 21.11 (inv2.png): the engine anchored the movie top right (its rect = setMcSize's width) and the window shifted left inside it was cut
@@ -588,8 +603,6 @@ def inv_spec(k):
     # origin at 0 (or where the host says: dmOX) and the window is centred INSIDE it: X1 = (DW - MW) / 2 - dmOX
     SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
     X0 = s.let('X1', V('X0') + (DW - MW) / 2 - V('OK') * V('OX'))
-    # centred in the band above B; the whole window (its bottom rim too) above B where it fits (21.11: nothing under the hot bar), else from the top
-    Y0 = s.let('Y0', fmax(0, fmin(fmin(1080 - HS, B - HS), TOP_M + fmax(0, (B - TOP_M - INV_LIST_Y * SH - LH * S) / 2))))
     s.let('PX', 50 * S)
     if k is None: return s
     w = (INV_CLIP,)
@@ -700,47 +713,63 @@ def cs_geom(C=CELL0, ST=0, DW=SCREEN0, BT=BOTTOM0):
 
 
 def cs_spec(k, glow=None):
-    """dmLay of characterSheet_p: state 0 = the sheet (two stat columns, no doll), state 1 = the doll panel of the equipment view"""
-    s = Spec(); C, DW = V('C'), V('DW')
+    """dmLay of characterSheet_p. Owner 23.11 (phone shots against the iPad's characterSheet_t): state 0 = the sheet as the iPad shows it - the
+    doll panel (the doll's body: slots, the 3D character, its numbers) on the LEFT, the stat columns / tab lists on the right, one block, the
+    doll as tall as the sheet; state 1 = the doll panel of the equipment view, beside the bag with the bag's top and height (bag_lets 'Q').
+    The clip shows its own px RX..RX+RW, RY..RY+RH (scrollRect); a clip px p is on the screen at CX + (p - RX) * S, Y0 + (q - RY) * S. The doll's
+    pieces (bg d0, equip_mc, dmDollBg) are placed from their doll-frame px (x from CS_SPLIT, y from CS_EQ_Y_DOLL = the body's top) at XA, YA
+    scaled KD: state 1 = the PC places (KD 1, the crop starts at the body's top), state 0 = left of the sheet's px 0, the body's top at 0."""
+    s = Spec(); C, DW = V('C'), V('DW'); OXK = V('OK') * V('OX')
     AVH = s.let('AVH', fmax(600, fmin(1080, V('BT'))) - TOP_M)            # the height above the host's bottom limit (the hot bar's top)
+    HX0, HSX = (k['hitArea_mc'][1], k['hitArea_mc'][3]) if k else (0.0, 1.0)
     def sheet(a):
-        S = a.let('S', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (DW - 2 * MARGIN) / CS_W), AVH / (CS_HEAD + CS_BOT + CS_PB_MIN)))
-        PB = a.let('PB', fmax(CS_PB_MIN, fmin(CS_PB0, ffloor(AVH / S - CS_HEAD - CS_BOT))))
+        S1 = a.let('S1', fmin(fmin(R(CS_S0[0], CS_S0[1]) * C / CELL0, (DW - 2 * MARGIN) / CS_W), AVH / (CS_HEAD + CS_BOT + CS_PB_MIN)))
+        PB = a.let('PB', fmax(CS_PB_MIN, fmin(CS_PB0, ffloor(AVH / S1 - CS_HEAD - CS_BOT))))
         H = a.let('H', CS_HEAD + PB + CS_BOT)
-        a.let('MW', ffloor(CS_W * S + R(999, 1000))); a.let('Y0', TOP_M + (AVH - H * S) / 2)
-        for n, v in (('RX', 0), ('RW', CS_W), ('XS', 0), ('XD', CS_FAR), ('EY', CS_EQ_Y), ('TX', CS_TITLE_X[0])): a.let(n, v)
+        KD = a.let('KD', H / DOLL_BODY_H)                                    # the doll as tall as the sheet
+        S = a.let('S', fmin(S1, (DW - 2 * MARGIN - 2 * COL_RES - DOLL_GAP) / (CS_W + CS_DOLL_W * KD)))   # the block (doll + sheet) fits the screen
+        MW = a.let('MW', ffloor(CS_DOLL_W * KD * S + DOLL_GAP + CS_W * S + R(999, 1000)))
+        RX = a.let('RX', 0 - CS_DOLL_W * KD - DOLL_GAP / S)
+        a.let('CX', (DW - MW) / 2 - OXK); a.let('Y0', TOP_M + (AVH - H * S) / 2)
+        for n, v in (('RY', 0), ('RW', CS_W - RX), ('RH', H), ('XA', RX), ('YA', 0), ('XS', 0), ('XB', CS_BTN_AT[0]), ('HX', RX), ('HK', HSX * (CS_W - RX) / CS_W)): a.let(n, v)
     def doll(a):
         eq_block(a, C, DW, V('BT'))
-        S = a.let('S', V('DP') / CS_DOLL_W); a.let('PB', CS_PB_MIN); a.let('H', CS_DOLL_H)
-        a.let('MW', V('MQ')); a.let('Y0', 0)
-        for n, v in (('RX', CS_SPLIT), ('RW', CS_DOLL_W), ('XS', CS_FAR), ('XD', 0), ('EY', CS_EQ_Y_DOLL), ('TX', CS_TITLE_X[1])): a.let(n, v)
+        bag_lets(a, 'Q', C, V('BT'), DW - 2 * MARGIN - 2 * COL_RES - V('DP'))
+        S = a.let('S', fmin((V('DP') - DOLL_GAP) / CS_DOLL_W, V('QHS') / DOLL_BODY_H))
+        a.let('PB', CS_PB_MIN); a.let('H', DOLL_BODY_H); a.let('KD', 1); a.let('MW', V('MQ'))
+        a.let('CX', (DW - V('MQ')) / 2 - OXK + V('DP') - DOLL_GAP - CS_DOLL_W * S)   # its right edge DOLL_GAP left of the bag (bag X1 = block + DP)
+        a.let('Y0', V('QY0') + (V('QHS') - DOLL_BODY_H * S) / 2)
+        for n, v in (('RX', CS_SPLIT), ('RY', CS_EQ_Y_DOLL), ('RW', CS_DOLL_W), ('RH', DOLL_BODY_H), ('XA', CS_SPLIT), ('YA', CS_EQ_Y_DOLL),
+                     ('XS', CS_FAR), ('XB', CS_FAR), ('HX', HX0), ('HK', HSX)): a.let(n, v)
     s.state('ST', doll, sheet)
-    S, PB, H, MW, Y0, RX, RW, XS, XD, EY = [V(n) for n in ('S', 'PB', 'H', 'MW', 'Y0', 'RX', 'RW', 'XS', 'XD', 'EY')]
-    DX = s.let('DX', (DW - MW) / 2 - V('OK') * V('OX'))                  # centred inside the screen-wide movie (see inv_spec, phone 21.11)
+    S, PB, H, MW, CX, Y0, RX, RY, RW, RH, XA, YA, XS, KD = [V(n) for n in ('S', 'PB', 'H', 'MW', 'CX', 'Y0', 'RX', 'RY', 'RW', 'RH', 'XA', 'YA', 'XS', 'KD')]
     SW = s.let('SW', ffloor(fmax(DW, MW) + R(999, 1000)))
+    s.let('DX', CX)
     if k is None: return s
     w = (CS_CLIP,)
-    s.on(w, [('scaleX', S), ('scaleY', S), ('x', DX), ('y', Y0)])
-    s.rect(w, RX, 0, RW, H)                                  # the window clip shows its own px RX.. only: the doll panel = the right half
+    s.on(w, [('scaleX', S), ('scaleY', S), ('x', CX), ('y', Y0)])
+    s.rect(w, RX, RY, RW, RH)
     bg = w + ('bg_mc', ('at', 0))
     s.on(bg + (('nm', 's0'),), [('x', XS)])
     s.on(bg + (('nm', 'sb'),), [('x', XS), ('scaleY', (H - CS_FOOT_ART - CS_BODY_Y) / CS_BODY_ART)])
     s.on(bg + (('nm', 'sf'),), [('x', XS), ('y', H - CS_FOOT_ART)])
-    s.on(bg + (('nm', 'd0'),), [('x', CS_SPLIT + XD)])
+    # the doll: doll-frame px (x - CS_SPLIT, y - CS_EQ_Y_DOLL) x KD from XA, YA (the d0 group's own rows above the body - title, equipment bar - are cropped)
+    s.on(bg + (('nm', 'd0'),), [('x', XA), ('y', YA - CS_EQ_Y_DOLL * KD), ('scaleX', KD), ('scaleY', KD)])
+    s.on(w + ('equip_mc',), [('x', XA + (k['equip_mc'][1] - CS_SPLIT) * KD), ('y', YA), ('scaleX', k['equip_mc'][3] * KD), ('scaleY', k['equip_mc'][4] * KD)])
+    s.on(w + (('nm', 'dmDollBg'),), [('x', XA + (k['dmDollBg'][1] - CS_SPLIT) * KD), ('y', YA - KD), ('scaleX', k['dmDollBg'][3] * KD), ('scaleY', k['dmDollBg'][4] * KD)])
+    s.on(w + ('equipment_txt',), [('x', CS_FAR)])
     s.on(w + ('panelBg1_mc',), [('scaleY', PB / CS_PB0)])
     s.on(w + (('nm', 'dmPanel2'),), [('x', k['dmPanel2'][1] + XS), ('scaleY', PB / CS_PB0)])
     s.on(w + ('mainStats_mc',), [('x', k['mainStats_mc'][1] + XS)])
     s.on(w + ('charInfo_mc',), [('x', k['charInfo_mc'][1] + XS)])
-    s.on(w + ('equip_mc',), [('x', k['equip_mc'][1] + XD), ('y', EY)])
-    s.on(w + (('nm', 'dmDollBg'),), [('x', k['dmDollBg'][1] + XD), ('y', EY - 1)])
-    s.on(w + ('equipment_txt',), [('x', k['equipment_txt'][1] + XD), ('y', EY - 44)])
-    s.on(w + ('title_txt',), [('x', V('TX'))])
-    s.on(w + ('hitArea_mc',), [('scaleY', k['hitArea_mc'][4] * (H - 17) / CS_HIT_H)])
+    s.on(w + ('title_txt',), [('x', CS_TITLE_X[0])])
+    s.on(w + ('hitArea_mc',), [('x', V('HX')), ('scaleX', V('HK')), ('scaleY', k['hitArea_mc'][4] * (H - 17) / CS_HIT_H)])
     s.raw('lists', cs_lists)
     for h, sy in sorted((glow or {}).items()):   # a tab list's glow behind it (PC: the 735 px panel) - else it shows under a shorter window
         s.on(w + (h, 'bgGlow_mc'), [('scaleY', sy * PB / CS_PB0)])
-    s.on((('nm', INV_BTN),), [('x', DX + (CS_BTN_AT[0] - RX) * S), ('y', Y0 + (EY - 45) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
-    for prop, e in (('uiLeft', DX), ('uiRight', DX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
+    # the doll button (to the equipment view) on the second column's head bar; the equipment view has the bag's own button (this one off)
+    s.on((('nm', INV_BTN),), [('x', CX + (V('XB') - RX) * S), ('y', Y0 + (CS_EQ_Y - 45 - RY) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
+    for prop, e in (('uiLeft', CX), ('uiRight', CX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
     s.ei('setMcSize', SW, STAGE_H); s.ei('setPosition', 'topleft', 'screen', 'topleft')   # phone 23.11: see inv_spec ('center' put it at x 881, cut)
     return s
 
@@ -842,7 +871,7 @@ def sheet(data, env=None):
     # 0x6b (FlashMouseMoveLeft / Right: [object+0x3fc] = the turn) and STOPS it on event 1 (FlashLeftMouse, the button's release:
     # [+0x3f8] = 0, capture off). dollUp / dollOut of the movie are not in main.raw and are not needed: the engine stops on the release itself.
     made = code.done(); S = env['S']
-    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['DX'], env['Y0'], env['DX'] + env['RW'] * S, env['Y0'] + env['H'] * S), bitmap=bid, shape=new, moved=moved,
+    return swf.write(), dict(placed=[INV_BTN], defs=ndef + nbtn, methods=made, env=env, rest=rest, window=(env['CX'] - env['RX'] * S, env['Y0'], env['CX'] + (CS_W - env['RX']) * S, env['Y0'] + env['H'] * S), bitmap=bid, shape=new, moved=moved,
                              stage=(STAGE_WMAX, STAGE_H), spec=spec)
 
 
@@ -1012,14 +1041,14 @@ def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None):
         if (view == 'inv' and o != 'partyInventory_p.swf') or (view == 'sheet' and o != 'characterSheet_p.swf'): continue
         dta, rep = f(src[SRC[o]], dict(C=C, ST=st, DW=DW, BT=BT)); e = rep['env']
         swf = Swf(dta)
-        if e.get('RX'): edit_places(swf, None, lambda name, rec: _set(rec, dx=-e['RX'] * e['S']) if name == CS_CLIP else None)   # the scrollRect crop, for the picture
+        if 'RY' in e: edit_places(swf, None, lambda name, rec: _set(rec, dx=-e['RX'] * e['S'], dy=-e['RY'] * e['S']) if name == CS_CLIP else None)   # the scrollRect crop, for the picture
         # what the PC code keeps hidden is not in the picture: the sort popup (until "sort by" is tapped), the game master's tabs of the sheet
         hide = ('sortBy_mc',) if o == 'partyInventory_p.swf' else ('invTabHolder_mc', 'customStats_mc', 'skillTabHolder_mc', 'panelBg2_mc')
         edit_places(swf, _root_names(swf)[INV_CLIP if o == 'partyInventory_p.swf' else CS_CLIP]['char'], lambda name, rec: False if name in hide else None)
         # the movie spans the screen from x 0 (setMcSize(screen width)); the window stands where dmLay put it inside
         pic, org = rn.render(swf, 'root', 1.0); x0 = 0
-        if e.get('RX'):   # the scrollRect crop: only the doll half, the rest of the clip is not drawn
-            dx = int(round(e['DX'])); pic = pic.crop((dx, 0, dx + int(e['RW'] * e['S']), pic.size[1])); img.alpha_composite(pic, (dx, 0))
+        if 'RY' in e:   # the scrollRect crop: only RX..RX+RW, RY..RY+RH of the clip is drawn
+            dx, dy = int(round(e['CX'])), int(round(e['Y0'])); pic = pic.crop((dx, dy, dx + int(e['RW'] * e['S']), dy + int(e['RH'] * e['S']))); img.alpha_composite(pic, (dx, dy))
         else: img.alpha_composite(pic.crop((0, 0, DW, STAGE_H)), (0, 0))
         if o == 'partyInventory_p.swf':
             S = e['S']; gx = x0 + e['X1'] + 8 * e['SH'] + 12 * S; gy = e['Y0'] + INV_LIST_Y * e['SH'] + INV_BAG_HEAD * S
@@ -1028,7 +1057,8 @@ def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None):
                     for c in range(INV_COLS):
                         x = gx + c * INV_PITCH * S; y = gy + r * INV_PITCH * S; dr.rectangle([x, y, x + 50 * S, y + 50 * S], outline=(150, 132, 104, 255), fill=(30, 26, 24, 255))
             note.append('bag: cell %.0f px, %d x %d, window %.0f x %.0f, header x%.2f' % (50 * S, INV_COLS, e['ROWS'], INV_W * S, e['HS'], e['SH']))
-        else: note.append(('doll panel %.0f x %.0f, slot %.0f px' if st else 'sheet %.0f x %.0f, row %.0f px') % (e['RW'] * e['S'], e['H'] * e['S'], (64 if st else 26) * e['S']))
+        elif st: note.append('doll panel %.0f x %.0f, slot %.0f px' % (e['RW'] * e['S'], e['H'] * e['S'], 64 * e['S']))
+        else: note.append('doll + sheet %.0f x %.0f, row %.0f px, doll slot %.0f px' % (e['RW'] * e['S'], e['H'] * e['S'], 26 * e['S'], 64 * e['KD'] * e['S']))
     return img, '%s, cell asked %d, screen %d x 1080: %s' % (view, C, DW, '; '.join(note))
 
 
