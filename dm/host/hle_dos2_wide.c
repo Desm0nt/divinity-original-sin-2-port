@@ -16,18 +16,22 @@
 // The window can constrain its picture to an aspect (+0xd1 flag, +0xd4 aspect, 0x93e350 -> rect 0x93d320, viewports fitted 0x90fab0):
 // the only caller that turns it on is 0xc0b4b0, and only for a window NARROWER than 16:9 (0xc0b548: w / h < 16/9f at main+0x1f123bc)
 // while the global byte main+0x2bb8918 is set (it also switches the UI scale 0x110e364): then the game letterboxes itself to 16:9 inside
-// the window. Wider windows keep the whole window. UI (Iggy): each UI movie is scaled by height (0x110e32c: window rect height / the
+// the window. Wider windows keep the whole window. That letterbox comes out wrong on this build (the 3D squeezed twice, issue #9), so a
+// narrower request is turned into the 16:9 window of the "16:9 with bars" shape by default (hle_dos2_wide_size.h: DM_DOS2_NARROW,
+// DM_DOS2_FAKE_SCREEN, the reasoning and the numbers). UI (Iggy): each UI movie is scaled by height (0x110e32c: window rect height / the
 // movie's height) and placed by the engine's anchors (setAnchor / registerAnchorId, the PC code), so the HUD sits at the screen edges;
 // videos (Bink) are fitted to their own aspect (0xd1f4e0, centred).
 //   DM_DOS2_WIDE unset / 1   auto from the screen (front_screen_px, long side first):
 //                             wider than 16:9   docked W x 900, W = 900 x aspect rounded to 16 (max 3200); handheld 720 x aspect, x 720
-//                             narrower          docked 1600 x H, H = 1600 / aspect rounded to 16 (max 1600); handheld 1280 x 1280 / aspect
+//                             narrower          (DM_DOS2_NARROW=letterbox / tall) docked 1600 x H, H = 1600 / aspect rounded to 16 (max
+//                                               1600); handheld 1280 x 1280 / aspect; default (bars): the 16:9 window at the base height
 //   DM_DOS2_WIDE=<W>          docked width W (1601..3200) x 900, handheld W x 4/5 x 720
 //   DM_DOS2_WIDE=<W>x<H>      docked size (the Java gear passes this: the screen as the activity sees it), handheld both x 4/5
 //   DM_DOS2_WIDE=<a>:<b>      as auto, for that aspect (e.g. 4:3)
 //   DM_DOS2_WIDE=0            the Switch's 1600x900 / 1280x720 (the front end then bars or stretches it)
-//   DM_DOS2_WIDE_TALL=1       narrower windows: the game's own 16:9 letterbox off (0xc0b550 b.mi -> nop): the whole 4:3 window, Hor-
-//                             (same vertical view, less at the sides) and the 16:9 UI on it; experiment, default off = the game's letterbox
+//   DM_DOS2_NARROW=tall       narrower windows: the game's own 16:9 letterbox off (0xc0b550 b.mi -> nop): the whole 4:3 window, Hor-
+//                             (same vertical view, less at the sides) and the 16:9 UI on it, cut off on the right (DM_DOS2_WIDE_TALL=1 = the same)
+//   DM_DOS2_NARROW=letterbox  narrower windows: the game's own letterbox (0.3.0's default; the 3D squeezed, issue #9)
 // Clustered lights (the fix of 14.11: "1080p" window = point lights, glows and the menu fresco highlight gone, 900p fine). The point
 // lights go through ClusteredLightingWithSSAO.bshd with a light grid the CPU builds every frame (stage vtable main+0x299b4f0, ctor
 // 0xb19820): SetSize vt+0x50 = 0xb19e50 (w, h = [[arg+0x20]+0x20/+0x24], from Init vt+0x18 = 0xb19ad0) makes tiles of 128 px,
@@ -51,6 +55,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "hle_dos2_wide_size.h"
 
 enum { DW_MODES = 0x93844c, DW_LBOX = 0xc0b534, DW_CLUSTERS = 0xb19d00 };
 // 0xb19d00 ldr x0,[x8,#0xc68] (renderer) / +4 mov w1,#0x8700 (ClusterInfoBuffer size) / +8 bl 0x915170 (make the buffer)
@@ -74,28 +79,6 @@ static int dw_poke(module_t *m, uint32_t off, uint32_t w) {
     __builtin___clear_cache((char *)at, (char *)(at + 1));
     return 0;
 }
-static unsigned r16(double v) { return (unsigned)(llround(v / 16) * 16); }
-static unsigned clampu(unsigned v, unsigned lo, unsigned hi) { return v < lo ? lo : v > hi ? hi : v; }
-
-// The two modes for an aspect a (= width / height): 0 = 16:9 (nothing to change)
-// [DOS2] DM_DOS2_RES = 720 (default, owner 14.11: the Switch's DRS range is 495-720p, widen the view instead of raising the
-// resolution; handheld = docked) or 900 (the Switch's docked height; handheld 720)
-static unsigned dw_base(void) { const char *e = getenv("DM_DOS2_RES"); int v = e ? atoi(e) : 720; return v == 900 || v == 1080 ? (unsigned)v : 720; }
-static int dw_from_aspect(double a, unsigned s[4]) {
-    if (!(a > 0.5 && a < 8)) return 0;
-    const unsigned b = dw_base();
-    if (fabs(a - 16.0 / 9.0) < 0.01) { if (b == 900) return 0; s[0] = s[2] = 1280; s[1] = s[3] = 720; return 1; }
-    if (b == 720) {
-        if (a > 16.0 / 9.0) { s[0] = s[2] = clampu(r16(720 * a), 1296, 2560); s[1] = s[3] = 720; }
-        else { s[0] = s[2] = 1280; s[1] = s[3] = clampu(r16(1280 / a), 736, 1280); }
-        return 1;
-    }
-    const unsigned bw = b * 16 / 9;   // 900 -> 1600, 1080 -> 1920; handheld 720
-    if (a > 16.0 / 9.0) { s[0] = clampu(r16(b * a), bw + 16, 3200); s[1] = b; s[2] = clampu(r16(720 * a), 1296, 2560); s[3] = 720; }
-    else { s[0] = bw; s[1] = clampu(r16(bw / a), b + 16, bw); s[2] = 1280; s[3] = clampu(r16(1280 / a), 736, 1280); }
-    return 1;
-}
-
 // The clustered-light buffer for the largest window of the two modes (see the header: 0x8700 = 1920x1080's 135 tiles)
 static void dw_clusters(module_t *m, const unsigned s[4]) {
     const char *e = getenv("DM_DOS2_CLUSTERS");
@@ -125,33 +108,22 @@ void dm_dos2_wide_size(unsigned *w, unsigned *h) { *w = g_dw_w; *h = g_dw_h; }
 
 void dm_dos2_wide_install(void);   // main.c host_preload, right after load_modules (before any guest code runs)
 void dm_dos2_wide_install(void) {
-    const char *e = getenv("DM_DOS2_WIDE");
-    if (e && *e == '0' && !e[1]) { LOG("[wide] DM_DOS2_WIDE=0: window 1600x900 (handheld 1280x720), the 16:9 picture as the front end shows it"); return; }
-    unsigned s[4] = {0}, w = 0, h = 0, x = 0, y = 0; int ok = 0; const char *how = "the screen";
-    if (e && sscanf(e, "%ux%u", &w, &h) == 2) {
-        how = "DM_DOS2_WIDE=<W>x<H>";
-        {   // [DOS2] the gear computes W x H from its own resolution choice; DM_DOS2_RES (the gear's value, or dm/env, which is read later and wins) decides
-            const char *r = getenv("DM_DOS2_RES"); const unsigned b = dw_base();
-            if (r && *r && h >= 360 && h != b && b >= 720) {
-                LOG("[wide] DM_DOS2_WIDE=%ux%u but DM_DOS2_RES=%u: window rescaled to the height %u (same shape)", w, h, b, b);
-                w = (unsigned)((unsigned long long)w * b / h); h = b;
-            }
-        }
-        if (w >= 640 && h >= 360 && w <= 4096 && h <= 4096 && (w != 1600 || h != 900)) {
-            s[0] = (w + 4) / 8 * 8; s[1] = (h + 4) / 8 * 8; s[2] = (w * 4 / 5 + 4) / 8 * 8; s[3] = (h * 4 / 5 + 4) / 8 * 8; ok = 1;   // [DOS2] multiples of 8: 2400x1080 exact (16 made it 1088, 14.11)
-            if (h <= 720 && w <= 2560) { s[2] = s[0]; s[3] = s[1]; }   // [DOS2] 720p (the default): handheld = docked
-            s[0] = clampu(s[0], 640, 3200); s[1] = clampu(s[1], 368, 2400); s[2] = clampu(s[2], 512, 2560); s[3] = clampu(s[3], 288, 1920);
-        }
-    } else if (e && sscanf(e, "%u:%u", &x, &y) == 2 && x && y) { how = "DM_DOS2_WIDE=<a>:<b>"; ok = dw_from_aspect((double)x / y, s); }
-    else if (e && atol(e) > 1600) {
-        how = "DM_DOS2_WIDE=<W>"; w = clampu((unsigned)atol(e), 1616, 3200);
-        s[0] = (w + 8) / 16 * 16; s[1] = 900; s[2] = (s[0] * 4 / 5 + 8) / 16 * 16; s[3] = 720; ok = 1;
-    } else {
-        uint64_t front_screen_px(void); uint64_t r = front_screen_px(); w = (uint32_t)r; h = (uint32_t)(r >> 32);
-        if (w && h) ok = dw_from_aspect((double)w / h, s);
-        else { LOG("[wide] DM_DOS2_WIDE=%s: the screen size is not known yet: window stays 1600x900", e ? e : "(default)"); return; }
-    }
-    if (!ok) { LOG("[wide] DM_DOS2_WIDE=%s (%s %ux%u): 16:9 or not usable: window stays 1600x900", e ? e : "(default)", how, w, h); return; }
+    const char *e = getenv("DM_DOS2_WIDE"), *res = getenv("DM_DOS2_RES"), *fk = getenv("DM_DOS2_FAKE_SCREEN");
+    uint64_t front_screen_px(void);
+    dws_plan p; dws_decide(e, res, getenv("DM_DOS2_NARROW"), getenv("DM_DOS2_WIDE_TALL"), fk, front_screen_px(), &p);
+    const unsigned b = dws_base(res);
+    if (p.fake > 0) LOG("[wide] DM_DOS2_FAKE_SCREEN=%s (debug): the screen is taken as %.4f:1%s; the front end shows the picture in a rectangle "
+                        "of that shape", fk, p.fake, p.faked ? "" : " (this request is not a widescreen one: unchanged)");
+    if (p.off) { LOG("[wide] DM_DOS2_WIDE=0: window 1600x900 (handheld 1280x720), the 16:9 picture as the front end shows it"); return; }
+    if (p.no_screen) { LOG("[wide] DM_DOS2_WIDE=%s: the screen size is not known yet: window stays 1600x900", e ? e : "(default)"); return; }
+    if (p.rescaled && !p.faked) LOG("[wide] DM_DOS2_WIDE=%ux%u but DM_DOS2_RES=%u: window rescaled to the height %u (same shape)", p.rw, p.rh, b, b);
+    if (p.narrow && p.fallback)   // [DOS2] issue #9: never the game's own letterbox on a narrow screen (it squeezed the 3D a second time)
+        LOG("[wide] %s %ux%u: the window %ux%u is narrower than 16:9 -> widescreen = 16:9 with black bars on this screen (DM_DOS2_NARROW=bars, "
+            "default): window %ux%u, the front end sizes its view 16:9 (issue #9: the game's own 16:9 letterbox drew the 3D squeezed into a "
+            "%.2f:1 band); DM_DOS2_NARROW=letterbox | tall = the old ways", p.how, p.rw, p.rh, p.nw, p.nh, p.ok ? p.s[0] : 1600, p.ok ? p.s[1] : 900,
+            16.0 / 9.0 * (16.0 / 9.0) / ((double)p.nw / p.nh));
+    if (!p.ok) { LOG("[wide] DM_DOS2_WIDE=%s (%s %ux%u): 16:9 or not usable: window stays 1600x900", e ? e : "(default)", p.how, p.rw, p.rh); return; }
+    const unsigned *s = p.s;
     module_t *m = NULL;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
     if (!m) { LOG("【红】[wide] no main module: window stays 1600x900"); return; }
@@ -163,15 +135,15 @@ void dm_dos2_wide_install(void) {
         LOG("【红】[wide] mprotect RW failed part-way: the game may mix sizes"); return; }
     g_dw_w = s[0]; g_dw_h = s[1];
     LOG("[wide] DOS2 window 1600x900 -> %ux%u, handheld 1280x720 -> %ux%u (%s %ux%u; display modes main+%#x); aspect %.4f: cameras take the "
-        "window's aspect (Hor+, vertical FOV kept), UI scaled by height and anchored to the edges", s[0], s[1], s[2], s[3], how, w, h, DW_MODES, (double)s[0] / s[1]);
+        "window's aspect (Hor+, vertical FOV kept), UI scaled by height and anchored to the edges", s[0], s[1], s[2], s[3], p.how, p.rw, p.rh, DW_MODES, (double)s[0] / s[1]);
     dw_clusters(m, s);
-    if (s[0] * 9 < s[1] * 16) {   // narrower than 16:9: the game's own 16:9 letterbox (0xc0b4b0) unless DM_DOS2_WIDE_TALL=1
-        const char *t = getenv("DM_DOS2_WIDE_TALL"); int full = t && *t == '1';
-        if (!full) LOG("[wide] narrower than 16:9: the game letterboxes the 3D and the UI to 16:9 inside the window (main+0xc0b4b0, as on PC); "
-                       "DM_DOS2_WIDE_TALL=1 uses the whole window");
+    if (dws_narrower(s[0], s[1])) {   // only DM_DOS2_NARROW=letterbox / tall get here (bars made it 16:9 above)
+        if (p.mode != DWS_NARROW_TALL) LOG("【红】[wide] DM_DOS2_NARROW=%s: narrower than 16:9: the game letterboxes the 3D and the UI to 16:9 inside the window "
+                       "(main+0xc0b4b0, controller UI) and the 3D comes out squeezed (issue #9); DM_DOS2_NARROW=tall uses the whole window", dws_narrow_name[p.mode]);
         else if (memcmp(m->base + DW_LBOX, k_dw_lbox, sizeof k_dw_lbox)) LOG("【红】[wide] main+%#x differs: the game's 16:9 letterbox stays", DW_LBOX);
         else if (dw_poke(m, DW_LBOX + 0x1c, 0xd503201f /* nop */)) LOG("【红】[wide] mprotect RW failed: the game's 16:9 letterbox stays");
-        else LOG("[wide] DM_DOS2_WIDE_TALL=1: the game's 16:9 letterbox off (main+%#x b.mi -> nop): the whole window, Hor- (vertical FOV kept)", DW_LBOX + 0x1c);
+        else LOG("[wide] DM_DOS2_NARROW=tall: the game's 16:9 letterbox off (main+%#x b.mi -> nop): the whole window, Hor- (vertical FOV kept), "
+                 "the UI laid out by height (cut off on the right)", DW_LBOX + 0x1c);
     }
 }
 #endif

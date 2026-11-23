@@ -187,8 +187,8 @@ final class Tl2Gear {
             Os.setenv("DM_OPMODE", a.startedHandheld ? "0" : "1", true);   // dm/env still wins (it is applied after this)
         }
     }
-    // ---- picture shape 2 = widescreen (next launch): DOS2 hle_dos2_wide.c DM_DOS2_WIDE=<W>x<H> (Hor+; narrower screens 1600 x H, letterboxed
-    // by the game itself); TL2 hle_tl2_wide.c W x 1080 Hor+, the width from the display, not the SurfaceView (the view
+    // ---- picture shape 2 = widescreen (next launch): DOS2 hle_dos2_wide.c DM_DOS2_WIDE=<W>x<H> (Hor+; on a narrower screen the
+    // native side makes it the 16:9 window and DmActivity.dos2FitSurface shows it with bars, issue #9); TL2 hle_tl2_wide.c W x 1080 Hor+, the width from the display, not the SurfaceView (the view
     // may still be laid out 16:9 before startedAspect is known, or portrait when started with the screen off); D3 hle_d3.c DM_D3_WIDE
     static void aspectEnv(DmActivity a, int v) throws ErrnoException {
         a.startedAspect = v;

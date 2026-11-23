@@ -600,8 +600,8 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         return handheld ? new int[] {(w * 4 / 5 + 8) / 16 * 16, 720} : new int[] {w, 900};
     }
     // [DOS2] the docked window for the screen's shape, the same rule as hle_dos2_wide.c's auto size: wider than 16:9 = W x 900 (W = 900 x
-    // aspect rounded to 16, max 3200), narrower = 1600 x H (H = 1600 / aspect rounded to 16, max 1600: the game letterboxes itself to 16:9
-    // inside it, never squashed); null = 16:9 / unknown (the Switch's 1600x900)
+    // aspect rounded to 16, max 3200), narrower = 1600 x H (H = 1600 / aspect rounded to 16, max 1600; the native side turns that into the
+    // 16:9 window of the bars shape, issue #9: the game's own letterbox squeezed the 3D); null = 16:9 / unknown (the Switch's 1600x900)
     // [DOS2] the window height (the width follows the screen's shape, Hor+): until 19.11 the gear's 720 / 900 / 1080 row; since 19.11 always
     // the screen's own height (Tl2Gear.dos2NativeRes), the 3D resolution is its own row (Tl2Gear.dos2Res3d: DM_HACK_SCALE / DRS)
     static int dos2Base = 720;
@@ -609,19 +609,41 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     // Tl2Gear.aspectEnv sets: widescreen = dos2WideSize; 16:9 bars / stretched = 1280x720 rescaled to the base height (900: the Switch's
     // 1600x900 / 1280x720). Handheld = docked at 720p, else 4/5 of it.
     static int[] dos2Size(int base, boolean wide, boolean handheld, int sw, int sh) {
-        int[] d = wide ? dos2WideSize(base, sw, sh) : base == 900 ? null : new int[] {base * 16 / 9, base};
+        // [DOS2] issue #9: the window the native side really makes (Dos2Shape.window: a narrower screen's widescreen = the 16:9 of the bars shape)
+        double fake = dos2Fake(), a = fake > 0 ? fake : Dos2Shape.aspect(sw, sh);
+        int[] d = Dos2Shape.window(wide ? 2 : 0, base, a, dos2NarrowMode());
         if (d == null) return handheld ? new int[] {1280, 720} : new int[] {1600, 900};
         if (d[1] <= 720 && d[0] <= 2560) return d;   // [DOS2] 720p: handheld = docked (hle_dos2_wide.c)
         return handheld ? new int[] {(d[0] * 4 / 5 + 8) / 16 * 16, (d[1] * 4 / 5 + 8) / 16 * 16} : d;
     }
     static int[] dos2WideSize(int sw, int sh) { return dos2WideSize(dos2Base, sw, sh); }
-    static int[] dos2WideSize(int b, int sw, int sh) {
-        if (sw <= 0 || sh <= 0) return null;
-        double a = (double) Math.max(sw, sh) / Math.min(sw, sh);
-        int bw = b * 16 / 9;   // 720 -> 1280, 900 -> 1600
-        if (Math.abs(a - 16.0 / 9.0) < 0.01) return b == 900 ? null : new int[] {bw, b};
-        if (a > 16.0 / 9.0) return new int[] {(int) Math.max(bw + 16, Math.min(3200, Math.round(b * a / 16) * 16)), b};
-        return new int[] {bw, (int) Math.max(b + 16, Math.min(bw, Math.round(bw / a / 16) * 16))};
+    // the widescreen request as sent (DM_DOS2_WIDE=<W>x<H>, the screen's shape; Dos2Shape.wideSize): the native side turns a narrower one
+    // into 16:9 itself (hle_dos2_wide_size.h), so a DM_DOS2_NARROW / DM_DOS2_FAKE_SCREEN from dm/env (read after this) still decides there
+    static int[] dos2WideSize(int b, int sw, int sh) { return Dos2Shape.wideSize(b, Dos2Shape.aspect(sw, sh)); }
+    // [DOS2] issue #9 switches (dm/env, in the environment once nativeStart has read it; before that the defaults: bars, the real screen)
+    static int dos2NarrowMode() { return Dos2Shape.narrowMode(Os.getenv("DM_DOS2_NARROW"), Os.getenv("DM_DOS2_WIDE_TALL")); }
+    static double dos2Fake() { return Dos2Shape.fakeAspect(Os.getenv("DM_DOS2_FAKE_SCREEN")); }
+    private String dos2ShapeLogged;
+    // [DOS2] the SurfaceView for a picture shape: 16:9 centred (bars) or the whole screen; a screen narrower than 16:9 shows widescreen as bars
+    // (Dos2Shape.bars, issue #9); with DM_DOS2_FAKE_SCREEN the "screen" is a rectangle of that shape centred in the frame. Touch-as-mouse
+    // normalises to this view's rectangle (D3PadView), the presenter scales the game's window uniformly into it.
+    private void dos2FitSurface(int shape) {
+        double fake = dos2Fake(); int nm = dos2NarrowMode(); int[] sc = screenSize();
+        double a = fake > 0 ? fake : Dos2Shape.aspect(sc[0], sc[1]);
+        boolean bars = Dos2Shape.bars(shape, a, nm);
+        int fw = gameFrame.getWidth(), fh = gameFrame.getHeight();
+        if (fake <= 0) GearDisplay.fitSurface(view, gameFrame, bars);
+        else if (fw > 0 && fh > 0) {
+            int[] r = Dos2Shape.surfaceRect(fw, fh, bars, fake);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(r[2], r[3], android.view.Gravity.CENTER), cur = (FrameLayout.LayoutParams) view.getLayoutParams();
+            if (cur == null || cur.width != lp.width || cur.height != lp.height || cur.gravity != lp.gravity) view.setLayoutParams(lp);
+        }
+        int[] r = Dos2Shape.surfaceRect(fw, fh, bars, fake);
+        String msg = String.format(Locale.ROOT, "picture shape %d, screen %s %.3f:1%s, DM_DOS2_NARROW=%s: game view %s %dx%d at (%d,%d) in the frame %dx%d", shape,
+            fake > 0 ? "DM_DOS2_FAKE_SCREEN=" + Os.getenv("DM_DOS2_FAKE_SCREEN") : sc[0] + "x" + sc[1], a,
+            shape == 2 && Dos2Shape.narrower(a) ? (bars ? " narrower than 16:9 -> widescreen shown as 16:9 with black bars (issue #9)" : " narrower than 16:9 (old way)") : "",
+            new String[] {"bars", "letterbox", "tall"}[nm], bars ? "16:9" : "full", r[2], r[3], r[0], r[1], fw, fh);
+        if (fw > 0 && !msg.equals(dos2ShapeLogged)) { dos2ShapeLogged = msg; crumb(msg); }
     }
     int[] screenSize() { return GearDisplay.screenSize(this); }   // landscape: the long side first (the size the game's surface had at start)
     // The running game's render size (D3SkillIcons reads the game picture back at this size); null before the game starts.
@@ -670,6 +692,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
             int mode = XC2 && startedAspect == 2 ? 2 : doomPrefs().getInt("aspect", XC2 ? ASPECT_DEFAULT : D3_ASPECT_DEFAULT);
             if (D3) mode = startedAspect == 2 ? 2 : (TL2 && startedAspect < 0 && mode == 2) ? 2 : mode == 2 ? 0 : mode;   // [D3] widescreen = whole screen only when the game was started with it;
             // [TL2] before the host starts the saved choice is what it will start with (a 16:9 view here made the first surface 16:9)
+            if (DOS2) { dos2FitSurface(mode); return; }   // [DOS2] narrower screens: widescreen = bars (issue #9); DM_DOS2_FAKE_SCREEN
             GearDisplay.fitSurface(view, gameFrame, mode == 0);
         });
     }
@@ -760,6 +783,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         int result = nativeStart(getFilesDir().getAbsolutePath(), ext.getAbsolutePath(), src, Locale.getDefault().toLanguageTag());
         if (DOOM) { nativeLogReady = true; flushCrumbs(); crumb("nativeStart " + result); }
         if (D3) padSurfaceEnv();   // [DOS2] dm/env is read by nativeStart, so its pad switches apply from here
+        if (DOS2) applyAspectLayout();   // [DOS2] dm/env's DM_DOS2_NARROW / DM_DOS2_FAKE_SCREEN are known from here (issue #9)
         if (DOS2) { dos2TouchUiEnv(); if (result >= 0) { dos2ColumnApply(); Tl2Gear.dos2FpsApply(this); Tl2Gear.dos2SustainedApply(this); } }   // [DOS2] ... and the frame rate target's display mode + boot line   // [DOS2] the column's state with the pad known by now
         if (result < 0) {
             int resource = switch (result) {
