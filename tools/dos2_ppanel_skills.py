@@ -24,21 +24,41 @@ height of 1080; the iPad's windows are 1160 x 1040..1080 centred, the iPad's hot
               Touch as the iPad: tap a skill = select + tooltip (the PC's single click learned / memorised at once), DOUBLE tap = learn /
               memorise / forget (the PC click; skillSlot / memorySegment onUp gated), drag a skill = the PC's startDragging to the hot bar or the
               memory page (also after a hold: the host's TOUCH rule, hle_dos2_touch.c dt_panel_release), two fingers = the lists' wheel (host).
-              Finger pads: close, "all schools" and the character arrows >= 50 on screen.
+              Finger pads: close, "all schools" and the character arrows (see "Element scale-up" below).
   uiCraft_p   uiCraft.swf (680 x 1060 at the top right): centred (setPosition center / screen / center, also on resize), WIDENED to the
               iPad's one-column window (21.11, craft_art): every background bitmap re-cut (two plain column bands stretched; the header keeps
               its end blocks and tab holes whole and gets two wings), every child moved with the art (left / middle / right third) -> 1311 x 1060
               own px, x0.9 = 1180 x 954 px (iPad 1160 x 1080), stage 1220; the bag and the rune inventory x1.689 inside: cell 50 -> 76 on screen,
               pitch 56 -> 85 (invCellSpacing 6; iPad 76 / 86); invCols 13 x 5 rows visible (iPad 13 x 6), invRuneCols 6 (iPad 6) - engine
               variables, so the engine's icons follow. The recipe list scrolls by one finger. The rune tab and the close are now 309 px apart.
-              Finger pads: close, character arrows, -/+, search / clear (side by side: taller only), the rune popup's close. Everything else
-              is the PC's mouse code (tap, double click = use, drag ingredients, right click = context menu by the host's long press).
+              Finger pads: close, character arrows, -/+, search / clear (side by side: taller only), the rune popup's close, the recipe
+              categories' -/+. Everything else is the PC's mouse code (tap, double click = use, drag ingredients, right click = context menu
+              by the host's long press).
   journal_p   journal.swf (1360 x 1064, centred; the map is its tab 3): x0.88 (1197 x 936, screen y 8..944; iPad 1160 x 1040); quest rows
               30 + JN_ROWPAD (45 on screen = the iPad's; same text, the list keeps its width: a scaled list would clip the one-line titles); all
               five lists and the tutorial page's text field scroll by one finger on the text (rows are not draggable). Map: one finger pans (the PC's own drag -> mapOffset), pinch = zoom (the
               host's two fingers = wheel -> zoomIn / zoomOut), tap does NOT add a flag any more (the PC's click did), a long press (the host's
-              right click) adds the flag where the finger is (iPad: LongPress = addFlag); zoom buttons x1.4. Finger pads: close, the two
-              bottom buttons, the "postponed" check box.
+              right click) adds the flag where the finger is (iPad: LongPress = addFlag); zoom buttons 75 px. Finger pads: close, the two
+              bottom buttons, the "postponed" / "tutorial pop-ups" check boxes.
+
+Element scale-up (owner 23.11, a 6.7" 2400 x 1080 phone, UI mode touch: "the close X and many labels are tiny; make them finger-sized - not
+by scaling the whole window, scale the elements"; the host's physical scale there: 1 mm = 15.4 px). Screen px at a height of 1080:
+  close buttons   drawn 50 x 50 (the inventory's INV_CLOSE; PC 20..21), top-right corner kept where the PC had it (grows into the
+                  window), pad 96 (skills, journal, crafting and the crafting rune popup).
+  small targets   scaled about anchors that keep them clear of their neighbours (*_EL): skills character arrows x1.3 outwards, "all
+                  schools" x1.25 down from its top (+ text 16 -> 18), school filter icons x1.3 (52 x 48; dmFilterFit after every
+                  updateSkills: shrinks back while the row is wider than SK_FMAXW); crafting character arrows x1.3 outwards, amount -/+ x2
+                  (17 -> 34), search / clear x1.3 about their joint, recipe categories' -/+ x1.6 (27) with 75 x 56 pads (CraftCategory.init);
+                  journal bottom buttons x1.2 about their joint (inside their bar art), check boxes x1.25, map zoom 53 -> 75. Pads (*_PAD,
+                  screen px, converted to the element's own px): >= 64 x 64, aimed at 75; search / clear 47 wide (as drawn), "all schools"
+                  50 high (it hangs under the icons).
+  text            the key fields' font heights raised in the movie's DefineEditText (*_TXT; runtime rows of library symbols get it too):
+                  skills page headers 26 -> 32, school / memory list headers 20 -> 24 (x1.25 of the pages: 26 on screen); journal quest
+                  list 20 -> 24 (21 on screen; one line still fits entryHeight 30, the const the rows and highlight are cut by), quest
+                  text 20 -> 26 (23), quest title 20 -> 27, tutorial page 18 -> 24 / title 27, tutorial list 18 -> 24, tabs 16 -> 21;
+                  crafting recipe list 18 -> 24 (22 on screen: a recipe row is now two elemSpacing = 56 px, a finger row; the label is
+                  centred in it, the category header too), tabs 14 -> 19, buttons 14 -> 17. Single-line fields grow their box up and down
+                  (text centred where it was), a few are widened (school names 150 -> 300, "Schools" 125 -> 200).
 
   python -I tools/dos2_ppanel_skills.py check <Switch Game.pak | dir of the PC movies>
   python -I tools/dos2_ppanel_skills.py build <src> <out dir>
@@ -73,9 +93,35 @@ SK_PITCH = 69 + SK_SPACING
 SK_LW, SK_LH = 18 + (SK_COLS - 1) * SK_PITCH + 69 + 10, 477   # list frame (list-local px): 6 columns + the memory scroll bar
 SK_LX, SK_RX, SK_Y = 130, 704, 322    # the two pages' list origins (pane px)
 SK_SBLEN = 349
-# run 21.11: the close buttons' pads 103 / 100 own px = >= 90 screen px at x0.88 / x0.9 (they were 50; the journal's close was missed)
-SK_PAD = [('skillPane_mc', 'Xclose_mc', 103, 103), ('skillPane_mc', 'allBtn_mc', 80, 57), ('skillPane_mc', 'leftCycle_mc', 57, 91),
-          ('skillPane_mc', 'rightCycle_mc', 57, 91)]   # pane px: x0.88 -> >= 50 screen px
+# ---- element scale-up (owner 23.11, 6.7" 2400 x 1080 phone, UI mode touch: "the close X and many labels are tiny - make them finger-sized,
+# but NOT by scaling the whole window"). The windows keep their size; single elements grow inside them:
+#   the close button: drawn CLOSE_PX on screen (= the inventory's, tools/dos2_ppanel_inv.py INV_CLOSE; iPad mcBtnCloseTouch 50), its top-right
+#     corner kept where the PC had it (it grows into the window, never out of it), finger pad PAD_CLOSE;
+#   other small tap targets: drawn x1.2..x2 about an anchor that keeps them clear of their neighbours (each row below says which), finger
+#     pads (transparent rectangles in the element's own graphics, centred on its drawing) of >= PAD_MIN screen px where neighbours allow;
+#   text: the font height of the key fields raised in the movie's own DefineEditText (the field's default format: every runtime instance of
+#     a library row gets it; the PC code sizes rows from textHeight, so lists follow), single-line fields grow their box (centred titles /
+#     labels grow up and down, a few are widened so longer words do not clip); see *_TXT.
+# The host's physical scale on that phone: 70.1 mm per 1080 px, 1 mm = 15.4 px; 50 px = 3.2 mm (the iPad's pad minimum), PAD_MIN 75 px = 4.9 mm.
+CLOSE_PX, PAD_CLOSE, PAD_MIN = 50, 96, 75
+SK_WIN = (SK_SX, SK_S[0] / float(SK_S[1]))   # the book's (x, y) scale on the screen
+# (path from the document, kx, ky, anchor x, anchor y in the parent's px[, dx]): x = ax + (x - ax) * kx + dx, scale *= k (after the PC init)
+SK_EL = [(('skillPane_mc', 'Xclose_mc'), CLOSE_PX / (23 * SK_WIN[0]), CLOSE_PX / (23 * SK_WIN[1]), 1335, 41),   # top-right corner kept
+         (('skillPane_mc', 'leftCycle_mc'), 1.3, 1.3, 635, 116),    # the character arrows grow outwards (the portrait between them stays clear)
+         (('skillPane_mc', 'rightCycle_mc'), 1.3, 1.3, 719, 116),
+         (('skillPane_mc', 'allBtn_mc'), 1.25, 1.25, 297, 157)]     # "all schools": grows down from its top (the school icons above it)
+SK_FK, SK_FMAXW = 1.3, 520            # school filter icons 42 -> x1.3 (52 x 48 on screen), shrunk back while the row is wider than SK_FMAXW pane px
+# finger pads, SCREEN px (w, h): converted to the element's own px through the window's and the element's scale
+SK_PAD = [(('skillPane_mc', 'Xclose_mc'), PAD_CLOSE, PAD_CLOSE), (('skillPane_mc', 'allBtn_mc'), 100, 50),
+          (('skillPane_mc', 'leftCycle_mc'), 64, 96), (('skillPane_mc', 'rightCycle_mc'), 64, 96)]   # arrows: 64 wide = the gap to the portrait
+# text: (symbol class, instance names down to the field, new font height px, 'c' = single line centred vertically, new width px or None)
+SK_TXT = [('skills_fla.skillPane_1', ('title1holder', 'title1_txt'), 32, 'c', None),   # page headers 26 (23 on screen) -> 32 (28)
+          ('AllBtn', ('text_txt',), 18, 'c', None),                                      # "all schools" 16 -> 18 (x1.25 with its button: 20 on screen)
+          ('skills_fla.skillPane_1', ('title2holder', 'title2_txt'), 32, 'c', None),
+          ('skills_fla.skillPane_1', ('knownSchools_txt',), 24, 'c', 200), ('skills_fla.skillPane_1', ('deckManager_txt',), 24, 'c', None),
+          ('skills_fla.skillPane_1', ('defaultDeck_txt',), 26, 'c', None), ('skills_fla.skillPane_1', ('occupiedMemory_mc', 'text_txt'), 24, 'c', None),
+          ('skillList', ('title_txt',), 24, '', 300),       # school names over the lists 20 -> 24 (x1.252 of the pages: 26 on screen)
+          ('skillList', ('memoryCost_mc', 'text_txt'), 22, '', None), ('memoryList', ('title_txt',), 24, '', 300)]
 # ---- crafting: the iPad's uiCraft_t is the PC's one-column window made 1160 wide (recipes 1119, experiment 1104, bag 13 columns of 76 / 86).
 # 21.11 (owner: "the item grid has 5 rows - better like the iPad"; "a tap on the runes hit the close"): the PC art is WIDENED, not scaled:
 # every background bitmap is re-cut (tools/dos2_ppanel_inv.py pieces_sprite) - the panels' two plain column bands CR_BANDS stretch by CR_EXW / 2
@@ -100,19 +146,69 @@ CR_RUNE = (CR_RUNE_COLS * CR_PITCH + 4, 190)   # rune inventory frame: 6 x 56; (
 CR_SB = 34                            # own px of a grid's scroll bar beside its frame
 CR_BAG_X = (CR_W - CR_BAG[0] * CR_K - CR_SB) / 2.0   # the bag centred in the widened panel
 CR_RUNE_X = 4                         # the rune grid's holder in the 614 px rune popup (6 columns: 574 + the bar)
-CR_PAD = [('craftPanel_mc', 'closeButton_mc', 100, 100), ('craftPanel_mc', 'prevChar_mc', 56, 64), ('craftPanel_mc', 'nextChar_mc', 56, 64),
-          ('craftPanel_mc', 'recipesPanel_mc', 'plus_mc', 56, 56), ('craftPanel_mc', 'recipesPanel_mc', 'min_mc', 56, 56),
-          ('craftPanel_mc', 'recipesPanel_mc', 'searchBtn_mc', 40, 56), ('craftPanel_mc', 'recipesPanel_mc', 'cancelBtn_mc', 40, 56),
-          ('craftPanel_mc', 'runesPanel_mc', 'inventory_mc', 'close_mc', 100, 100)]
-PAD_TIGHT = {'searchBtn_mc', 'cancelBtn_mc'}   # the recipe search / clear buttons touch each other (40 px each): their pads only grow in height
+CR_WIN = (0.9, 0.9)
+_RP = ('craftPanel_mc', 'recipesPanel_mc')
+CR_EL = [(('craftPanel_mc', 'closeButton_mc'), CLOSE_PX / (23 * 0.9), CLOSE_PX / (23 * 0.9), 1292, 38),   # top-right corner kept
+         (('craftPanel_mc', 'prevChar_mc'), 1.3, 1.3, 614.5, 147),  # the character arrows grow outwards, away from the portrait
+         (('craftPanel_mc', 'nextChar_mc'), 1.3, 1.3, 698.5, 147),
+         (_RP + ('min_mc',), 2.0, 2.0, 59, 981.5),                  # amount - / + (19 px: 17 on screen): x2, away from the amount between them
+         (_RP + ('plus_mc',), 2.0, 2.0, 128, 981.5),
+         (_RP + ('searchBtn_mc',), 1.3, 1.3, 1208, 188),            # search / clear touch each other: x1.3 about the joint
+         (_RP + ('cancelBtn_mc',), 1.3, 1.3, 1208, 188),
+         (_RP + ('filterName_txt',), 1.0, 1.0, 0, 0, -10), (_RP + ('filterHl_mc',), 1.0, 1.0, 0, 0, -10),   # the search text: room for them
+         (('craftPanel_mc', 'runesPanel_mc', 'inventory_mc', 'close_mc'), CLOSE_PX / (23 * 0.9), CLOSE_PX / (23 * 0.9), 595, 18)]
+CR_PAD = [(('craftPanel_mc', 'closeButton_mc'), PAD_CLOSE, PAD_CLOSE), (('craftPanel_mc', 'prevChar_mc'), 64, 84), (('craftPanel_mc', 'nextChar_mc'), 64, 84),
+          (_RP + ('plus_mc',), PAD_MIN, PAD_MIN), (_RP + ('min_mc',), PAD_MIN, PAD_MIN),
+          (_RP + ('searchBtn_mc',), 47, PAD_MIN), (_RP + ('cancelBtn_mc',), 47, PAD_MIN),
+          (('craftPanel_mc', 'runesPanel_mc', 'inventory_mc', 'close_mc'), PAD_CLOSE, PAD_CLOSE)]
+PAD_TIGHT = {'searchBtn_mc', 'cancelBtn_mc'}   # the recipe search / clear buttons touch each other (47 px drawn each): their pads only grow in height
+PAD_LOW = {'allBtn_mc'}               # "all schools" hangs right under the school icons: its pad is wide, 50 high (taller would take the icons' bottom)
+# recipe rows: the label 18 -> 24 makes a row two elemSpacing (31) high (62 own = 56 on screen, the PC 28: a finger-sized row, the iPad's 41 +
+# padding); the label sits centred in it (y 2 -> CR_LABEL_Y). Category headers the same: title y 3 -> CR_CAT_Y, their -/+ (19 px) x CR_CAT_K
+CR_LABEL_Y, CR_CAT_Y, CR_CAT_K, CR_CAT_BTN = 15, 16, 1.6, (29, 15.8)   # the header -/+ drawn at (x, y), 30 own px
+CR_CAT_PAD = (PAD_MIN, 56)            # their finger pads (screen px; 56 = the header row)
+CR_TXT = [('Recipe', ('label_txt',), 24, '', None), ('CraftCategory', ('title_txt',), 24, '', None),   # the recipe list 18 (16 on screen) -> 24 (22)
+          ('Tab', ('text_txt',), 19, 'c', None), ('uiCraft_fla.craftPanel_1', ('title_txt',), 20, 'c', None),
+          ('uiCraft_fla.craftPanel_1', ('charName_txt',), 19, '', None),
+          ('uiCraft_fla.recipesPanel_4', ('name_txt',), 24, '', None), ('uiCraft_fla.recipesPanel_4', ('amount_txt',), 24, 'c', None),
+          ('uiCraft_fla.recipesPanel_4', ('filterName_txt',), 18, 'c', None), ('uiCraft_fla.checkButtonLabel_27', ('text_txt',), 19, 'c', None),
+          ('smallRedBtn', ('text_txt',), 17, 'c', None), ('smallBrownBtn', ('text_txt',), 17, 'c', None), ('smallGreenBtn', ('text_txt',), 17, 'c', None),
+          ('uiCraft_fla.stationOverlay_12', ('stationText_txt',), 21, 'c', None),
+          ('uiCraft_fla.experimentPanel_36', ('result_txt',), 26, '', None), ('uiCraft_fla.experimentPanel_36', ('currentStep_txt',), 24, '', None),
+          ('uiCraft_fla.craftResult_39', ('noResult_txt',), 26, '', None),
+          ('uiCraft_fla.RunesPanel_48', ('title_txt',), 22, 'c', None), ('uiCraft_fla.RunesPanel_48', ('name_txt',), 22, 'c', None),
+          ('uiCraft_fla.RunesPanel_48', ('error_txt',), 22, '', None), ('uiCraft_fla.RuneInventory_54', ('title_txt',), 24, 'c', None),
+          ('RuneSlot', ('title_txt',), 16, '', None), ('RuneSlot', ('name_txt',), 20, '', None), ('RuneSlot', ('desc_txt',), 18, '', None)]
 # ---- journal (stage 1360 x 1128, anchored center: stage y = screen y + 24)
 JN_S = (88, 100)
 JN_X0, JN_Y0 = 81.6, 27.6             # journal_mc content 0..1360 x 5..1069 -> centred, top at screen 8
 JN_ROWPAD = 21                        # quest rows: 30 -> 51 journal px (45 on screen = the iPad's; 40 before 21.11), same text size and width (scaling the list
                                       # would clip the titles: they are one autoSize line in a 400 px list)
-JN_ZOOM = (1170, 821, 1240, 821, 1.4)  # map zoom in / out: x, y in map_mc px (PC 1216 / 1270, 838), scale 43 -> 60 (53 on screen)
-JN_PAD = [('journal_mc', 'close_mc', 103, 103), ('journal_mc', 'onMapBtn_mc', 229, 57), ('journal_mc', 'postponeBtn_mc', 229, 57),
-          ('journal_mc', 'showPostponed_mc', 370, 57), ('journal_mc', 'tutorialContainer_mc', 'showTutorialPopups_mc', 370, 57)]
+JN_ZOOM = (1150, 812, 1240, 812, 75 / (43 * 0.88))   # map zoom in / out: x, y in map_mc px (PC 1216 / 1270, 838), 43 -> 85 (75 on screen; 53 before
+                                      # 23.11), side by side in the map's bottom-right corner (its content ends at map y ~900)
+JN_WIN = (0.88, 0.88)
+JN_EL = [(('journal_mc', 'close_mc'), CLOSE_PX / (23 * 0.88), CLOSE_PX / (23 * 0.88), 1338, 42.5),   # top-right corner kept
+         (('journal_mc', 'onMapBtn_mc'), 1.2, 1.2, 899, 993.9),    # the two bottom buttons x1.2 about their joint: 623..1175, inside their
+         (('journal_mc', 'postponeBtn_mc'), 1.2, 1.2, 899, 993.9),  # bar art (bg_mc.btnBG_mc 619..1179 x 969..1021)
+         (('journal_mc', 'showPostponed_mc'), 1.25, 1.25, 169, 996),   # check boxes x1.25 from their left end (box 24 -> 30, label 16 -> 18 x1.25)
+         (('journal_mc', 'tutorialContainer_mc', 'showTutorialPopups_mc'), 1.25, 1.25, 145, 860)]
+JN_PAD = [(('journal_mc', 'close_mc'), PAD_CLOSE, PAD_CLOSE), (('journal_mc', 'onMapBtn_mc'), 242, PAD_MIN), (('journal_mc', 'postponeBtn_mc'), 242, PAD_MIN),
+          (('journal_mc', 'showPostponed_mc'), 407, PAD_MIN), (('journal_mc', 'tutorialContainer_mc', 'showTutorialPopups_mc'), 407, PAD_MIN)]
+# quest rows keep entryHeight 30 (cLineHeight, a const): one line of a 24 px font fits it (27 would make the highlight two rows)
+JN_TXT = [('QuestEntry', ('title_mc', 'name_txt'), 24, '', None),          # quest list 20 (18 on screen) -> 24 (21)
+          ('QuestAction', ('objective_txt',), 26, '', None), ('QuestAction', ('name_txt',), 26, '', None),   # quest text 20 -> 26 (23)
+          ('questFilter', ('title_txt',), 26, '', None),
+          ('journal_fla.detailsTitle_28', ('title_txt',), 27, '', None), ('journal_fla.detailsTitle_28', ('subTitle_txt',), 24, '', None),
+          ('journal_fla.tutorialHolder_34', ('title_txt',), 27, '', None), ('journal_fla.tutorialHolder_34', ('desc_txt',), 24, '', None),  # 18 -> 24
+          ('TutorialEntry', ('title_txt',), 24, '', None), ('TutCategory', ('title_txt',), 24, '', None), ('TutCategory', ('amount_txt',), 20, '', None),
+          ('DialogLine', ('line_txt',), 24, '', None), ('DialogLine', ('iline_txt',), 24, '', None),
+          ('DialogEntry', ('title_mc', 'name_txt'), 22, 'c', None), ('DialogEntry', ('title_mc', 'dateTime_txt'), 22, 'c', None),
+          ('DialogEntry', ('title_mc', 'level_txt'), 22, 'c', None),
+          ('SecretEntry', ('title_mc', 'name_txt'), 24, '', None), ('SecretInfo', ('name_txt',), 22, '', None),
+          ('stateButton', ('text_txt',), 21, 'c', None), ('button', ('text_txt',), 18, 'c', None), ('CheckBoxWlabel', ('text_txt',), 18, 'c', None),
+          ('tabBtn', ('text_txt',), 21, 'c', None),
+          ('LegendMC', ('label_mc', 'text_txt'), 21, '', None), ('journal_fla.legendHolder_13', ('title_txt',), 22, '', None),
+          ('journal_fla.map_2', ('info_mc',), 22, '', None), ('journal_fla.journalMC_1', ('mapName_txt',), 32, '', None)]
 JN_LISTS = ['activeList', 'closedList', 'dialogList', 'tutorialList', 'infoList']   # journalMC_1 properties (scrollList / scrollListGrouped)
 JN_TEXTS = [('tutorialContainer_mc', 'desc_txt')]   # TextFields that scroll by themselves (the tutorial page's text, 450 x 600)
 CR_LISTS = [('craftPanel_mc', 'recipesPanel_mc', 'recipeList')]
@@ -134,6 +230,9 @@ HEAD = (('getlocal0',), ('pushscope',))
 
 def num(v):
     v = int(v)
+    # pushshort is sign-extended from 16 bits by the player (tools/dos2_ppanel_inv.py num, phone 23.11: 718500 ran as -2.396): never past 32767;
+    # bigger numbers go through Movie.f (pushdouble)
+    assert -32767 <= v <= 32767, 'num(%d): out of pushshort range, use Movie.f' % v
     if -128 <= v <= 127: return [('pushbyte', v & 0xff)]
     return [('pushshort', v)] if v >= 0 else [('pushshort', -v), ('negate',)]
 
@@ -251,6 +350,105 @@ class Lay:
     def end(s): return s.c + [('returnvoid',)]
 
 
+# ================================================================ element scale-up: static text sizes, runtime element scales, pads in screen px
+def edit_info(d):
+    """DefineEditText body -> dict(fh = font height px, rect = (x0, y0, x1, y1) px, align 0 left / 1 right / 2 centre, ww, ml, auto, fh_at = byte
+    offset of the font height, rect_end = byte offset after the rect)"""
+    r = gr.Bits(d, 2); x0, x1, y0, y1 = r.rect(); p = r.p
+    f1, f2 = d[p], d[p + 1]; q = p + 2
+    assert f1 & 1 or f2 & 0x80, 'DefineEditText %d has no font' % struct.unpack_from('<H', d, 0)[0]
+    if f1 & 1: q += 2
+    if f2 & 0x80: q = d.index(b'\0', q) + 1
+    fh = struct.unpack_from('<H', d, q)[0] / 20.0; o = q + 2 + (4 if f1 & 4 else 0) + (2 if f1 & 2 else 0)
+    align = d[o] if f2 & 0x20 else 0
+    return dict(fh=fh, rect=(x0 / 20.0, y0 / 20.0, x1 / 20.0, y1 / 20.0), align=align, ww=bool(f1 & 0x40), ml=bool(f1 & 0x20), auto=bool(f2 & 0x40),
+                fh_at=q, rect_end=p)
+
+
+def _rect_bytes(x0, y0, x1, y1):
+    v = [int(round(t * 20)) for t in (x0, x1, y0, y1)]; n = max(abs(t).bit_length() for t in v) + 1
+    return gr.wbits([(n, 5)] + [(t, n) for t in v])
+
+
+def _symbols(swf):
+    """symbol class name -> character id (SymbolClass tags)"""
+    out = {}
+    for c, d, _ in swf.tags:
+        if c != gr.T_SYMCLASS: continue
+        n = struct.unpack_from('<H', d, 0)[0]; p = 2
+        for _ in range(n):
+            cid = struct.unpack_from('<H', d, p)[0]; name, p = gr.cstr(d, p + 2); out[name.decode()] = cid
+    return out
+
+
+def text_id(swf, cls, names, mvx=None, syms=None):
+    """character id of the TextField reached from symbol `cls` through the instance names (frame 1 of each sprite)"""
+    mvx = mvx or gr.Movie(swf); syms = syms or _symbols(swf); cid = syms[cls]
+    for nm in names:
+        code, d, _ = swf.tags[mvx.defs[cid]]; assert code == gr.T_SPRITE, (cls, names)
+        hit = [r['char'] for r in gr.frame_state(d, 1).values() if r.get('name') and r['name'][:-1].decode() == nm]
+        assert len(hit) == 1, 'no single %s in %s %s' % (nm, cls, names); cid = hit[0]
+    assert swf.tags[mvx.defs[cid]][0] == gr.T_EDIT, (cls, names)
+    return cid
+
+
+def texts(data, table):
+    """the PC movie with the font heights of `table` (*_TXT) raised in its DefineEditText tags -> (bytes, [(cls.names, id, old fh, new fh, old w, new w)]).
+    A single-line field ('c') grows its box up and down by the extra line height (the text stays centred where the PC had it), any other
+    grows down (multi-line / autoSize fields: the code sizes them); a new width widens the box to the right (left aligned) or both ways."""
+    swf = Swf(data); mvx = gr.Movie(swf); syms = _symbols(swf); rep = []; done = {}
+    for cls, names, fh, how, w in table:
+        cid = text_id(swf, cls, names, mvx, syms); n = mvx.defs[cid]; code, d, lng = swf.tags[n]
+        if cid in done: assert done[cid] == (fh, how, w), 'field %d listed twice with different sizes' % cid; continue
+        done[cid] = (fh, how, w); e = edit_info(d); x0, y0, x1, y1 = e['rect']
+        grow = (fh - e['fh']) * 1.2
+        if how == 'c': y0 -= grow / 2.0; y1 += grow / 2.0
+        else: y1 += grow
+        if w:
+            dw = w - (x1 - x0)
+            if e['align'] == 2: x0 -= dw / 2.0; x1 += dw / 2.0
+            else: x1 += dw
+        body = d[:2] + _rect_bytes(x0, y0, x1, y1) + d[e['rect_end']:e['fh_at']] + struct.pack('<H', int(round(fh * 20))) + d[e['fh_at'] + 2:]
+        swf.tags[n] = [code, body, lng]
+        rep.append(('%s.%s' % (cls, '.'.join(names)), cid, e['fh'], fh, e['rect'][2] - e['rect'][0], x1 - x0))
+    return swf.write(), rep
+
+
+def unfont(pc, out):
+    """the built movie with every DefineEditText the PC movie has put back to the PC's bytes (the check that nothing else changed)"""
+    a = {struct.unpack_from('<H', d, 0)[0]: d for c, d, _ in Swf(pc).tags if c == gr.T_EDIT}
+    b = Swf(out)
+    for t in b.tags:
+        if t[0] == gr.T_EDIT: t[1] = a.get(struct.unpack_from('<H', t[1], 0)[0], t[1])
+    return b.write()
+
+
+def el_xform(e):
+    """(path, kx, ky, ax, ay[, dx]) -> (x0, y0, kx, ky): x = x0 + x * kx (Lay.xform)"""
+    path, kx, ky, ax, ay = e[:5]; dx = e[5] if len(e) > 5 else 0.0
+    return ax * (1 - kx) + dx, ay * (1 - ky), kx, ky
+
+
+def el_scale(els, path):
+    for e in els:
+        if tuple(e[0]) == tuple(path): return e[1], e[2]
+    return 1.0, 1.0
+
+
+def pad_own(pad, win, els):
+    """a finger pad of (path, w, h screen px) -> (w, h) in the element's own px (the window's scale x the element's)"""
+    kx, ky = el_scale(els, pad[0])
+    return int(round(pad[1] / (win[0] * kx))), int(round(pad[2] / (win[1] * ky)))
+
+
+def apply_els(lay, els, pads, win):
+    """the layout code: every element of els scaled about its anchor, then the pads (sizes in screen px)"""
+    for e in els:
+        x0, y0, kx, ky = el_xform(e); lay.xform(list(e[0]), x0, y0, kx, ky)
+    for p in pads:
+        w, h = pad_own(p, win, els); lay.pad(list(p[0]), w, h)
+
+
 def doc_text_scroll(doc):
     """document methods dmTxDown(e) / dmTxMove(e) / dmTxUp(e): a finger on a long TextField (not in a scroll list) scrolls it line by line
     (scrollV = the line under the press - the finger's travel / the line height, clamped 1..maxScrollV) - owner 21.11: "the text scrolls by a
@@ -333,7 +531,34 @@ def call_orig(keep, n): return [('getlocal0',)] + [('getlocal', k + 1) for k in 
 
 
 # ================================================================ skills
+def filter_fit(doc):
+    """document dmFilterFit(): the school filter row (filterButtons, a listDisplay in skillPane_mc.filterContainer_mc) drawn x SK_FK, or
+    smaller while it would be wider than SK_FMAXW pane px; centred as the PC's updateSkills does (x = -width / 2 - width is in the
+    container's px, so the PC's own centring and filterBG_mc sizing keep working at the new scale), vertically on the PC's row centre
+    (filter 42 px high at y 0: y = 21 - 21 k); filterBG_mc (the row's backing) re-placed / re-sized as the PC does"""
+    mv = doc.mv; P = mv.P
+    c = list(HEAD) + [('pushnull',), ('coerce_a',), ('setlocal1',), ('pushbyte', 0), ('convert_d',), ('setlocal2',), ('pushbyte', 0), ('convert_d',), ('setlocal3',),
+        ('pushnull',), ('coerce_a',), ('setlocal', 4),
+        ('getlocal0',), ('getproperty', P('filterButtons')), ('coerce_a',), ('setlocal1',), ('getlocal1',), ('iffalse', 'end'),
+        ('getlocal1',), ('getproperty', P('width')), ('getlocal1',), ('getproperty', P('scaleX')), ('divide',), ('convert_d',), ('setlocal2',)] + \
+        mv.f(SK_FK) + [('convert_d',), ('setlocal3',),
+        ('getlocal2',), ('pushbyte', 0), ('ifngt', 'set'),
+        ('getlocal2',)] + mv.f(SK_FK) + [('multiply',)] + mv.f(SK_FMAXW) + [('ifngt', 'set')] + mv.f(SK_FMAXW) + [('getlocal2',), ('divide',), ('convert_d',), ('setlocal3',),
+        ('L', 'set'),
+        ('getlocal1',), ('getlocal3',), ('setproperty', P('scaleX')), ('getlocal1',), ('getlocal3',), ('setproperty', P('scaleY')),
+        ('getlocal1',), ('pushbyte', 21), ('pushbyte', 21), ('getlocal3',), ('multiply',), ('subtract',), ('setproperty', P('y')),
+        ('getlocal1',), ('pushbyte', 0), ('getlocal1',), ('getproperty', P('width')), ('pushbyte', 2), ('divide',), ('subtract',), ('setproperty', P('x')),
+        ('getlocal0',), ('getproperty', P('skillPane_mc')), ('getproperty', P('filterBG_mc')), ('coerce_a',), ('setlocal', 4), ('getlocal', 4), ('iffalse', 'end'),
+        ('getlocal', 4), ('getlocal0',), ('getproperty', P('skillPane_mc')), ('getproperty', P('filterContainer_mc')), ('getproperty', P('x')),
+        ('getlocal1',), ('getproperty', P('x')), ('add',), ('getlocal0',), ('getproperty', P('filterBGSpacing')), ('subtract',), ('setproperty', P('x')),
+        ('getlocal', 4), ('getlocal1',), ('getproperty', P('width')), ('getlocal0',), ('getproperty', P('filterBGSpacing')), ('pushbyte', 2), ('multiply',), ('add',),
+        ('callpropvoid', P('setWidth'), 1),
+        ('L', 'end'), ('returnvoid',)]
+    doc.method('dmFilterFit', 0, c)
+
+
 def skills(data):
+    data = texts(data, SK_TXT)[0]
     mv = Movie(data); P, S = mv.P, mv.S
     doc = mv.cls('skills_fla.MainTimeline'); pane = mv.cls('skills_fla.skillPane_1')
     slot = mv.cls('skillSlot'); mem = mv.cls('memorySegment')
@@ -392,7 +617,12 @@ def skills(data):
         lay.at(['skillPane_mc', frame], [('getlocal0',), ('getproperty', P('skillPane_mc')), ('getproperty', P(lst)), ('coerce_a',), ('setlocal', lay.L(2)), ('getlocal', lay.L(2)), ('iffalse', e),
             ('getlocal', lay.L(1)), ('getlocal', lay.L(2)), ('getproperty', P('width')), ('getlocal', lay.L(2)), ('getproperty', P('height')), ('pushbyte', 4), ('add',),
             ('callpropvoid', P('setSize'), 2), ('L', e)])
-    for p in SK_PAD: lay.pad(list(p[:-2]), p[-2], p[-1])
+    apply_els(lay, SK_EL, SK_PAD, SK_WIN)
+    # the school filter row: x SK_FK at init and after every updateSkills (the PC re-centres it there from its width)
+    filter_fit(doc)
+    lay.c += [('getlocal0',), ('callpropvoid', P('dmFilterFit'), 0)]
+    doc.wrap('updateSkills', 'dmUpdOrig', lambda n: list(HEAD) + call_orig('dmUpdOrig', n) + [('callpropvoid', P('dmUpdOrig'), n),
+        ('getlocal0',), ('callpropvoid', P('dmFilterFit'), 0), ('returnvoid',)])
     doc.wrap('onEventInit', 'dmInitOrig', lambda n: lay.end())
     doc.mark()
     return mv.done(), dict(placed=[], defs=0, methods=mv.made)
@@ -488,9 +718,36 @@ def craft_art(data):
     return swf.write(), rep
 
 
+def craft_rows(data):
+    """the recipe list's row symbols for the bigger text (static: every runtime Recipe / CraftCategory gets it): the recipe label CR_LABEL_Y
+    lower (centred in its now 62 px row), the category title CR_CAT_Y, its -/+ x CR_CAT_K at CR_CAT_BTN. -> (bytes, report)"""
+    import dos2_ppanel_inv as pi
+    swf = Swf(data); syms = _symbols(swf); rep = {}
+    def fn(name, rec):
+        if name == 'label_txt': pi._set(rec, y=CR_LABEL_Y); rep[name] = CR_LABEL_Y
+        elif name == 'title_txt': pi._set(rec, y=CR_CAT_Y); rep[name] = CR_CAT_Y
+        elif name in ('collapse_mc', 'decollapse_mc'): pi._set(rec, x=CR_CAT_BTN[0], y=CR_CAT_BTN[1], sx=CR_CAT_K, sy=CR_CAT_K); rep[name] = CR_CAT_K
+    pi.edit_places(swf, syms['Recipe'], lambda n, r: fn(n, r) if n == 'label_txt' else None)
+    pi.edit_places(swf, syms['CraftCategory'], lambda n, r: fn(n, r) if n in ('title_txt', 'collapse_mc', 'decollapse_mc') else None)
+    return swf.write(), rep
+
+
 def craft(data):
     data, art = craft_art(data)
+    data, rows = craft_rows(texts(data, CR_TXT)[0]); art['rows'] = rows
     mv = Movie(data); P, S = mv.P, mv.S
+    # CraftCategory.init: the original, then finger pads on the header's -/+ (library rows: no path from the document)
+    cat = mv.cls('CraftCategory')
+    def cat_init(n):
+        c = list(HEAD) + [('pushnull',), ('coerce_a',), ('setlocal', n + 1), ('pushnull',), ('coerce_a',), ('setlocal', n + 2), ('pushnull',), ('coerce_a',), ('setlocal', n + 3)]
+        c += call_orig('dmInitOrig', n) + [('callpropvoid', P('dmInitOrig'), n)]
+        w, h = int(round(CR_CAT_PAD[0] / (CR_WIN[0] * CR_CAT_K))), int(round(CR_CAT_PAD[1] / (CR_WIN[1] * CR_CAT_K)))
+        for k, name in enumerate(('collapse_mc', 'decollapse_mc')):
+            e = 'p%d' % k
+            c += [('getlocal0',), ('getproperty', P(name)), ('coerce_a',), ('setlocal', n + 1), ('getlocal', n + 1), ('iffalse', e)]
+            c += pad_lines(mv, n + 1, n + 2, n + 3, w, h, e) + [('L', e)]
+        return c + [('returnvoid',)]
+    cat.wrap('init', 'dmInitOrig', cat_init); cat.mark()
     doc = mv.cls('uiCraft_fla.MainTimeline')
     # frame1: the original, then the column counts of the bag and the rune inventory (engine variables, main+0x131b87c / 0x131b90c)
     doc.wrap('frame1', 'dmF1Orig', lambda n: list(HEAD) + call_orig('dmF1Orig', n) + [('callpropvoid', P('dmF1Orig'), n),
@@ -507,7 +764,7 @@ def craft(data):
         lay.place(holder, x, CR_BAG_Y if frame is CR_BAG else None, CR_K)   # the grid with its cells, its icon image and its scroll bar
         lay.at(inv, lay.call((), 'setFrame', num(frame[0]), num(frame[1])))
     for p in CR_LISTS: lay.scroll(list(p))
-    for p in CR_PAD: lay.pad(list(p[:-2]), p[-2], p[-1])
+    apply_els(lay, CR_EL, CR_PAD, CR_WIN)
     doc.wrap('onEventInit', 'dmInitOrig', lambda n: lay.end())
     doc.mark()
     return mv.done(), dict(placed=[], defs=art['defs'], methods=mv.made, art=art)
@@ -515,6 +772,7 @@ def craft(data):
 
 # ================================================================ journal + map
 def journal(data):
+    data = texts(data, JN_TXT)[0]
     mv = Movie(data); P, S = mv.P, mv.S
     doc = mv.cls('journal_fla.MainTimeline'); mp = mv.cls('journal_fla.map_2'); qe = mv.cls('QuestEntry')
     doc_scroll(doc); doc_text_scroll(doc)
@@ -543,7 +801,7 @@ def journal(data):
     lay.at(['journal_mc', 'map_mc', 'mapContentHolder_mc', 'mapContent_mc'], [('getlocal', lay.L(1)), ('pushstring', S('rightMouseDown')),
         ('getlocal0',), ('getproperty', P('dmMapFlag')), ('callpropvoid', P('addEventListener'), 2)])
     for name, x, y in (('zoomInBtn', JN_ZOOM[0], JN_ZOOM[1]), ('zoomOutBtn', JN_ZOOM[2], JN_ZOOM[3])): lay.place(['journal_mc', 'map_mc', name], x, y, JN_ZOOM[4])
-    for p in JN_PAD: lay.pad(list(p[:-2]), p[-2], p[-1])
+    apply_els(lay, JN_EL, JN_PAD, JN_WIN)
     doc.wrap('onEventInit', 'dmInitOrig', lambda n: lay.end())
     doc.mark()
     return mv.done(), dict(placed=[], defs=0, methods=mv.made)
@@ -576,8 +834,67 @@ def _canvas(W, bg):
     return Image.new('RGBA', (W, 1080), (38, 44, 40, 255))
 
 
-def _put(canvas, swf, cid, x, y, sc, hide=()):
-    """the character drawn with its own origin at screen (x, y), scale sc; `hide` = names of its direct children left out"""
+# sample strings of the mock pictures (English, typical lengths), by the instance name that places a TextField; fields without one keep
+# the renderer's grey box
+SAMPLE = {'title1_txt': 'Skills', 'title2_txt': 'Memory', 'knownSchools_txt': 'Schools', 'deckManager_txt': 'Skill decks',
+          'defaultDeck_txt': 'Default deck', 'mapName_txt': 'Fort Joy', 'charName_txt': 'Sebille', 'amount_txt': '1', 'filterName_txt': 'Search',
+          'result_txt': 'Unknown result'}
+SAMPLE_IN = {   # (the name the field's sprite is first placed under, field) -> sample (a list: one per instance drawn, in depth order)
+    ('leftJournalBtn_mc', 'text_txt'): ['Active', 'Completed'], ('onMapBtn_mc', 'text_txt'): ['Show on map', 'Postpone'],
+    ('showPostponed_mc', 'text_txt'): ['Show postponed quests'], ('showTutorialPopups_mc', 'text_txt'): ['Show postponed quests'], ('allBtn_mc', 'text_txt'): 'ALL',
+    ('occupiedMemory_mc', 'text_txt'): 'Memory 3 / 8', ('view_mc', 'text_txt'): 'Show unknown recipes', ('button_mc', 'text_txt'): 'COMBINE',
+    ('title_mc', 'title_txt'): 'The Wrath of the Cursed', ('title_mc', 'subTitle_txt'): 'Main quest', ('craftPanel_mc', 'title_txt'): 'CRAFTING',
+    ('recipesPanel_mc', 'name_txt'): 'Medium Healing Potion', ('closeContainerButton_mc', 'text_txt'): 'CLOSE', ('accept_mc', 'text_txt'): 'ACCEPT',
+    ('select_mc', 'text_txt'): 'SELECT'}
+FONT_TTF = (r'C:\Windows\Fonts\georgia.ttf', r'C:\Windows\Fonts\times.ttf', 'DejaVuSerif.ttf')
+
+
+def _font(px):
+    from PIL import ImageFont
+    for f in FONT_TTF:
+        try: return ImageFont.truetype(f, max(4, int(round(px))))
+        except OSError: pass
+    return ImageFont.load_default()
+
+
+def _text(canvas, box, fh, s, align=0, wrap=False):
+    """sample text s at font height fh (screen px) inside the screen box (x0, y0, x1, y1), cut at the box (as a field clips)"""
+    from PIL import Image, ImageDraw
+    x0, y0, x1, y1 = [int(round(v)) for v in box]; w, h = max(1, x1 - x0), max(1, y1 - y0)
+    f = _font(fh); im = Image.new('RGBA', (w, h), (0, 0, 0, 0)); dr = ImageDraw.Draw(im); lines = [s]
+    if wrap:
+        lines = []; cur = ''
+        for word in s.split():
+            t = (cur + ' ' + word).strip()
+            if cur and dr.textlength(t, font=f) > w - 4: lines.append(cur); cur = word
+            else: cur = t
+        lines.append(cur)
+    y = 2.0
+    for ln in lines:
+        tw = dr.textlength(ln, font=f); x = 2 if align == 0 else (w - tw) / 2.0 if align == 2 else w - 2 - tw
+        dr.text((x, y), ln, font=f, fill=(250, 240, 215, 255), stroke_width=max(1, int(fh / 14)), stroke_fill=(20, 12, 8, 255))
+        y += fh * 1.2
+    canvas.paste(im, (x0, y0), im)
+
+
+def _edit_names(swf):
+    """DefineEditText id -> (the name its parent sprite is placed under, its own instance name), of the first placement"""
+    alltags = [((c, d), None) for c, d, _ in swf.tags]
+    for c, d, _ in swf.tags:
+        if c == gr.T_SPRITE: alltags += [(t, struct.unpack_from('<H', d, 0)[0]) for t in gr.subtags(d)]
+    owner, out = {}, {}
+    recs = [(gr.place_parse(c, d), sp) for (c, d), sp in alltags if c in (gr.T_PLACE2, gr.T_PLACE3)]
+    for r, sp in recs:
+        if r.get('name') and r['char'] is not None: owner.setdefault(r['char'], r['name'][:-1].decode())
+    edits = {struct.unpack_from('<H', d, 0)[0] for c, d, _ in swf.tags if c == gr.T_EDIT}
+    for r, sp in recs:
+        if r.get('name') and r['char'] in edits: out.setdefault(r['char'], (owner.get(sp), r['name'][:-1].decode()))
+    return out
+
+
+def _put(canvas, swf, cid, x, y, sc, hide=(), text=True):
+    """the character drawn with its own origin at screen (x, y), scale sc; `hide` = names of its direct children left out; text: the
+    TextFields with a SAMPLE string get it at their font height (the movie's DefineEditText, x the drawing's vertical scale)"""
     import dos2_swf_render as rn
     from PIL import Image
     if hide:   # a copy of the movie whose sprite cid places no instance named in hide
@@ -590,9 +907,42 @@ def _put(canvas, swf, cid, x, y, sc, hide=()):
             out += gr.tag_bytes(c, t)
         s2.tags[n] = [code, out, True]; swf = s2
     sx, sc = sc if isinstance(sc, tuple) else (sc, sc)   # (x scale, y scale): drawn at y's, then resized sideways
-    img, org = rn.render(swf, cid, sc)
+    seen = []; orig = rn.draw
+    def hook(ctx, c, m, cv, cx=None, frame=1, depth=0):
+        if c in ctx.mv.defs and ctx.swf.tags[ctx.mv.defs[c]][0] == gr.T_EDIT: seen.append((c, m))
+        return orig(ctx, c, m, cv, cx, frame, depth)
+    rn.draw = hook
+    try: img, org = rn.render(swf, cid, sc)
+    finally: rn.draw = orig
     if sx != sc: img = img.resize((max(1, int(round(img.size[0] * sx / sc))), img.size[1]), Image.LANCZOS)
-    canvas.alpha_composite(img, (int(round(x + org[0] * sx)), int(round(y + org[1] * sc))))
+    ox, oy = int(round(x + org[0] * sx)), int(round(y + org[1] * sc))
+    canvas.alpha_composite(img, (ox, oy))
+    if not text: return
+    mvx = gr.Movie(swf); names = _edit_names(swf); used = {}
+    for c, m in seen:
+        par, nm = names.get(c, (None, None)); s = SAMPLE_IN.get((par, nm)) or SAMPLE.get(nm)
+        if isinstance(s, list): k = used.get((par, nm), 0); used[(par, nm)] = k + 1; s = s[k] if k < len(s) else None
+        if not s: continue
+        e = edit_info(swf.tags[mvx.defs[c]][1]); r = e['rect']; k = sx / sc
+        box = (ox + (m[0] * r[0] + m[4]) * k, oy + m[3] * r[1] + m[5], ox + (m[0] * r[2] + m[4]) * k, oy + m[3] * r[3] + m[5])
+        _text(canvas, box, e['fh'] * abs(m[3]), s, e['align'], e['ww'])
+
+
+def _mock_els(swf, els, places=()):
+    """the static picture of the runtime layout: each element of els scaled about its anchor (as Lay.xform does after the PC init), each
+    (path, x, y, scale) of places set (Lay.place) - on the PlaceObject of the instance in its parent sprite (this copy only)"""
+    import dos2_ppanel_inv as pi
+    def one(path, f):
+        par = _sym(swf, list(path[:-1])) if len(path) > 1 else None
+        pi.edit_places(swf, par, lambda n, rec: f(rec) if n == path[-1] else None)
+    for e in els:
+        x0, y0, kx, ky = el_xform(e)
+        def f(rec, x0=x0, y0=y0, kx=kx, ky=ky):
+            x, y, sx, sy = pi._mat(rec); pi._set(rec, x=x0 + x * kx, y=y0 + y * ky, sx=sx * kx, sy=sy * ky)
+        one(e[0], f)
+    for path, x, y, s in places:
+        one(path, lambda rec, x=x, y=y, s=s: pi._set(rec, x=x, y=y, sx=s, sy=s))
+    return swf
 
 
 def _cells(canvas, rects, colour):
@@ -609,10 +959,16 @@ def _ipad(canvas, path, sw, sh, W, anchor='center'):
     canvas.alpha_composite(img, (int((W - sw) / 2), int((1080 - sh) / 2)))
 
 
+def _fh(swf, cls, names):
+    """font height (px) of a TextField of the built movie"""
+    mvx = gr.Movie(swf); return edit_info(swf.tags[mvx.defs[text_id(swf, cls, names, mvx)]][1])['fh']
+
+
 def mock_skills(src, out, W=2400, bg=None, ipad=None):
-    swf = Swf(MAKE['skills_p.swf'](src['skills.swf'])[0])
+    swf = _mock_els(Swf(MAKE['skills_p.swf'](src['skills.swf'])[0]), SK_EL)
     cv = _canvas(W, bg); ox, oy = (W - 1354) / 2.0, -20      # stage -> screen
     S = SK_S[0] / float(SK_S[1]); SX = SK_SX
+    to = lambda x, y: (ox + SK_X0 + SX * x, oy + SK_Y0 + S * y)   # pane px -> screen
     pane = _sym(swf, ['skillPane_mc'])
     _put(cv, swf, pane, ox + SK_X0, oy + SK_Y0, (SX, S))
     rects = []
@@ -621,12 +977,19 @@ def mock_skills(src, out, W=2400, bg=None, ipad=None):
             for col in range(SK_COLS):
                 lx, ly = x0 + (18 + col * SK_PITCH) * SK_KX, SK_Y + (48 + row * SK_PITCH) * SK_K
                 if ly + 69 * SK_K > SK_Y + SK_LH * SK_K: continue
-                rects.append((ox + SK_X0 + SX * lx, oy + SK_Y0 + S * ly, ox + SK_X0 + SX * (lx + 69 * SK_KX), oy + SK_Y0 + S * (ly + 69 * SK_K)))
-    _cells(cv, rects, (90, 200, 255, 255))
-    _cells(cv, _pads(swf, SK_PAD, lambda x, y: (ox + SK_X0 + SX * x, oy + SK_Y0 + S * y), S), (255, 160, 60, 255))
+                rects.append(to(lx, ly) + to(lx + 69 * SK_KX, ly + 69 * SK_K))
+    # the list headers (school name / memory) at their font size: skillList title_txt at list (22, 12), memoryList title_txt at (12, 12)
+    for x0, cls, s in ((SK_LX, 'skillList', 'PYROKINETIC'), (SK_RX, 'memoryList', 'MEMORY')):
+        fx = 22 if cls == 'skillList' else 12
+        _text(cv, to(x0 + fx * SK_KX, SK_Y + 10 * SK_K) + to(x0 + (fx + 300) * SK_KX, SK_Y + 48 * SK_K), _fh(swf, cls, ('title_txt',)) * SK_K * S, s)
+    # the school filter row as dmFilterFit sets it for 6 known schools: 42 px icons at pitch 45 x k, centred on filterContainer_mc (297, 108)
+    k = min(SK_FK, SK_FMAXW / (6 * 45.0)); wrow = 6 * 45 * k
+    frect = [to(297 - wrow / 2 + i * 45 * k, 108 + 21 - 21 * k) + to(297 - wrow / 2 + i * 45 * k + 42 * k, 108 + 21 + 21 * k) for i in range(6)]
+    _cells(cv, rects + frect, (90, 200, 255, 255))
+    _cells(cv, _pads(swf, SK_PAD, to), (255, 160, 60, 255))
     cv.save(out); r = rects[0]
-    print('%s: skills_p computed layout, icon %.1f x %.1f px at pitch %.1f, book %.0f..%.0f x %.0f..%.0f (screen px)' % (
-        out, r[2] - r[0], r[3] - r[1], rects[1][0] - r[0], ox + SK_X0 - 20 * SX, ox + SK_X0 + 1356 * SX, oy + SK_Y0 - 20 * S, oy + SK_Y0 + 1060 * S))
+    print('%s: skills_p computed layout, icon %.1f x %.1f px at pitch %.1f, school filter %.0f x %.0f px, book %.0f..%.0f x %.0f..%.0f (screen px)' % (
+        out, r[2] - r[0], r[3] - r[1], rects[1][0] - r[0], frect[0][2] - frect[0][0], frect[0][3] - frect[0][1], ox + SK_X0 - 20 * SX, ox + SK_X0 + 1356 * SX, oy + SK_Y0 - 20 * S, oy + SK_Y0 + 1060 * S))
     if ipad:
         cv2 = _canvas(W, bg); _ipad(cv2, os.path.join(ipad, 'skills_t.swf'), 1160, 1080, W); p2 = out.replace('.png', '.ipad.png'); cv2.save(p2); print(p2)
     return dict(icon=r[2] - r[0], pitch=rects[1][0] - r[0], bottom=oy + SK_Y0 + 1060 * S, top=oy + SK_Y0 - 20 * S, left=ox + SK_X0 - 20 * SX, right=ox + SK_X0 + 1356 * SX)
@@ -641,30 +1004,45 @@ def _bounds(swf, path):
     return hit[0]['stage'] if hit and hit[0]['stage'] else None
 
 
-def _pads(swf, pads, to_screen, S):
-    """screen rectangles of the finger pads: centred on the instance's PC drawing (stage bounds relative to the first path link's origin,
-    i.e. the panel's own px: the first link is the panel at 0,0 on the PC stage)"""
+def _pads(swf, pads, to_screen):
+    """screen rectangles of the finger pads (w x h SCREEN px), centred on the instance's drawing (stage bounds relative to the first path
+    link's origin, i.e. the panel's own px: the first link is the panel at 0,0 on the PC stage)"""
     out = []
     for p in pads:
-        b = _bounds(swf, list(p[:-2]))
+        b = _bounds(swf, list(p[0]))
         if not b: continue
-        cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0; w, h = p[-2], p[-1]
-        x0, y0 = to_screen(cx - w / 2.0, cy - h / 2.0); x1, y1 = to_screen(cx + w / 2.0, cy + h / 2.0); out.append((x0, y0, x1, y1))
+        cx, cy = to_screen((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0); w, h = p[1], p[2]
+        out.append((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0))
     return out
 
 
 def mock_craft(src, out, W=2400, bg=None, ipad=None):
-    swf = Swf(MAKE['uiCraft_p.swf'](src['uiCraft.swf'])[0])
+    swf = _mock_els(Swf(MAKE['uiCraft_p.swf'](src['uiCraft.swf'])[0]), CR_EL)
     S = CR_S[0] / float(CR_S[1]); ox, oy = (W - CR_STAGE_W) / 2.0, 10      # setPosition center: stage CR_STAGE_W x 1060 centred
     to = lambda x, y: (ox + CR_X0 + S * x, oy + CR_Y0 + S * y)
     panel = _sym(swf, ['craftPanel_mc']); res = {}
     for tab, hide, cells in (('experiment', ('recipesPanel_mc', 'runesPanel_mc'), (CR_BAG_X, CR_BAG_Y, CR_COLS, CR_BAG)),
                              ('runes', ('recipesPanel_mc', 'experimentPanel_mc'), (32 + CR_EXW / 2.0 + CR_RUNE_X, 172 + 316 + 105, CR_RUNE_COLS, CR_RUNE)),
                              ('recipes', ('experimentPanel_mc', 'runesPanel_mc'), None)):
-        if cells is None:   # the recipe tab: the art only (the list is the engine's)
+        pads = [p for p in CR_PAD if not set(p[0]) & set(hide)]
+        if cells is None:   # the recipe tab: the art + the list's rows as the code makes them (a category header, then recipes, 62 own px each)
             cv = _canvas(W, bg); _put(cv, swf, panel, ox + CR_X0, oy + CR_Y0, S, hide)
-            _cells(cv, _pads(swf, [p for p in CR_PAD if not set(p) & set(hide)], to, S), (255, 160, 60, 255))
-            p = out.replace('.png', '_%s.png' % tab); cv.save(p); print(p); continue
+            lx, ly = 337.5, 204   # recipesPanel_mc.container_mc (the list) in panel px
+            rfh, cfh = _fh(swf, 'Recipe', ('label_txt',)) * S, _fh(swf, 'CraftCategory', ('title_txt',)) * S
+            rows = [to(lx + CR_CAT_BTN[0], ly + CR_CAT_BTN[1]) + to(lx + CR_CAT_BTN[0] + 19 * CR_CAT_K, ly + CR_CAT_BTN[1] + 19 * CR_CAT_K)]
+            _text(cv, to(lx + 61, ly + CR_CAT_Y) + to(lx + 634, ly + 62), cfh, 'POTIONS')
+            names = ['[1] Medium Healing Potion', '[-] Huge Poison Potion', '[2] Fire Arrowheads', '[-] Scroll of Resurrection', '[3] Fish Pie',
+                     '[-] Elemental Arrowheads', '[1] Strong Invisibility Potion']
+            for i, s in enumerate(names):
+                y = ly + 62 * (i + 1)
+                if y + 62 > ly + 17 * 31: break
+                rows.append(to(lx + 60, y) + to(lx + 60 + 620, y + 62)); _text(cv, to(lx + 60 + 3, y + CR_LABEL_Y) + to(lx + 60 + 620, y + 62), rfh, s)
+            cat_pad = [(c[0] + c[2]) / 2.0 for c in rows[:1]] + [(rows[0][1] + rows[0][3]) / 2.0]
+            pads_px = _pads(swf, pads, to) + [(cat_pad[0] - CR_CAT_PAD[0] / 2.0, cat_pad[1] - CR_CAT_PAD[1] / 2.0, cat_pad[0] + CR_CAT_PAD[0] / 2.0, cat_pad[1] + CR_CAT_PAD[1] / 2.0)]
+            _cells(cv, rows, (90, 200, 255, 255)); _cells(cv, pads_px, (255, 160, 60, 255))
+            p = out.replace('.png', '_%s.png' % tab); cv.save(p)
+            res[tab] = dict(row=(rows[1][3] - rows[1][1]) if len(rows) > 1 else 0, rows=len(rows) - 1, label=rfh)
+            print('%s: uiCraft_p recipes tab, recipe row %.0f px, label font %.1f px, %d rows visible' % (p, res[tab]['row'], rfh, res[tab]['rows'])); continue
         cv = _canvas(W, bg); _put(cv, swf, panel, ox + CR_X0, oy + CR_Y0, S, hide)
         x0, y0, cols, frame = cells; rects = []
         for row in range(20):   # inventoryClass.createCell: x = (cell + spacing) * col - bgDiscrap (-2), same for y; visible inside the frame
@@ -672,9 +1050,8 @@ def mock_craft(src, out, W=2400, bg=None, ipad=None):
                 lx, ly = CR_PITCH * col + 2, CR_PITCH * row + 2
                 if ly + 50 > frame[1]: continue
                 rects.append(to(x0 + CR_K * lx, y0 + CR_K * ly) + to(x0 + CR_K * (lx + 50), y0 + CR_K * (ly + 50)))
-        rects = [(r[0], r[1], r[2], r[3]) for r in rects]
         _cells(cv, rects, (90, 200, 255, 255))
-        _cells(cv, _pads(swf, [p for p in CR_PAD if not set(p) & set(hide)], to, S), (255, 160, 60, 255))
+        _cells(cv, _pads(swf, pads, to), (255, 160, 60, 255))
         p = out.replace('.png', '_%s.png' % tab); cv.save(p); r = rects[0]
         res[tab] = dict(icon=r[2] - r[0], pitch=rects[1][0] - r[0], cols=cols, rows=len(rects) // cols, right=rects[cols - 1][2])
         print('%s: uiCraft_p %s tab, cell %.1f px at pitch %.1f, %d x %d visible, window %.0f..%.0f x %.0f..%.0f' % (
@@ -686,29 +1063,39 @@ def mock_craft(src, out, W=2400, bg=None, ipad=None):
 
 
 def mock_journal(src, out, W=2400, bg=None, ipad=None):
-    swf = Swf(MAKE['journal_p.swf'](src['journal.swf'])[0])
+    zoom = [(('journal_mc', 'map_mc', n), x, y, JN_ZOOM[4]) for n, x, y in (('zoomInBtn', JN_ZOOM[0], JN_ZOOM[1]), ('zoomOutBtn', JN_ZOOM[2], JN_ZOOM[3]))]
+    swf = _mock_els(Swf(MAKE['journal_p.swf'](src['journal.swf'])[0]), JN_EL, zoom)
     S = JN_S[0] / float(JN_S[1]); ox, oy = (W - 1360) / 2.0, -24
     to = lambda x, y: (ox + JN_X0 + S * x, oy + JN_Y0 + S * (y + 5))   # journal_mc px (it sits at 0, 5 on the PC stage)
     jm = _sym(swf, ['journal_mc']); res = {}
+    qfh, ffh, afh = _fh(swf, 'QuestEntry', ('title_mc', 'name_txt')) * S, _fh(swf, 'questFilter', ('title_txt',)) * S, _fh(swf, 'QuestAction', ('name_txt',)) * S
     for tab, hide in (('quests', ('map_mc', 'tutorialContainer_mc', 'dialogLogContainer_mc', 'mapName_txt')),
                       ('map', ('tutorialContainer_mc', 'dialogLogContainer_mc', 'infoContainer_mc', 'onMapBtn_mc', 'postponeBtn_mc', 'showPostponed_mc',
                                'leftJournalBtn_mc', 'rightJournalBtn_mc', 'paperTop_mc'))):
         cv = _canvas(W, bg); _put(cv, swf, jm, ox + JN_X0, oy + JN_Y0 + 5 * S, S, hide)
         rects = []
-        if tab == 'quests':   # journalContainer_mc 64,198 + list y 35; a one-line quest row 30 + JN_ROWPAD, full list width 400
+        if tab == 'quests':   # journalContainer_mc 64,198 + list y 35; a category header, then one-line quest rows 30 + JN_ROWPAD, full list width 400
+            names = ['The Wrath of the Cursed', 'Escape from Fort Joy', 'The Teleporter Pyramid', 'A Taste of Freedom', 'Hammer and Anvil',
+                     'The Imprisoned Elf', 'The Shocking Scion', 'The Missing Sailor', 'Mysterious Merchant', 'Hidden Pleasures', 'A Familiar Face',
+                     'The Collector', 'Fishy Business', 'The Lone Wolves', 'Blood of the Elder']
+            y = 198 + 35; _text(cv, to(64 + 25, y + 2) + to(64 + 420, y + 40), ffh, 'MAIN QUESTS'); y += 40
             for k in range(16):
-                y = 198 + 35 + k * (30 + JN_ROWPAD)
                 if y + 30 + JN_ROWPAD > 198 + 35 + 724: break
                 rects.append(to(64 + 20, y) + to(64 + 20 + 380, y + 30 + JN_ROWPAD))
-            res[tab] = dict(row=rects[0][3] - rects[0][1], rows=len(rects))
+                _text(cv, to(64 + 20 + 19, y + 2) + to(64 + 20 + 380, y + 30 + JN_ROWPAD), qfh, names[k % len(names)]); y += 30 + JN_ROWPAD
+            # the quest log on the right: infoList (infoContainer_mc 477,187 + x 54): quest text at QuestAction's size
+            iy = 187 + 130
+            for s in ('Find a way out of Fort Joy.', 'We met a strange elf near the docks. She said the Magisters keep a secret in the dungeon under the fort.'):
+                _text(cv, to(477 + 54 + 38, iy) + to(477 + 54 + 700, iy + 3.6 * afh / S), afh, s, 0, True); iy += 3.6 * afh / S + 10
+            res[tab] = dict(row=rects[0][3] - rects[0][1], rows=len(rects), quest_font=qfh, text_font=afh)
         else:                 # zoom buttons where the added code puts them (map_mc at 16,133), JN_ZOOM px
             for x, y in ((JN_ZOOM[0], JN_ZOOM[1]), (JN_ZOOM[2], JN_ZOOM[3])):
                 rects.append(to(16 + x, 133 + y) + to(16 + x + 43 * JN_ZOOM[4], 133 + y + 43 * JN_ZOOM[4]))
             res[tab] = dict(zoom=rects[0][2] - rects[0][0])
         _cells(cv, rects, (90, 200, 255, 255))
-        _cells(cv, _pads(swf, [p for p in JN_PAD if not set(p) & set(hide)], lambda x, y: to(x, y - 5), S), (255, 160, 60, 255))
+        _cells(cv, _pads(swf, [p for p in JN_PAD if not set(p[0]) & set(hide)], lambda x, y: to(x, y - 5)), (255, 160, 60, 255))
         p = out.replace('.png', '_%s.png' % tab); cv.save(p)
-        print('%s: journal_p %s, %s, window %.0f..%.0f x %.0f..%.0f' % (p, tab, res[tab], to(0, 0)[0], to(1360, 0)[0], to(0, 0)[1], to(0, 1064)[1]))
+        print('%s: journal_p %s, %s, window %.0f..%.0f x %.0f..%.0f' % (p, tab, {k: round(v, 1) for k, v in res[tab].items()}, to(0, 0)[0], to(1360, 0)[0], to(0, 0)[1], to(0, 1064)[1]))
     res['window'] = to(0, 0) + to(1360, 1064)
     if ipad:
         cv2 = _canvas(W, bg); _ipad(cv2, os.path.join(ipad, 'journal_csp_t.swf'), 1160, 1040, W); p2 = out.replace('.png', '.ipad.png'); cv2.save(p2); print(p2)
@@ -719,6 +1106,7 @@ def build(src): return {o: MAKE[o](src[OUT[o]])[0] for o in OUT if o in MAKE}
 
 
 # ================================================================ static checks (also run by tools/dos2_pchud_touch.py check)
+TABLES = {'skills_p.swf': (SK_EL, SK_PAD, SK_WIN, SK_TXT), 'uiCraft_p.swf': (CR_EL, CR_PAD, CR_WIN, CR_TXT), 'journal_p.swf': (JN_EL, JN_PAD, JN_WIN, JN_TXT)}
 HOTBAR_TOP = 967      # screen y of the touch hot bar's slots (hotBar_p, TOUCH_MODES_PLAN.md "Implemented: touch HUD"); panels end above it
 WANT = {   # o -> (document class, methods that must be wrapped / added, EI-free numbers checked below)
     'skills_p.swf': ('skills_fla.MainTimeline', ['dmInitOrig', 'dmF1Orig', 'dmIsDragOrig', 'dmTap']),
@@ -738,14 +1126,16 @@ def _ei_names(abc):
 
 def _paths(o):
     """every instance path the added layout code walks (from the document root)"""
+    els, pads = TABLES[o][0], TABLES[o][1]
+    extra = [list(e[0]) for e in els] + [list(p[0]) for p in pads]
     if o == 'skills_p.swf':
         return [['skillPane_mc'], ['memoryPageHitRect_mc'], ['dragHit_mc']] + [['skillPane_mc', n] for n in (
-            'skillContainer_mc', 'memoryContainer_mc', 'leftPageFrame_mc', 'rightPageFrame_mc')] + [list(p[:-2]) for p in SK_PAD]
+            'skillContainer_mc', 'memoryContainer_mc', 'leftPageFrame_mc', 'rightPageFrame_mc', 'filterContainer_mc', 'filterBG_mc')] + extra
     if o == 'uiCraft_p.swf':
         return [['craftPanel_mc'], ['craftPanel_mc', 'experimentPanel_mc', 'container_mc'], ['craftPanel_mc', 'runesPanel_mc', 'inventory_mc', 'inventoryHolder_mc'],
-                ['craftPanel_mc', 'recipesPanel_mc']] + [list(p[:-2]) for p in CR_PAD]
+                ['craftPanel_mc', 'recipesPanel_mc']] + extra
     return [['journal_mc'], ['journal_mc', 'map_mc', 'mapContentHolder_mc', 'mapContent_mc'], ['journal_mc', 'map_mc', 'zoomInBtn'],
-            ['journal_mc', 'map_mc', 'zoomOutBtn']] + [list(p[:-2]) for p in JN_PAD] + [['journal_mc'] + list(p) for p in JN_TEXTS]
+            ['journal_mc', 'map_mc', 'zoomOutBtn']] + extra + [['journal_mc'] + list(p) for p in JN_TEXTS]
 
 
 def _traits(abc, cls):
@@ -810,17 +1200,52 @@ def check_one(o, data, out, say):
         say(row >= 44.5 and bottom < HOTBAR_TOP and top >= 0 and 43 * JN_ZOOM[4] * S >= 50 and JN_ZOOM[0] + 43 * JN_ZOOM[4] <= JN_ZOOM[2] and t.count("'dmTxDown'") + t.count('dmTxDown') >= len(JN_TEXTS),
             'quest row %.1f px on screen (iPad 45); zoom buttons %.0f px; window %.0f x %.0f, screen y %.0f..%.0f; %d lists + %d text field(s) scroll by finger' % (
                 row, 43 * JN_ZOOM[4] * S, 1360 * S, 1064 * S, top, bottom, len(JN_LISTS), len(JN_TEXTS)))
-    pads = SK_PAD if o == 'skills_p.swf' else CR_PAD if o == 'uiCraft_p.swf' else JN_PAD
-    S = (SK_S if o == 'skills_p.swf' else CR_S if o == 'uiCraft_p.swf' else JN_S); S = S[0] / float(S[1])
-    tight = [p for p in pads if p[-3] in PAD_TIGHT]
-    say(all(min(p[-2], p[-1]) * S >= 50 or (p in tight and p[-1] * S >= 50) for p in pads) and dis(doc + '::onEventInit').count('drawRect') == len(pads),
-        '%d finger pads, each >= 50 px on screen%s' % (len(pads), '' if not tight else ' (%s: %.0f wide - side by side, 40 px apart: only taller)' % (
-            ', '.join(p[-3] for p in tight), min(p[-2] for p in tight) * S)))
+    # element scale-up (owner 23.11): close drawn CLOSE_PX, pads, the elements inside their window, the text sizes
+    els, pads, win, txt = TABLES[o]
+    t = dis(doc + '::onEventInit')
+    close = [e for e in els if 'clos' in e[0][-1].lower()]
+    say(close and all(abs(23 * e[1] * win[0] - CLOSE_PX) < 0.5 and abs(23 * e[2] * win[1] - CLOSE_PX) < 0.5 for e in close),
+        'close button(s) drawn %d x %d px on screen (the inventory\'s INV_CLOSE, iPad 50), top-right corner where the PC had it: %s' % (
+            CLOSE_PX, CLOSE_PX, ', '.join('.'.join(e[0][1:]) for e in close)))
+    own = [pad_own(p, win, els) for p in pads]
+    tight = [p for p in pads if p[0][-1] in PAD_TIGHT]
+    low = [p for p in pads if p[0][-1] in PAD_LOW]
+    say(all(min(p[1], p[2]) >= 64 or (p in tight and p[2] >= PAD_MIN) or (p in low and p[1] >= PAD_MIN and p[2] >= 50) for p in pads) and t.count('drawRect') == len(pads) and all(min(w) > 0 for w in own),
+        '%d finger pads, each >= 64 x 64 px on screen (%s)%s' % (len(pads), ', '.join('%s %dx%d' % (p[0][-1], p[1], p[2]) for p in pads),
+            ''.join([' (%s: as wide as drawn - side by side: only taller)' % ', '.join(p[0][-1] for p in tight)] if tight else []) +
+            ''.join([' (%s: under the school icons: wide, 50 high)' % ', '.join(p[0][-1] for p in low)] if low else [])))
+    # every scaled child of the window clip: its PC drawing (frame 1 bounds) through the scale stays inside the window's own box
+    box = {'skills_p.swf': (0, -20, 1356, 1060), 'uiCraft_p.swf': (0, 0, CR_W, 1060), 'journal_p.swf': (0, 0, 1360, 1064)}[o]
+    import dos2_layout as lay, tempfile
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, OUT[o]); open(f, 'wb').write(out)
+        wk = {e['npath']: e for e in lay.walk(lay.Mov.load(f), 5)}
+    outside = []; n_in = 0
+    for e in els:
+        if len(e[0]) > 2: continue   # nested deeper than the window's own child (the recipe panel's, the rune popup's): the mock shows them
+        st = wk.get('.'.join(e[0]), {}).get('stage')
+        if not st: outside.append('.'.join(e[0]) + ' (no bounds)'); continue
+        dy0 = 5.0 if o == 'journal_p.swf' else 0.0   # journal_mc sits at 0,5 on the PC stage; the others at 0,0
+        x0, y0, kx, ky = el_xform(e); n_in += 1
+        bx = [x0 + st[0] * kx, y0 + (st[1] - dy0) * ky, x0 + st[2] * kx, y0 + (st[3] - dy0) * ky]
+        if bx[0] > bx[2]: bx[0], bx[2] = bx[2], bx[0]
+        if bx[0] < box[0] or bx[1] < box[1] or bx[2] > box[2] or bx[3] > box[3]: outside.append('%s %s' % ('.'.join(e[0]), [round(v) for v in bx]))
+    say(not outside, '%d elements scaled x%.2f..x%.2f about anchors that keep them clear of their neighbours; the %d children of the window clip stay inside it%s' % (
+        len(els), min(min(e[1], e[2]) for e in els), max(max(e[1], e[2]) for e in els), n_in, '' if not outside else ': ' + '; '.join(outside)))
+    bs = Swf(out); mvb = gr.Movie(bs); syms = _symbols(bs); wrong = []
+    for cls, names, fh, how, w in txt:
+        got = edit_info(bs.tags[mvb.defs[text_id(bs, cls, names, mvb, syms)]][1])['fh']
+        if abs(got - fh) > 0.05: wrong.append('%s.%s %.1f' % (cls, '.'.join(names), got))
+    pc = texts(data, txt)[1]
+    say(not wrong, '%d text fields raised (font px; on screen x%.2f): %s%s' % (len(pc), win[1], ', '.join('%s %g->%g' % ('.'.join(r[0].split('.')[-2:]), r[2], r[3]) for r in pc),
+        '' if not wrong else ': NOT SET ' + ', '.join(wrong)))
 
 
 def tag_filter(o, g):
-    """tools/dos2_swf_graft.py check messages that are by design: uiCraft_p's widened art changes the stage size and re-places frame 1 of the
-    panel sprites (DefineSprite, code 39); also used by tools/dos2_pchud_touch.py check"""
+    """tools/dos2_swf_graft.py check messages that are by design: the raised text sizes change DefineEditText tags (code 37; this module's
+    own check compares the movie with them put back, see check); uiCraft_p's widened art changes the stage size and re-places frame 1 of
+    the panel sprites (DefineSprite, code 39; the recipe rows too); also used by tools/dos2_pchud_touch.py check"""
+    g = [m for m in g if not (m.startswith('original tag #') and '(code 37)' in m)]
     if o != 'uiCraft_p.swf': return g
     return [m for m in g if m != 'header / tail differ' and not (m.startswith('original tag #') and '(code 39)' in m)]
 
@@ -836,8 +1261,8 @@ def check(src):
         for who, why in errs: print('       %s: %s' % (who, why))
         say(not errs, 'ABC verifies: %d method bodies' % len(B.bodies))
         say(Swf(Swf(out).write()).body() == b.body(), 'the movie parses and round-trips')
-        g = tag_filter(o, gr.check(data, out, quiet=True))
-        say(g == [], 'every original tag kept (uiCraft_p: but the re-placed sprites and the stage), ids unique, uses after definitions%s' % ('' if not g else ': ' + str(g)))
+        g = tag_filter(o, gr.check(data, unfont(data, out), quiet=True))
+        say(g == [], 'every original tag kept (the raised text fields put back: nothing else differs; uiCraft_p: but the re-placed sprites and the stage), ids unique, uses after definitions%s' % ('' if not g else ': ' + str(g)))
         check_one(o, data, out, say)
     return bad
 
