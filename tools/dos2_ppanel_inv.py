@@ -107,26 +107,33 @@ SA_BOT, SA_BOT_H, SA_BOTP = 1030, 26, 475   # the bottom border rows 1030..1056;
 SA_BOT_BAR = 11                  # the bottom border's opaque bar (rows 1030..1041); the spikes under it stand on nothing
 SA_RAIL = 8                      # the side rails x 0..8 / 672..680 (plain: stretched)
 SA_BODY = (420, 900, 160, 100)   # a plain black patch (under the PC doll)
-BODY_TILE = (2600, 1100)         # own px of each damask rectangle (assets/touchui/gen_damask.png repeated): more than any window; cut by scrollRect
+DK_TILE, DK_PITCH = 256, 255      # px of a damask tile (gen_damask.png 512 px x TILE_K, its fill covers the bitmap exactly once) and their pitch
+                                 # (1 px overlap: no seam); phone 23.11 night: the UI renderer clamps a REPEATING fill - stretched streaks
+DK_GRID = (10, 5)                # tiles per damask group: 2550 x 1275 px, more than any window; each group cut by a scrollRect
+DK_GROUPS = ['dmDkA', 'dmDkB', 'dmDkC', 'dmDkD']   # the damask groups at the clip's lowest depths (everything is drawn over them)
 SA_BOX = (8, 202, 331, 46, 6)    # the black framed bar of the PC tab row: x y w h, the edge rows kept at top / bottom (the middle stretches):
                                  # the HP / AP / Source box, the inventory's stat strip and filter row
 SA_PLAQUE = (341, 202, 336, 48)  # the wood plaque with notched ends (PC "equipment" title): the tab title
 SA_PANEL = (22, 290, 317, 740, 56)   # the parchment panel's ornate frame (x y w h, corner): 9 pieces, the edges plain (stretched), no centre (a hole)
 SA_DOLL = (341, 253, 337, 627)   # the doll frame (black, ornament corners, the slots' frames baked in): scaled as one (D)
 NPER = 20                        # period copies made (the widest window needs < 20)
+DK_TOP = 30                      # frame art px (x F): the damask starts under the title bar's opaque bar (its spikes stand on nothing)
 STRETCH = 0.999                  # the static scale of a piece dmLay stretches (any scale but 1: pieces_sprite draws it without the bleed pixel)
 GM, GG = 12, 12                  # the grid: outer margin inside the rails, gutter between the columns (screen px)
 WIN_FMAX = (13, 10)              # the frame art's scale cap (title bar 65 px, iPad ~75)
-ROWA = 108                       # row A height in frame art px (x F): the sheet's tabs 56 + 4 + the plaque 48
-PADP = 10                        # the panel content's inset inside the parchment frame (frame art px, x F)
+ROWA = 116                       # row A height in frame art px (x F): the tab tray (tabs 56 x 0.9 + its edge and gaps) + the plaque 48 x 0.85 - the overlap
+PADP = 8                         # the panel content's inset inside the parchment frame (frame art px, x F)
 PANEL_W = 680                    # the panel content width in the sheet's own px: two stat columns of 340
 COL2 = 340                       # own x of the second column
 DOLL_W, DOLL_H = SA_DOLL[2], SA_DOLL[3]
 INFO_W = 262                     # own px of an InfoStat row (icon at -13 .. the value's right end at 248)
 PANEL_IN = 13                    # frame art px (x F) inside a generated panel's carved edge (its frame is ~12 px at F)
-TRAY_PAD = (12, 5)               # frame art px (x F): the tab tray round the 5 tabs (sides, top / bottom)
+TRAY_PAD = (6, 3)                # frame art px (x F): the tab tray's inner gap round the 5 tabs (sides, top / bottom), inside its carved edge
+TRAY_FRM = 12.5                  # frame art px (x F): the generated panel's carved edge at the panels' scale (25 bitmap px x TILE_K)
+TAB_K = (9, 10)                  # the tabs x F x 0.9, the tab title plaque x F x 0.85: the tray, the hanging plaque and the HP box share row A
+PLQ_K = (85, 100)
 DOLL_RIM = 16                    # px: the doll column's carved frame (16 px + its dark inner bevel) stands round the doll art, not over it
-TRAY_HANG = 6                    # frame art px (x F): the plaque overlaps the tray's bottom edge (it hangs from it)
+TRAY_HANG = 7                    # frame art px (x F): the plaque overlaps the tray's bottom edge (it hangs from it)
 STRIP_H = 40                     # frame art px (x F) of the inventory's stat strip (one row: secondary stats, then resistances); the filter row
                                  # under it gets the rest of row A (its icons ~66 px on the phone)
 def win_lets(a, C, DW, BT, OXK):
@@ -488,21 +495,25 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pad
     onEventInit = original + dmHook (drag bar `off` hidden, the doll button `btn` armed: dmSide(8) = the equipment view, dmSide(back) from it)
     + dmLay; onEventResolution(w, h) = original + dmW + dmLay."""
     d = code.of('MainTimeline', 'onEventInit'); P = d.P
-    for n, v in (('dmCell', CELL0), ('dmState', 0), ('dmW', SCREEN0), ('dmB', BOTTOM0), ('dmOX', 0), ('dmOXok', 0)): add_slot(d, n, v)
+    for n, v in (('dmCell', CELL0), ('dmState', 0), ('dmW', SCREEN0), ('dmB', BOTTOM0), ('dmOX', 0), ('dmOXok', 0), ('dmLastSW', 0)): add_slot(d, n, v)
     d.method('dmLay', 0, HEAD + spec.asm(d, INPUTS) + [('returnvoid',)])
     lay = [('getlocal0',), ('callpropvoid', P('dmLay'), 0)]
     # dmSetCell(px): 40..399 = the cell px; 400..1080 = the bottom limit dmB (the host's hot bar top), one channel for both
     # n >= DW_CMD: dmW = n - DW_CMD (the host's screen width in stage px); n >= OX_CMD: dmOX = n - OX_CMD - OX_BIAS, dmOXok = 1 (run 21.11)
-    d.method('dmSetCell', 1, HEAD + [('getlocal1',), ('pushint', _int(d, DW_CMD)), ('iflt', 'nw'),
-             ('getlocal0',), ('getlocal1',), ('pushint', _int(d, DW_CMD)), ('subtract',), ('setproperty', P('dmW'))] + lay + [('returnvoid',), ('L', 'nw'),
+    def set_if(prop, val, k):   # this.prop = val, then dmLay - unless it already is val (the host repeats its numbers every poll)
+        return [('getlocal0',), ('getproperty', P(prop))] + val + [('ifne', 'set%s' % k), ('returnvoid',), ('L', 'set%s' % k),
+                ('getlocal0',)] + val + [('setproperty', P(prop))] + lay + [('returnvoid',)]
+    d.method('dmSetCell', 1, HEAD + [('getlocal1',), ('pushint', _int(d, DW_CMD)), ('iflt', 'nw')] +
+             set_if('dmW', [('getlocal1',), ('pushint', _int(d, DW_CMD)), ('subtract',)], 'w') + [('L', 'nw'),
              ('getlocal1',), ('pushint', _int(d, OX_CMD)), ('iflt', 'no'),
+             ('getlocal0',), ('getproperty', P('dmOXok')), ('iffalse', 'ox1')] +
+             set_if('dmOX', [('getlocal1',), ('pushint', _int(d, OX_CMD + OX_BIAS)), ('subtract',)], 'o') + [('L', 'ox1'),
              ('getlocal0',), ('getlocal1',), ('pushint', _int(d, OX_CMD + OX_BIAS)), ('subtract',), ('setproperty', P('dmOX')),
              ('getlocal0',), ('pushbyte', 1), ('setproperty', P('dmOXok'))] + lay + [('returnvoid',), ('L', 'no'),
              ('getlocal1',), ('pushbyte', 40), ('ifnlt', 'e'), ('returnvoid',), ('L', 'e'),
-             ('getlocal1',), ('pushshort', 400), ('iflt', 'c'), ('getlocal1',), ('pushshort', 1080), ('ifgt', 'x'),
-             ('getlocal0',), ('getlocal1',), ('setproperty', P('dmB'))] + lay + [('returnvoid',), ('L', 'x'), ('returnvoid',),
-             ('L', 'c'), ('getlocal0',), ('getlocal1',), ('setproperty', P('dmCell'))] + lay + [('returnvoid',)])
-    d.method('dmSetState', 1, HEAD + [('getlocal0',), ('getlocal1',), ('setproperty', P('dmState'))] + lay + [('returnvoid',)])
+             ('getlocal1',), ('pushshort', 400), ('iflt', 'c'), ('getlocal1',), ('pushshort', 1080), ('ifgt', 'x')] +
+             set_if('dmB', [('getlocal1',)], 'b') + [('L', 'x'), ('returnvoid',), ('L', 'c')] + set_if('dmCell', [('getlocal1',)], 'c'))
+    d.method('dmSetState', 1, HEAD + set_if('dmState', [('getlocal1',)], 's'))
     hook = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1), ('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3)]
     for k, (path, h) in enumerate(pads):   # a finger pad: a transparent rectangle in the object's own graphics, h own px tall, centred on its drawing
         hook += [('getlocal0',), ('coerce_a',), ('setlocal', 1)]
@@ -543,9 +554,10 @@ def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pad
         hook += [('getlocal', 1), ('pushstring', d.S('rightMouseUp')), ('getlocal0',), ('getproperty', P('dmCtxUp')), ('callpropvoid', P('addEventListener'), 2), ('L', 'nx')]
     if extra: hook += extra(d)
     d.method('dmHook', 0, hook + [('returnvoid',)])
-    d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.call_orig('dmInitOrig', n) + [('getlocal0',), ('callpropvoid', P('dmHook'), 0)] + lay + [('returnvoid',)])
+    resend = [('getlocal0',), ('pushbyte', 0), ('setproperty', P('dmLastSW'))]   # init / a new resolution: setMcSize + setPosition again
+    d.wrap('onEventInit', 'dmInitOrig', lambda n: HEAD + d.call_orig('dmInitOrig', n) + [('getlocal0',), ('callpropvoid', P('dmHook'), 0)] + resend + lay + [('returnvoid',)])
     d.wrap('onEventResolution', 'dmResOrig', lambda n: HEAD + d.call_orig('dmResOrig', n) + [('getlocal2',), ('pushbyte', 0), ('ifngt', 'z'),
-           ('getlocal0',), ('getlocal1',), ('pushshort', 1080), ('multiply',), ('getlocal2',), ('divide',), ('setproperty', P('dmW')), ('L', 'z')] + lay + [('returnvoid',)])
+           ('getlocal0',), ('getlocal1',), ('pushshort', 1080), ('multiply',), ('getlocal2',), ('divide',), ('setproperty', P('dmW')), ('L', 'z')] + resend + lay + [('returnvoid',)])
     d.wrap(cmd, 'dmAnchorOrig', lambda n: HEAD + [('pushbyte', 0), ('convert_d',), ('setlocal', n + 1), ('getlocal1',), ('pushint', _int(d, CMD)), ('ifnge', 'o'),
            ('getlocal1',), ('pushint', _int(d, CMD)), ('subtract',), ('convert_d',), ('setlocal', n + 1), ('getlocal', n + 1), ('pushbyte', 40), ('ifnlt', 'cell'),
            ('getlocal0',), ('getlocal', n + 1), ('callpropvoid', P('dmSetState'), 1), ('returnvoid',),
@@ -635,6 +647,63 @@ def cxform_bytes(mult, add):
 SEL_TINT = ((256, 70, 66, 256), (34, 0, 0, 0))   # the selected tab's beige plate -> deep red (the iPad's selected tab)
 
 
+def damask_layer(swf, win, dk):
+    """the damask groups (DK_GROUPS) of 1:1 tiles: ONE DefineShape (a DK_TILE px square whose clipped fill covers the bitmap exactly once) placed
+    DK_GRID times at DK_PITCH in each group sprite; the groups go to the lowest depths of the clip `win` (its frame-1 depths move up)"""
+    bid, bw, bh = dk; W = int(round(bw * TILE_K * 20)); H = int(round(bh * TILE_K * 20))
+    used = {struct.unpack_from('<H', d, 0)[0] for c, d, _ in swf.tags if c in gr.DEFS} | set(gr.Movie(swf).imports); nid = [max(used) + 1]
+    def new(): nid[0] += 1; return nid[0] - 1
+    def nb(*v): return max(2, max(abs(int(x)).bit_length() for x in v) + 1)
+    sid = new(); fill = b'\x01\x41' + struct.pack('<H', bid) + gr.matrix_bytes(0, 0, 20.0 * TILE_K, 20.0 * TILE_K)
+    rec = [(0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (1, 1), (2, 5), (0, 2), (0, 2), (1, 1)]
+    for ex, ey in ((W, 0), (0, H), (-W, 0), (0, -H)):
+        n = nb(ex, ey); rec += [(1, 1), (1, 1), (n - 2, 4), (1, 1), (ex, n), (ey, n)]
+    rec += [(0, 1), (0, 5)]; n = nb(W, H)
+    tags = [[2, struct.pack('<H', sid) + gr.wbits([(n, 5), (0, n), (W, n), (0, n), (H, n)]) + fill + b'\x00' + bytes([0x10]) + gr.wbits(rec), False]]
+    def place(depth, cid, x, y, name=None):
+        return gr.tag_bytes(*gr.place_build(dict(depth=depth, char=cid, matrix=gr.matrix_bytes(x, y), cx=None, ratio=None, name=None if name is None else name.encode() + b'\0',
+                                                 clip=None, cls=None, f2=0, rest3=b'', move=False, v3=False, actions=None)))
+    gids = []
+    for _ in DK_GROUPS:
+        spr = b''.join(place(1 + i * DK_GRID[1] + j, sid, i * DK_PITCH, j * DK_PITCH) for i in range(DK_GRID[0]) for j in range(DK_GRID[1]))
+        gid = new(); gids.append(gid); tags.append([gr.T_SPRITE, struct.pack('<HH', gid, 1) + spr + gr.tag_bytes(gr.T_SHOW, b'') + gr.tag_bytes(gr.T_END, b''), False])
+    at = _def_index(swf, win); swf.tags[at:at] = tags
+    # the clip's own placements one depth group up; the damask groups at 1..len(DK_GROUPS)
+    k = len(DK_GROUPS); n = _def_index(swf, win); d = swf.tags[n][1]; o = d[:4]
+    for code, tt in gr.subtags(d):
+        if code in (gr.T_PLACE2, gr.T_PLACE3, gr.T_REMOVE2):
+            if code == gr.T_REMOVE2: tt = struct.pack('<H', struct.unpack_from('<H', tt, 0)[0] + k)
+            else: rec_ = gr.place_parse(code, tt); rec_['depth'] += k; code, tt = gr.place_build(rec_)
+        o += gr.tag_bytes(code, tt)
+    swf.tags[n][1] = o
+    for i, (g, gid) in enumerate(zip(DK_GROUPS, gids)): add_place(swf, win, 1 + i, gid, 0, 0, g)
+    return len(tags)
+
+
+def fill_report(before, after):
+    """every NEW DefineShape's bitmap fills: [(shape id, problem)] - a fill must be clipped (0x41 / 0x43: the UI renderer does not repeat) and
+    the shape must lie inside its bitmap (mapped back through the fill matrix: no clamped / stretched edge pixels)"""
+    import dos2_swf_render as rn
+    a = Swf(before); b = Swf(after); mv = gr.Movie(b)
+    old = {struct.unpack_from('<H', d, 0)[0] for c, d, _ in a.tags if c in gr.DEFS}
+    bad = []; n = 0
+    for code, d, _ in b.tags:
+        if code not in gr.T_SHAPES: continue
+        sid = struct.unpack_from('<H', d, 0)[0]
+        if sid in old: continue
+        for kind, style, segs in rn.parse_shape(d, gr.T_SHAPES[code]):
+            if kind != 'fill' or style[0] != 'bmp': continue
+            n += 1; _, bid, m, clipped, smooth = style
+            bt = b.tags[mv.defs[bid]]; bw, bh = struct.unpack_from('<HH', bt[1], 3)
+            if not clipped: bad.append((sid, 'repeating fill')); continue
+            det = m[0] * m[3] - m[1] * m[2]
+            pts = [p for e in segs for p in e]
+            for x, y in pts:
+                u = ((x - m[4]) * m[3] - (y - m[5]) * m[2]) / det; v = ((y - m[5]) * m[0] - (x - m[4]) * m[1]) / det
+                if not (-0.01 <= u <= bw + 0.01 and -0.01 <= v <= bh + 0.01): bad.append((sid, 'point %.1f,%.1f outside the %d x %d bitmap' % (u, v, bw, bh))); break
+    return n, bad
+
+
 def swap_char(swf, holder, frame, old, new):
     hit = []
     def fn(name, rec):
@@ -720,7 +789,7 @@ def inv_spec(k):
     for n in ('minimise_mc', 'keyHintsHolder_mc'): s.on(w + (n,), [('x', CS_FAR * 2)])
     for prop, e in (('uiLeft', WX), ('uiRight', WX + WW), ('uiTop', WY), ('uiMinHeight', 190), ('uiMinWidth', 150)): s.root(prop, ffloor(e + R(1, 2)))
     s.let('DX', WX)
-    s.ei('setMcSize', V('SW'), 1080); s.ei('setPosition', 'topleft', 'screen', 'topleft')
+    s.raw('mcsize', mc_size)
     return s
 
 
@@ -742,7 +811,8 @@ def filter_row_hook(d):
         o += path((INV_CLIP, b), 1, e)
         for ch in ('bg_mc', 'activeBG_mc', 'text_txt'):
             e2 = '%s_%s' % (e, ch)
-            o += [('getlocal', 1), ('getproperty', P(ch)), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', e2), ('getlocal', 2), ('pushfalse',), ('setproperty', P('visible')), ('L', e2)]
+            o += [('getlocal', 1), ('getproperty', P(ch)), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', e2), ('getlocal', 2), ('pushfalse',), ('setproperty', P('visible')),
+                  ('getlocal', 2), ('pushbyte', 0), ('setproperty', P('alpha')), ('L', e2)]   # (alpha too: the PC re-shows them on its state changes)
         o += [('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
               ('getlocal', 2), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2),
               ('getlocal', 2), ('pushbyte', 0), ('pushbyte', 0), ('pushbyte', 41), ('pushbyte', 41), ('callpropvoid', P('drawRect'), 4),
@@ -769,7 +839,42 @@ def filter_row_hook(d):
         ('getlocal', 2), ('getlocal', 1), ('getproperty', P('text')), ('setproperty', P('text')),
         ('L', 'end'), ('returnvoid',)]
     d.method('dmWTick', 1, c)
-    return o + [('getlocal0',), ('pushstring', d.S('enterFrame')), ('getlocal0',), ('getproperty', P('dmWTick')), ('callpropvoid', P('addEventListener'), 2)]
+    # dmFTick: the filter tabs' red plate - the PC selects every tab for "All" (selectTab 0 -> selectElement on each): then every tab's select_mc
+    # alpha 0 and the All plate's red one 1, else the reverse (alpha only: isSelected reads select_mc.visible); the gold widget shown (the PC
+    # hides it with one inventory; the iPad's row has the gold). Locals: 1 the list, 2 a tab, 3 n, 4 i, 5 used, 6 selected, 7 all
+    L_, T_, N_, I_, U_, S_, A_ = 1, 2, 3, 4, 5, 6, 7
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', T_)] + [x for v in (N_, I_, U_, S_, A_) for x in (('pushbyte', 0), ('convert_d',), ('setlocal', v))] + \
+        path((INV_CLIP, 'tabList'), L_, 'end') + [('getlocal', L_), ('getproperty', P('length')), ('convert_d',), ('setlocal', N_),
+        ('L', 'c1'), ('getlocal', I_), ('getlocal', N_), ('ifge', 'c2'),
+        ('getlocal', L_), ('getlocal', I_), ('callproperty', P('getAt'), 1), ('coerce_a',), ('setlocal', T_), ('getlocal', T_), ('iffalse', 'cn'),
+        ('getlocal', T_), ('getproperty', P('id'))] + num(255) + [('ifeq', 'cn'),
+        ('getlocal', U_), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', U_),
+        ('getlocal', T_), ('getproperty', P('select_mc')), ('getproperty', P('visible')), ('iffalse', 'cn'),
+        ('getlocal', S_), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', S_),
+        ('L', 'cn'), ('getlocal', I_), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I_), ('jump', 'c1'),
+        ('L', 'c2'), ('getlocal', U_), ('pushbyte', 0), ('ifngt', 'c3'), ('getlocal', S_), ('getlocal', U_), ('ifne', 'c3'), ('pushbyte', 1), ('convert_d',), ('setlocal', A_),
+        ('L', 'c3'), ('pushbyte', 0), ('convert_d',), ('setlocal', I_),
+        ('L', 'd1'), ('getlocal', I_), ('getlocal', N_), ('ifge', 'd2'),
+        ('getlocal', L_), ('getlocal', I_), ('callproperty', P('getAt'), 1), ('coerce_a',), ('setlocal', T_), ('getlocal', T_), ('iffalse', 'dn'),
+        ('getlocal', T_), ('getproperty', P('select_mc')), ('pushbyte', 1), ('getlocal', A_), ('subtract',), ('setproperty', P('alpha')),
+        ('L', 'dn'), ('getlocal', I_), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I_), ('jump', 'd1'),
+        ('L', 'd2')] + path((('nm', 'dmIcoAll'),), T_, 'g0') + [('getlocal', T_), ('pushbyte', 1), ('callproperty', P('getChildAt'), 1), ('getlocal', A_), ('setproperty', P('alpha')),
+        ('L', 'g0')] + path((INV_CLIP, 'totalGold_mc'), T_, 'end') + [('getlocal', T_), ('getproperty', P('visible')), ('iftrue', 'end'),
+        ('getlocal', T_), ('pushtrue',), ('setproperty', P('visible')),
+        ('L', 'end'), ('returnvoid',)]
+    d.method('dmFTick', 1, c)
+    return o + [('getlocal0',), ('pushstring', d.S('enterFrame')), ('getlocal0',), ('getproperty', P('dmWTick')), ('callpropvoid', P('addEventListener'), 2),
+                ('getlocal0',), ('pushstring', d.S('enterFrame')), ('getlocal0',), ('getproperty', P('dmFTick')), ('callpropvoid', P('addEventListener'), 2)]
+
+
+def mc_size(sp, c):
+    """dmLay's last lines: setMcSize(SW, 1080) + setPosition(topleft, screen, topleft) - only when SW differs from the last sent (dmLastSW):
+    the phone run 23.11 had them 1672 times from one window (the host's numbers every poll each re-laid it)"""
+    P = c.P; sw = sp.var('SW')
+    return [('getlocal0',), ('getproperty', P('dmLastSW')), ('getlocal', sw), ('ifeq', 'mcs'),
+            ('getlocal0',), ('getlocal', sw), ('setproperty', P('dmLastSW'))] + \
+        c.ei('setMcSize', [('getlocal', sw)], num(STAGE_H)) + c.ei('setPosition', [('pushstring', c.S('topleft'))], [('pushstring', c.S('screen'))], [('pushstring', c.S('topleft'))]) + \
+        [('L', 'mcs')]
 
 
 def _kids(swf, sprite):
@@ -807,11 +912,16 @@ def party(data, env=None):
     # the icon overlays: our generated glyphs, on the PC filter tab's plate where they stand for a button
     import dos2_touchart as ta
     g = gr.Graft(swf); art = ta.Art(g); plate = [c for c, n in mv.classes.items() if n.split('.')[-1] == 'tabBG_60']; assert len(plate) == 1
+    selp = [c for c, n in mv.classes.items() if n.split('.')[-1] == 'tabSelectedBG_61']; assert len(selp) == 1
     for name, glyph, on_plate in INV_ICONS:
         ic, ib = art.png(glyph); gw_ = ib[2] - ib[0]; k = (28.0 if on_plate else 36.0) / gw_
-        kids_ = ([(plate[0], 1, (0, 0), None)] if on_plate else []) + [(ic, 2, (41 / 2.0 - gw_ * k / 2, 41 / 2.0 - (ib[3] - ib[1]) * k / 2, k), None)]
+        kids_ = ([(plate[0], 1, (0, 0), None)] if on_plate else []) + [(ic, 3, (41 / 2.0 - gw_ * k / 2, 41 / 2.0 - (ib[3] - ib[1]) * k / 2, k), None)]
+        if name == 'dmIcoAll': kids_.insert(1, (selp[0], 2, (0, 0), None))   # its red "selected" plate (child 1: dmFTick sets its alpha)
         g.place(g.sprite(kids_), 0, 0, name)
     g.finish(); ndef += len(g.new_defs)
+    def red(name, rec):
+        if rec['depth'] == 2: rec['cx'] = cxform_bytes(*SEL_TINT)
+    edit_places(swf, _root_names(swf)['dmIcoAll']['char'], red)   # the All plate's selected plate: red as the filter tabs'
     # a bag's header (playerInventory): its frame, body and drop mark follow the list's width, gold / weight / the fold mark stay at the right end
     lx = INV_LIST_W / float(INV_LIST_W0)
     bag = [c for c, n in mv.classes.items() if n == 'playerInventory']; assert len(bag) == 1
@@ -858,9 +968,7 @@ def frame_groups(dk, pn, prefix=''):
     bx, by, bw, bh = SA_BODY; dx, dy, dw, dh = SA_DOLL; ox, oy, ow, oh, oe = SA_BOX; px, py, pw, ph, pc = SA_PANEL; lx, rx, ty = SA_TILE
     one = lambda x, y, w, h: (0, 0, x, y, w, h, 1.0)          # drawn 1 px larger (no hairline seam to its neighbour)
     st = lambda x, y, w, h: (0, 0, x, y, w, h, STRETCH)       # stretched by dmLay: exactly its px (a bleed pixel x 30 overshoots)
-    tile = (0, 0, 0, 0, BODY_TILE[0], BODY_TILE[1], 1.0, 1.0, dk + (True,))
-    groups = [('k%d' % i, [tile]) for i in range(6)] + [                                                # the body: 6 damask rectangles round the panels
-              ('wb', panel_pieces(pn)),                                                                  # the doll column's carved frame (under the doll art)
+    groups = [('wb', panel_pieces(pn)),                                                                  # the doll column's carved frame (under the doll art)
               ('w7', [one(dx, dy, dw, dh)]),                                                             # the doll frame
               ('w6', [one(px, py, pc, pc), st(px + pc, py, pw - 2 * pc, pc), one(px + pw - pc, py, pc, pc),    # the parchment frame: TL T TR
                       st(px, py + pc, pc, ph - 2 * pc), st(px + pw - pc, py + pc, pc, ph - 2 * pc),             # L R
@@ -882,11 +990,15 @@ def frame_spec(s, bg):
     F, WW, WH, PY, PZ, PH, LX, LW, RX, RW, D, CT, IH, SR, XS, FT = [V(n) for n in ('F', 'WW', 'WH', 'PY', 'PZ', 'PH', 'LX', 'LW', 'RX', 'RW', 'D', 'CT', 'IH', 'SR', 'XS', 'FT')]
     FAR = XS * CS_FAR * 2
     def pc(g, k, x, y, kx, ky): s.on(bg + (('nm', g), ('at', k)), [('x', x), ('y', y), ('scaleX', kx), ('scaleY', ky)])
-    TB = SA_TOP_H * F; Y1 = s.let('BY1', PY + XS * (FT - PY)); H1 = PZ - Y1
-    for k, (x, y, w, h) in enumerate(((SR, TB, WW - 2 * SR, Y1 - TB), (SR, PZ, WW - 2 * SR, WH - (SA_BOT_H - SA_BOT_BAR) * F - PZ), (SR, Y1, LX - SR, H1),
-                                      (LX + LW, Y1, RX - LX - LW, H1), (RX + RW, Y1, WW - SR - RX - RW, H1), (LX + (1 - XS) * CS_FAR * 2, FT, LW, PY - FT))):
-        # a damask group at x, y showing ITS x..x+w, y..y+h (scrollRect): the pattern stays put in window px across the rectangles
-        s.on(bg + (('nm', 'k%d' % k),), [('x', x), ('y', y)]); s.rect(bg + (('nm', 'k%d' % k),), x, y, fmax(1, w), fmax(1, h))
+    # the damask: groups of 1:1 tiles at the clip's lowest depths (under the panels, the doll, everything), each cut by its scrollRect at x, y
+    # showing ITS x..x+w, y..y+h - the pattern fixed to the window. State 0: one rectangle (under the title bar's bar .. the bottom bar). State 1:
+    # the right column from the filter row down stays OPEN (the inventory movie's bag): A = the top band, B = left of it, C = right of it, D = under it
+    TT, BOT = DK_TOP * F, WH - (SA_BOT_H - SA_BOT_BAR) * F
+    YA = s.let('DKY', BOT + XS * (FT - BOT))                         # A ends at the bottom (state 0) / at the filter row (state 1)
+    OFF = (1 - XS) * CS_FAR * 2
+    for g, (x, y, w, h) in zip(DK_GROUPS, ((SR, TT, WW - 2 * SR, YA - TT), (SR + OFF, FT, RX - SR, BOT - FT), (RX + RW + OFF, FT, WW - SR - RX - RW, BOT - FT),
+                                           (RX + OFF, PZ, RW, BOT - PZ))):
+        s.on((CS_CLIP, ('nm', g)), [('x', x), ('y', y)]); s.rect((CS_CLIP, ('nm', g)), x, y, fmax(1, w), fmax(1, h))
     pc('w7', 0, LX, PY, D, D)
     panel_spec(s, bg, 'wb', LX - DOLL_RIM, PY - DOLL_RIM, LW + 2 * DOLL_RIM, PH + 2 * DOLL_RIM, F * TILE_K)
     s.on(bg + (('nm', 'wb'), ('at', 4)), [('x', CS_FAR * 3)])        # no centre: the doll shows through (its 3D view is under bg_mc)
@@ -931,6 +1043,7 @@ CS_TOGGLE2 = 'dmDoll2_mc'        # the same button in the inventory window (stat
 STRIP_PITCH = 30                 # own px of the strip's row (a cell is cropped to 32 high from -3)
 STRIP_IN = 7                     # frame art px (x F) between the strip's panel edge and its row
 STRIP_MID = 13                   # own px: the middle of a strip cell (its crop -3 .. 29)
+STRIP_DIAG_FRAME = 30            # frames into a stay in state 1 when dmStripDiag reports (UIAssert, once a stay)
 STRIP_GAP = 26                   # own px between the secondary stats and the resistances
 def cs_spec(k, glow=None):
     """dmLay of characterSheet_p (owner 23.11: the iPad's characterSheet_t structure in our art). The clip stats_mc stands at the window's top
@@ -961,12 +1074,13 @@ def cs_spec(k, glow=None):
     frame_spec(s, bg)
     PK = s.let('PK', F * TILE_K)                                      # the panels' corner scale (own px a bitmap px)
     panel_spec(s, bg, 'w4', LX, CT, LW, IH, PK)                      # HP / AP / Source
-    TRW, TRH = s.let('TRW', CS_TABS_W * F + 2 * TRAY_PAD[0] * F), s.let('TRH', 56 * F + 2 * TRAY_PAD[1] * F)
+    TK, QK = s.let('TK', F * R(*TAB_K)), s.let('QK', F * R(*PLQ_K))
+    TRW, TRH = s.let('TRW', CS_TABS_W * TK + 2 * (TRAY_FRM + TRAY_PAD[0]) * F), s.let('TRH', 56 * TK + 2 * (TRAY_FRM + TRAY_PAD[1]) * F)
     TRX = s.let('TRX', RX + RW / 2 - TRW / 2)
     panel_spec(s, bg, 'w9', TRX + FAR, CT, TRW, TRH, PK)             # the tab tray (state 0)
     panel_spec(s, bg, 'wa', RX + (1 - XS) * CS_FAR * 2, CT, RW, SH, PK)   # the stat strip (state 1)
     QY = s.let('QY', CT + TRH - TRAY_HANG * F)                        # the plaque hangs from the tray's bottom edge onto row A's floor
-    s.on(bg + (('nm', 'w5'), ('at', 0)), [('x', RX + RW / 2 - SA_PLAQUE[2] / 2 * F + FAR), ('y', QY), ('scaleX', F), ('scaleY', F)])
+    s.on(bg + (('nm', 'w5'), ('at', 0)), [('x', RX + RW / 2 - SA_PLAQUE[2] / 2 * QK + FAR), ('y', QY), ('scaleX', QK), ('scaleY', QK)])
     # the doll: its frame piece, equip_mc and the backdrop from the doll frame's art origin (SA_DOLL = equip_mc's PC place 341, 253)
     s.on(w + ('equip_mc',), [('x', LX), ('y', PY), ('scaleX', k['equip_mc'][3] * D), ('scaleY', k['equip_mc'][4] * D)])
     s.on(w + (('nm', 'dmDollBg'),), [('x', LX + (k['dmDollBg'][1] - SA_DOLL[0]) * D), ('y', PY + (k['dmDollBg'][2] - SA_DOLL[1]) * D),
@@ -974,13 +1088,14 @@ def cs_spec(k, glow=None):
     # the info rows: equip_mc's infoStatHolder_mc, in equip_mc's px (D): the rows' block centred in the box, the icon 13 own right of the edge
     s.on(w + ('equip_mc', 'infoStatHolder_mc'), [('x', (BP + 13 * SI) / D), ('y', (CT + (IH - 74 * SI) / 2 + 3 * SI - PY) / D), ('scaleX', SI / D), ('scaleY', SI / D)])
     # the tabs (F), their glows, the tab title plaque with the title, the points left (right of the plaque); off in state 1
-    TX, TY = s.let('TX', RX + RW / 2 - CS_TABS_W / 2 * F), s.let('TY', CT + TRAY_PAD[1] * F - 21 * F)   # the tabs seated in the tray
-    s.on(w + ('tabsHolder_mc',), [('x', TX + FAR), ('y', TY), ('scaleX', F), ('scaleY', F)])
+    # the tabs seated in the tray: a tab stands at y 0 of the tabs list (stats_1 selectedTabY 23 / deselectedTabY 21 move its ICON), 56 high
+    TX, TY = s.let('TX', RX + RW / 2 - CS_TABS_W / 2 * TK), s.let('TY', CT + (TRAY_FRM + TRAY_PAD[1]) * F)
+    s.on(w + ('tabsHolder_mc',), [('x', TX + FAR), ('y', TY), ('scaleX', TK), ('scaleY', TK)])
     for i, n in enumerate(CS_WARN):   # tab i of the PC's order (attributes, combat, civil, talents): its top right corner
-        s.on(w + (n,), [('x', TX + (66 * i + 64) * F + FAR), ('y', TY + 26 * F), ('scaleX', k[n][3] * F * R(6, 10)), ('scaleY', k[n][4] * F * R(6, 10))])
-    s.on(w + ('tabTitle_txt',), [('x', RX + RW / 2 - 165 * F + FAR), ('y', QY + 6 * F), ('scaleX', F), ('scaleY', F)])
+        s.on(w + (n,), [('x', TX + (66 * i + 64) * TK + FAR), ('y', TY + 5 * TK), ('scaleX', k[n][3] * TK * R(6, 10)), ('scaleY', k[n][4] * TK * R(6, 10))])
+    s.on(w + ('tabTitle_txt',), [('x', RX + RW / 2 - 165 * QK + FAR), ('y', QY + 6 * QK), ('scaleX', QK), ('scaleY', QK)])
     s.root('dmPfC', RX + RW / 2 + FAR)                              # the plaque's centre: the points frame stands there (centred by dmPfX)
-    s.on(w + ('pointsFrame_mc',), [('x', RX + RW / 2 + FAR - PF_HALF0 * F), ('y', QY + (SA_PLAQUE[3] / 2 - PF_MID) * F), ('scaleX', F), ('scaleY', F)])
+    s.on(w + ('pointsFrame_mc',), [('x', RX + RW / 2 + FAR - PF_HALF0 * QK), ('y', QY + (SA_PLAQUE[3] / 2 - PF_MID) * QK), ('scaleX', QK), ('scaleY', QK)])
     s.raw('points', pf_lines)
     # the panel: ONE parchment under the frame's hole (two halves, even mirrored, met in a dark fold: the 'open book' the owner rejected)
     IN = 4 * F
@@ -1018,7 +1133,7 @@ def cs_spec(k, glow=None):
     for name, far in ((INV_BTN, FAR), (CS_TOGGLE2, (1 - XS) * CS_FAR * 2)):
         s.on((('nm', name),), [('x', WX + CS_TILE_C[0] * F - TP / 2 + far), ('y', WY + CS_TILE_C[1] * F - TP / 2), ('scaleX', TP / BTN_ART), ('scaleY', TP / BTN_ART)])
     for prop, e in (('uiLeft', WX), ('uiRight', WX + WW), ('uiTop', WY), ('uiMinHeight', 190), ('uiMinWidth', 150)): s.root(prop, ffloor(e + R(1, 2)))
-    s.ei('setMcSize', V('SW'), STAGE_H); s.ei('setPosition', 'topleft', 'screen', 'topleft')   # phone 23.11: see inv_spec ('center' put it at x 881, cut)
+    s.raw('mcsize', mc_size)   # phone 23.11: setPosition topleft (see inv_spec: 'center' put it at x 881, cut)
     return s
 
 
@@ -1030,6 +1145,17 @@ def pf_lines(sp, c):
     return [('getlocal0',), ('getproperty', P(CS_CLIP)), ('getproperty', P('pointsFrame_mc')), ('coerce_a',), ('setlocal', o), ('getlocal', o), ('iffalse', 'pfx'),
             ('getlocal', o), ('getlocal0',), ('getproperty', P('dmPfC')), ('getlocal0',), ('getproperty', P('dmPfHalf')), ('getlocal', o), ('getproperty', P('scaleX')),
             ('multiply',), ('subtract',), ('setproperty', P('x')), ('L', 'pfx')]
+
+
+def tab_tooltip_off(code):
+    """phone 23.11 night: after a tap on a tab the engine's tooltip (the tab's name) stood over the title bar while the cursor rested there. In
+    touch the tab title plaque names the tab: StatsTabButton.onMouseOver runs with its tooltip emptied (its own test then skips
+    ShowTooltipForMC; the frames, the hover sound stay) and gets it back"""
+    tb = code.of('StatsTabButton', 'onMouseOver'); P = tb.P
+    tb.wrap('onMouseOver', 'dmOverOrig', lambda n: HEAD + [('getlocal0',), ('getproperty', P('tooltip')), ('setlocal', n + 1),
+            ('getlocal0',), ('pushstring', tb.S('')), ('setproperty', P('tooltip'))] + tb.call_orig('dmOverOrig', n) +
+            [('getlocal0',), ('getlocal', n + 1), ('setproperty', P('tooltip')), ('returnvoid',)])
+    return []
 
 
 def points_fix(code, d):
@@ -1092,6 +1218,7 @@ def sheet(data, env=None):
     bid, bw, bh = bitmap_of(swf, shape, True); assert (bw, bh) == (CS_W, CS_H0), 'background %d x %d' % (bw, bh)
     dk = add_bitmap(swf, holder, 'gen_damask'); pn = add_bitmap(swf, holder, 'gen_panel')
     new, ndef = pieces_sprite(swf, holder, bid, bw, bh, frame_groups(dk, pn)); ndef += 2
+    ndef += damask_layer(swf, win, dk)
     tab = [c for c, n in mv.classes.items() if n.split('.')[-1] == 'StatsTabButton']; assert len(tab) == 1
     tinted = []
     def tint(name, rec):
@@ -1138,7 +1265,7 @@ def sheet(data, env=None):
     code = Code(swf)
     window_doc(code, spec, [(CS_CLIP, 'dragHit_mc')], [INV_BTN, CS_TOGGLE2], 3, 'setHelmetOptionState', ctx=((CS_CLIP, 'equip_mc'), 'equipment_41'),
                extra=lambda d: list_scroll(d, [(CS_CLIP, h, 'list') for h, _, _ in CS_LISTS]) + list_flow(d, [(CS_CLIP, h) for h, _, _ in CS_LISTS]) + stat_strip(d) +
-               points_fix(code, d))
+               points_fix(code, d) + tab_tooltip_off(code))
     # The doll turns under the finger by the PC class's own means, nothing is changed here: equipment_41.onDown sends dollDown (handled,
     # main+0x12a59c8: byte [object+0x3f8] = 1 + the mouse capture); the class's input handler main+0x12af270 turns it on the events 0x6a /
     # 0x6b (FlashMouseMoveLeft / Right: [object+0x3fc] = the turn) and STOPS it on event 1 (FlashLeftMouse, the button's release:
@@ -1304,7 +1431,24 @@ def stat_strip(d):
         ('multiply',), ('subtract',), ('pushbyte', 2), ('divide',), ('add',), ('setproperty', P('x')),
         ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmStCY'))] + num(STRIP_MID) + [('getlocal', B), ('multiply',), ('subtract',), ('setproperty', P('y')),
         ('L', 'end'), ('returnvoid',)]
-    d.method('dmStripTick', 1, c)
+    d.method('dmStripTick', 1, [x for x in c[:-2]] + [('getlocal0',), ('getproperty', P('dmState')), ('iffalse', 'nd'),
+        ('getlocal0',), ('getlocal0',), ('getproperty', P('dmStN')), ('increment',), ('setproperty', P('dmStN')),
+        ('getlocal0',), ('getproperty', P('dmStN')), ('pushbyte', STRIP_DIAG_FRAME), ('ifne', 'nd'),
+        ('getlocal0',), ('getlocal', A), ('callpropvoid', P('dmStripDiag'), 1), ('L', 'nd'), ('L', 'end'), ('returnvoid',)])
+    add_slot(d, 'dmStN', 0)
+    def val(lines): return lines + [('add',)]
+    def obj(path):   # the value of this.<path> (null-safe only for the first link: the diag runs after the strip's own checks)
+        return [('getlocal0',)] + [('getproperty', P(q)) for q in path]
+    parts = [('st=', obj(['dmState'])), (' msv=', obj([CS_CLIP, 'mainStats_mc', 'visible'])), (' msa=', obj([CS_CLIP, 'mainStats_mc', 'alpha'])),
+             (' msx=', obj([CS_CLIP, 'mainStats_mc', 'x'])), (' msy=', obj([CS_CLIP, 'mainStats_mc', 'y'])), (' mss=', obj([CS_CLIP, 'mainStats_mc', 'scaleX'])),
+             (' secn=', obj([CS_CLIP, 'secondaryStatList', 'length'])), (' secv=', obj([CS_CLIP, 'secondaryStatList', 'visible'])),
+             (' resn=', obj([CS_CLIP, 'resistanceStatList', 'length'])), (' resv=', obj([CS_CLIP, 'resistanceStatList', 'visible'])),
+             (' shv=', obj([CS_CLIP, 'mainStats_mc', 'secStatHolder_mc', 'visible'])), (' shx=', obj([CS_CLIP, 'mainStats_mc', 'secStatHolder_mc', 'x'])),
+             (' rhx=', obj([CS_CLIP, 'mainStats_mc', 'resistancesStatHolder_mc', 'x'])), (' X=', obj(['dmStX'])), (' W=', obj(['dmStW'])),
+             (' SS=', obj(['dmStSS'])), (' cy=', obj(['dmStCY'])), (' clv=', obj([CS_CLIP, 'visible'])), (' A=', [('getlocal1',)])]
+    c = HEAD + [('pushstring', d.S('dmStrip'))]
+    for label, lines in parts: c += [('pushstring', d.S(label)), ('add',)] + val(lines)
+    d.method('dmStripDiag', 1, c + [('setlocal', 2)] + d.ei('UIAssert', [('getlocal', 2)]) + [('returnvoid',)])
     # bug 3 (phone 23.11 evening: the strip box empty): mainStats_mc is the attributes tab's panel (panelArray[0]) - ClickTab hides it while
     # another tab is open, and the window may have been left on any tab. On the way into state 1 its visibility is kept and it is shown; on the
     # way back the kept value returns (no tab is clicked in state 1: the tabs are off the window). dmStVis: -1 = not in state 1.
@@ -1317,7 +1461,7 @@ def stat_strip(d):
         ('getlocal0',), ('getlocal', 2), ('getproperty', P('visible')), ('iffalse', 'v0'), ('pushbyte', 1), ('jump', 'vs'), ('L', 'v0'), ('pushbyte', 0), ('L', 'vs'),
         ('setproperty', P('dmStVis')),
         ('L', 'show'), ('getlocal', 2), ('pushtrue',), ('setproperty', P('visible')), ('returnvoid',),
-        ('L', 'st0'), ('getlocal0',), ('getproperty', P('dmStVis')), ('pushbyte', 0), ('iflt', 'end'),
+        ('L', 'st0'), ('getlocal0',), ('pushbyte', 0), ('setproperty', P('dmStN')), ('getlocal0',), ('getproperty', P('dmStVis')), ('pushbyte', 0), ('iflt', 'end'),
         ('getlocal', 2), ('getlocal0',), ('getproperty', P('dmStVis')), ('pushbyte', 0), ('greaterthan',), ('setproperty', P('visible')),
         ('getlocal0',), ('pushbyte', -1 & 0xff), ('setproperty', P('dmStVis')),
         ('L', 'end'), ('returnvoid',)]
@@ -1386,6 +1530,9 @@ def check(o, data, out, rep, say):
         'assets/touchui plate_square_copper + ico_inventory / ico_charsheet (the window button), gen_damask + gen_panel (generated: the body, the HP box, tab tray, strip)'
         if o == 'characterSheet_p.swf' else 'assets/touchui gen_panel (the filter row) + gen_ico_all / sort / sortby / weight (generated glyphs; three on the filter tabs\' plate)'))
     say(b.head[:-4] == rect_bytes(*rep['stage']), 'stage %d x %d: wider than any screen; dmLay sets the movie to the screen width (setMcSize) and centres the window inside it (phone 21.11: a window shifted inside a window-wide movie was cut at the movie rect)' % rep['stage'])
+    nf, badf = fill_report(data, out)
+    say(not badf, 'bitmap fills: all %d of the new shapes are clipped and lie inside their bitmap (the phone\'s UI renderer clamps a repeating fill: the '
+        'damask was stretched streaks - it is 1:1 tiles now)%s' % (nf, '' if not badf else ': ' + str(badf[:4])))
     ea, eb = _ei(A), _ei(B); added = sorted(set(eb) - set(ea))
     say(set(ea) <= set(eb) and set(added) <= {'dmSide', 'setMcSize'}, 'ExternalInterface: the PC movie\'s %d names kept; added: %s (dmSide = the host\'s; setMcSize = the engine\'s own, as the PC inventory calls it)' % (len(ea), ' '.join(added)))
     def doc(X):
@@ -1403,6 +1550,10 @@ def check(o, data, out, rep, say):
     say('dmInitOrig' in t and 'dmHook' in t and 'dmLay' in t and 'dmResOrig' in r and 'dmLay' in r and 'dmW' in r, 'onEventInit = original + dmHook + dmLay; onEventResolution(w, h) = original + dmW (w * 1080 / h) + dmLay')
     say('dmSetCell' in c and 'dmSetState' in c and 'dmAnchorOrig' in c and str(CMD) in c, '%s(%d + n) = dmSetState(n < 40) / dmSetCell(n): the host\'s way in through a name the engine class registers; below %d the original' % (cmd, CMD, CMD))
     say("'topleft'" in l and "'center'" not in l and 'setMcSize' in l and ('scrollbarVisible' in l or 'setLength' in l), 'dmLay: computes the layout from dmCell / dmState / dmW, then setMcSize + setPosition(topleft, screen, topleft): origin 0, the window centres itself (phone 23.11)')
+    sc_ = dis('MainTimeline', 'dmSetCell'); ss_ = dis('MainTimeline', 'dmSetState')
+    say('dmLastSW' in l and l.count("'setMcSize'") == 1 and sc_.count('returnvoid') >= 6 and 'ifne' in ss_,
+        'phone bug 7 (setMcSize / setPosition 1672 times from the sheet in one run): a number the host repeats no longer re-lays the window (dmSetCell / '
+        'dmSetState return when it is unchanged), dmLay sends the two EIs only when the width changed (dmLastSW; reset by init / a new resolution)')
     # every path of the layout exists on the timeline (or is a member the PC code makes)
     bad = []
     for path in rep['spec'].paths():
@@ -1439,6 +1590,10 @@ def check(o, data, out, rep, say):
             'the filter row %.0f px (the generated carved panel): weight | All, 7 filter tabs | sort, sort by | party view ... gold - one line of plates 41 -> %.0f px, '
             'none over another; our icons stand on the PC buttons they mean' % (e['FH'], 41 * e['SB']))
         h = dis('MainTimeline', 'dmHook'); wt = dis('MainTimeline', 'dmWTick'); ph = inv_geom(103, 1, 2400, 949)
+        ft_ = dis('MainTimeline', 'dmFTick')
+        say('tabList' in ft_ and 'select_mc' in ft_ and 'alpha' in ft_ and 'totalGold_mc' in ft_ and "'enterFrame'" in h and h.count('alpha') >= 6,
+            'phone bugs 5 / 6: the PC selects EVERY filter tab for "All" - dmFTick shows that as the All plate red and no tab red (select_mc alpha: isSelected '
+            'reads visible), one filter = only its tab red; the PC sort plates hidden and alpha 0 (it re-shows them); the gold widget kept on')
         say(h.count('drawRect') == len(INV_ICON_BTN) and h.count("'text_txt'") == 0 and 41 * ph['SB'] >= 60 and "weight_txt" in wt and "'dmWeight_mc'" in wt,
             'phone bug 4 (owner 23.11: "All" drawn over the filter icons, icons and sort buttons tiny): the All / sort / sort by buttons lose their PC plate and '
             'label (dmHook), get a 41 own hit rectangle under our icon; on the phone a plate is %.0f px (was 42 / 29); the weight sits in the row (dmWTick copies '
@@ -1468,20 +1623,31 @@ def check(o, data, out, rep, say):
             'grid: margin %d, gutter %d px; the doll column %.0f,%.0f %.0f x %.0f (doll x%.2f: a slot 64 -> %.0f px; iPad 422 x 678, slot 82), the right column x %.0f, %.0f wide' % (
             GM, GG, dl[0], dl[1], e['LW'], e['PH'], e['D'], 64 * e['D'], X + e['RX'], e['RW']))
         tb = w['stats_mc.tabsHolder_mc']['origin']; ci = w['stats_mc.charInfo_mc']['origin']; cl = box('close_mc.bg_mc'); tg = w[INV_BTN]['stage']
-        say(abs(tb[0] + CS_TABS_W / 2 * e['F'] - (X + e['RX'] + e['RW'] / 2)) < 1 and abs(ci[0] - (X + e['WW'] / 2)) < 1 and abs(cl[2] - cl[0] - CS_CLOSE) < 1 and
+        say(abs(tb[0] + CS_TABS_W / 2 * e['TK'] - (X + e['RX'] + e['RW'] / 2)) < 1 and abs(ci[0] - (X + e['WW'] / 2)) < 1 and abs(cl[2] - cl[0] - CS_CLOSE) < 1 and
             cl[2] <= X + e['WW'] and tg[0] >= X and tg[1] >= Y,
             'title bar: name - level centred (charInfo_mc at %.0f), close %.0f px at the right tile (hit x2: %.0f px), the sheet <-> inventory button %.0f px on the left tile; '
             'the 5 tabs x%.2f (a tab %.0f x %.0f px) centred over the panel, the tab title on the plaque under them' % (
-            ci[0], cl[2] - cl[0], 2 * (cl[2] - cl[0]), tg[2] - tg[0], e['F'], 76 * e['F'], 56 * e['F']))
+            ci[0], cl[2] - cl[0], 2 * (cl[2] - cl[0]), tg[2] - tg[0], e['TK'], 76 * e['TK'], 56 * e['TK']))
         ih = w['stats_mc.equip_mc.infoStatHolder_mc']['origin']
         say(X + e['LX'] < ih[0] < X + e['LX'] + 30 * e['F'] and Y + e['CT'] < ih[1] < Y + e['CT'] + e['IH'] and e['SI'] * INFO_W <= e['LW'] - 16 * e['F'] + 0.01,
             'HP / AP / Source (the PC\'s infoStatList, type 0 of addSecondaryStat; equip_mc.infoStatHolder_mc) in the box of row A over the doll: rows of %.0f px, x%.2f (iPad: 3 rows of 36 px top left)' % (
             26 * e['SI'], e['SI']))
+        tb_ = w['stats_mc.tabsHolder_mc']['origin']; trin = (Y + e['CT'] + TRAY_FRM * e['F'], Y + e['CT'] + e['TRH'] - TRAY_FRM * e['F'])
+        tt_ = dis('StatsTabButton', 'onMouseOver')
+        say(trin[0] <= tb_[1] and tb_[1] + 56 * e['TK'] <= trin[1] + 0.5 and abs(e['QY'] - (e['CT'] + e['TRH'] - TRAY_HANG * e['F'])) < 0.01 and
+            e['QY'] + SA_PLAQUE[3] * e['QK'] <= e['CT'] + e['IH'] + 0.5 and 'dmOverOrig' in tt_ and 'tooltip' in tt_,
+            'phone 23.11 night: the 5 tabs (at y 0 of their list - selectedTabY / deselectedTabY move only the icon) inside the tray\'s carved edge '
+            '(tabs %.0f..%.0f, inner %.0f..%.0f px), the plaque hangs from the tray\'s bottom edge; the tab hover tooltip is off (StatsTabButton.onMouseOver '
+            'runs with its tooltip emptied)' % (tb_[1], tb_[1] + 56 * e['TK'], trin[0], trin[1]))
+        dg = dis('MainTimeline', 'dmStripDiag'); stk_ = dis('MainTimeline', 'dmStripTick')
+        say("'UIAssert'" in dg and 'secondaryStatList' in dg and 'dmStripDiag' in stk_ and 'dmStN' in stk_,
+            'phone bug 3 again (the strip still empty): dmStripDiag - %d frames into each stay in state 1, UIAssert("dmStrip st=.. msv=.. msx=.. secn=.. resn=.. X=.. W=.. A=..") '
+            'once (an EI name of the PC LS_Classes and main.raw; the host\'s EI log writes the first call with its arguments)' % STRIP_DIAG_FRAME)
         # phone 23.11 evening, bugs 1 / 2: the points frame sat on the HP box and the plaque was empty
         pf = w['stats_mc.pointsFrame_mc']['origin']; tt = w['stats_mc.tabTitle_txt']['origin']; pcx = X + e['RX'] + e['RW'] / 2
         ip = dis('stats_1', 'INTSetWarnAndPoints'); lay = dis('MainTimeline', 'dmLay')
-        say('dmPfOrig' in ip and 'PointsFrameW' in ip and 'dmPfC' in ip and 'dmPfHalf' in ip and 'dmPfHalf' in lay and abs(pf[0] - (pcx - PF_HALF0 * e['F'])) < 1 and
-            abs(tt[0] + 165 * e['F'] - pcx) < 1 and Y + e['QY'] <= pf[1] <= Y + e['QY'] + SA_PLAQUE[3] * e['F'] and Y + e['QY'] <= tt[1] <= Y + e['QY'] + SA_PLAQUE[3] * e['F'],
+        say('dmPfOrig' in ip and 'PointsFrameW' in ip and 'dmPfC' in ip and 'dmPfHalf' in ip and 'dmPfHalf' in lay and abs(pf[0] - (pcx - PF_HALF0 * e['QK'])) < 1 and
+            abs(tt[0] + 165 * e['QK'] - pcx) < 1 and Y + e['QY'] <= pf[1] <= Y + e['QY'] + SA_PLAQUE[3] * e['QK'] and Y + e['QY'] <= tt[1] <= Y + e['QY'] + SA_PLAQUE[3] * e['QK'],
             'phone bugs 1 / 2: the tab title and the points frame that REPLACES it (INTSetAvailablePointsVisible) both centred on the plaque: INTSetWarnAndPoints = original '
             '(x = PointsFrameW 160 - half its content, a const) + re-centre on dmPfC at its scale (dmPfHalf kept for dmLay); the box at the top of the phone shot was the tab\'s hover tooltip')
         sv = dis('MainTimeline', 'dmStripVis'); stk = dis('MainTimeline', 'dmStripTick'); hk = dis('MainTimeline', 'dmHook')
@@ -1516,9 +1682,9 @@ def check(o, data, out, rep, say):
         say(not bad, 'the window, its title bar, the HP box and the doll stand in the SAME place at the same size on the sheet and in the inventory window (state 1) for every cell / screen%s' % (
             '' if not bad else ': NOT ' + str(bad)))
         ph = cs_geom(103, 0, 2400, 949)
-        say(26 * ph['S'] >= 43.5 and 64 * ph['D'] >= 64 and 76 * ph['F'] >= 95 and ph['WY'] + ph['WH'] <= 949,
+        say(26 * ph['S'] >= 43.5 and 64 * ph['D'] >= 63 and 76 * ph['F'] * R(*TAB_K).ev({}) >= 85 and ph['WY'] + ph['WH'] <= 949,
             'phone (cell 103, 2400 x 1080, hot bar top 949): window %.0f x %.0f, stat row %.0f px, info row %.0f px, tab %.0f x %.0f, doll slot %.0f, close pad %.0f, + / - %.0f x %.0f px' % (
-            ph['WW'], ph['WH'], 26 * ph['S'], 26 * ph['SI'], 76 * ph['F'], 56 * ph['F'], 64 * ph['D'], 2 * CS_CLOSE, CS_PM_HIT[2] * ph['S'], CS_PM_HIT[3] * ph['S']))
+            ph['WW'], ph['WH'], 26 * ph['S'], 26 * ph['SI'], 76 * ph['F'] * R(*TAB_K).ev({}), 56 * ph['F'] * R(*TAB_K).ev({}), 64 * ph['D'], 2 * CS_CLOSE, CS_PM_HIT[2] * ph['S'], CS_PM_HIT[3] * ph['S']))
         geom, wown = cs_geom, CS_W
     # the fit: every cell the host may ask, every screen, both states
     for st, what in (((1, 'the inventory window'),) if o == 'partyInventory_p.swf' else ((0, 'the sheet'), (1, 'the inventory window (this movie: frame, doll, strip)'))):
@@ -1564,7 +1730,7 @@ def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None, mock=True):
         if view == 'sheet' and o != 'characterSheet_p.swf': continue
         dta, rep = MAKE[o](src[SRC[o]], dict(C=C, ST=st, DW=DW, BT=BT)); e = rep['env']
         swf = Swf(dta)
-        if o == 'characterSheet_p.swf': tile_rects(swf, rep['rest'])
+        if o == 'characterSheet_p.swf': mask_rects(swf, rep['rest'])
         # what the PC code keeps hidden is not in the picture: the sort popup (until "sort by" is tapped), the game master's tabs of the sheet
         hide = ('sortBy_mc', 'sortByBg_mc') if o == 'partyInventory_p.swf' else ('invTabHolder_mc', 'customStats_mc', 'skillTabHolder_mc', 'panelBg2_mc', 'pointsFrame_mc')
         if o == 'partyInventory_p.swf':   # dmHook's run-time hiding (the PC art under our icons, the widget labels, the party view's label)
@@ -1591,26 +1757,36 @@ def picture(src, view, C, DW, grid=True, BT=BOTTOM0, base=None, mock=True):
     return img, '%s, cell asked %d, screen %d x 1080: %s' % (view, C, DW, '; '.join(note))
 
 
-def tile_rects(swf, rest):
-    """the picture only (the renderer has no scrollRect): every damask group cut by dmLay's scrollRect x, y, w, h gets its tile shape remade
-    as a w x h rectangle with the fill moved by -x, -y - what the scrollRect shows, the pattern fixed in window px"""
-    mv = gr.Movie(swf)
+def mask_rects(swf, rest):
+    """the picture only (the renderer has no scrollRect): every damask group cut by dmLay's scrollRect x, y, w, h stands at 0, 0 with a clip
+    layer (a w x h rectangle at x, y) over its tiles - what the scrollRect shows"""
+    import dos2_touchart as ta
     for r in rest:
-        if r[0] != 'rect' or not r[1] or r[1][-1][0] != 'nm' or not r[1][-1][1].startswith('k'): continue
+        if r[0] != 'rect' or not r[1] or r[1][-1][0] != 'nm' or r[1][-1][1] not in DK_GROUPS: continue
         x, y, w, h = r[2]; sp, dep = _resolve(swf, r[1])
-        grp = gr.frame_state(swf.tags[_def_index(swf, sp)][1], 1)[dep]['char']
-        sid = list(gr.frame_state(swf.tags[_def_index(swf, grp)][1], 1).values())[0]['char']
-        n = _def_index(swf, sid); code, d, _ = swf.tags[n]
-        import dos2_swf_render as rn
-        bid = rn.parse_shape(d, gr.T_SHAPES[code])[0][1][1]
-        W, H = int(max(1, w) * 20), int(max(1, h) * 20)
-        def nb(*v): return max(2, max(abs(int(q)).bit_length() for q in v) + 1)
-        fill = b'\x01\x40' + struct.pack('<H', bid) + gr.matrix_bytes(-x, -y, 20.0 * TILE_K, 20.0 * TILE_K)
-        rec = [(0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (1, 1), (2, 5), (0, 2), (0, 2), (1, 1)]
-        for ex, ey in ((W, 0), (0, H), (-W, 0), (0, -H)):
-            k = nb(ex, ey); rec += [(1, 1), (1, 1), (k - 2, 4), (1, 1), (ex, k), (ey, k)]
-        rec += [(0, 1), (0, 5)]; k = nb(W, H)
-        swf.tags[n] = [2, struct.pack('<H', sid) + gr.wbits([(k, 5), (0, k), (W, k), (0, k), (H, k)]) + fill + b'\x00' + bytes([0x10]) + gr.wbits(rec), False]
+        g = gr.Graft(swf); sid, _ = ta.poly_shape(g, [(x, y), (x + max(1, w), y), (x + max(1, w), y + max(1, h)), (x, y + max(1, h))], (0, 0, 0)); g.finish()
+        sp, dep = _resolve(swf, r[1]); grp = gr.frame_state(swf.tags[_def_index(swf, sp) if sp else 0][1], 1) if sp else None
+        name = r[1][-1][1]
+        def at0(nm, rec):
+            if nm == name: _set(rec, x=0, y=0)
+        edit_places(swf, sp, at0)
+        gid = [rec['char'] for nm, rec in ((n_, r_) for n_, r_ in _named(swf, sp).items()) if nm == name][0]
+        n = _def_index(swf, gid); d = swf.tags[n][1]; o = d[:4]
+        mrec = dict(depth=1000, char=sid, matrix=gr.matrix_bytes(0, 0), cx=None, ratio=None, name=None, clip=struct.pack('<H', 2000), cls=None, f2=0, rest3=b'', move=False,
+                    v3=False, actions=None)
+        o += gr.tag_bytes(*gr.place_build(mrec))
+        for code, tt in gr.subtags(d):
+            if code in (gr.T_PLACE2, gr.T_PLACE3):
+                rr = gr.place_parse(code, tt); rr['depth'] += 1000; code, tt = gr.place_build(rr)
+            o += gr.tag_bytes(code, tt)
+        swf.tags[n][1] = o
+
+
+def _named(swf, sprite):
+    out = {}
+    for rec in (gr.frame_state(swf.tags[_def_index(swf, sprite)][1], 1).values() if sprite is not None else _recs(swf, None).values()):
+        if rec['name']: out[rec['name'][:-1].decode()] = rec
+    return out
 
 
 def _font(px):
@@ -1690,14 +1866,15 @@ def mock_sheet(img, swf, e):
         cid = [c for c, n in mv.classes.items() if n.split('.')[-1] == name][0]; im, org = rn.render(swf, cid, k, frame)
         img.alpha_composite(im, (int(X + x + org[0] * k), int(Y + y + org[1] * k)))
     F, S, SI = e['F'], e['S'], e['SI']
-    for i in range(5):   # tab 0 selected (its plate tinted red in the movie), the others their plain plate; icons frames 1..5
-        tx, ty = e['TX'] + 66 * i * F, e['TY'] + (23 if i == 0 else 21) * F
-        if i == 0: sym('StatsTabButton', F, tx, ty)
-        else: sym('statsTabsBG_79', F, tx + 7 * F, ty)
-        sym('tabIcons_81', F, tx + 38 * F, ty + 21 * F, i + 1)
+    TK = e['TK']
+    for i in range(5):   # tab 0 selected (its plate tinted red in the movie), the others their plain plate; a tab at y 0 of its list, its icon at 23 / 21
+        tx, ty = e['TX'] + 66 * i * TK, e['TY']
+        if i == 0: sym('StatsTabButton', TK, tx, ty)
+        else: sym('statsTabsBG_79', TK, tx + 7 * TK, ty)
+        sym('tabIcons_81', TK, tx + 38 * TK, ty + (23 if i == 0 else 21) * TK, i + 1)
     mock_info(img, swf, e)
     ft = font(26 * F); dr.text((X + e['WW'] / 2, Y + 35 * F), 'FANE - LEVEL 1', font=ft, fill=(220, 210, 190, 255), anchor='mm')
-    dr.text((X + e['RX'] + e['RW'] / 2, Y + e['QY'] + 24 * F), 'Attributes', font=ft, fill=(220, 210, 190, 255), anchor='mm')
+    dr.text((X + e['RX'] + e['RW'] / 2, Y + e['QY'] + 24 * e['QK']), 'Attributes', font=_font(26 * e['QK']), fill=(220, 210, 190, 255), anchor='mm')
     fs = font(19 * S); ink = (60, 40, 30, 255)
     def rows(x, y, labels, pitch):
         for r, lab in enumerate(labels):

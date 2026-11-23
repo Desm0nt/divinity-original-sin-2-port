@@ -75,7 +75,7 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
   python -I tools/dos2_pchud_touch.py mock  <Switch Game.pak | dir> <out.png> [--w 2400]   the computed layout drawn from the movies' own
         symbols at the positions the patched code sets (a picture of the NUMBERS, not a played movie)
 """
-import hashlib, os, struct, sys
+import hashlib, math, os, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dos2_abc import Swf, Trait, asm, verify_all, NS_PUBLIC, MN_MULTIL
@@ -154,14 +154,16 @@ MM_MOVE = [('hit_mc', -42, 29), ('map_mc', -42, 29), ('tension_mc', -42, 29), ('
 # input event on the Switch (only the controller tutorial TUT_ActiveSearchInterface_Controller): left out.
 MM_RING = (227, 187)             # the ring's centre after MM_MOVE (old-frame stage px: x of a 420 stage)
 def _arc(r, deg): import math; return (MM_RING[0] + r * math.cos(math.radians(deg)), MM_RING[1] + r * math.sin(math.radians(deg)))
-MM_TGL = 77                      # the view button and the toggles (iPad 67; owner 23.11: 64 -> 77, +20 %): plate_round_copper, glyph GLYPH of it
+MM_TGL = 90                      # the view button and the toggles (iPad 67; owner 23.11: 64 -> 77 -> 90 "a bit bigger"): plate_round_copper, glyph GLYPH
+MM_SMALL = 72                    # info / quick save (62 -> 72)
+MM_RING_R = 130                  # the ring's radius (the map mask 260): no button drawing and no hit of ours inside it (the map's own tap)
 # name, code (10 + dmKey n = the host; 20 = the arc, 21 = the names), icon, centre x, y, size, the host's state bit (0 = none)
-MM_BTNS = [('dmMmView_mc', 20, 'icon_view', 66, 188, MM_TGL, 0)] + [
+MM_BTNS = [('dmMmView_mc', 20, 'icon_view') + _arc(MM_RING_R + MM_TGL / 2.0 + 6, 180) + (MM_TGL, 0)] + [
     (n, c, i) + _arc(285, deg) + (MM_TGL, b) for n, c, i, deg, b in (
         ('dmMmT1_mc', 12, 'icon_tactical_s', 195, 1), ('dmMmT2_mc', 13, 'icon_labels', 165, 2),
         ('dmMmT3_mc', 14, 'icon_cones', 135, 4), ('dmMmT4_mc', 15, 'icon_camlock', 105, 8))] + [
-    ('dmMmInfo_mc', 21, 'icon_info') + _arc(215, 226) + (62, 0),
-    ('dmMmSave_mc', 11, 'icon_save', 355, 187, 62, 0)]   # quick save: the iPad's quickSaveBtn_mc 1351..1399 (48) on the ring's right edge
+    ('dmMmInfo_mc', 21, 'icon_info') + _arc(205, 226) + (MM_SMALL, 0),   # r 205: its top stays on the stage (y 3)
+    ('dmMmSave_mc', 11, 'icon_save', 355, 187, MM_SMALL, 0)]   # quick save: the iPad's quickSaveBtn_mc 1351..1399 (48) on the ring's right edge
 MM_ARC = ['dmMmT1_mc', 'dmMmT2_mc', 'dmMmT3_mc', 'dmMmT4_mc', 'dmMmInfo_mc']   # shown while the view menu is open
 MM_LBL = [('dmMmL1_mc', 'dmMmT1_mc', 'Tactical camera', 'Тактическая камера'), ('dmMmL2_mc', 'dmMmT2_mc', 'Item labels', 'Подписи предметов'),
           ('dmMmL3_mc', 'dmMmT3_mc', 'Sight cones', 'Конусы обзора'), ('dmMmL4_mc', 'dmMmT4_mc', 'Camera lock', 'Фиксация камеры')]
@@ -170,8 +172,18 @@ MM_STATE = 100                   # setBtnVisible(MM_STATE + bits, ..) from the h
 MM_W = 420                       # the PC stage width; every number here is in it (the iPad's place: the ring centred ~194 px from the right edge)
 MM_GROW = 360                    # the stage grows this much to the LEFT (every root child shifted +MM_GROW at init): the arc and its names
                                  # reach x -330 of the old frame; the screen place of everything stays W - (MM_W - x)
-MM_PAD = [('pingButton_mc', 64), ('homestead_mc', 64), ('dmMmView_mc', 130), ('dmMmT1_mc', 150), ('dmMmT2_mc', 150), ('dmMmT3_mc', 150),
-          ('dmMmT4_mc', 150), ('dmMmInfo_mc', 100), ('dmMmSave_mc', 86)]   # owner 23.11: labels / cones still hard to hit -> toggles 30 deg apart
+MM_PAD = [('pingButton_mc', 64), ('homestead_mc', 64)]   # the PC ring buttons' finger pads; ours have no pads: one hit area, nearest button
+# Phone 23.11 (53 measured presses, 60 % worked): 13 failed because the finger was held (the host's short long press releases off the element,
+# its long press is a right click) - our buttons acted on the release; 8 landed between buttons, outside every fixed pad. Owner: "tap on, tap
+# off, no holding". Now ONE transparent hit area dmMmHit_mc (just below the PC ping / home buttons, above the map): while the menu is open an
+# annular sector around the ring (MM_RING_R .. MM_HIT_R, MM_HIT_DEG) - the ring itself stays the map's - plus a square on the quick save; while
+# closed a square on the view button and the save square. A PRESS there picks the nearest visible button within MM_PICK_R (Voronoi: the space
+# between buttons belongs to the nearest) and acts at once (dmBAct); the release only ends the press look. Our buttons take no mouse.
+MM_PICK_R = 115
+MM_HIT_R = 285 + MM_PICK_R
+MM_HIT_DEG = (82, 256)           # T4 at 105 - 23 deg (115 px at r 285) .. info at 226 + 30 deg (115 px at r 215)
+MM_HIT_SAVE = 86                 # the save square (its old pad: it sits on the ring's rim, as the iPad's)
+MM_HIT_VIEW = 130                # the view button's square while the menu is closed   # owner 23.11: labels / cones still hard to hit -> toggles 30 deg apart
                                  # on r 285 (centres 148 px apart), pads 150 (~12 mm at the phone's x1.26)   # finger pads (transparent, stage px) around the small ring buttons
                                  # (48 / 64 drawn): the minimap stays at x 1 (owner 20.11), the touch target grows; the save pad stays off the ring
 # ---- status console (PC stage 1920 x 1080, anchored bottom; its own code already raises by bottomBarHeight 67)
@@ -203,12 +215,23 @@ SC_ARM = [('leftArmourBarHolder_mc', SC_GREY[1], -1), ('rightArmourBarHolder_mc'
 SC_ARM_S = (309 * SC_BAR_K / 198.0, 1.0)
 SC_ARM_TOP = SC_FOOT - 12
 SC_EXPLORE = 100                 # setBtnVisible(SC_EXPLORE, ..) from the host (hle_dos2_touchui_hud.c HU_SC_EXPLORE): out of combat, bars only
-SC_BTN_Y, SC_BTN_H = 875, 52                         # the text plates' row: the PC End turn plate's own 52 (iPad 879..923, 44 high)
+# One vertical stack above the bars, even gaps (owner 23.11, phone: "the turn plaque runs over the action points"): the PC resets the plaque
+# to its class const originalNotificationPosY (873) on every notice - our SC_UP raise was lost and the plaque's foot (873 + 22) covered the
+# dots (ap_mc at 888). Now: bars (top SC_HB[1]) - gap - ap_mc (its drawing 0..36: dots, studs, glow, the 7+ overflow 0..31) - gap - the plaque
+# (centred on its y, 43 high on the phone) with the const patched to SC_NOTICE_Y; the text plates' row ends with the AP row (the iPad: at the
+# dots' height). The PC's dark backing behind its old bar place (Console_1's unnamed shape #94, child 0: 500 x 35 at -250..250 x -54..-19 of
+# console_mc) was the black band above the red bar: hidden. The PC number fields go ON their bars (shown by the PC hover only).
+SC_STACK_GAP, SC_AP_H, SC_NOTICE_HALF = 8, 36, 22
+SC_AP_Y = SC_HB[1] - SC_STACK_GAP - SC_AP_H                 # 900
+SC_NOTICE_Y = SC_AP_Y - SC_STACK_GAP - SC_NOTICE_HALF       # 870: the plaque 848..892
+SC_BTN_H = 52                                               # the PC End turn plate's own 52 (iPad 879..923, 44 high)
+SC_BTN_Y = SC_AP_Y + SC_AP_H - SC_BTN_H                     # 884: the plates' feet on the AP row's foot (936)
+SC_TXT = [('hbTxt_mc', SC_RED, 470, SC_FOOT - 8), ('abTxt_mc', SC_GREY, 225, SC_FOOT - 6), ('mabTxt_mc', SC_BLUE, 225, SC_FOOT - 6)]   # field, its bar, width, centre y
 SC_END_X = 1272                                      # endBtn_mc (204 x 52, the engine's caption): iPad endBtn_mc 1272..1478
-SC_PLATES = [('dmWait_mc', 1, 352, 'Delay Turn', 'Отложить ход'), ('dmFlee_mc', 2, 552, 'Flee', 'Бежать')]   # name, code, x; captions: the game's
+SC_PLATES = [('dmWait_mc', 1, 328, 'Delay Turn', 'Отложить ход'), ('dmFlee_mc', 2, 528, 'Flee', 'Бежать')]   # name, code, x; captions: the game's
 SC_PLATE_W, SC_FONT = 192, 22                        # own words (english.xml h157c01cd.. "Delay Turn", russian.xml hcf2cc556.. "Отложить ход", hb399d83e.. Flee / Бежать)
 SC_FIT_MIN = 14                  # captions shrink (TextFormat size) until they fit the plate's inner width, not below this
-SC_PAD = (8, 24, 14)                                 # the plates' finger pads: px past the drawing left / right, above, below (90 high: ~7.4 mm at the
+SC_PAD = (8, 24, 6)                                 # the plates' finger pads: px past the drawing left / right, above, below (90 high: ~7.4 mm at the
                                                      # phone's x1.26; never over the hot bar 955 below, under the hint banner's foot 850 above)
 # ---- the right side (rightSideButtons_t: stage 1440 x 1080 anchored right; here the last SIDE_W px of it)
 SIDE_W, SIDE_H = 140, 1080       # frame, anchored topright (the physical scale grows it from the corner: the iPad's places, owner 20.11)
@@ -694,6 +717,12 @@ def dmVis(on):
     h = this.hotbar_mc.hotkeys_mc
     if h:
         h.visible = False
+    h = this.showLog_mc
+    if h:
+        h.visible = False
+    h = this.endPiece_mc
+    if h:
+        h.visible = False
     m = this.getChildByName('dmChat_mc')
     if m:
         m.visible = on == True
@@ -703,7 +732,9 @@ def dmVis(on):
 ''' % ((SLOTS,) + ((PLATE - PLATE_PAD) // 2, (PLATE - PLATE_PAD) // 2, PLATE_PAD, PLATE_PAD) * 2), {'textEffect': ('lex', d.lex('textEffect')), 'CONF_RU': ('const', CONF_RU), 'HINT_RU': ('const', HINT_RU)})
     # phone 23.11 ("a padlock hangs over the skill bar and never goes"): the engine's showSkillBar(true) runs the PC bottombar.showSkillBar,
     # which sets .visible = true on every element of its skillBar list - lockButton_mc (moved into the deck list) and hotkeys_mc among them.
-    # After the original our visibility is put back: the lock only with the open list, no slot numbers, the plates follow the bar
+    # After the original our visibility is put back: the lock only with the open list, no slot numbers, the plates follow the bar.
+    # Phone 23.11 (combat shot): MainTimeline.showSkillBar also sets showLog_mc.visible / endPiece_mc.visible = on - the PC combat log tab
+    # (crossed swords, 1876,874: "a small button right of our log plate") came back at its PC place; dmLog_mc covers it: hidden again
     d.wrap('showSkillBar', 'dmSsbOrig', lambda n: HEAD + d.call_orig('dmSsbOrig', n) + [('getlocal0',), ('getlocal1',), ('callpropvoid', P('dmVis'), 1), ('returnvoid',)])
     # the language of our words: a Cyrillic letter in the tooltips the engine gives (setFixedBtnTooltips: chat / log / deck arrows; the lock's)
     d.wrap('setFixedBtnTooltips', 'dmFbtOrig', lambda n: HEAD + d.call_orig('dmFbtOrig', n) + [('getlocal0',), ('getlocal2',), ('callpropvoid', P('dmLang'), 1), ('returnvoid',)])
@@ -835,6 +866,7 @@ def mm_art(swf):
     """the minimap's buttons (MM_BTNS: round copper plates, our glyphs, an 'on' ring on the toggles / the view button) and the names (MM_LBL)"""
     swf.head = rect_bytes(MM_W + MM_GROW, 2000) + swf.head[-4:]   # the stage grows to the left; onEventInit shifts every root child by MM_GROW
     g = gr.Graft(swf); art = ta.Art(g); placed = []; ons = {}
+    g.place(g.sprite([]), 0, 0, 'dmMmHit_mc')   # the one hit area (dmMmHitDraw draws it; dmMmHook puts it just below the PC ping / home)
     for name, code, icon, cx, cy, size, bit in MM_BTNS:
         on = None
         if bit or code in (20, 21):
@@ -878,7 +910,89 @@ def _mm_code():
         n = o.getChildByName('txt')
         if n:
             n.text = '%s\'''' % (l[0], l[3]) for l in MM_LBL)
-    return '''
+    hook = ''.join('''
+    o = this.getChildByName('%s')
+    if o:
+        o.dmCode = %d
+        o.mouseEnabled = False
+        o.mouseChildren = False''' % (b[0], b[1]) for b in MM_BTNS)
+    pick = ''.join('''
+    o = this.getChildByName('%s')
+    if o:
+        if o.visible:
+            dx = x - %r
+            dy = y - %r
+            d = dx * dx + dy * dy
+            if d < bd:
+                bd = d
+                best = o''' % (b[0], b[3], b[4]) for b in MM_BTNS)
+    a0, a1 = MM_HIT_DEG; n = 30
+    pts = [(MM_RING[0] + MM_HIT_R * math.cos(math.radians(a0 + (a1 - a0) * k / float(n))), MM_RING[1] + MM_HIT_R * math.sin(math.radians(a0 + (a1 - a0) * k / float(n)))) for k in range(n + 1)]
+    pts += [(MM_RING[0] + MM_RING_R * math.cos(math.radians(a1 - (a1 - a0) * k / float(n))), MM_RING[1] + MM_RING_R * math.sin(math.radians(a1 - (a1 - a0) * k / float(n)))) for k in range(n + 1)]
+    sector = '''
+        g.moveTo(%r, %r)''' % (round(pts[0][0], 1), round(pts[0][1], 1)) + ''.join('''
+        g.lineTo(%r, %r)''' % (round(x, 1), round(y, 1)) for x, y in pts[1:] + pts[:1])
+    vw = next(b for b in MM_BTNS if b[1] == 20); sv = next(b for b in MM_BTNS if b[0] == 'dmMmSave_mc')
+    view_sq = (vw[3] - MM_HIT_VIEW / 2.0, vw[4] - MM_HIT_VIEW / 2.0, MM_HIT_VIEW, MM_HIT_VIEW)
+    save_sq = (sv[3] - MM_HIT_SAVE / 2.0, sv[4] - MM_HIT_SAVE / 2.0, MM_HIT_SAVE, MM_HIT_SAVE)
+    hit = '''
+def dmMmHook():%s
+    h = this.getChildByName('dmMmHit_mc')
+    if not h:
+        return
+    i = this.getChildIndex(h)
+    p = this.pingButton_mc
+    if p:
+        k = this.getChildIndex(p)
+        if k < i:
+            i = k
+    p = this.homestead_mc
+    if p:
+        k = this.getChildIndex(p)
+        if k < i:
+            i = k
+    this.setChildIndex(h, i)
+    h.addEventListener('mouseDown', this.dmMmPick)
+def dmMmHitDraw(a, vis):
+    h = this.getChildByName('dmMmHit_mc')
+    if not h:
+        return
+    g = h.graphics
+    g.clear()
+    if not vis:
+        return
+    g.beginFill(0, 0)
+    if a:%s
+    else:
+        g.drawRect(%r, %r, %r, %r)
+    g.endFill()
+    g.beginFill(0, 0)
+    g.drawRect(%r, %r, %r, %r)
+    g.endFill()
+def dmMmPick(e):
+    h = this.getChildByName('dmMmHit_mc')
+    x = h.mouseX
+    y = h.mouseY
+    best = None
+    bd = %d%s
+    if not best:
+        return
+    best.alpha = 0.6
+    this.dmMmDim = best
+    s = this.stage
+    if s:
+        s.addEventListener('mouseUp', this.dmMmUp)
+    this.dmBAct(best.dmCode)
+def dmMmUp(e):
+    o = this.dmMmDim
+    if o:
+        o.alpha = 1
+    this.dmMmDim = None
+    s = this.stage
+    if s:
+        s.removeEventListener('mouseUp', this.dmMmUp)
+''' % ((hook, sector) + view_sq + save_sq + (MM_PICK_R * MM_PICK_R, pick))
+    return hit + '''
 def dmMmGrow():
     i = 0
     k = this.numChildren
@@ -918,6 +1032,7 @@ def dmMmShow():
     o = this.getChildByName('dmMmSave_mc')
     if o:
         o.visible = vis
+    this.dmMmHitDraw(a, vis)
 def dmMmState(b):
     this.dmBits = b%s
 def dmMmLang(t):
@@ -955,8 +1070,9 @@ def minimap(data):
     act = lambda d: [('getlocal1',), ('pushbyte', 20), ('ifne', 'n20')] + lines(d, 'dmMmArc') + click(d) + [('returnvoid',), ('L', 'n20'),
                      ('getlocal1',), ('pushbyte', 21), ('ifne', 'n21')] + lines(d, 'dmMmInfo') + click(d) + [('returnvoid',), ('L', 'n21')]
     ipre = lambda d: lines(d, 'dmMmGrow')
-    ipost = lambda d: lines(d, 'dmMmShow') + lines(d, 'dmMmState', [('pushbyte', 0)])
-    return moved(data, MM_MOVE, ('hit_mc', 2), [b[:6] for b in MM_BTNS], MM_PAD, art=mm_art, act_pre=act, init_pre=ipre, init_post=ipost, setup=setup)
+    ipost = lambda d: lines(d, 'dmMmHook') + lines(d, 'dmMmShow') + lines(d, 'dmMmState', [('pushbyte', 0)])
+    # our buttons are not armed (no press / release listeners): dmMmHook gives them their codes, the hit area dmMmHit_mc acts on the press
+    return moved(data, MM_MOVE, ('hit_mc', 2), [], MM_PAD, art=mm_art, act_pre=act, init_pre=ipre, init_post=ipost, setup=setup)
 
 
 
@@ -991,6 +1107,11 @@ def _sc_code():
         a.y = %r
         a.scaleX = %r
         a.scaleY = %r''' % (n, x - ox, SC_ARM_TOP - oy, sg * SC_ARM_S[0], SC_ARM_S[1]) for n, x, sg in SC_ARM)
+    txt = ''.join('''
+    f = c.%s
+    if f:
+        f.x = %r
+        f.y = %r''' % (n, (bar[0] + bar[1]) / 2.0 - w / 2.0 - ox, cy - 11 - oy) for n, bar, w, cy in SC_TXT)
     fit = ''.join('''
     m = this.getChildByName('%s')
     if m:
@@ -1035,6 +1156,9 @@ def dmScBars():
     if not c:
         return
     c.frame_mc.visible = False
+    b = c.getChildAt(0)
+    if b:
+        b.visible = False%s
     h = c.hbHolder_mc
     if h:
         h.x = %r
@@ -1069,7 +1193,13 @@ def dmScMode():
             n.visible = False
     this.dmScVis()
 def dmScLay():
-    this.dmScBars()%s
+    this.dmScBars()
+    a = this.console_mc.ap_mc
+    if a:
+        a.y = %r
+    n = this.turnNotice_mc
+    if n:
+        n.y = %r%s
     f = this.fightButtons_mc
     if not f:
         return
@@ -1116,7 +1246,7 @@ def dmScLang(t):
         i = i + 1
     if not ru:
         return%s
-''' % (SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], arm, SC_FIT_MIN, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
+''' % (txt, SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], arm, SC_FIT_MIN, SC_AP_Y - oy, SC_NOTICE_Y, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
        SC_BTN_H + SC_PAD[1] + SC_PAD[2], hook, vis, lang)
 
 
@@ -1124,6 +1254,9 @@ def status(data):
     """the PC status console raised by SC_UP; in touch the iPad's combat row (SC_*): bars on the hot bar, Wait / Flee / End turn as text plates"""
     def setup(d):
         P = d.P
+        tc = d.abc.trait(d.ci, 'originalNotificationPosY'); assert tc is not None and tc.kind & 15 == 6 and tc.vkind == 6, 'originalNotificationPosY: a Number const'
+        assert struct.unpack('<d', d.abc.doubles[tc.vindex])[0] == 873.0, 'originalNotificationPosY is not 873'
+        d.abc.doubles.append(struct.pack('<d', float(SC_NOTICE_Y))); tc.vindex = len(d.abc.doubles) - 1
         press_code(d, [('getlocal0',), ('getlocal1',), ('callpropvoid', P('dmScAct'), 1)])   # the plates: press dims, release on the plate acts
         d.kc(_sc_code())
         # the PC's own visibility / disabled calls drive the plates (combat only, as the PC duo buttons); setBtnText(0, caption) -> language
@@ -1242,7 +1375,7 @@ def check(src):
             t = dis('dmPads'); say('dmPads' in dis('dmHook') and 'drawRect' in t and (PLATE_PAD - PLATE) // 2 < GAP, 'chat / log finger pads %d x %d (drawing %d), they stop short of the bar' % (PLATE_PAD, PLATE_PAD, PLATE))
             t = dis('dmSlotsCut'); say("'slot'" in t and 'visible' in t and 'dmSlotsCut' in dis('dmHook'), 'slots 13.. hidden (the actions button sits where the 13th was)')
             t = dis('showSkillBar'); tv = dis('dmVis')
-            say('dmSsbOrig' in t and 'dmVis' in t and 'dmDeckShow' in tv and 'hotkeys_mc' in tv and 'dmChat_mc' in tv,
+            say('dmSsbOrig' in t and 'dmVis' in t and 'dmDeckShow' in tv and 'hotkeys_mc' in tv and 'dmChat_mc' in tv and 'showLog_mc' in tv and 'endPiece_mc' in tv,
                 'showSkillBar(on): the original (it sets visible on lockButton_mc / hotkeys_mc), then dmVis: the lock only with the open deck list, no slot numbers, the plates follow')
             t = dis('dmLang'); say('dmFbtOrig' in dis('setFixedBtnTooltips') and 'dmLang' in dis('setFixedBtnTooltips') and 'dmLang' in dis('setLockBtnTooltips') and 'charCodeAt' in t
                 and CONF_RU in t and HINT_RU in t, 'language: a Cyrillic letter in the engine tooltips -> %s / %s' % (CONF_RU, HINT_RU))
@@ -1298,17 +1431,28 @@ def check(src):
             xs = [p2[1] for p2 in rep['placed']]
             say(min(x[0] for x in xs) >= -MM_GROW and max(x[2] for x in xs) <= MM_W and min(x[1] for x in xs) >= 0,
                 'everything inside the grown stage: x %.0f..%.0f of -%d..%d, top %.0f' % (min(x[0] for x in xs), max(x[2] for x in xs), MM_GROW, MM_W, min(x[1] for x in xs)))
-            pads = dict(MM_PAD); clash = []
+            clash = []
             for i, a2 in enumerate(MM_BTNS):
                 for c2 in MM_BTNS[i + 1:]:
                     dd = ((a2[3] - c2[3]) ** 2 + (a2[4] - c2[4]) ** 2) ** 0.5
                     if dd < (a2[5] + c2[5]) / 2.0 + 8: clash.append('%s/%s %.0f' % (a2[0], c2[0], dd))
-            say(not clash and all(pads.get(b2[0], 0) >= b2[5] for b2 in MM_BTNS), 'buttons never touch (>= 8 px apart), every one has a finger pad >= its drawing%s' % (': ' + ', '.join(clash) if clash else ''))
+            onring = [b2[0] for b2 in MM_BTNS if b2[0] != 'dmMmSave_mc' and math.hypot(b2[3] - MM_RING[0], b2[4] - MM_RING[1]) - b2[5] / 2.0 < MM_RING_R]
+            say(not clash and not onring and all(b2[5] == (MM_TGL if b2[1] in (12, 13, 14, 15, 20) else MM_SMALL) for b2 in MM_BTNS),
+                'buttons: toggles / view %d, info / save %d, drawings >= 8 px apart, none over the ring (save on its rim, as the iPad)%s' % (MM_TGL, MM_SMALL, ': ' + ', '.join(clash + onring) if clash or onring else ''))
+            t = dis('dmMmPick'); th = dis('dmMmHook'); tw = dis('dmMmHitDraw')
+            say((b'dmMmHit_mc\0') in names and 'mouseDown' in th and 'setChildIndex' in th and 'pingButton_mc' in th and 'mouseEnabled' in th and "'dmBDown'" not in th
+                and 'dmBAct' in t and 'mouseUp' in t and 'alpha' in t and str(MM_PICK_R * MM_PICK_R) in t and 'dmMmHitDraw' in dis('dmMmShow') and 'lineTo' in tw and 'clear' in tw,
+                'one hit area under the PC ping / home: a PRESS picks the nearest visible button within %d px and acts at once (the release only ends the press look); '
+                'open: the sector r %d..%d, %d..%d deg + the save square %d; closed: the view square %d + save' % (MM_PICK_R, MM_RING_R, MM_HIT_R, MM_HIT_DEG[0], MM_HIT_DEG[1], MM_HIT_SAVE, MM_HIT_VIEW))
+            import itertools
+            far = [b2[0] for b2 in MM_BTNS if b2[0] not in ('dmMmSave_mc',) and b2[1] != 20 and not (MM_HIT_DEG[0] <= (math.degrees(math.atan2(b2[4] - MM_RING[1], b2[3] - MM_RING[0])) % 360) <= MM_HIT_DEG[1]
+                   and MM_RING_R < math.hypot(b2[3] - MM_RING[0], b2[4] - MM_RING[1]) + MM_PICK_R and math.hypot(b2[3] - MM_RING[0], b2[4] - MM_RING[1]) + 45 <= MM_HIT_R)]
+            say(not far and min(MM_RING[0] - MM_HIT_R, 0) >= -MM_GROW, 'every arc button lies inside the hit sector, the sector inside the grown stage (x >= %d)%s' % (MM_RING[0] - MM_HIT_R, ': ' + ', '.join(far) if far else ''))
             t = dis('dmMmState'); say('dmSbvOrig' in dis('setBtnVisible') and str(MM_STATE) in dis('setBtnVisible') and 'alpha' in t and "'on'" in t,
                 'state from the host: setBtnVisible(%d + bits) -> the "on" ring + full glyph (off: glyph 55 %%); bits 1 tactical, 2 labels, 4 cones, 8 camera lock' % MM_STATE)
             say('dmSmmOrig' in dis('showMiniMap') and 'dmMmShow' in dis('showMiniMap') and 'dmSbtOrig' in dis('setBtnTooltip') and 'dmMmLang' in dis('setBtnTooltip'),
                 "showMiniMap hides / shows our buttons too; setBtnTooltip -> the names' language")
-            say('drawRect' in dis('onEventInit') and all(n in dis('onEventInit') for n, _ in MM_PAD), 'finger pads: %s' % ', '.join('%s %d' % p2 for p2 in MM_PAD))
+            say('drawRect' in dis('onEventInit') and all(n in dis('onEventInit') for n, _ in MM_PAD), 'PC ring buttons\' finger pads: %s' % ', '.join('%s %d' % p2 for p2 in MM_PAD))
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
@@ -1329,6 +1473,12 @@ def check(src):
             say(str(SC_EXPLORE) in t and 'dmExplore' in t and 'dmScMode' in t and 'dmExplore' in dis('setCombatTurnNotification') and 'fightButtons_mc' in tm and 'ap_mc' in tm
                 and 'turnNotice_mc' in tm and 'dmExplore' in dis('dmScVis'),
                 'out of combat: the host shows the object again and sends setBtnVisible(%d) = bars only (fight buttons, AP, turn plaque, plates hidden); a fight button shown / a turn notice = combat' % SC_EXPLORE)
+            t = dis('dmScBars'); tl = dis('dmScLay'); tc = B.trait(ib[doc] if False else [i for i, c2 in enumerate(B.instances) if B.mname(c2['name']) == doc][0], 'originalNotificationPosY')
+            say('getChildAt' in t and all(n in t for n, *_ in SC_TXT) and 'ap_mc' in tl and 'turnNotice_mc' in tl and struct.unpack('<d', B.doubles[tc.vindex])[0] == SC_NOTICE_Y
+                and SC_NOTICE_Y + SC_NOTICE_HALF + SC_STACK_GAP == SC_AP_Y and SC_AP_Y + SC_AP_H + SC_STACK_GAP == SC_HB[1] and SC_BTN_Y + SC_BTN_H == SC_AP_Y + SC_AP_H,
+                'one stack, gaps %d: plaque %d..%d (originalNotificationPosY 873 -> %d) | AP row %d..%d (overflow inside) | bars %d..%d; plates %d..%d (feet on the AP row); the dark backing (child 0) hidden, the numbers on their bars' % (
+                    SC_STACK_GAP, SC_NOTICE_Y - SC_NOTICE_HALF, SC_NOTICE_Y + SC_NOTICE_HALF, SC_NOTICE_Y, SC_AP_Y, SC_AP_Y + SC_AP_H, SC_HB[1], SC_FOOT, SC_BTN_Y, SC_BTN_Y + SC_BTN_H))
+            say(SC_PLATES[1][2] + SC_PLATE_W + 10 <= 960 - 230, 'the plates end at %d, 10+ px left of the turn plaque (ВАШ ХОД: ~460 wide on the phone 23.11, from %d)' % (SC_PLATES[1][2] + SC_PLATE_W, 960 - 230))
             t = dis('dmFit'); say('textWidth' in t and 'setTextFormat' in t and 'dmFit' in dis('dmScLay') and 'dmFit' in dis('dmScLang'),
                 'captions shrink to the plate inner width %d (TextFormat size, not below %d)' % (SC_PLATE_W - 16, SC_FIT_MIN))
             t = dis('dmScAct'); say(all((n.encode() + b'\0') in names for n, *_ in SC_PLATES) and "'GuardPressed'" in t and "'FleePressed'" in t and 'disabled_mc' in t and "'UI_Gen_XButton_Click'" in t,
@@ -1441,7 +1591,10 @@ def mock(src, path, W=2400, F=None, made=None):
     for (nm, x, sg), cls in zip(SC_ARM, ('armourBarHolderPhys', 'armourBarHolder')):
         put(sc, mv.resolve(cls), sx(x - (198 * SC_ARM_S[0] if sg < 0 else 0)), sy(SC_ARM_TOP), SC_ARM_S[0] * f, SC_ARM_S[1] * f, flip=sg < 0)
     if F.get('combat', True):   # out of combat (explore: the host's setBtnVisible(SC_EXPLORE)) the bars only
-        put(sc, mv.resolve('apBar_10'), sx(ox - 81), sy(oy - 92), f)
+        put(sc, mv.resolve('apBar_10'), sx(ox - 81), sy(SC_AP_Y), f)
+        # the turn plaque: its art is attached at run time (scalableBG_22.setMovieClips) - an approximation of its box (43 high, centred on its y)
+        ImageDraw.Draw(canvas).rounded_rectangle([sx(960 - 230), sy(SC_NOTICE_Y - SC_NOTICE_HALF), sx(960 + 230), sy(SC_NOTICE_Y + SC_NOTICE_HALF)], radius=6, fill=(14, 12, 22, 235), outline=(70, 160, 170, 255), width=2)
+        text((sx(960 - 200), sy(SC_NOTICE_Y - SC_NOTICE_HALF), sx(960 + 200), sy(SC_NOTICE_Y + SC_NOTICE_HALF)), 'ВАШ ХОД' if lang == 'ru' else 'YOUR TURN', 18 * f)
         put(sc, mv.resolve('endTurnButton'), sx(SC_END_X), sy(SC_BTN_Y), f)
         text((sx(SC_END_X + 20), sy(SC_BTN_Y), sx(SC_END_X + 184), sy(SC_BTN_Y + SC_BTN_H)), 'КОНЕЦ ХОДА' if lang == 'ru' else 'END TURN', SC_FONT * f)
         for nm, code, x, en, ru in SC_PLATES:
@@ -1472,6 +1625,20 @@ def mock(src, path, W=2400, F=None, made=None):
             tb = next(b2 for b2 in MM_BTNS if b2[0] == tname); x1 = tb[3] - tb[5] / 2.0 - 10; x0 = x1 - MM_LBL_W; y0 = tb[4] - MM_LBL_H / 2.0
             canvas.alpha_composite(Image.fromarray(label_art(MM_LBL_W, MM_LBL_H)).resize((int(MM_LBL_W * f), int(MM_LBL_H * f)), Image.LANCZOS), (int(W - (mw - x0) * f), int(y0 * f)))
             text((W - (mw - x0 - 14) * f, y0 * f, W - (mw - x1 + 14) * f, (y0 + MM_LBL_H) * f), ru if lang == 'ru' else en, MM_LBL_FONT * f, 'r')
+    if F.get('hits'):   # the hit area of the view menu (dmMmHitDraw: the sector while open) and its nearest-button cells, for the review
+        import math as _m
+        sx2 = lambda x: W - (mw - x) * f
+        a0, a1 = MM_HIT_DEG; pts = [(MM_RING[0] + r * _m.cos(_m.radians(a)), MM_RING[1] + r * _m.sin(_m.radians(a))) for r, a in
+            [(MM_HIT_R, a0 + (a1 - a0) * k / 30.0) for k in range(31)] + [(MM_RING_R, a1 - (a1 - a0) * k / 30.0) for k in range(31)]]
+        dr = ImageDraw.Draw(canvas); dr.polygon([(sx2(x), y * f) for x, y in pts], outline=(255, 220, 80, 255))
+        vis = [b2 for b2 in MM_BTNS if arc or b2[0] not in MM_ARC]
+        for yy in range(0, int(MM_RING[1] + MM_HIT_R), 4):
+            for xx in range(int(MM_RING[0] - MM_HIT_R), int(MM_RING[0] + 10), 4):
+                rr = _m.hypot(xx - MM_RING[0], yy - MM_RING[1]); aa = _m.degrees(_m.atan2(yy - MM_RING[1], xx - MM_RING[0])) % 360
+                if not (MM_RING_R <= rr <= MM_HIT_R and a0 <= aa <= a1): continue
+                d2 = sorted(((xx - b2[3]) ** 2 + (yy - b2[4]) ** 2, b2[0]) for b2 in vis)
+                if d2[0][0] > MM_PICK_R ** 2: continue
+                if len(d2) > 1 and abs(d2[0][0] ** 0.5 - d2[1][0] ** 0.5) < 3: dr.point((sx2(xx), yy * f), fill=(255, 220, 80, 255))
     # the right side (stage SIDE_W x 1080, anchor topright)
     f = F['side']; sd = Swf(made['dmSide_p.swf']); ids = root_ids(sd)
     for name, code, icon, x, y, size in SIDE: put(sd, ids[name], W - (SIDE_W - x) * f, y * f, f)
