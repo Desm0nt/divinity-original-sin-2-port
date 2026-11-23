@@ -1,8 +1,14 @@
 # Divinity Original Sin 2 Mobile
 
-**A native Android port of Divinity: Original Sin 2 – Definitive Edition for Nintendo Switch.** The game's own AArch64
-program runs directly on the phone's CPU; a small host provides the Switch system services (HLE of the `nn::` SDK), and
-the NVN graphics API is replayed on Vulkan. You bring the game: this repository contains no game content and no keys.
+**Divinity Original Sin 2 Mobile is an as-native-as-it-gets Android port of Divinity: Original Sin 2 – Definitive Edition
+for Nintendo Switch.** The game's original AArch64 code runs on the phone's CPU (no emulator, no JIT); a small host
+stands in for the Switch system services (HLE of the `nn::` SDK, 9.3), but since **0.3.0** the engine draws through the
+port's **own Vulkan renderer** — no NVN, no Switch graphics API, no translation layer. Built on
+[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) (MIT) and my other ports: DOOM Mobile, Diablo III Mobile and
+Torchlight II Mobile.
+
+**The game is not in this repository.** You need your own copy of Divinity: Original Sin 2 for Switch (base + update
+v786432) and your own keys.
 
 Русский: [ниже](#по-русски).
 
@@ -11,31 +17,67 @@ the NVN graphics API is replayed on Vulkan. You bring the game: this repository 
 them into `put-game-files-here/`, double-click `setup.bat` (or `bash setup.sh`), copy `work/DivinityOriginalSin2Mobile`
 to the phone's `Download` folder and install the APK from the
 [Releases page](https://github.com/Desm0nt/divinity-original-sin-2-port/releases/latest) (or build it with `build.bat`,
-see *Building*).
+see *Building*). Only the Switch game is needed: nothing from the iPad / PC editions.
 
 > [!WARNING]
-> **Tested so far on one device: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) with the bundled Mesa Turnip driver.**
-> **Devices with Mali (Exynos, Dimensity, Tensor), PowerVR and Xclipse GPUs have not been tested at all** — the engine has
-> fallbacks for them (shared with the DOOM, Diablo III and Torchlight II ports), but expect problems. If something goes
-> wrong on your device, please [open an issue](https://github.com/Desm0nt/divinity-original-sin-2-port/issues) and
-> **always attach the logs**: the whole folder `Download/DivinityOriginalSin2Mobile/logs/` — `crash.txt` (written at the
-> start after a crash), `boot.log` / `boot.prev.log` and `logcat.txt` / `logcat.prev.txt` (written live, so they survive
-> even when the system kills the game) — and name your phone model and Android version. Without logs a report usually
-> can't be acted on.
+> **Tested on one device only: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra).** Phones with **Mali** (Exynos,
+> Dimensity, Tensor), **PowerVR** and **Xclipse** GPUs were only run in a limited simulation on my phone, not on real
+> hardware: the renderer has paths and workarounds for them, but bugs may pop up. If something doesn't work,
+> [open an issue](https://github.com/Desm0nt/divinity-original-sin-2-port/issues) and **be sure to attach the logs** —
+> the whole folder `Download/DivinityOriginalSin2Mobile/logs/`: `crash.txt` (appears at the start after a crash),
+> `boot.log` / `boot.prev.log` and `logcat.txt` / `logcat.prev.txt` (written on the fly, so they survive even when the
+> system killed the game) — and name your phone model and Android version.
+
+## What's new in 0.3.0
+
+- **A fully native Android game.** Finally managed to rip out the last pieces of the Switch graphics pipeline: no more
+  NVN through the Switch API, no translator layer, no conversions. Now the engine's render requests knock straight on
+  our own Vulkan renderer, which talks to the phone's hardware directly.
+
+- **A renderer tuned for phones.** Fewer render passes, and longer ones (a lot is drawn in a single pass), which
+  noticeably took the load off the memory bus; shadows and the interface got much cheaper; the render work is spread
+  across the CPU cores. On my phone, the same scene at the same clocks: **61.8 fps in 0.2.x → 74.5 fps with the native
+  renderer in 0.3.0**.
+
+- **Faster loading.** Got rid of needless save and profile backups at start, and the memory clean-up manager, which ate a
+  lot of time while a level loaded on phones, works much better now.
+
+- **Three interface modes to choose from.** The default is **Hybrid of touch and gamepad**; to change it: ⚙ →
+  *Settings* → *Controls* → *Interface in the game*, then restart the game.
+  
+  - **Switch** — the plain console interface with the on-screen gamepad, taps on the game do nothing (for playing with a
+    gamepad);
+  - **Hybrid** (default) — the console interface with bits of the touch UI and touch support (as in 0.2.0);
+  - **Touch interface** — like the iOS version: no on-screen gamepad or other extra buttons. A mobile-oriented HUD fully
+    adapted to playing with your fingers on the touchscreen (unless I screwed up somewhere).
+
+> [!WARNING]
+> If the new renderer doesn't start on your device and crashes, the game automatically switches back to the old Switch
+> renderer with translation.
 
 ## Screenshots
 
-Captured on the phone (Xiaomi 14 Ultra, Adreno 750, Mesa Turnip 27) during development: the game renders at the
-screen's 20:9 shape (wider view, nothing stretched). The counter in the top-left corner is the port's own FPS / frame
-time / GPU time overlay (it can be turned off). Game text in Russian; the console interface with touch handling, the
-button column on the right edge and the on-screen pad.
+Captured on the phone (Xiaomi 14 Ultra, Adreno 750, Mesa Turnip) at the screen's 20:9 shape (wider view, nothing
+stretched). The counter in the top-left corner is the port's own FPS / frame time overlay (it can be turned off). Game
+text in Russian.
 
-| | |
-|---|---|
-| ![Title screen](docs/images/title.jpg) | ![Main menu](docs/images/main_menu.jpg) |
-| ![Character creation](docs/images/character_creation.jpg) | ![On the ship: HUD, hot bar and the button column](docs/images/ship_hud.jpg) |
-| ![Long press on an item: the Actions menu](docs/images/actions_menu.jpg) | ![Steam clouds on the ship](docs/images/steam_cloud.jpg) |
-| ![Game options, by touch](docs/images/options.jpg) | ![Port settings (gear button)](docs/images/settings.jpg) |
+**0.3.0, Touch interface mode:**
+
+|                                                                                          |                                                                                                       |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| ![Fort Joy, Touch mode HUD](docs/images/touch_hud.jpg)      | ![Fort Joy up close](docs/images/touch_hero.jpg)                         |
+| ![Minimap view menu](docs/images/touch_minimap_menu.jpg)    | ![Journal map](docs/images/touch_map.jpg)                                |
+| ![Character sheet](docs/images/touch_sheet.jpg)             | ![Inventory doll, stat strip and bag](docs/images/touch_inventory.jpg)   |
+| ![Game menu in Touch mode](docs/images/touch_game_menu.jpg) | ![Choosing the interface mode in the settings](docs/images/ui_modes.jpg) |
+
+**Earlier builds, console interface with touch (Hybrid mode) and the on-screen pad:**
+
+|                                                                                                      |                                                                                                          |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| ![Title screen](docs/images/title.jpg)                                  | ![Main menu](docs/images/main_menu.jpg)                                     |
+| ![Character creation](docs/images/character_creation.jpg)               | ![On the ship HUD, hot bar and the button column](docs/images/ship_hud.jpg) |
+| ![Long press on an item the Actions menu](docs/images/actions_menu.jpg) | ![Steam clouds on the ship](docs/images/steam_cloud.jpg)                    |
+| ![Game options, by touch](docs/images/options.jpg)                      | ![Port settings gear button](docs/images/settings.jpg)                      |
 
 ## What it is, and what it is not
 
@@ -45,13 +87,11 @@ button column on the right edge and the on-screen pad.
   share the AArch64 instruction set; an offline rewriter (`dm/tools/patch_nso.py`) changes only the few instructions
   that cannot run unchanged on Linux (x18 use, TLS reads, system calls, counter reads) into calls to the host, and
   `dm/verify/equiv.py` checks every rewritten site against the original instruction before you play.
-- An HLE host for the Horizon OS services Divinity: Original Sin 2 uses (SDK **9.3.0**: threads, memory with the virtual
-  address memory manager, file system, audio, input, account, save data…), and an NVN → Vulkan recorder and engine tuned
-  for Adreno GPUs. The game's 12 329 shaders (Larian's `.bshd` programs and the ones built into the program) are
-  translated to SPIR-V offline on your PC.
-- A phone port with **touch control on the console interface**, a widescreen picture at the screen's own resolution,
-  frame rates above 60, game controllers and the shared settings of the DOOM / Diablo III / Torchlight II ports (see
-  *Features*).
+- An HLE host for the Horizon OS services Divinity: Original Sin 2 uses (SDK **9.3.0**: file system, audio, input, account, save data…), and **a Vulkan renderer of its own**
+  (`dm/gfx/vkn`) that receives the engine's render commands directly. The game's 12 329 shaders (Larian's `.bshd`
+  programs and the ones built into the program) are translated to SPIR-V offline on your PC.
+- A phone port with **three interface modes** (console, hybrid, touch), a widescreen picture at the screen's own
+  resolution, frame rates above 60, game controllers.
 
 **It is not:**
 
@@ -66,81 +106,100 @@ button column on the right edge and the on-screen pad.
 
 ## Features
 
-**Touch control on the console interface**
+### Three interface modes
 
-The Switch version has a console interface made for a gamepad. The port keeps it and adds touch to it. The interface
-movies are patched on your PC by setup (`romfs/Data/TouchUI.pak`); nothing of the game is in the APK.
+**Hybrid is the default.** To change it: gear button (⚙) → *Settings* → *Controls* → *Interface in the game*, then
+restart the game.
 
-From the Switch files alone:
+| Mode                 | For                         | What you get                                                                                                                                   |
+| -------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Switch**           | a gamepad (Bluetooth / USB) | the console interface and the on-screen pad; taps on the game do nothing                                                                       |
+| **Hybrid** (default) | touch + on-screen pad       | the console interface with touch handling, as in 0.2 (details below)                                                                           |
+| **Touch**            | touch only                  | like the iPad edition: no on-screen pad, the HUD and the windows made for fingers; a press on a real gamepad brings the console interface back |
 
-- **Menus by tap**: the main menu, character creation, the pause menu, message boxes, save / load, options, mods,
-  tutorial boxes and dialogue answers react to taps on their own elements, and the **button hints** at the bottom of a
-  screen (e.g. *(B) Back*) are buttons too — a tap on a hint presses that pad button. A tap on the minimap opens the
-  map, a tap on a portrait selects that character.
-- **Touch as a mouse in the world**: tap = click (walk there, talk, pick up, attack); **long press = right click**, which
-  opens the *Actions…* menu of an item or character (or tap the *(X) Actions…* hint over the selected target); drag
-  items; **tap places moved items** (in the game's move mode the item goes to the floor where you tap).
-- **Camera**: **one-finger swipe on the right 60 % of the screen** turns it, pinch zooms, two fingers left / right turn
-  it too.
-- **Floating left stick** for walking: invisible until you touch the lower left part of the screen, it appears under your
-  thumb and is gone when you let go (it can be turned off: then you walk by tapping the floor). The right stick is hidden
-  by default (the gear can show it).
-- **On-screen pad** (Joy-Con layout: d-pad, ABXY, L / R / ZL / ZR, − / +) for everything the game does with buttons, with
-  the layout editor of the DOOM port (move, resize, hide); game controllers (Bluetooth / USB) and rumble work as well.
+### Native renderer
 
-The console HUD also gets on-screen buttons (made from the Switch files alone; the button art is this project's own):
+The Switch build of the game is written for a desktop-class console GPU: many render passes, fat G-buffers, reading back
+what was just drawn. Phone GPUs prefer the opposite: few long passes that stay in their small fast on-chip memory, and as
+little traffic through the shared RAM as possible (every byte costs power and heat). In 0.3.0 the renderer is our own, so
+it can draw the game's frame the way a phone likes:
 
-- the **button column** on the right edge (character panels, journal, map, options), which can be folded or hidden and
-  folds itself while a gamepad is connected;
-- the hot bar's page arrows, end turn, sneak and tactical camera buttons, taps on hot bar slots;
-- the **panels** (inventory, equipment, character, skills, journal, crafting, trade, rewards) with a button
-  row and taps on their tabs, items and skills.
+- **Straight to Vulkan.** The engine's render commands go directly into the port's renderer — the ~1 000 NVN calls a
+  frame that were left in 0.2.x and the whole translation step are gone. The Vulkan work is recorded on a separate
+  thread while the game prepares the next frame, so the work is spread over several CPU cores.
+- **Lighting in one pass.** G-buffer → depth → shadows → lighting runs as one render pass in on-chip memory on tile GPUs
+  (Mali, PowerVR, and Adreno as well), and results nobody reads later are not written out to RAM at all. Together with the
+  other pass work this roughly halves the memory traffic of a frame on the Mali model.
+- **Cheaper shadows.** A shadow cascade that only moved a bit is shifted and only its new strip is drawn; objects outside
+  a cascade are left out; a cascade where nothing changed is reused; the far cascade (distant shadows) is redrawn every
+  other frame — not visible in play, about +11 % FPS while walking.
+- **Less double work.** Objects whose depth is drawn again by the G-buffer anyway skip the depth pre-pass; animated
+  characters are skinned once per frame for all passes.
+- **Cheaper interface.** The UI is drawn in a few long passes instead of ~50 short ones, and the blurred panel
+  backgrounds are drawn once and reused while nothing under them changes.
+- **Textures:** phones without BC (Mali, PowerVR, Xclipse) read the ASTC pack setup makes, and whatever it lacks is
+  converted on the GPU instead of the CPU. A pipeline warm-up list in the APK builds most GPU pipelines before you need
+  them, so first visits stutter less.
 
-**Picture**
+The result on the test phone (Xiaomi 14 Ultra, standing in a busy spot of Fort Joy, frame limit off, same clock caps):
+**61.8 FPS with the 0.2.x path → 74.5 FPS with the native renderer on 0.3.0**
+
+### Picture
 
 - **Widescreen (Hor+)**: the game renders in the screen's own shape (e.g. 2400×1080 on a 20:9 phone) with a wider view
   of the world, the HUD at the screen edges.
 - **Resolution:** the window follows the Switch mode (Docked = the screen's own resolution, Handheld = lighter); the
   **3D resolution** is set per mode: a fixed 100 / 83 / 75 / 67 / 50 % or **dynamic** (the game's own DRS with a target of
   30 / 45 / 60 / 75 / 90 / 120 fps and a lowest size of 85 / 75 / 60 / 50 %; the default in Handheld), with **FSR 1**
-  upscaling below 100 %. The interface always stays at full resolution.
+  upscaling below 100 %, applied at once. The interface always stays at full resolution.
 - **Graphics quality** page (Off / Light / Medium / Maximum / Custom): bloom, anti-aliasing, shadow maps and filter,
   distant shadows, texture sharpness, angle filtering, model detail distance, lamps per spot.
 - **Frame rate limit 30 / 60 (default) / 90 / 120 / no limit** (90 and 120 only where the screen has such a mode; above
-  60 is experimental: more heat). The game's speed does not change with the frame rate.
+  60 means more heat). The game's speed does not change with the frame rate.
 
-**Front end shared with the DOOM / Diablo III / Torchlight II ports**
+## What to expect, and how to set it up
 
-- Gear button (⚙) → **pause menu** that really holds the game (as the Switch HOME menu), save export / import.
-- Port settings: menu and game language, Switch mode, 3D resolution, dynamic resolution, FSR 1, sharpening, frame rate limit,
-  thermal mode, graphics quality, safe mode (Mali / PowerVR), touch as
-  mouse, left / right stick, button column, Vulkan driver (with a driver manager), vibration, FPS counter, control
-  layout and editor.
-- **Textures for phones without BC** (Mali, PowerVR, Xclipse): setup encodes the game's BC textures once to ASTC on your
-  PC (`astc/dos2-astc.pack`, ~1.5 GB, every texture kept at ≥ 42 dB against the original); such phones load them directly instead
-  of decoding BC at every upload, and whatever the pack lacks is encoded on the phone in the background. Adreno phones
-  sample BC natively and do not need the pack.
+- **I'm not a wizard, and miracles don't happen.** A phone weaker than the Switch won't run the game better than the
+  Switch. A Switch-level phone at similar settings (lower resolution, 30 fps, dynamic resolution) will run about like the
+  Switch. High resolution and 60+ fps need a noticeably more powerful phone.
+- **The game will heat your phone.** The port is optimised (God knows, very optimised), but this is a big, heavy
+  PC-class game, and it runs all CPU cores and the GPU flat out. The phone heats up, the battery drains. Nothing to be
+  done about it — cap the fps, lower the resolution, play on devices with cooling, and you'll be happy.
+- **When the phone overheats, fps drops, and that's expected.** Android lowers the CPU and GPU clocks, and the frame rate
+  drops along with them.
+
+**Recommended setup (⚙):**
+
+1. *Interface in the game*: **Touch** if you play with your fingers only, **Hybrid** if you like the on-screen gamepad,
+   **Switch** only with a gamepad (real or on-screen).
+2. *3D resolution*: **Dynamic**, target **60 fps**, lowest **75 %** (on weak devices 60 or 50 %). Lowering the 3D
+   resolution helps way more than anything else (85 % instead of 100 % gave almost +20 fps on my phone).
+3. **FSR 1** — at lowered resolutions better turn it on together with sharpening. Not perfect, but it gets rid of the
+   jaggies and adds some crispness. With dynamic resolution its switches become less noticeable.
+4. *Frame rate limit*: **60**; weak phones — **30**.
+5. Only if that's still not enough — the **Graphics quality** page (Light / Medium, or single items: shadows, bloom,
+   model detail distance). But honestly, it doesn't do much.
 
 ## Current state
 
-Tested on **Snapdragon 8 Gen 3 / Adreno 750** (Xiaomi 14 Ultra) with Mesa Turnip v27.
+Tested on **Snapdragon 8 Gen 3 / Adreno 750** (Xiaomi 14 Ultra) with Mesa Turnip.
 
-- Boot, the main menu, character creation and the start of the campaign (the ship) run at the 60 fps default; with the
-  higher limits the frame rate goes above 60 where the GPU allows.
-- Touch on the console interface, widescreen, the pause menu and the settings as described above.
+- The campaign plays from the start: the ship and Fort Joy, at 60 FPS with the default settings; with the
+  higher limits above 60 where the GPU and the phone's temperature allow.
+- All three interface modes, widescreen, the pause menu and the settings as described above.
 
 ### Known limitations
 
 - Only update **v786432** is supported; the patches and addresses are tied to its build id (`main` 4979b200…,
   `sdk` 230994ac…).
-- The first time a scene is shown the Vulkan pipelines are built, which can stutter for a moment; later visits are
-  smooth (the pipeline cache is kept).
+- The first time a scene is shown some Vulkan pipelines may still be built, which can stutter for a moment; later visits
+  are smooth (the pipeline cache is kept).
 - No online or local multiplayer; Steam cross-save is not available.
-- Only one device has been tested; other Snapdragon devices may work, other GPUs (Mali, PowerVR, Xclipse) are untested
-  (the engine has fallbacks for them, see *Other GPUs*).
-- Touch on the console interface is new: some screens may still need the on-screen pad. Many renderer and host fixes are
-  behind switches for A/B testing (`Download/DivinityOriginalSin2Mobile/dm/env`); see
-  [docs/dos2/DOS2_PORT.md](docs/dos2/DOS2_PORT.md).
+- Only one device has been tested on real hardware; other Snapdragon devices may work, other GPUs (Mali, PowerVR,
+  Xclipse) have only been checked in simulation (see *Other GPUs*).
+- The Touch interface mode is new: if a window looks or behaves wrong, please report it with a screenshot. Many renderer and host features are behind switches for A/B testing
+  (`Download/DivinityOriginalSin2Mobile/dm/env`); see [docs/dos2/DOS2_PORT.md](docs/dos2/DOS2_PORT.md) and
+  [docs/dos2/nr/VK-NATIVE-STATUS.md](docs/dos2/nr/VK-NATIVE-STATUS.md).
 
 ## Building
 
@@ -218,7 +277,8 @@ shaders, no D24 depth (D32 is used), no GPU timestamps, no linear filtering of s
 clamp, no `nullDescriptor`, no sampler anisotropy, driver pipeline failures (skipped instead of fatal), interrupted fence
 waits on Mali. BC textures, which Mali and PowerVR cannot sample, come from the **ASTC pack** setup made (see
 *Features*); the rest are decoded on the GPU (with a self-test against the CPU decoder) and encoded to ASTC in the
-background for the next time. A GPU self-test at start turns off the optimisations a driver gets wrong. One boot.log
+background for the next time. With the bundled PanVK driver the port turns off the driver's own BC emulation
+(`PANVK_NO_BC_EMU=1`; it gave wrong colours, #7), so BC textures take the same route as on the stock driver. A GPU self-test at start turns off the optimisations a driver gets wrong. One boot.log
 line lists what the device needed: `NVN fallbacks on this device: ...`; the texture pack reports itself as
 `NVN astc cache: ...`. Reports (device, GPU, driver, logs) are very welcome.
 
@@ -242,16 +302,16 @@ into boot.log. Attach the whole `logs` folder to a bug report.
 
 ## Repository layout
 
-| Path | What |
-|---|---|
-| `dm/` | The host (from d2r-mobile, via DOOM Mobile, Diablo III Mobile and Torchlight II Mobile): loader, HLE (`dm/host`, Divinity: Original Sin 2 code in `hle_dos2*.c` and behind `DM_GAME_DOS2`), NVN recorder and Vulkan engine (`dm/gfx`), Android app (`dm/android`; the DOS2 settings in `Tl2Gear.java`, the pad in `D3PadView.java`), offline rewriter (`dm/tools/patch_nso.py`) and its verifiers (`dm/verify`). The tree also carries the DOOM, DOOM Eternal, Xenoblade 2, Diablo III and Torchlight II code paths of the same host family; Divinity: Original Sin 2 builds `DM_GAME_DOOM` + `DM_GAME_D3` + `DM_GAME_TL2` (shared code) + `DM_GAME_DOS2`. |
-| `setup.sh`, `setup.bat`, `build.bat` | Game file preparation (`tools/setup_dos2.py`) and APK build entry points |
-| `tools/` | Tooling: package / RomFS / ExeFS readers, Larian LSPK reader (`lspk.py`), shader jobs (`dos2_shader_jobs.py`) and translation, touch interface package (`dos2_touchui_pak.py` and the `dos2_*_touch.py` movie patches), ASTC texture pack (`dos2_astc_cache.py`), APK build, device test and analysis scripts (also the Diablo III / Torchlight II ones this port grew from) |
-| `third_party/libadrenotools` | git submodule (BSD-2-Clause) |
-| `drivers/` | Notes on the bundled and optional Vulkan driver packages (no binaries) |
-| `docs/dos2/` | Port documentation: journal, plans and audits, game files, derived information |
-| `docs/tl2/`, `docs/d3/` | Documentation of the Torchlight II and Diablo III ports, whose host this port shares |
-| `docs/THIRD_PARTY.md`, `docs/DEPENDENCIES.md`, `docs/DERIVED.md`, `docs/upstream/` | Attribution: code ported from other projects, the third-party code and D2R-derived records inherited from d2r-mobile, and d2r-mobile's acknowledgements |
+| Path                                                                               | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dm/`                                                                              | The host (from d2r-mobile, via DOOM Mobile, Diablo III Mobile and Torchlight II Mobile): loader, HLE (`dm/host`, Divinity: Original Sin 2 code in `hle_dos2*.c` and behind `DM_GAME_DOS2`), NVN recorder and Vulkan engine (`dm/gfx`), Android app (`dm/android`; the DOS2 settings in `Tl2Gear.java`, the pad in `D3PadView.java`), offline rewriter (`dm/tools/patch_nso.py`) and its verifiers (`dm/verify`). The tree also carries the DOOM, DOOM Eternal, Xenoblade 2, Diablo III and Torchlight II code paths of the same host family; Divinity: Original Sin 2 builds `DM_GAME_DOOM` + `DM_GAME_D3` + `DM_GAME_TL2` (shared code) + `DM_GAME_DOS2`. |
+| `setup.sh`, `setup.bat`, `build.bat`                                               | Game file preparation (`tools/setup_dos2.py`) and APK build entry points                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `tools/`                                                                           | Tooling: package / RomFS / ExeFS readers, Larian LSPK reader (`lspk.py`), shader jobs (`dos2_shader_jobs.py`) and translation, touch interface package (`dos2_touchui_pak.py` and the `dos2_*_touch.py` movie patches), ASTC texture pack (`dos2_astc_cache.py`), APK build, device test and analysis scripts (also the Diablo III / Torchlight II ones this port grew from)                                                                                                                                                                                                                                                                               |
+| `third_party/libadrenotools`                                                       | git submodule (BSD-2-Clause)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `drivers/`                                                                         | Notes on the bundled and optional Vulkan driver packages (no binaries)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `docs/dos2/`                                                                       | Port documentation: journal, plans and audits, game files, derived information                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `docs/tl2/`, `docs/d3/`                                                            | Documentation of the Torchlight II and Diablo III ports, whose host this port shares                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `docs/THIRD_PARTY.md`, `docs/DEPENDENCIES.md`, `docs/DERIVED.md`, `docs/upstream/` | Attribution: code ported from other projects, the third-party code and D2R-derived records inherited from d2r-mobile, and d2r-mobile's acknowledgements                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ## Credits
 
@@ -303,60 +363,49 @@ MIT — see [LICENSE](LICENSE). The d2r-mobile copyright notice is kept; third-p
 ## По-русски
 
 > [!WARNING]
-> **Проверено только на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra).** Телефоны с GPU **Mali**
-> (Exynos, Dimensity, Tensor), **PowerVR** и **Xclipse** не тестировались вообще — обходы в движке есть, но проблемы
-> вероятны. Если что-то не работает,
+> **Проверено только на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra).** Телефоны с GPU **Mali** (Exynos, Dimensity, Tensor), **PowerVR** и **Xclipse** гонялись только в виде ограниченной симуляции на моем телефоне, но не на настоящем железе: пути и обходы для них в рендере есть, но могут вылезти косяки. Если что-то не работает,
 > [откройте issue](https://github.com/Desm0nt/divinity-original-sin-2-port/issues) и **обязательно приложите логи** —
 > всю папку `Download/DivinityOriginalSin2Mobile/logs/`: `crash.txt` (появляется при запуске после падения),
 > `boot.log` / `boot.prev.log` и `logcat.txt` / `logcat.prev.txt` (пишутся на лету, поэтому сохраняются, даже если
 > система убила игру), и укажите модель телефона и версию Android.
 
-**Divinity Original Sin 2 Mobile** — нативный порт Divinity: Original Sin 2 – Definitive Edition для Nintendo Switch на
-Android. Оригинальный AArch64-код игры исполняется прямо на процессоре телефона (без эмулятора и JIT); небольшой хост
-подменяет системные сервисы Switch (HLE `nn::`, SDK 9.3), а графический API NVN воспроизводится через Vulkan. Основа —
-проект [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) (MIT) через порты DOOM Mobile, Diablo III Mobile и
-Torchlight II Mobile.
+**Divinity Original Sin 2 Mobile** — максимально нативный порт Divinity: Original Sin 2 – Definitive Edition для Nintendo Switch на Android. Оригинальный AArch64-код игры исполняется на процессоре телефона (без эмулятора и JIT); небольшой хост
+подменяет системные сервисы Switch (HLE `nn::`, SDK 9.3), но с версии **0.3.0** движок рисует через **собственный Vulkan-рендер** порта, без NVN, графического API Switch или слоя трансляции. Основа — проект [d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) (MIT) и мои другие порты: DOOM Mobile, Diablo III Mobile и Torchlight II Mobile.
 
-- **Игры в репозитории нет.** Нужна своя копия Divinity: Original Sin 2 для Switch (база + обновление v786432) и свои
-  ключи консоли. **Установка по шагам: [docs/INSTALL.ru.md](docs/INSTALL.ru.md).** APK — на странице
-  [Releases](https://github.com/Desm0nt/divinity-original-sin-2-port/releases/latest). Технические подробности подготовки
-  файлов — [docs/dos2/GAME_FILES.md](docs/dos2/GAME_FILES.md) (англ.), журнал порта —
-  [docs/dos2/DOS2_PORT.md](docs/dos2/DOS2_PORT.md).
-- **Касание на консольном интерфейсе** (фильмы интерфейса патчит setup на ПК, `romfs/Data/TouchUI.pak`): главное меню,
-  создание персонажа, меню паузы, окна сообщений, сохранения, настройки, моды, обучение и ответы в диалогах отвечают на
-  тапы по своим элементам; подсказки кнопок внизу экрана — тоже кнопки (тап = нажатие этой кнопки пада); тап по
-  мини-карте открывает карту, по портрету — выбирает персонажа. В мире касание
-  работает как мышь: тап = клик (идти, говорить, подобрать, атаковать), **долгое нажатие = правый клик** (меню
-  «Действия…» предмета или персонажа), перетаскивание предметов, **тап ставит перемещаемый предмет** туда, где коснулись.
-  Камера: **свайп одним пальцем по правым 60 % экрана** поворачивает её, щипок — зум. **Плавающий левый стик** ходьбы
-  появляется под пальцем в левой нижней части экрана (можно выключить — тогда ходьба тапом по полу); правый стик скрыт по
-  умолчанию. Экранный пад (раскладка Joy-Con) с редактором раскладки; геймпады (Bluetooth / USB) и вибрация тоже
-  работают.
-- HUD получает и экранные кнопки (только из файлов Switch; рисунки кнопок — собственные, проекта): **колонку кнопок** справа (панели персонажа, журнал, карта, параметры; её можно свернуть или скрыть, при
-  подключённом геймпаде она сворачивается сама), стрелки страниц панели быстрого доступа, конец хода, скрытность,
-  тактическую камеру, тапы по ячейкам, а **панели** (инвентарь, снаряжение, персонаж, навыки, журнал, крафт, торговля,
-  награды) — ряд кнопок и тапы по вкладкам, предметам и навыкам.
-- **Картинка:** широкий экран по форме телефона (Hor+, например 2400×1080 на 20:9); окно по режиму Switch (в доке — родное
-  разрешение экрана, портативный — легче); **разрешение 3D** на каждый режим: фиксированное 100 / 83 / 75 / 67 / 50 % или
-  **динамическое** (DRS самой игры, цель 30 / 45 / 60 / 75 / 90 / 120 fps, нижняя граница 85 / 75 / 60 / 50 %; в портативном по
-  умолчанию), ниже 100 % — апскейл **FSR 1**; интерфейс всегда в полном разрешении; страница **«Качество графики»**;
-  **лимит кадров 30 / 60 (по умолчанию) / 90 / 120 / без ограничения** (выше 60 — эксперимент: больше нагрев; скорость
-  игры от частоты кадров не меняется).
-- **⚙:** меню паузы, которое по-настоящему держит игру, экспорт / импорт сохранений, язык меню и игры, режим Switch,
-  разрешение 3D, динамическое разрешение, FSR 1, резкость, лимит кадров, тепловой режим, качество графики, безопасный режим (Mali / PowerVR), касание как мышь, левый / правый стик, колонка кнопок, драйвер
-  Vulkan, вибрация, счётчик FPS, раскладка и её редактор.
-- **Текстуры для телефонов без BC** (Mali, PowerVR, Xclipse): setup один раз перекодирует BC-текстуры игры в ASTC на ПК
-  (`astc/dos2-astc.pack`, каждая не хуже 42 дБ к оригиналу); такие телефоны грузят их сразу, без распаковки BC, а
-  недостающее докодируется на телефоне в фоне. Телефонам с Adreno пак не нужен.
-- Проверено на одном устройстве: Snapdragon 8 Gen 3 / Adreno 750 (Xiaomi 14 Ultra) с драйвером Turnip из APK — **60 fps**
-  по умолчанию, с лимитом выше 60 — больше, насколько позволяет GPU. Поддерживается только обновление v786432; при первом показе сцены возможны короткие рывки
-  (сборка пайплайнов); сетевой игры и Steam cross-save нет (на вопрос о cross-save отвечайте «Нет»).
-- Android 12+: `DOS2-Mobile-v<версия>-arm64.apk` (minSdk 31); Android 10 и 11: `DOS2-Mobile-v<версия>-arm64-android10.apk`
-  (minSdk 29; на настоящем Android 10 ещё не проверялся). Процессоры ARMv8.0 без LSE (Cortex-A53/A73, Snapdragon 6xx)
-  поддерживаются. Нужно 8 ГБ ОЗУ или больше.
-- Подготовка файлов: положите базу, обновление, `prod.keys` в
-  `put-game-files-here/` и дважды щёлкните `setup.bat` (Linux / macOS: `bash setup.sh`); проверка без изменений —
-  `setup check`. Готовую папку `work/DivinityOriginalSin2Mobile` (~13 ГБ, из них ~1.5 ГБ ASTC-текстур, которые на Adreno
-  не нужны) скопируйте в `Download` телефона (или `setup push`).
-- Сборка: `cmake -S dm/android -B work/build-android … -DDM_GAME=dos2`, затем `build.bat` / `tools/build_apk.ps1`
-  (см. «Building»).
+**Игры в репозитории нет.** Нужна своя копия Divinity: Original Sin 2 для Switch (база + обновление v786432) и свои ключи.
+
+**Установка по шагам: [docs/INSTALL.ru.md](docs/INSTALL.ru.md).** APK — на странице [Releases](https://github.com/Desm0nt/divinity-original-sin-2-port/releases/latest). Технические подробности подготовки файлов — [docs/dos2/GAME_FILES.md](docs/dos2/GAME_FILES.md) (англ.), журнал порта — [docs/dos2/DOS2_PORT.md](docs/dos2/DOS2_PORT.md).
+
+### Что нового в 0.3.0
+
+- **Полностью нативная Android-игра.** Удалось окончательно выпилить последние куски графического конвейера Switch: больше никакого NVN через API Switch, никакого слоя транслятора и преобразований. Теперь запросы рендеринга движка стучатся напрямую в наш собственный рендерер Vulkan, работающий с железом смартфона напрямую.
+
+- **Заточенный под телефоны рендер:** Проходов отрисовки стало меньше и они длиннее (многое рисуется одним проходом), что заметно снизило нагрузку на шину памяти, тени и интерфейс стали заметно дешевле по запросам, работа рендера раскидана по ядрам процессора. На моём телефоне одна и та же сцена при тех же частотах: **61.8 fps в 0.2.x → 74.5 fps на нативном рендере в 0.3.0**.
+
+- **Ускорились загрузки.** Удалось избавиться от излишних бэкапов сохранения и профиля при старте, а также улучшена работа менеджера очистки памяти, съедавшего много времени при подгрузке уровня на смартфонах.
+
+- **Три режима интерфейса на выбор.** По умолчанию — **Гибрид тача и геймпада**; сменить: ⚙ → *Настройки* → *Управление* → *Интерфейс в игре*, затем
+  перезапустить игру.
+  
+  - **Switch** — обычный интерфейс консоли с экранным геймпадом, тапы по игре ничего не делают (для игры с геймпадом);
+  - **Гибрид** (по умолчанию) — консольный интерфейс с элементами тач UI и поддержкой касаний (как в версии 0.2.0);
+  - **Тач-интерфейс** — подобно iOS-версии: без экранного геймпада и иных кнопок. Мобильно-ориентированный HUD с полной адаптацией под управления пальцами с тачскрина (если я не накосячил нигде).
+
+> [!WARNING]
+> Если вдруг новый рендер на вашем девайсе не заведется и упадет - игра автоматически переключится на старый Switch-рендер с трансляцией.
+
+### Чего ожидать от порта и как лучше настроить:
+
+- **Я не волшебник, и чудес не бывает.** Телефон слабее Switch не потянет игру лучше Switch. Телефон уровня Switch на похожих настройках
+  (пониже разрешение, 30 fps, динамическое разрешение) будет работать примерно как Switch. Высокое разрешение и 60+ fps требуют заметно
+  более мощного телефона.
+- **Игра будет греть телефон.** Порт оптимизирован (видит бог, очень оптимизирован), но это большая тяжелая игра PC-уровня, и она использует все ядра процессора и GPU на полную катушку. Телефон греется, батарея садится. С этим ничего не поделать - ограничивайте фпс, снижайте разрешение, играйте на девайсах с охлаждением - и будет вам счастье.
+- **При перегреве к/с падает и это ожидаемо.** Android снижает частоты процессора и GPU, и частота кадров падает вместе с ними.
+
+**Рекомендуемая настройка (⚙):**
+
+1. *Интерфейс в игре*: **Касание** — если играете только пальцами, **Гибрид** — если нравится экранный геймпад, **Switch** — только с геймпадом (реальным или наэкранным).
+2. *Разрешение 3D*: **Динамическое**, цель **60 fps**, нижняя граница **75 %** (на слабых девайсах — 60 или 50 %). Снижение разрешения 3D помогает гораздо лучше всего остального (85 % вместо 100 % дали почти +20 к/с на моем телефоне).
+3. **FSR 1** — на пониженных разрешениях лучше включить вместе с резкостью. Не идеально, но лесенки уберет и четкости накинет. С динамическим разрешением становятся не так заметны моменты его переключения.
+4. *Лимит кадров*: **60**; слабые телефоны — **30**.
+5. Только если и этого мало — страница **«Качество графики»** («Лёгкое» / «Среднее» или отдельные пункты: тени, свечение, дальность детализации моделей). Но тут толку по факту мало.

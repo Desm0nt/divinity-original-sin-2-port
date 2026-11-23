@@ -163,11 +163,18 @@ from your browser or file manager the first time.
 2. It asks for **All files access** (it needs it to read `Download/DivinityOriginalSin2Mobile`). Turn it on and go back.
 3. The first start and the first visit of every scene take longer than later ones (the Vulkan pipelines are built and
    cached). When the game offers *Steam cross-save*, answer **No** (there is no network play).
-4. The gear button (⚙) opens the pause menu and the port's settings: language, render resolution (default: the screen's
-   own height), dynamic resolution (off), frame rate limit (60), touch as mouse, left / right stick, button column,
-   Vulkan driver, FPS counter, control layout.
+4. The gear button (⚙) opens the pause menu and the port's settings: language, interface mode, 3D resolution and dynamic
+   resolution, FSR 1, frame rate limit (60), graphics quality, touch as mouse, left / right stick, button column, Vulkan
+   driver, FPS counter, control layout. Recommended values: see *What to expect, and how to set it up* in the
+   [README](../README.md).
 
-**Playing by touch:** menus react to taps on their items, and the button hints at the bottom of the screen are buttons.
+**Interface mode:** the game starts in **Hybrid** (the console interface with touch and the on-screen pad, described
+below). For a gamepad choose **Switch**; for playing by fingers only choose **Touch** — the iPad-like interface without
+the on-screen pad (windows, tooltips and the HUD made for fingers; long press = context menu, drag items and skills, with
+a skill prepared a tap aims and *Confirm* casts). Gear → *Settings* → *Controls* → *Interface in the game*, then restart
+the game.
+
+**Playing by touch (Hybrid):** menus react to taps on their items, and the button hints at the bottom of the screen are buttons.
 In the world a tap is a click (walk, talk, pick up, attack); a **long press** opens the *Actions…* menu of what is under
 your finger; drag items to move them. Swipe with one finger on the right part of the screen to turn the camera, pinch
 to zoom. The move stick appears under your left thumb anywhere in the lower left (the gear can hide it: then tap the
@@ -194,10 +201,16 @@ data* option turned on (and keep the ticket).
 **"not enough free space"** — free some space, or put the work folder on another disk: `setup.bat --work D:\dos2-work`
 (Windows) or `bash setup.sh --work /mnt/big/dos2-work`.
 
-**I already set up an older version (0.1.x)** — run setup again in the same folder after downloading the new version: it
-skips everything that is still current and makes only what changed (for 0.2.0: the touch interface package and three new
-shader packs, a few minutes). Then copy `romfs/Data/TouchUI.pak` and the whole `dm/shaders` folder to the phone again
-(or the whole `DivinityOriginalSin2Mobile` folder; overwriting the files that did not change is fine).
+**I already set up an older version (0.1.x / 0.2.x)** — run setup again in the same folder after downloading the new
+version: it skips everything that is still current and makes only what changed (a few minutes). Then copy what it made to
+the phone again, over the old files, and install the new APK over the old one (saves stay):
+- from **0.2.x** to 0.3.0: only `romfs/Data/TouchUI.pak` (the touch interface package, now with the Touch mode);
+- from **0.1.x**: `romfs/Data/TouchUI.pak` and the whole `dm/shaders` folder.
+
+Copying the whole `DivinityOriginalSin2Mobile` folder again works too; overwriting the files that did not change is fine.
+
+**Do I need the iPad / PC version of the game?** — No. Everything, including the iPad-like Touch mode, is made by setup
+from your Switch files; the port's own button art comes with the repository.
 
 **I set up an older release with an `.ipa`** — it is not needed any more (setup ignores it). Run setup again after
 updating: it remakes only the touch interface package (stage 9); copy `romfs/Data/TouchUI.pak` to the phone again.
