@@ -476,6 +476,8 @@ static void hu_scale(uint8_t *mgr, uint8_t *o, int ti, const char *movie) {
 // ---- the host's objects ----
 static void hu_tip_drop_pin(void);
 static int g_mm_sent = -1; static uint8_t *g_mm_fp;   // hu_mm_sync: the state last told to minimap_p and its player
+// hu_bars_sync: the statusConsole object kept shown for its bars out of combat (owner 23.11 "the bars must be there outside combat too")
+static int g_bars = 1, g_bars_off; static unsigned g_bars_n, g_bars_win_n; static uint64_t g_bars_win_t;
 static void hu_destroy(const char *why) {
     uint8_t *mgr = hu_mgr();
     hu_tip_drop_pin();   // the kept hover-out calls name objects that go now
@@ -499,7 +501,7 @@ static void hu_destroy(const char *why) {
         if (g_dbg) LOG("[hud] destroyed type %#x player %u handle %#llx", g_obj[i].type, g_obj[i].player, (unsigned long long)g_obj[i].h);
     }
     LOG("[hud] touch HUD down (%s): %d of %d object(s) destroyed, %llu us", why, gone, g_nobj, (unsigned long long)(hu_us() - t0));
-    g_mm_sent = -1; g_mm_fp = NULL;
+    g_mm_sent = -1; g_mm_fp = NULL; g_bars_off = 0; g_bars_win_n = 0; g_bars_win_t = 0;
     g_nobj = 0; atomic_store(&g_aim, 0); atomic_store(&g_aim_act, 0); g_aim_all = g_aim_shown = 0; g_act.kind = 0; g_plate_on = 0; g_panel_open = 0; g_cell_vis = 0;
     { void dm_dos2_touch_world_aim_hold(int on, float x, float y); dm_dos2_touch_world_aim_hold(0, 0, 0); }
     g_view = 0; g_view_who = 0;   // run 20.11 review: the equipment view's state of the old set must not steer the first dmSide of the next one
@@ -757,6 +759,37 @@ static int hu_ei_side(void *ctx, void *player, void *ui, const char *name, unsig
 // the combined "something waits for a target" (game thread, every poll): on a change the aimed point is forgotten (run 21.11:
 // CONFIRM aims where the player taps the world from now on, else under itself), the end lets the picking follow the cursor again, and the
 // hot bar is told to show / hide CONFIRM and cancel for the states its own showActiveSkill does not see (hle_dos2_touchui_hud.h hu_aim_*)
+// The bars out of combat (owner 23.11: on the iPad the health / armour bars stay on the hot bar in exploration). The PC statusConsole class
+//   (vtable main+0x29ecd08, invoke names registered by main+0x125e0d0) never changes its own visibility - no Show / Hide / flag call in its
+//   code (main+0x125c000..0x1260000); the engine's PC rule outside the class hides the whole object out of combat through its vt Hide
+//   (vt+0x58 = main+0x10a6670 -> 0xae3700: ClearFlags(8)). The iPad keeps it and tells its own class setCharacterBarsVisible (not in the
+//   Switch main). So: while the player's hot bar is shown and the statusConsole object of that player is hidden, the host sets its visible
+//   flag again (SetFlags main+0xae4110, as the right side's) and tells the movie "explore" through the registered invoke
+//   setBtnVisible(HU_SC_EXPLORE, false) - statusConsole_p then shows the bars only (no AP, plates, turn plaque) until the engine's own combat
+//   calls (setBtnVisible(i, true), setCombatTurnNotification(n >= 0)) come back. The values are the engine's: the class keeps its updates
+//   (setHealth / updateArmourBar) while the object is shown. A fight with the engine (it hides again every frame: >= 4 re-shows in 2 s) turns
+//   this off until the next HUD set, one log line. DM_DOS2_TOUCH_BARS=0: off (the PC rule: bars only in combat).
+enum { HU_SC_EXPLORE = 100, HU_T_STATUS = 0x75 };
+static void hu_bars_sync(uint8_t *mgr) {
+    if (!g_bars || g_bars_off || !g_flags_ok || !mgr) return;
+    for (int i = 0; i < g_nobj; i++) {
+        if (g_obj[i].type != HU_T_STATUS) continue;
+        uint8_t *o = hu_obj(mgr, g_obj[i].h);
+        if (!o || *(volatile uint32_t *)(o + HU_OBJ_TYPE) != HU_T_STATUS || (o[HU_OBJ_FLAGS] & HU_F_VISIBLE)) continue;
+        int hb_vis = 0;
+        for (int k = 0; k < g_nobj; k++) if (g_obj[k].type == HU_T_HOTBAR && g_obj[k].player == g_obj[i].player) { const uint8_t *hb = hu_obj(mgr, g_obj[k].h); if (hb) hb_vis = (hb[HU_OBJ_FLAGS] & HU_F_VISIBLE) != 0; }
+        if (!hb_vis) continue;   // a dialog / cutscene / the menu hid the hot bar too: the engine's hide stands
+        const uint64_t now = hu_us() / 1000;
+        if (now - g_bars_win_t > 2000) { g_bars_win_t = now; g_bars_win_n = 0; }
+        if (++g_bars_win_n >= 4) { g_bars_off = 1; LOG("【红】[hud] statusConsole: the engine hides it again at once (%u re-shows in 2 s): the bars stay out of combat no more (until the next HUD set)", g_bars_win_n); return; }
+        ((void (*)(void *, uint32_t))(void *)(g_main->base + HU_SETFLAGS_FN))(o, HU_F_VISIBLE);
+        uint8_t *fp = *(uint8_t *volatile *)(o + HU_OBJ_FP); int told = 0;
+        if (fp) { dm_ei_val v[2]; memset(v, 0, sizeof v); v[0].type = 4; v[0].d = HU_SC_EXPLORE; v[1].type = 4; v[1].d = 0; told = dm_dos2_touchui_invoke(fp, "setBtnVisible", v, 2); }
+        g_bars_n++;
+        if (g_dbg || g_bars_n <= 16) LOG("[hud] statusConsole hidden by the engine (out of combat) while the hot bar is shown: shown again for its bars%s (#%u, flags now %#x)",
+                                           told ? ", the movie told: explore (bars only)" : ", the movie NOT told (no setBtnVisible invoke)", g_bars_n, *(volatile uint32_t *)(o + HU_OBJ_FLAGS));
+    }
+}
 // the minimap's view menu shows the toggles' state (game thread, every poll): on a change, or for a new minimap object, its setBtnVisible(HU_MM_STATE
 // + bits, true) - tools/dos2_pchud_touch.py MM_STATE; bits from hle_dos2_touch.c dm_dos2_touch_t_bits
 enum { HU_MM_STATE = 100, HU_T_MINIMAP = 0x1e };
@@ -1189,6 +1222,7 @@ void dm_dos2_touchui_hud_poll(void) {
     // (run 21.11: no more "where the cursor rested" - that was the hot bar slot or the CONFIRM circle; see hu_ei_aimbtn)
     hu_aim_sync("poll");
     hu_mm_sync(mgr);
+    hu_bars_sync(mgr);
     hu_tip_make(ui, mgr, "the touch HUD is up and the tooltip object is gone");
     if (*hu_mode() == 0) hu_tip_tell(ui, mgr);
     hu_act_step();
@@ -1236,6 +1270,7 @@ void dm_dos2_touchui_hud_install(void) {
     if (bs >= 0) LOG("【红】[hud] main+%#x differs (the UI object's class scale / resize): the touch HUD keeps the engine's own size, DM_DOS2_TOUCH_HUD_SCALE not applied", k_size[bs].off);
     static const hu_site k_fl[] = {{HU_SETFLAGS_FN, 3, k_hu_setflags_fn}, {HU_CLRFLAGS_FN, 3, k_hu_clrflags_fn}};
     g_flags_ok = hu_same(m, k_fl, 2) < 0;
+    if ((v = getenv("DM_DOS2_TOUCH_BARS")) && *v) g_bars = atoi(v) != 0;
     if (!g_flags_ok) LOG("【红】[hud] main+%#x / +%#x differ (SetFlags / ClearFlags): the right side (dmSide_p) is not shown by the host", HU_SETFLAGS_FN, HU_CLRFLAGS_FN);
     static const hu_site k_hb[] = {{HU_HB_CALLED, 12, k_hu_hb_called}, {HU_HB_BTN, 5, k_hu_hb_btn}, {HU_HB_SWITCH, 5, k_hu_hb_switch}};
     g_btn_ok = hu_same(m, k_hb, 3) < 0 && m->size > HU_HB_TABLE + sizeof k_hu_hb_table && !memcmp(m->base + HU_HB_TABLE, k_hu_hb_table, sizeof k_hu_hb_table);

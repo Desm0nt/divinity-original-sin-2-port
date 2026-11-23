@@ -49,7 +49,9 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        The stage grows MM_GROW to the left (root children shifted at init). The host tells the toggles' state through
                        setBtnVisible(MM_STATE + bits) (an "on" ring + full glyph); showMiniMap hides our buttons with the map
   statusConsole_p.swf  statusConsole.swf: console / fight buttons / turn notice / GM button raised by SC_UP more (the hot bar is taller);
-                       the iPad's combat row (SC_*): health 505 and armour 309 bars thin on the hot bar's frame (the PC frame hidden), Wait /
+                       the iPad's combat row (SC_*): grey | red | blue bars (iPad 309 / 505 / 309) flush on the hot bar's frame and as wide
+                       as it (dmScBars, again after every updateArmourBar: the PC forces the armour holders' scaleX -1 / 1); out of combat
+                       the host shows the object again and setBtnVisible(SC_EXPLORE) = bars only (the PC frame hidden), Wait /
                        Flee as text plates dmWait_mc / dmFlee_mc (the PC End turn plate art + the game's words; they follow the PC duo
                        buttons' visible / disabled, call GuardPressed / FleePressed), the PC End turn plate in their row; finger pads
   combatLog_p.swf      combatLog.swf opened at the screen centre as the iPad's (setPosition center / screen / center in onEventInit and
@@ -122,6 +124,12 @@ HINT_EN, HINT_RU = 'Tap Confirm to use the skill', 'Нажмите «Подтв�
 # the bar, its lock 44 x 44 inside; owner 23.11 "do it the iPad way"): the PC deck number cycleHotBar_mc (its text_txt) becomes that button
 # (arrows hidden, a plate drawn under the number, DECK_PAD own px around its bounds), the list = a backing, the PC lock moved into it, 5 plates
 DECK_PAD = (12, -18, 6)                    # own px of the number's plate past its bounds: left (the lock's old place), right, top / bottom
+# owner 23.11 (phone): "the 1 centred, the button nicer and 20 % narrower": the plate 44 -> DECK_W own px wide, centred where the 44 px one
+# stood (the bar's crop and the host's row numbers unchanged), rounded with an inner line; text_txt spans the plate, centred (TextFormat align)
+DECK_W, DECK_X, DECK_R = 35, -8, 10       # plate width, its left from the number's bounds x (= -12 + (44 - 35) / 2, rounded), corner size
+DECK_TY = -4                               # the number moved up this much (its field sat 5 px under the plate's middle)
+DECK_ART = (34, 52)                        # the backing: the PC actions button's art (hotBar_fla.actionButtonBG_28), its size in hotbar_mc px
+def DECK_BG_CLS(d): return d.abc.pub('actionButtonBG_28', 'hotBar_fla')
 # right -18: the bounds reach past the number over the first slot (phone 23.11 at x1.56: the plate covered 22 px of slot 1, owner "наплыла на скилы")
 DECK_BG = (408, 709, 406, 76)              # dmDeckBg_mc: x, y, w, h (stage px; its foot (screen 865) above the combat row of statusConsole_p (875..927), 23.11)
 DECK_LOCK = (416, 717, 60)                 # the PC lockButton_mc fitted (centred, by its height) into this box: x, y, size
@@ -146,14 +154,14 @@ MM_MOVE = [('hit_mc', -42, 29), ('map_mc', -42, 29), ('tension_mc', -42, 29), ('
 # input event on the Switch (only the controller tutorial TUT_ActiveSearchInterface_Controller): left out.
 MM_RING = (227, 187)             # the ring's centre after MM_MOVE (old-frame stage px: x of a 420 stage)
 def _arc(r, deg): import math; return (MM_RING[0] + r * math.cos(math.radians(deg)), MM_RING[1] + r * math.sin(math.radians(deg)))
-MM_TGL = 64                      # the view button and the toggles (iPad 67): plate_round_copper, glyph GLYPH of it
+MM_TGL = 77                      # the view button and the toggles (iPad 67; owner 23.11: 64 -> 77, +20 %): plate_round_copper, glyph GLYPH of it
 # name, code (10 + dmKey n = the host; 20 = the arc, 21 = the names), icon, centre x, y, size, the host's state bit (0 = none)
-MM_BTNS = [('dmMmView_mc', 20, 'icon_view', 75, 188, MM_TGL, 0)] + [
-    (n, c, i) + _arc(255, deg) + (MM_TGL, b) for n, c, i, deg, b in (
-        ('dmMmT1_mc', 12, 'icon_tactical_s', 196, 1), ('dmMmT2_mc', 13, 'icon_labels', 170, 2),
-        ('dmMmT3_mc', 14, 'icon_cones', 144, 4), ('dmMmT4_mc', 15, 'icon_camlock', 118, 8))] + [
-    ('dmMmInfo_mc', 21, 'icon_info') + _arc(235, 218) + (52, 0),
-    ('dmMmSave_mc', 11, 'icon_save', 355, 187, 52, 0)]   # quick save: the iPad's quickSaveBtn_mc 1351..1399 (48) on the ring's right edge
+MM_BTNS = [('dmMmView_mc', 20, 'icon_view', 66, 188, MM_TGL, 0)] + [
+    (n, c, i) + _arc(285, deg) + (MM_TGL, b) for n, c, i, deg, b in (
+        ('dmMmT1_mc', 12, 'icon_tactical_s', 195, 1), ('dmMmT2_mc', 13, 'icon_labels', 165, 2),
+        ('dmMmT3_mc', 14, 'icon_cones', 135, 4), ('dmMmT4_mc', 15, 'icon_camlock', 105, 8))] + [
+    ('dmMmInfo_mc', 21, 'icon_info') + _arc(215, 226) + (62, 0),
+    ('dmMmSave_mc', 11, 'icon_save', 355, 187, 62, 0)]   # quick save: the iPad's quickSaveBtn_mc 1351..1399 (48) on the ring's right edge
 MM_ARC = ['dmMmT1_mc', 'dmMmT2_mc', 'dmMmT3_mc', 'dmMmT4_mc', 'dmMmInfo_mc']   # shown while the view menu is open
 MM_LBL = [('dmMmL1_mc', 'dmMmT1_mc', 'Tactical camera', 'Тактическая камера'), ('dmMmL2_mc', 'dmMmT2_mc', 'Item labels', 'Подписи предметов'),
           ('dmMmL3_mc', 'dmMmT3_mc', 'Sight cones', 'Конусы обзора'), ('dmMmL4_mc', 'dmMmT4_mc', 'Camera lock', 'Фиксация камеры')]
@@ -162,8 +170,9 @@ MM_STATE = 100                   # setBtnVisible(MM_STATE + bits, ..) from the h
 MM_W = 420                       # the PC stage width; every number here is in it (the iPad's place: the ring centred ~194 px from the right edge)
 MM_GROW = 360                    # the stage grows this much to the LEFT (every root child shifted +MM_GROW at init): the arc and its names
                                  # reach x -330 of the old frame; the screen place of everything stays W - (MM_W - x)
-MM_PAD = [('pingButton_mc', 64), ('homestead_mc', 64), ('dmMmView_mc', 100), ('dmMmT1_mc', 108), ('dmMmT2_mc', 108), ('dmMmT3_mc', 108),
-          ('dmMmT4_mc', 108), ('dmMmInfo_mc', 80), ('dmMmSave_mc', 72)]   # finger pads (transparent, stage px) around the small ring buttons
+MM_PAD = [('pingButton_mc', 64), ('homestead_mc', 64), ('dmMmView_mc', 130), ('dmMmT1_mc', 150), ('dmMmT2_mc', 150), ('dmMmT3_mc', 150),
+          ('dmMmT4_mc', 150), ('dmMmInfo_mc', 100), ('dmMmSave_mc', 86)]   # owner 23.11: labels / cones still hard to hit -> toggles 30 deg apart
+                                 # on r 285 (centres 148 px apart), pads 150 (~12 mm at the phone's x1.26)   # finger pads (transparent, stage px) around the small ring buttons
                                  # (48 / 64 drawn): the minimap stays at x 1 (owner 20.11), the touch target grows; the save pad stays off the ring
 # ---- status console (PC stage 1920 x 1080, anchored bottom; its own code already raises by bottomBarHeight 67)
 SC_UP = 33                       # health bar 1043 - 67 - 33 = 943 (statusConsole_t: 943)
@@ -173,13 +182,32 @@ SC_MOVE = ['console_mc', 'fightButtons_mc', 'turnNotice_mc', 'toGM_mc']
 # Stage = statusConsole's 1920 x 1080 (anchor bottom: screen x = x - (1920 - W) / 2); console_mc / fightButtons_mc stand at y 980 after
 # bottomBarHeight 67 + SC_UP (their own px below). The bars: the PC holders scaled to the iPad's lengths, their tops on screen y 940 / 942.
 SC_ORG = (960, 1080 - 67 - SC_UP)                    # console_mc / fightButtons_mc origin on the stage
-SC_HB = (708, 940, 505 / 476.0, 15 / 16.0)           # hbHolder_mc: stage left, top, scaleX, scaleY (iPad hbHolder_mc 708..1213 x 943..958)
-SC_ARM = [('leftArmourBarHolder_mc', 386), ('rightArmourBarHolder_mc', 1226)]   # 309 x 11 (iPad 386..694 / 1223..1535), top 942
-SC_ARM_S = (309 / 198.0, 11 / 12.0)
+# The bars sit FLUSH on the hot bar's frame, together as wide as it (owner 23.11, phone: "the red one floats, the grey one is short and off to
+# the left, the blue one is not seen"): grey (physical armour) | red (health) | blue (magic armour) in the iPad's 309 / 505 / 309, SC_BAR_INSET
+# from the frame's ends and SC_BAR_GAP apart. Both movies are anchored bottom-centre with the same factor (the host: 0x28 and 0x75 alike),
+# so stage numbers hold on every screen width: status stage x = hot bar stage x + SC_DX, y = hot bar stage y + 80.
+HB_FRAME_ART = 57                # hotbar_mc own px of the frame's top line (its first opaque row: measured on the rendered symbol)
+SC_DX = 960 - 974
+SC_FOOT = HB_Y + HB_FRAME_ART * _s + 80                        # 960: the frame's top on the status stage (phone 23.11: ~960)
+SC_SPAN = (HB_X + SC_DX, HB_X + VISW * _s + SC_DX)             # the frame's ends (377 .. 1542)
+SC_BAR_INSET, SC_BAR_GAP = 6, 6
+SC_BAR_K = (SC_SPAN[1] - SC_SPAN[0] - 2 * SC_BAR_INSET - 2 * SC_BAR_GAP) / float(309 + 505 + 309)
+SC_GREY = (SC_SPAN[0] + SC_BAR_INSET, SC_SPAN[0] + SC_BAR_INSET + 309 * SC_BAR_K)
+SC_RED = (SC_GREY[1] + SC_BAR_GAP, SC_GREY[1] + SC_BAR_GAP + 505 * SC_BAR_K)
+SC_BLUE = (SC_RED[1] + SC_BAR_GAP, SC_RED[1] + SC_BAR_GAP + 309 * SC_BAR_K)
+SC_HB = (SC_RED[0], SC_FOOT - 16, (SC_RED[1] - SC_RED[0]) / 476.0, 1.0)    # hbHolder_mc: left, top, scaleX, scaleY (its drawing 476 x 16)
+# the armour holders (drawing 198 x 12): Console_1.setLeftArmourBar forces leftArmourBarHolder_mc.scaleX = -1 (the PC draws it mirrored,
+# growing leftwards from its origin) and setRightArmourBar the right one's = 1 on every update - so the origin of the left one is the RIGHT
+# end of its span, and dmScBars puts the scale back after every updateArmourBar (the engine's only path to those setters)
+SC_ARM = [('leftArmourBarHolder_mc', SC_GREY[1], -1), ('rightArmourBarHolder_mc', SC_BLUE[0], 1)]   # name, origin x, scaleX sign
+SC_ARM_S = (309 * SC_BAR_K / 198.0, 1.0)
+SC_ARM_TOP = SC_FOOT - 12
+SC_EXPLORE = 100                 # setBtnVisible(SC_EXPLORE, ..) from the host (hle_dos2_touchui_hud.c HU_SC_EXPLORE): out of combat, bars only
 SC_BTN_Y, SC_BTN_H = 875, 52                         # the text plates' row: the PC End turn plate's own 52 (iPad 879..923, 44 high)
 SC_END_X = 1272                                      # endBtn_mc (204 x 52, the engine's caption): iPad endBtn_mc 1272..1478
-SC_PLATES = [('dmWait_mc', 1, 370, 'Delay Turn', 'Отложить ход'), ('dmFlee_mc', 2, 552, 'Flee', 'Бежать')]   # name, code, x; captions: the game's
-SC_PLATE_W, SC_FONT = 176, 22                        # own words (english.xml h157c01cd.. "Delay Turn", russian.xml hcf2cc556.. "Отложить ход", hb399d83e.. Flee / Бежать)
+SC_PLATES = [('dmWait_mc', 1, 352, 'Delay Turn', 'Отложить ход'), ('dmFlee_mc', 2, 552, 'Flee', 'Бежать')]   # name, code, x; captions: the game's
+SC_PLATE_W, SC_FONT = 192, 22                        # own words (english.xml h157c01cd.. "Delay Turn", russian.xml hcf2cc556.. "Отложить ход", hb399d83e.. Flee / Бежать)
+SC_FIT_MIN = 14                  # captions shrink (TextFormat size) until they fit the plate's inner width, not below this
 SC_PAD = (8, 24, 14)                                 # the plates' finger pads: px past the drawing left / right, above, below (90 high: ~7.4 mm at the
                                                      # phone's x1.26; never over the hot bar 955 below, under the hint banner's foot 850 above)
 # ---- the right side (rightSideButtons_t: stage 1440 x 1080 anchored right; here the last SIDE_W px of it)
@@ -539,12 +567,24 @@ def hotbar(data, notif=None):
     def bx(f): return [('getlocal', 3), ('getproperty', P(f))]
     code += d.get('hotbar_mc', 'cycleHotBar_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nb'),
         ('getlocal', 1), ('getlocal', 1), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', 3),
-        ('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
-        ('getlocal', 2), ('pushbyte', 2), ('pushint', d.abc_int(0x7a5e3a)), ('callpropvoid', P('lineStyle'), 2),
-        ('getlocal', 2), ('pushint', d.abc_int(0x1e1812)), ('pushbyte', 9), ('pushbyte', 10), ('divide',), ('callpropvoid', P('beginFill'), 2),
-        ('getlocal', 2)] + bx('x') + num(DECK_PAD[0]) + [('subtract',)] + bx('y') + num(DECK_PAD[2]) + [('subtract',)] + \
-        bx('width') + num(DECK_PAD[0] + DECK_PAD[1]) + [('add',)] + bx('height') + num(2 * DECK_PAD[2]) + [('add',), ('callpropvoid', P('drawRect'), 4),
-        ('getlocal', 2), ('callpropvoid', P('endFill'), 0)]
+        # owner 23.11: "the 1 styled as the actions button on the right": the deck button's backing = the PC actions button's own art
+        # (hotBar_fla.actionButtonBG_28, 34 x 52, the same symbol and size as the actionsButton_mc beside the slots), behind the number,
+        # centred on the number's column, vertically on its bounds (the row's height)
+        ('findpropstrict', DECK_BG_CLS(d)), ('constructprop', DECK_BG_CLS(d), 0), ('coerce_a',), ('setlocal', 2),
+        ('getlocal', 2), ('pushstring', S('dmDeckArt')), ('setproperty', P('name')),
+        ('getlocal', 2)] + bx('x') + num(DECK_X + (DECK_W - DECK_ART[0]) // 2) + [('add',), ('setproperty', P('x')),
+        ('getlocal', 2)] + bx('y') + bx('height') + num(DECK_ART[1]) + [('subtract',), ('pushbyte', 2), ('divide',), ('add',), ('setproperty', P('y')),
+        ('getlocal', 1), ('getlocal', 2), ('pushbyte', 0), ('callpropvoid', P('addChildAt'), 2),
+        # the number centred on the plate: the field spans it, align center (defaultTextFormat too: the PC code sets the text again per deck)
+        ('getlocal', 1), ('getproperty', P('text_txt')), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'ntx'),
+        ('getlocal', 2), ('pushstring', S('none')), ('setproperty', P('autoSize')),
+        ('getlocal', 2)] + bx('x') + num(DECK_X) + [('add',), ('setproperty', P('x')),
+        ('getlocal', 2)] + num(DECK_W) + [('setproperty', P('width')),
+        ('getlocal', 2), ('getlocal', 2), ('getproperty', P('y'))] + num(DECK_TY) + [('add',), ('setproperty', P('y')),
+        ('getlocal', 2), ('callproperty', P('getTextFormat'), 0), ('coerce_a',), ('setlocal', 4),
+        ('getlocal', 4), ('pushstring', S('center')), ('setproperty', P('align')),
+        ('getlocal', 2), ('getlocal', 4), ('setproperty', P('defaultTextFormat')),
+        ('getlocal', 2), ('getlocal', 4), ('callpropvoid', P('setTextFormat'), 1), ('L', 'ntx')]
     for btn in ('upBtn_mc', 'downBtn_mc'):
         code += [('getlocal', 1), ('getproperty', P(btn)), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'nv' + btn),
                  ('getlocal', 2), ('pushfalse',), ('setproperty', P('visible')), ('L', 'nv' + btn)]
@@ -947,10 +987,16 @@ def _sc_code():
     arm = ''.join('''
     a = c.%s
     if a:
-        a.x = %d
-        a.y = %d
+        a.x = %r
+        a.y = %r
         a.scaleX = %r
-        a.scaleY = %r''' % (n, x - ox, 942 - oy, SC_ARM_S[0], SC_ARM_S[1]) for n, x in SC_ARM)
+        a.scaleY = %r''' % (n, x - ox, SC_ARM_TOP - oy, sg * SC_ARM_S[0], SC_ARM_S[1]) for n, x, sg in SC_ARM)
+    fit = ''.join('''
+    m = this.getChildByName('%s')
+    if m:
+        f = m.getChildByName('txt')
+        if f:
+            this.dmFit(f, %d)''' % (n, SC_PLATE_W - 16) for n, code, x, en, ru in SC_PLATES)
     vis = ''.join('''
     m = this.getChildByName('%s')
     if m:
@@ -959,6 +1005,8 @@ def _sc_code():
         if d.visible:
             if b.visible:
                 v = True
+        if this.dmExplore == True:
+            v = False
         m.visible = v
         if b.disabled_mc.visible:
             m.alpha = 0.45
@@ -979,18 +1027,49 @@ def _sc_code():
     if m:
         f = m.getChildByName('txt')
         if f:
-            f.text = '%s\'''' % (n, ru) for n, code, x, en, ru in SC_PLATES)
+            f.text = '%s'
+            this.dmFit(f, %d)''' % (n, ru, SC_PLATE_W - 16) for n, code, x, en, ru in SC_PLATES)
     return '''
-def dmScLay():
+def dmScBars():
+    c = this.console_mc
+    if not c:
+        return
+    c.frame_mc.visible = False
+    h = c.hbHolder_mc
+    if h:
+        h.x = %r
+        h.y = %r
+        h.scaleX = %r
+        h.scaleY = %r%s
+def dmFit(f, w):
+    i = 0
+    while i < 12:
+        if f.textWidth <= w:
+            return
+        t = f.getTextFormat()
+        if t.size <= %d:
+            return
+        t.size = t.size - 1
+        f.setTextFormat(t)
+        f.defaultTextFormat = t
+        i = i + 1
+def dmScMode():
+    x = not (this.dmExplore == True)
+    f = this.fightButtons_mc
+    if f:
+        f.visible = x
     c = this.console_mc
     if c:
-        c.frame_mc.visible = False
-        h = c.hbHolder_mc
-        if h:
-            h.x = %d
-            h.y = %d
-            h.scaleX = %r
-            h.scaleY = %r%s
+        a = c.ap_mc
+        if a:
+            a.visible = x
+    if not x:
+        n = this.turnNotice_mc
+        if n:
+            n.visible = False
+    this.dmScVis()
+def dmScLay():
+    this.dmScBars()%s
     f = this.fightButtons_mc
     if not f:
         return
@@ -1037,8 +1116,8 @@ def dmScLang(t):
         i = i + 1
     if not ru:
         return%s
-''' % (SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], arm, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2],
-       hook, vis, lang)
+''' % (SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], arm, SC_FIT_MIN, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
+       SC_BTN_H + SC_PAD[1] + SC_PAD[2], hook, vis, lang)
 
 
 def status(data):
@@ -1048,8 +1127,20 @@ def status(data):
         press_code(d, [('getlocal0',), ('getlocal1',), ('callpropvoid', P('dmScAct'), 1)])   # the plates: press dims, release on the plate acts
         d.kc(_sc_code())
         # the PC's own visibility / disabled calls drive the plates (combat only, as the PC duo buttons); setBtnText(0, caption) -> language
-        for nm, keep in (('setBtnVisible', 'dmSbvOrig'), ('setBtnDisabled', 'dmSbdOrig')):
-            d.wrap(nm, keep, lambda n, keep=keep: HEAD + d.call_orig(keep, n) + [('getlocal0',), ('callpropvoid', P('dmScVis'), 0), ('returnvoid',)])
+        d.wrap('setBtnDisabled', 'dmSbdOrig', lambda n: HEAD + d.call_orig('dmSbdOrig', n) + [('getlocal0',), ('callpropvoid', P('dmScVis'), 0), ('returnvoid',)])
+        # setBtnVisible(i, on): the host's SC_EXPLORE (the engine hid the object out of combat, the host shows it again for the bars) =
+        # explore mode: bars only; an engine call that SHOWS a fight button (i < SC_EXPLORE, on) = combat again; the plates follow
+        d.wrap('setBtnVisible', 'dmSbvOrig', lambda n: HEAD + [('getlocal1',), ('pushbyte', SC_EXPLORE), ('ifnge', 'orig'),
+               ('getlocal0',), ('pushtrue',), ('setproperty', P('dmExplore')), ('getlocal0',), ('callpropvoid', P('dmScMode'), 0), ('returnvoid',),
+               ('L', 'orig')] + d.call_orig('dmSbvOrig', n) + [('getlocal2',), ('iffalse', 'vis'), ('getlocal0',), ('getproperty', P('dmExplore')), ('iffalse', 'vis'),
+               ('getlocal0',), ('pushfalse',), ('setproperty', P('dmExplore')), ('getlocal0',), ('callpropvoid', P('dmScMode'), 0), ('returnvoid',),
+               ('L', 'vis'), ('getlocal0',), ('callpropvoid', P('dmScVis'), 0), ('returnvoid',)])
+        # setCombatTurnNotification(n, ..): n >= 0 = a turn notice = combat
+        d.wrap('setCombatTurnNotification', 'dmSctnOrig', lambda n: HEAD + d.call_orig('dmSctnOrig', n) + [('getlocal1',), ('pushbyte', 0), ('ifnge', 'end'),
+               ('getlocal0',), ('getproperty', P('dmExplore')), ('iffalse', 'end'), ('getlocal0',), ('pushfalse',), ('setproperty', P('dmExplore')),
+               ('getlocal0',), ('callpropvoid', P('dmScMode'), 0), ('L', 'end'), ('returnvoid',)])
+        # updateArmourBar(): the original (Console_1.setLeft / setRightArmourBar force scaleX -1 / 1), then our bars' geometry again
+        d.wrap('updateArmourBar', 'dmUabOrig', lambda n: HEAD + d.call_orig('dmUabOrig', n) + [('getlocal0',), ('callpropvoid', P('dmScBars'), 0), ('returnvoid',)])
         d.wrap('setBtnText', 'dmSbtxOrig', lambda n: HEAD + d.call_orig('dmSbtxOrig', n) + [('getlocal0',), ('getlocal2',), ('callpropvoid', P('dmScLang'), 1), ('returnvoid',)])
     post = lambda d: [('getlocal0',), ('callpropvoid', d.P('dmScLay'), 0)]
     return moved(data, [(n, 0, -SC_UP) for n in SC_MOVE], art=sc_art, init_post=post, setup=setup)
@@ -1221,9 +1312,25 @@ def check(src):
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
-            t = dis('dmScLay'); say('dmScLay' in dis('onEventInit') and 'hbHolder_mc' in t and all(n in t for n, _ in SC_ARM) and 'frame_mc' in t and 'endBtn_mc' in t and 'duoBtns_mc' in t,
-                'bars on the hot bar: health %d..%d (x%.3f), armour %s (x%.3f), 940..955; the PC frame hidden; End turn at %d..%d, y %d..%d' % (
-                    SC_HB[0], SC_HB[0] + 505, SC_HB[2], ', '.join('%d..%d' % (x, x + 309) for _, x in SC_ARM), SC_ARM_S[0], SC_END_X, SC_END_X + 204, SC_BTN_Y, SC_BTN_Y + SC_BTN_H))
+            t = dis('dmScBars'); tl = dis('dmScLay')
+            spans = [SC_GREY, SC_RED, SC_BLUE]; widths = [s2[1] - s2[0] for s2 in spans]
+            say('dmScBars' in tl and 'dmScLay' in dis('onEventInit') and 'hbHolder_mc' in t and all(n in t for n, _, _ in SC_ARM) and 'frame_mc' in t
+                and abs(SC_GREY[0] - SC_SPAN[0] - SC_BAR_INSET) < 0.01 and abs(SC_SPAN[1] - SC_BLUE[1] - SC_BAR_INSET) < 0.01
+                and abs(SC_RED[0] - SC_GREY[1] - SC_BAR_GAP) < 0.01 and abs(SC_BLUE[0] - SC_RED[1] - SC_BAR_GAP) < 0.01
+                and abs(widths[0] / widths[1] - 309 / 505.0) < 1e-3 and abs(widths[2] - widths[0]) < 0.01,
+                'bars flush on the hot bar frame %.0f..%.0f (status stage; the frame top %.0f): grey %.0f..%.0f | red %.0f..%.0f | blue %.0f..%.0f (309 / 505 / 309 x %.3f, inset %d, gaps %d)' % (
+                    SC_SPAN[0], SC_SPAN[1], SC_FOOT, SC_GREY[0], SC_GREY[1], SC_RED[0], SC_RED[1], SC_BLUE[0], SC_BLUE[1], SC_BAR_K, SC_BAR_INSET, SC_BAR_GAP))
+            say(abs(SC_HB[1] + 16 - SC_FOOT) < 0.01 and abs(SC_ARM_TOP + 12 - SC_FOOT) < 0.01 and abs(SC_FOOT - 960) < 1,
+                'feet on the frame: health %.0f..%.0f, armour %.0f..%.0f (screen at factor 1; phone 23.11: the frame top ~960)' % (SC_HB[1], SC_HB[1] + 16, SC_ARM_TOP, SC_ARM_TOP + 12))
+            t = dis('updateArmourBar'); say('dmUabOrig' in t and 'dmScBars' in t and 'leftArmourBarHolder_mc' in dis('dmScBars') and 'rightArmourBarHolder_mc' in dis('dmScBars'),
+                'updateArmourBar: the original (Console_1 forces scaleX -1 / 1), then dmScBars: left x%.3f mirrored with its origin at the right end %.0f, right x%.3f from %.0f' % (
+                    -SC_ARM_S[0], SC_GREY[1], SC_ARM_S[0], SC_BLUE[0]))
+            t = dis('setBtnVisible'); tm = dis('dmScMode')
+            say(str(SC_EXPLORE) in t and 'dmExplore' in t and 'dmScMode' in t and 'dmExplore' in dis('setCombatTurnNotification') and 'fightButtons_mc' in tm and 'ap_mc' in tm
+                and 'turnNotice_mc' in tm and 'dmExplore' in dis('dmScVis'),
+                'out of combat: the host shows the object again and sends setBtnVisible(%d) = bars only (fight buttons, AP, turn plaque, plates hidden); a fight button shown / a turn notice = combat' % SC_EXPLORE)
+            t = dis('dmFit'); say('textWidth' in t and 'setTextFormat' in t and 'dmFit' in dis('dmScLay') and 'dmFit' in dis('dmScLang'),
+                'captions shrink to the plate inner width %d (TextFormat size, not below %d)' % (SC_PLATE_W - 16, SC_FIT_MIN))
             t = dis('dmScAct'); say(all((n.encode() + b'\0') in names for n, *_ in SC_PLATES) and "'GuardPressed'" in t and "'FleePressed'" in t and 'disabled_mc' in t and "'UI_Gen_XButton_Click'" in t,
                 'Wait / Flee text plates %s (the PC End turn plate art, %d x %d) -> GuardPressed / FleePressed (the PC sound; nothing while the PC button is disabled)' % (
                     ', '.join('%s %d' % (n, x) for n, c, x, *_ in SC_PLATES), SC_PLATE_W, SC_BTN_H))
@@ -1231,9 +1338,9 @@ def check(src):
                 'the plates follow the PC duo buttons (setBtnVisible / setBtnDisabled: combat only; disabled = 45 % and no action)')
             t = dis('dmScLang'); say('dmScLang' in dis('setBtnText') and all(ru in t for *_, ru in SC_PLATES) and SC_FONT >= 22,
                 'captions: %s (English) / %s (a Cyrillic letter in the engine\'s End turn caption), %d px' % (' / '.join(p2[3] for p2 in SC_PLATES), ' / '.join(p2[4] for p2 in SC_PLATES), SC_FONT))
-            say(SC_BTN_Y + SC_BTN_H + SC_PAD[2] < 955 and SC_BTN_Y - SC_PAD[1] >= HINT[1] + 64 * HINT[3] + 80 and SC_HB[1] + 15 <= 955,
-                'finger pads %d x %d (plates) / %d x %d (End turn): screen y %d..%d, between the hint banner (foot %.0f) and the hot bar (955)' % (
-                    SC_PLATE_W + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], 204 + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], SC_BTN_Y - SC_PAD[1], SC_BTN_Y + SC_BTN_H + SC_PAD[2], HINT[1] + 64 * HINT[3] + 80))
+            say(SC_BTN_Y + SC_BTN_H + SC_PAD[2] < SC_HB[1] and SC_BTN_Y - SC_PAD[1] >= HINT[1] + 64 * HINT[3] + 80 and SC_PLATES[0][2] + SC_PLATE_W + 8 <= SC_PLATES[1][2],
+                'finger pads %d x %d (plates) / %d x %d (End turn): screen y %d..%d, between the hint banner (foot %.0f) and the bars (%.0f)' % (
+                    SC_PLATE_W + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], 204 + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], SC_BTN_Y - SC_PAD[1], SC_BTN_Y + SC_BTN_H + SC_PAD[2], HINT[1] + 64 * HINT[3] + 80, SC_HB[1]))
         elif o in pps.MAKE: pps.check_one(o, data, out, say)   # tools/dos2_ppanel_skills.py
         elif o[:-6] in PANEL_CLOSE:
             import dos2_layout as lay, tempfile
@@ -1269,9 +1376,10 @@ def mock(src, path, W=2400, F=None, made=None):
     import dos2_swf_render as rn
     F = dict(dict(hb=1.0, mm=1.0, side=1.0, pi=1.0), **(F or {}))
     canvas = Image.new('RGBA', (W, 1080), (38, 44, 40, 255))
-    def put(swf, what, x, y, sx=1.0, sy=None, crop=None):
+    def put(swf, what, x, y, sx=1.0, sy=None, crop=None, flip=False):
         sy = sx if sy is None else sy
         img, org = rn.render(swf, what, 1.0)
+        if flip: bb = img.getbbox(); img = img.crop(bb).transpose(Image.FLIP_LEFT_RIGHT); org = (0, org[1] + bb[1])   # the drawing only (its 0.. box), mirrored
         if crop:   # (x0, y0, x1, y1) in the character's own px
             img = img.crop((int(crop[0] - org[0]), int(crop[1] - org[1]), int(crop[2] - org[0]), int(crop[3] - org[1]))); org = (crop[0], crop[1])
         img = img.resize((max(1, int(img.size[0] * sx)), max(1, int(img.size[1] * sy))), Image.LANCZOS)
@@ -1306,7 +1414,7 @@ def mock(src, path, W=2400, F=None, made=None):
     hb = Swf(made['hotBar_p.swf']); ids = root_ids(hb)
     hb2 = strip(hb, ids['hotbar_mc'], {'lockButton_mc', 'actionsButton_mc', 'chatBtn_mc', 'hotkeys_mc'})
     # the deck number's plate (dmHook draws it under cycleHotBar_mc: its bounds 300.6..350.6 x 64..113 own px + DECK_PAD)
-    dx0, dy0, dx1, dy1 = 300.6 - DECK_PAD[0], 64 - DECK_PAD[2], 350.6 - DECK_PAD[1], 113 + DECK_PAD[2]
+    dx0, dy0, dx1, dy1 = 304.3 + DECK_X, 64 - DECK_PAD[2], 304.3 + DECK_X + DECK_W, 113 + DECK_PAD[2]
     put(hb2, ids['hotbar_mc'], hx(HB_X), hy(HB_Y), _s * f, crop=(CROP, 0, CROP + VISW, VISH))
     ImageDraw.Draw(canvas).rectangle([hx(HB_X + (dx0 - CROP) * _s), hy(HB_Y + dy0 * _s), hx(HB_X + (dx1 - CROP) * _s), hy(HB_Y + dy1 * _s)], fill=(30, 24, 18, 230), outline=(122, 94, 58, 255), width=2)
     put(hb2, ids['hotbar_mc'], hx(HB_X), hy(HB_Y), _s * f, crop=(dx0 + 2, 0, dx1 - 2, VISH))   # the number over its plate (as the movie draws it)
@@ -1330,9 +1438,10 @@ def mock(src, path, W=2400, F=None, made=None):
     sx = lambda x: W / 2.0 + (x - 960) * f; sy = lambda y: 1080 - (1080 - y) * f
     ox, oy = SC_ORG
     put(sc, mv.resolve('healthBarHolder'), sx(SC_HB[0]), sy(SC_HB[1]), SC_HB[2] * f, SC_HB[3] * f)
-    for (nm, x), cls in zip(SC_ARM, ('armourBarHolderPhys', 'armourBarHolder')): put(sc, mv.resolve(cls), sx(x), sy(942), SC_ARM_S[0] * f, SC_ARM_S[1] * f)
-    put(sc, mv.resolve('apBar_10'), sx(ox - 81), sy(oy - 92), f)
-    if F.get('combat', True):
+    for (nm, x, sg), cls in zip(SC_ARM, ('armourBarHolderPhys', 'armourBarHolder')):
+        put(sc, mv.resolve(cls), sx(x - (198 * SC_ARM_S[0] if sg < 0 else 0)), sy(SC_ARM_TOP), SC_ARM_S[0] * f, SC_ARM_S[1] * f, flip=sg < 0)
+    if F.get('combat', True):   # out of combat (explore: the host's setBtnVisible(SC_EXPLORE)) the bars only
+        put(sc, mv.resolve('apBar_10'), sx(ox - 81), sy(oy - 92), f)
         put(sc, mv.resolve('endTurnButton'), sx(SC_END_X), sy(SC_BTN_Y), f)
         text((sx(SC_END_X + 20), sy(SC_BTN_Y), sx(SC_END_X + 184), sy(SC_BTN_Y + SC_BTN_H)), 'КОНЕЦ ХОДА' if lang == 'ru' else 'END TURN', SC_FONT * f)
         for nm, code, x, en, ru in SC_PLATES:

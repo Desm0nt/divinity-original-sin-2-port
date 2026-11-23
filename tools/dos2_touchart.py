@@ -29,7 +29,11 @@ ASSETS = {
     # touch HUD 23.11 (tools/dos2_pchud_touch.py: the hot bar's chat / combat log plates, the minimap's view menu and quick save)
     'icon_chat': (112, 105), 'icon_combatlog': (111, 112), 'icon_save': (108, 112), 'icon_view': (112, 61), 'icon_labels': (112, 98),
     'icon_cones': (112, 67), 'icon_camlock': (83, 112), 'icon_info': (71, 112), 'icon_tactical_s': (104, 108),
+    # touch sheet / inventory 23.11 (tools/dos2_ppanel_inv.py; made by tools/dos2_sheet_art.py from Qwen Image 3 generations)
+    'gen_damask': (512, 512), 'gen_panel': (1024, 234), 'gen_ico_all': (112, 112), 'gen_ico_sort': (112, 112), 'gen_ico_sortby': (112, 112),
+    'gen_ico_weight': (112, 112),
 }
+OPAQUE = {'gen_damask'}       # tiles: opaque on purpose (a repeating fill)
 ARROW_RGB = (150, 141, 120)   # the hot bar arrows' flat khaki (the iPad's own arrow is a vector of this colour)
 
 
@@ -190,7 +194,7 @@ def check():
     for n, (w, h) in sorted(ASSETS.items()):
         p = ASSET_DIR / (n + '.png')
         try:
-            img = read_png(p); ok = (img.shape[1], img.shape[0]) == (w, h) and img[..., 3].min() == 0
+            img = read_png(p); ok = (img.shape[1], img.shape[0]) == (w, h) and (img[..., 3].min() == 0 or n in OPAQUE)
             print('%-4s %-22s %4dx%-4d sha256 %s' % ('ok' if ok else 'FAIL', n, img.shape[1], img.shape[0], hashlib.sha256(p.read_bytes()).hexdigest()[:16]))
         except Exception as e: ok = False; print('FAIL %-22s %s' % (n, e))
         bad += not ok
