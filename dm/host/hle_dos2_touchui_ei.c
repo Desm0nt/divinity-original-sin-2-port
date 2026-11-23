@@ -39,6 +39,8 @@
 //   - host handlers: dm_dos2_touchui_ei_register(name, fn, ctx); fn returns 1 = the call is the host's (the game's class does not get it).
 //     Built in: the iPad-only names of the `_t` movies (TOUCH_UI_PLAN.md 2.2: no such string in the Switch main, so no class can know them)
 //     are taken by a stub that only counts (one line each). DM_DOS2_TOUCHUI_EI=2 = log only, no stubs, everything goes to the game.
+//   - watchers: dm_dos2_touchui_ei_watch(fn, ctx) is asked for every call before the name's handler (hle_dos2_touch_ctxdesc.c: it sees
+//     showItemTooltip / openContextMenu, which have a handler of their own or go to the game); 1 = taken.
 //   - dm_dos2_touchui_invoke(player, name, args, count): call a movie method the engine way (the id is looked up in the player's own
 //     name table: only names the class registered can be sent).
 #ifdef DM_GAME_DOS2
@@ -189,6 +191,18 @@ int dm_dos2_touchui_ei_host(const char *name, void *player, void *ui, unsigned n
     pthread_mutex_unlock(&g_lock);
     return h ? h(ctx, player, ui, name, n, args) : -1;
 }
+// watchers: asked for EVERY drained call before the name table (one name has one handler; a watcher sees a name that already has one,
+// e.g. showItemTooltip of hle_dos2_touchui_hud.c, without replacing it). 1 = taken: neither the name's handler nor the game's class gets it.
+enum { EI_MAXW = 4 };
+static struct { dm_ei_fn fn; void *ctx; } g_w[EI_MAXW]; static int g_nw;
+int dm_dos2_touchui_ei_watch(dm_ei_fn fn, void *ctx) {
+    if (!fn) return 0;
+    pthread_mutex_lock(&g_lock);
+    const int ok = g_nw < EI_MAXW;
+    if (ok) { g_w[g_nw].fn = fn; g_w[g_nw].ctx = ctx; g_nw++; }
+    pthread_mutex_unlock(&g_lock);
+    return ok;
+}
 static int ei_stub(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) { (void)ctx; (void)player; (void)ui; (void)name; (void)n; (void)a; return 1; }
 // ExternalInterface names of the iPad `_t` movies that are not a string of the Switch main at all (TOUCH_UI_PLAN.md 1 / 2.2)
 static const char *const k_ipad_only[] = {"didUse2FingerScrolling", "cancelActiveAction", "clearRuneTarget", "clickedAction", "closeAndDragItem", "didToggleDeckSwitcher", "dropItem",
@@ -234,8 +248,11 @@ static uint64_t ei_drain_hook(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3
         pthread_mutex_lock(&g_lock);
         if ((uty == 0x8c || uty == 0x46) && strcmp(name, "PlaySound")) { g_jr[g_jri & 63].h = ei_hash(name); g_jr[g_jri & 63].t = ei_ms(); g_jri++; }
         for (int k = 0; k < g_nh; k++) if (!strcmp(g_h[k].name, name)) { h = g_h[k].fn; ctx = g_h[k].ctx; break; }
+        const int nw = g_nw;   // watchers are only appended (at install), so the entries below nw stay as they are
         pthread_mutex_unlock(&g_lock);
-        const int taken = h ? h(ctx, fp, ui, name, n, args) : 0;
+        int taken = 0;
+        for (int k = 0; k < nw && !taken; k++) taken = g_w[k].fn(g_w[k].ctx, fp, ui, name, n, args);
+        if (!taken && h) taken = h(ctx, fp, ui, name, n, args);
         if (!g_quiet || g_note) ei_note(0, fp, name, n, args, taken);
         if (!taken) { void **vt = *(void ***)ui; ((void (*)(void *, const char *, uint32_t, void *))vt[0])(ui, name, n, args); }
     }

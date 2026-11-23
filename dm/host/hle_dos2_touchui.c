@@ -246,6 +246,9 @@ static const tu_def k_touch[] = {
     // the PC tooltip window (made by hle_dos2_touchui_hud.c hu_tip_make): tooltip.swf with everything of its library tooltipHelper_kb.swf
     // inside, under its own class names (tools/dos2_ptooltip.py) - no Flash library is registered for it
     {0x2c, 0, "tooltip_p", "GUI/tooltip.swf"},
+    // the item context menu: the engine's entries + "Description" at the bottom when an item window opened it (tools/dos2_pctxmenu.py; the
+    // host half that tells the movie and shows the tooltip: hle_dos2_touch_ctxdesc.c). 0xa (not an item's menu) keeps the stock movie
+    {0x0b, 0, "contextMenu_p", "GUI/contextMenu.swf"},
     {0, 0, NULL, NULL}   // end
 };
 // console menus that take the whole input while shown: with one of them on screen and no touch code in it the mouse filter stays closed

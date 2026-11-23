@@ -684,6 +684,9 @@ import dos2_ptouch_tips; dos2_ptouch_tips.install(sys.modules[__name__])
 import dos2_ptooltip; dos2_ptooltip.install(sys.modules[__name__])
 # the tutorial window (tutorialBox_p: a tap on the whole pop-up / bubble = its X, on the modal box = OK): tools/dos2_ptutorial.py adds its movie
 import dos2_ptutorial; dos2_ptutorial.install(sys.modules[__name__])
+# the item context menu (contextMenu_p: the engine's entries + "Description" at the bottom when an item window opened it; the host shows the
+# item's tooltip): tools/dos2_pctxmenu.py adds its movie
+import dos2_pctxmenu; dos2_pctxmenu.install(sys.modules[__name__])
 
 
 def main():

@@ -188,6 +188,7 @@ static void host_preload(int argc, char **argv) {
     { void dm_dos2_touchui_ie_install(void); dm_dos2_touchui_ie_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: the iPad's input events "IE Tap" ... for the `_t` movies (hle_dos2_touchui_ie.c, run tu05a)
     { void dm_dos2_touchui_hud_install(void); dm_dos2_touchui_hud_install(); }   // [DOS2] touch HUD (UI mode touch / DM_DOS2_TOUCHUI_HUD), step 1: site checks + switches only, before the touch hook (hle_dos2_touchui_hud.c)
     { void dm_dos2_touch_gaps_install(void); dm_dos2_touch_gaps_install(); }   // [DOS2] UI mode touch: EI calls the Switch classes lack (portrait long press = inventory), after the EI hook (hle_dos2_touch_gaps.c)
+    { void dm_dos2_touch_ctxdesc_install(void); dm_dos2_touch_ctxdesc_install(); }   // [DOS2] UI mode touch: Description in the item context menu (contextMenu_p) shows the item's tooltip; the inventory hover only through it (hle_dos2_touch_ctxdesc.c)
     { void dm_dos2_touch_tips_install(void); dm_dos2_touch_tips_install(); }   // [DOS2] UI mode touch: keyboard-only loading screen tips out of the PC pick (hle_dos2_touch_tips.c)
     { void dm_dos2_touchui_vis_install(void); dm_dos2_touchui_vis_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: "dmPanel" of bottomBar_d's panel column = the radial menu's openPanel (hle_dos2_touchui_vis.c)
     { void dm_dos2_touchui_route_install(void); dm_dos2_touchui_route_install(); }   // [DOS2] with DM_DOS2_TOUCHUI: per-movie mouse routing, modal guard, a tap is not "accept" (hle_dos2_touchui_route.c)
