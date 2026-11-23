@@ -88,7 +88,8 @@ CANCEL = (974 + 201, 816 - 80, 69)   # cancelBtn_mc centre (W/2 + 201, 816), 69
 # the deck switcher as the iPad's (hotBar_t btnDeckSwitcher_mc 46 x 84 left of the slots: a tap opens / closes deckSwitcher_mc 359 x 107 above
 # the bar, its lock 44 x 44 inside; owner 23.11 "do it the iPad way"): the PC deck number cycleHotBar_mc (its text_txt) becomes that button
 # (arrows hidden, a plate drawn under the number, DECK_PAD own px around its bounds), the list = a backing, the PC lock moved into it, 5 plates
-DECK_PAD = (12, 0, 6)                      # own px of the number's plate past its bounds: left (the lock's old place), right, top / bottom
+DECK_PAD = (12, -18, 6)                    # own px of the number's plate past its bounds: left (the lock's old place), right, top / bottom
+# right -18: the bounds reach past the number over the first slot (phone 23.11 at x1.56: the plate covered 22 px of slot 1, owner "наплыла на скилы")
 DECK_BG = (428, 755, 406, 76)              # dmDeckBg_mc: x, y, w, h (stage px; its foot above the health bar of the status console, screen y ~915)
 DECK_LOCK = (436, 763, 60)                 # the PC lockButton_mc fitted (centred, by its height) into this box: x, y, size
 DECK_LIST = (502, 763, 60, 66)             # dmDeck1..5_mc: x of the first, y, size, pitch
