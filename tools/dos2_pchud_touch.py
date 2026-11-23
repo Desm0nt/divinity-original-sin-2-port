@@ -212,6 +212,7 @@ SC_HB = (SC_RED[0], SC_FOOT - 16, (SC_RED[1] - SC_RED[0]) / 476.0, 1.0)    # hbH
 # growing leftwards from its origin) and setRightArmourBar the right one's = 1 on every update - so the origin of the left one is the RIGHT
 # end of its span, and dmScBars puts the scale back after every updateArmourBar (the engine's only path to those setters)
 SC_ARM = [('leftArmourBarHolder_mc', SC_GREY[1], -1), ('rightArmourBarHolder_mc', SC_BLUE[0], 1)]   # name, origin x, scaleX sign
+BAR_TRACK = (0x1e0c0c, 0.9)              # owner 23.11: a dark track under the health / armour bars, their own size (the lost part shows; at full it is covered)
 SC_ARM_S = (309 * SC_BAR_K / 198.0, 1.0)
 SC_ARM_TOP = SC_FOOT - 12
 SC_EXPLORE = 100                 # setBtnVisible(SC_EXPLORE, ..) from the host (hle_dos2_touchui_hud.c HU_SC_EXPLORE): out of combat, bars only
@@ -1106,7 +1107,12 @@ def _sc_code():
         a.x = %r
         a.y = %r
         a.scaleX = %r
-        a.scaleY = %r''' % (n, x - ox, SC_ARM_TOP - oy, sg * SC_ARM_S[0], SC_ARM_S[1]) for n, x, sg in SC_ARM)
+        a.scaleY = %r
+        g = a.graphics
+        g.clear()
+        g.beginFill(%d, %r)
+        g.drawRect(0, 0, %d, %d)
+        g.endFill()''' % (n, x - ox, SC_ARM_TOP - oy, sg * SC_ARM_S[0], SC_ARM_S[1], BAR_TRACK[0], BAR_TRACK[1], 198, 12) for n, x, sg in SC_ARM)
     txt = ''.join('''
     f = c.%s
     if f:
@@ -1164,7 +1170,12 @@ def dmScBars():
         h.x = %r
         h.y = %r
         h.scaleX = %r
-        h.scaleY = %r%s
+        h.scaleY = %r
+        g = h.graphics
+        g.clear()
+        g.beginFill(%d, %r)
+        g.drawRect(0, 0, 476, 16)
+        g.endFill()%s
 def dmFit(f, w):
     i = 0
     while i < 12:
@@ -1246,7 +1257,7 @@ def dmScLang(t):
         i = i + 1
     if not ru:
         return%s
-''' % (txt, SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], arm, SC_FIT_MIN, SC_AP_Y - oy, SC_NOTICE_Y, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
+''' % (txt, SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], BAR_TRACK[0], BAR_TRACK[1], arm, SC_FIT_MIN, SC_AP_Y - oy, SC_NOTICE_Y, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
        SC_BTN_H + SC_PAD[1] + SC_PAD[2], hook, vis, lang)
 
 

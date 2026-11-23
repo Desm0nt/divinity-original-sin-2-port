@@ -111,7 +111,7 @@ const char *dm_ei_str(const dm_ei_val *v, char *buf, size_t n) {
 static void ei_args(char *o, size_t on, const dm_ei_val *a, unsigned n) {
     size_t k = 0; o[0] = 0;
     for (unsigned i = 0; a && i < n && i < 12 && k + 80 < on; i++) {
-        char s[64];
+        char s[400];   // a movie's diagnostic string (UIAssert) is longer than a name (23.11: the strip report was cut at 63)
         if (a[i].type == 3) k += (size_t)snprintf(o + k, on - k, "%s%s", i ? ", " : "", a[i].b ? "true" : "false");
         else if (a[i].type == 4) k += (size_t)snprintf(o + k, on - k, "%s%.10g", i ? ", " : "", a[i].d);
         else if (a[i].type == 5 || a[i].type == 6) k += (size_t)snprintf(o + k, on - k, "%s\"%s\"", i ? ", " : "", dm_ei_str(&a[i], s, sizeof s));
@@ -153,8 +153,8 @@ static void ei_note(int dir, const uint8_t *player, const char *name, unsigned n
                                      snprintf(r->name, sizeof r->name, "%s", name); snprintf(r->movie, sizeof r->movie, "%s", movie); g_rows_new++; g_rows_t = ei_s(); }
     if (r) {
         const uint32_t c = ++r->n;
-        if (c == 1 || c == 10 || c == 100 || c == 1000 || c == 10000 || c == 100000) {
-            char args[512]; ei_args(args, sizeof args, a, n);
+        if (c == 1 || c == 10 || c == 100 || c == 1000 || c == 10000 || c == 100000 || (!dir && !strcmp(name, "UIAssert") && c <= 50)) {   // UIAssert: a movie's own report, every one (up to 50)
+            char args[1024]; ei_args(args, sizeof args, a, n);
             LOG("[ei] %s type %#x %s: %s(%s)%s%s", dir ? "invoke ->" : "EI     <-", type, movie, name, args, stub ? " [host stub: not sent to the game's class]" : "", c > 1 ? "" : " (first)");
             if (c > 1) LOG("[ei]   ... x%u", c);
         }

@@ -1045,6 +1045,11 @@ STRIP_IN = 7                     # frame art px (x F) between the strip's panel 
 STRIP_MID = 13                   # own px: the middle of a strip cell (its crop -3 .. 29)
 STRIP_DIAG_FRAME = 30            # frames into a stay in state 1 when dmStripDiag reports (UIAssert, once a stay)
 STRIP_GAP = 26                   # own px between the secondary stats and the resistances
+# phone 23.11 (UIAssert dmStrip: mainStats_mc at x 398, y 116, visible, alpha 1 - inside the strip, still nothing seen): stats_mc.bg_mc lies
+# ABOVE mainStats_mc (the PC window art had holes for the panels) and our black strip box is a piece of bg_mc: it covered the strip. In the
+# inventory the strip goes on top of stats_mc's children (its index kept in dmMsIdx, put back for the sheet), and its values - the PC's dark
+# ink for the parchment - turn light on the dark box (STRIP_INK; each field's own colour kept in dmIcX, put back for the sheet)
+STRIP_INK = 0xE6D6B8
 def cs_spec(k, glow=None):
     """dmLay of characterSheet_p (owner 23.11: the iPad's characterSheet_t structure in our art). The clip stats_mc stands at the window's top
     left at scale 1, every child is placed in window px (win_lets): the frame pieces (frame_spec), the HP / AP / Source box (the PC's infoStatList,
@@ -1376,9 +1381,20 @@ def stat_strip(d):
     -> the dmHook lines that start the tick"""
     P = d.P; Rc = d.abc.pub('Rectangle', 'flash.geom')
     for n in ('dmStX', 'dmStW', 'dmStSS', 'dmStCY'): add_slot(d, n, 0)
-    N, I, EL, TM, TT, X0, W, CUR = range(3, 11)
+    # phone 23.11 (UIAssert dmStrip: mainStats_mc x 2234, off the window): the PC draws the stat icons LEFT of the label (secondary stats,
+    # resistances), so "icon right edge - value left" was negative for every cell and the row's width summed negative - the centring threw
+    # the block far right. Now an icon left of its value moves right after the value while in the strip (its own x kept in dmIcX, a
+    # Dictionary of the document keyed by the element, and put back when the sheet shows the list again)
+    d.inst['traits'].append(Trait(d.P('dmIcX'), 0, 0, 0, 0, 0))
+    Dic = d.abc.pub('Dictionary', 'flash.utils')
+    LATE = next(i for i, m in enumerate(d.abc.mn) if i and m[0] == 0x1b)   # a MultinameL of the movie (dict[el])
+    N, I, EL, TM, TT, X0, W, CUR, IC, DI = range(3, 13)
     def at(i): return [('getlocal1',), ('getlocal', i), ('callproperty', P('getAt'), 1), ('coerce_a',), ('setlocal', EL)]
-    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', EL), ('pushnull',), ('coerce_a',), ('setlocal', TM), ('pushnull',), ('coerce_a',), ('setlocal', TT)] + \
+    c = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', EL), ('pushnull',), ('coerce_a',), ('setlocal', TM), ('pushnull',), ('coerce_a',), ('setlocal', TT),
+        ('pushnull',), ('coerce_a',), ('setlocal', IC),
+        ('getlocal0',), ('getproperty', P('dmIcX')), ('coerce_a',), ('setlocal', DI), ('getlocal', DI), ('iftrue', 'hasd'),
+        ('findpropstrict', Dic), ('constructprop', Dic, 0), ('coerce_a',), ('setlocal', DI), ('getlocal0',), ('getlocal', DI), ('setproperty', P('dmIcX')),
+        ('L', 'hasd')] + \
         [x for v in (N, I, X0, W, CUR) for x in (('pushbyte', 0), ('convert_d',), ('setlocal', v))] + [
         ('getlocal1',), ('iffalse', 'ret'), ('getlocal1',), ('getproperty', P('length')), ('convert_d',), ('setlocal', N),
         ('getlocal', N), ('pushbyte', 0), ('ifngt', 'ret'),
@@ -1388,22 +1404,47 @@ def stat_strip(d):
         ('pushbyte', 0), ('convert_d',), ('setlocal', I),
         ('L', 'off'), ('getlocal', I), ('getlocal', N), ('ifge', 'offd')] + at(I) + [('getlocal', EL), ('iffalse', 'offn'),
         ('getlocal', EL), ('pushnull',), ('setproperty', P('scrollRect')),
-        ('L', 'offn'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'off'),
+        ('getlocal', DI), ('getlocal', EL), ('getproperty', LATE), ('pushundefined',), ('ifstricteq', 'offn'),
+        ('getlocal', EL), ('getproperty', P('icon_mc')), ('coerce_a',), ('setlocal', IC), ('getlocal', IC), ('iffalse', 'offn'),
+        ('getlocal', IC), ('getlocal', DI), ('getlocal', EL), ('getproperty', LATE), ('setproperty', P('x')),
+        ('getlocal', DI), ('getlocal', EL), ('deleteproperty', LATE), ('pop',),
+        ('L', 'offn'), ('getlocal', EL), ('iffalse', 'offc'), ('getlocal', EL), ('getproperty', P('texts_mc')), ('coerce_a',), ('setlocal', TM), ('getlocal', TM), ('iffalse', 'offc'),
+        ('getlocal', TM), ('getproperty', P('text_txt')), ('coerce_a',), ('setlocal', TT), ('getlocal', TT), ('iffalse', 'offc'),
+        ('getlocal', DI), ('getlocal', TT), ('getproperty', LATE), ('pushundefined',), ('ifstricteq', 'offc'),
+        ('getlocal', TT), ('getlocal', DI), ('getlocal', TT), ('getproperty', LATE), ('setproperty', P('textColor')),
+        ('getlocal', DI), ('getlocal', TT), ('deleteproperty', LATE), ('pop',),
+        ('L', 'offc'), ('getlocal', EL), ('iffalse', 'offx'), ('getlocal', EL), ('getproperty', P('texts_mc')), ('coerce_a',), ('setlocal', TM), ('getlocal', TM), ('iffalse', 'offx'),
+        ('getlocal', DI), ('getlocal', TM), ('getproperty', LATE), ('pushundefined',), ('ifstricteq', 'offx'),
+        ('getlocal', EL), ('getlocal', DI), ('getlocal', TM), ('getproperty', LATE), ('setproperty', P('x')),
+        ('getlocal', DI), ('getlocal', TM), ('deleteproperty', LATE), ('pop',),
+        ('L', 'offx'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'off'),
         ('L', 'offd'), ('getlocal1',), ('callpropvoid', P('positionElements'), 0),
         ('L', 'ret'), ('pushbyte', 0), ('returnvalue',),
         ('L', 'on'), ('pushbyte', 0), ('convert_d',), ('setlocal', I),
         ('L', 'loop'), ('getlocal', I), ('getlocal', N), ('ifge', 'done')] + at(I) + [('getlocal', EL), ('iffalse', 'next'),
         ('getlocal', EL), ('getproperty', P('texts_mc')), ('coerce_a',), ('setlocal', TM), ('getlocal', TM), ('iffalse', 'next'),
         ('getlocal', TM), ('getproperty', P('text_txt')), ('coerce_a',), ('setlocal', TT), ('getlocal', TT), ('iffalse', 'next'),
+        ('getlocal', DI), ('getlocal', TT), ('getproperty', LATE), ('pushundefined',), ('ifstrictne', 'inkk'),
+        ('getlocal', DI), ('getlocal', TT), ('getlocal', TT), ('getproperty', P('textColor')), ('setproperty', LATE),
+        ('L', 'inkk'), ('getlocal', TT), ('pushint', _int(d, STRIP_INK)), ('setproperty', P('textColor')),
         ('getlocal', TM), ('getproperty', P('x')), ('getlocal', TT), ('getproperty', P('x')), ('add',), ('pushbyte', 4), ('subtract',), ('convert_d',), ('setlocal', X0),
-        ('getlocal', EL), ('getproperty', P('icon_mc')), ('getproperty', P('visible')), ('iffalse', 'noic'),
-        ('getlocal', EL), ('getproperty', P('icon_mc')), ('getproperty', P('x')), ('pushbyte', 32), ('add',), ('getlocal', X0), ('subtract',), ('convert_d',), ('setlocal', W),
+        ('getlocal', EL), ('getproperty', P('icon_mc')), ('coerce_a',), ('setlocal', IC), ('getlocal', IC), ('iffalse', 'noic'),
+        ('getlocal', IC), ('getproperty', P('visible')), ('iffalse', 'noic'),
+        ('getlocal', IC), ('getproperty', P('x')), ('getlocal', X0), ('ifnlt', 'icr'),
+        ('getlocal', DI), ('getlocal', EL), ('getproperty', LATE), ('pushundefined',), ('ifstrictne', 'kept'),
+        ('getlocal', DI), ('getlocal', EL), ('getlocal', IC), ('getproperty', P('x')), ('setproperty', LATE),
+        ('L', 'kept'), ('getlocal', IC), ('getlocal', TM), ('getproperty', P('x')), ('getlocal', TT), ('getproperty', P('x')), ('add',),
+        ('getlocal', TT), ('getproperty', P('width')), ('add',), ('pushbyte', 4), ('add',), ('setproperty', P('x')),
+        ('L', 'icr'), ('getlocal', IC), ('getproperty', P('x')), ('pushbyte', 32), ('add',), ('getlocal', X0), ('subtract',), ('convert_d',), ('setlocal', W),
         ('jump', 'cell'),
         ('L', 'noic'), ('getlocal', TT), ('getproperty', P('width')), ('pushbyte', 8), ('add',), ('convert_d',), ('setlocal', W),
         ('L', 'cell'), ('getlocal', EL), ('getproperty', P('scrollRect')), ('iftrue', 'put'),
         ('getlocal', EL), ('findpropstrict', Rc), ('getlocal', X0), ('pushbyte', 3), ('negate',), ('getlocal', W), ('pushbyte', 32), ('constructprop', Rc, 4),
         ('setproperty', P('scrollRect')),
-        ('L', 'put'), ('getlocal', EL), ('getlocal', CUR), ('setproperty', P('x')), ('getlocal', EL), ('pushbyte', 0), ('setproperty', P('y')),
+        # phone 23.11: back on the sheet the rows kept the strip's x (a staircase) - each row's own x is kept (dmIcX[texts_mc]) and put back
+        ('L', 'put'), ('getlocal', DI), ('getlocal', TM), ('getproperty', LATE), ('pushundefined',), ('ifstrictne', 'xk'),
+        ('getlocal', DI), ('getlocal', TM), ('getlocal', EL), ('getproperty', P('x')), ('setproperty', LATE),
+        ('L', 'xk'), ('getlocal', EL), ('getlocal', CUR), ('setproperty', P('x')), ('getlocal', EL), ('pushbyte', 0), ('setproperty', P('y')),
         ('getlocal', CUR), ('getlocal', W), ('add',), ('pushbyte', 12), ('add',), ('convert_d',), ('setlocal', CUR),
         ('L', 'next'), ('getlocal', I), ('pushbyte', 1), ('add',), ('convert_d',), ('setlocal', I), ('jump', 'loop'),
         ('L', 'done'), ('getlocal', CUR), ('returnvalue',)]
@@ -1416,8 +1457,12 @@ def stat_strip(d):
         ('getlocal0',), ('getlocal', SM), ('getproperty', P('resistanceStatList')), ('getlocal0',), ('getproperty', P('dmState')), ('callproperty', P('dmStripRow'), 2), ('convert_d',), ('setlocal', B),
         ('getlocal', SM), ('getproperty', P('expStatList')), ('coerce_a',), ('setlocal', MS), ('getlocal', MS), ('iffalse', 'nx'),
         ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmState')), ('not',), ('setproperty', P('visible')),
-        ('L', 'nx'), ('getlocal0',), ('getproperty', P('dmState')), ('iffalse', 'end'),
+        ('L', 'nx'), ('getlocal0',), ('getproperty', P('dmState')), ('iffalse', 'st0'),
         ('getlocal', SM), ('getproperty', P('mainStats_mc')), ('coerce_a',), ('setlocal', MS), ('getlocal', MS), ('iffalse', 'end'),
+        ('getlocal0',), ('getproperty', P('dmMsIdx')), ('pushbyte', 0), ('ifge', 'up'),
+        ('getlocal0',), ('getlocal', SM), ('getlocal', MS), ('callproperty', P('getChildIndex'), 1), ('setproperty', P('dmMsIdx')),
+        ('getlocal', SM), ('getlocal', MS), ('getlocal', SM), ('getproperty', P('numChildren')), ('pushbyte', 1), ('subtract',), ('callpropvoid', P('setChildIndex'), 2),
+        ('L', 'up'),
         # one row: the resistances' holder right after the secondary stats; T = the row's width (own), the scale = min(dmStSS, dmStW / T)
         ('getlocal', MS), ('getproperty', P('resistancesStatHolder_mc')), ('coerce_a',), ('setlocal', SM), ('getlocal', SM), ('iffalse', 'end'),
         ('getlocal', SM), ('getlocal', A)] + num(STRIP_GAP) + [('add',), ('setproperty', P('x')), ('getlocal', SM), ('pushbyte', 0), ('setproperty', P('y')),
@@ -1430,12 +1475,18 @@ def stat_strip(d):
         ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmStX')), ('getlocal0',), ('getproperty', P('dmStW')), ('getlocal', A), ('getlocal', B),
         ('multiply',), ('subtract',), ('pushbyte', 2), ('divide',), ('add',), ('setproperty', P('x')),
         ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmStCY'))] + num(STRIP_MID) + [('getlocal', B), ('multiply',), ('subtract',), ('setproperty', P('y')),
-        ('L', 'end'), ('returnvoid',)]
+        ('jump', 's1d'),
+        # the sheet: mainStats_mc back to its own place under bg_mc
+        ('L', 'st0'), ('getlocal0',), ('getproperty', P('dmMsIdx')), ('pushbyte', 0), ('iflt', 's1d'),
+        ('getlocal', SM), ('getproperty', P('mainStats_mc')), ('coerce_a',), ('setlocal', MS), ('getlocal', MS), ('iffalse', 's1d'),
+        ('getlocal', SM), ('getlocal', MS), ('getlocal0',), ('getproperty', P('dmMsIdx')), ('callpropvoid', P('setChildIndex'), 2),
+        ('getlocal0',), ('pushbyte', 0xff), ('setproperty', P('dmMsIdx')),
+        ('L', 's1d'), ('L', 'end'), ('returnvoid',)]
     d.method('dmStripTick', 1, [x for x in c[:-2]] + [('getlocal0',), ('getproperty', P('dmState')), ('iffalse', 'nd'),
         ('getlocal0',), ('getlocal0',), ('getproperty', P('dmStN')), ('increment',), ('setproperty', P('dmStN')),
         ('getlocal0',), ('getproperty', P('dmStN')), ('pushbyte', STRIP_DIAG_FRAME), ('ifne', 'nd'),
         ('getlocal0',), ('getlocal', A), ('callpropvoid', P('dmStripDiag'), 1), ('L', 'nd'), ('L', 'end'), ('returnvoid',)])
-    add_slot(d, 'dmStN', 0)
+    add_slot(d, 'dmStN', 0); add_slot(d, 'dmMsIdx', -1)
     def val(lines): return lines + [('add',)]
     def obj(path):   # the value of this.<path> (null-safe only for the first link: the diag runs after the strip's own checks)
         return [('getlocal0',)] + [('getproperty', P(q)) for q in path]
