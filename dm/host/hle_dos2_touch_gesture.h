@@ -148,10 +148,12 @@ static inline int dt_t1_state(float moved, uint64_t held_ms, float slop, int slo
     return DT_T1_WAIT;
 }
 // UI mode TOUCH (owner 23.11: "no Move for an item on the ground, no way to put it elsewhere"): a one-finger world move that would be the
-// camera pan is the PC's own item drag (left held on the item, the cursor follows, the release places it) when the finger was held still for
-// the short long press first and the picking had an ITEM under it. 1 = drag the item, 0 = the pan as before.
-static inline int dt_t1_item_drag(int state, uint64_t held_ms, int slong_ms, int item_under) {
-    return state == DT_T1_PAN && item_under && slong_ms > 0 && held_ms >= (uint64_t)slong_ms;
+// camera pan is the PC's own item drag (left held on the item, the cursor follows, the release places it) when the picking had an ITEM under
+// the spot where the finger landed. The iPad's own tutorial (TUT_MoveItem on iPad: "Move an object by tapping it, and then dragging it") drags
+// at once, so hold_ms is 0 by default (owner 23.11: "убирай" the delay); DM_DOS2_TOUCH_T_ITEMDRAG=2 keeps the 23.11 hold of the short long
+// press first. 1 = drag the item, 0 = the pan as before.
+static inline int dt_t1_item_drag(int state, uint64_t held_ms, int hold_ms, int item_at_landing) {
+    return state == DT_T1_PAN && item_at_landing && hold_ms >= 0 && held_ms >= (uint64_t)hold_ms;
 }
 enum { DT_REL_TAP = 0 /* a click */, DT_REL_TIP = 1 /* a short long press ended: tooltip only, no click */, DT_REL_NONE = 2 /* moved: nothing */ };
 // What the release of a still one-finger touch (no pan, no long press fired) is.

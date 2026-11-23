@@ -159,6 +159,12 @@ int dm_dos2_touch_world_item_under(void) {
     const uint64_t h = g_pick_obj;
     return h && tw_ms() - g_pick_ms <= 400 && tw_kind(h)[0] == 'I';
 }
+// the same, only from a pick that ran at or after t (ms, CLOCK_MONOTONIC as tw_ms): the landing spot of a finger, not a stale pick from before it
+int dm_dos2_touch_world_item_since(uint64_t t);
+int dm_dos2_touch_world_item_since(uint64_t t) {
+    const uint64_t h = g_pick_obj, ms = g_pick_ms;
+    return h && ms >= t && tw_kind(h)[0] == 'I';
+}
 // hle_dos2_touchui_hud.c, the action plate's second source: the engine's own PC pick under the cursor right now. 1 a character / item, 0 none,
 // -1 = the helper's ray set-up has not run with the mode byte 0 in the last second (hooks off, or not the PC input mode)
 int dm_dos2_touch_world_obj_live(void);

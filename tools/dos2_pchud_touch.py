@@ -20,7 +20,8 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
       showActiveSkill(slot)  the original, then CONFIRM / cancel are shown while the engine marks a prepared skill (slot >= 0) and
                        ExternalInterface dmAim(0 | 1) tells the host; a tap on them = dmAimBtn(1 confirm | 0 cancel) (host: the PC's left
                        click at the aimed point / right click = cancel)
-      HUD extras ("Implemented: touch HUD extras"): the deck list - dmDeck_mc (above the deck number) opens / closes five plates dmDeck1..5_mc
+      HUD extras ("Implemented: touch HUD extras"): the deck list (the iPad's deck switcher) - the PC deck number cycleHotBar_mc is the button (arrows hidden, a
+                       plate under the number), a tap opens / closes the backing dmDeckBg_mc with the PC lock moved in and five plates dmDeck1..5_mc
                        (k pips = deck k), a tap on one runs the PC cycleHotBar as many times as it takes (nextHotbar) and closes the list; the
                        deck indicator dmInd1..5_mc under the slots (the current deck's bar is bright; followed on enterFrame from the PC's
                        currentHotBarIndex). The ACTION PLATE: showActiveSkill(2000000 + stageX * 2000 + stageY) from the host (a world tap on
@@ -84,12 +85,16 @@ EXP_SX = (49, 100)               # expBar_mc.scaleX: ends near the last slot
 SWIPE = 130                      # stage px (1.5 slots)
 CONFIRM = (974, 788 - 80, 118)   # centre x, y, size: statusConsole_t confirmActionBtn_mc centre (W/2, 788), 118
 CANCEL = (974 + 201, 816 - 80, 69)   # cancelBtn_mc centre (W/2 + 201, 816), 69
-DECK_BTN = (396 + ROW_DX, 836, 44)        # dmDeck_mc: x, y, size (just above the deck number of the bar)
-DECK_LIST = (396 + ROW_DX, 778, 52, 58)   # dmDeck1..5_mc: x of the first, y, size, pitch
+# the deck switcher as the iPad's (hotBar_t btnDeckSwitcher_mc 46 x 84 left of the slots: a tap opens / closes deckSwitcher_mc 359 x 107 above
+# the bar, its lock 44 x 44 inside; owner 23.11 "do it the iPad way"): the PC deck number cycleHotBar_mc (its text_txt) becomes that button
+# (arrows hidden, a plate drawn under the number, DECK_PAD own px around its bounds), the list = a backing, the PC lock moved into it, 5 plates
+DECK_PAD = (12, 0, 6)                      # own px of the number's plate past its bounds: left (the lock's old place), right, top / bottom
+DECK_BG = (428, 755, 406, 76)              # dmDeckBg_mc: x, y, w, h (stage px; its foot above the health bar of the status console, screen y ~915)
+DECK_LOCK = (436, 763, 60)                 # the PC lockButton_mc fitted (centred, by its height) into this box: x, y, size
+DECK_LIST = (502, 763, 60, 66)             # dmDeck1..5_mc: x of the first, y, size, pitch
 IND = (750 + ROW_DX, 988, 80, 5, 82)      # dmInd1..5_mc: x of the first, y, bar w, h, pitch (hotBar_t indicator_mc: 5 bars 80 x 5 every 82)
 ROW_HALF, HB_FRAME_TOP, HB_END_TOP = 695, 875, 849   # the row's half width, its frame's top, the log button's top (stage px): hle_dos2_touch_scale.h
 ACT_FOOT = HB_FRAME_TOP - 2      # stage px: dmTick keeps the actions list's foot on the bar frame's top whatever its height (phone 23.11)
-DECK_HIT = (-18, 42)             # own x, width of the deck arrows' hit areas (x1.56: 66 screen px; was -16, 32 = 50 px; phone 23.11 'hard to hit')
 PLATE_UP = 110                   # the action plate's centre above the tapped point
 PLATE_BASE, PLATE_HIDE, PLATE_MUL = 2000000, 1999999, 2000
 # ---- minimap (PC stage 420 x 2000, anchored topright)
@@ -231,9 +236,9 @@ def hotbar_art(swf):
     sq, qb = art.png('plate_square_copper'); qw = qb[2] - qb[0]; ink = (236, 226, 200)
     def rect(x0, y0, w, h, rgb=ink): return ta.poly_shape(g, [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)], rgb)[0]
     def pip(cx, cy, r=5): return ta.poly_shape(g, [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)], ink)[0]
-    bx, by, bs = DECK_BTN
-    g.place(g.sprite([(sq, 1, (0, 0, bs / qw), None)] + [(rect(bs * 0.25, bs * (0.28 + 0.19 * i), bs * 0.5, bs * 0.09), 2 + i, (0, 0), None) for i in range(3)]), bx, by, 'dmDeck_mc')
-    placed.append(('dmDeck_mc', DECK_BTN))
+    gx, gy, gw, gh = DECK_BG
+    g.place(g.sprite([(rect(-2, -2, gw + 4, gh + 4, (122, 94, 58)), 1, (0, 0), None), (rect(0, 0, gw, gh, (30, 24, 18)), 2, (0, 0), None)]), gx, gy, 'dmDeckBg_mc')
+    placed.append(('dmDeckBg_mc', DECK_BG))
     lx, ly, ls, lp = DECK_LIST
     for k in range(1, 6):
         xs = [ls / 2.0 + (i - (k - 1) / 2.0) * 9 for i in range(k)]
@@ -296,6 +301,9 @@ def hotbar(data):
     code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1)]
     for k in range(1, 6):
         code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 's%d' % k), ('getlocal', 1)] + d.get('dmDeckOpen') + [('convert_b',), ('setproperty', P('visible')), ('L', 's%d' % k)]
+    code += d.child('dmDeckBg_mc', 1) + [('getlocal', 1), ('iffalse', 'sbg'), ('getlocal', 1)] + d.get('dmDeckOpen') + [('convert_b',), ('setproperty', P('visible')), ('L', 'sbg')]
+    code += d.get('hotbar_mc', 'lockButton_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'slk'), ('getlocal', 1)] + d.get('dmDeckOpen') + [
+        ('convert_b',), ('setproperty', P('visible')), ('L', 'slk')]
     d.method('dmDeckShow', 0, code + [('returnvoid',)])
     # dmTick(e): the indicator follows the PC's current deck. locals 2 current, 3 mc
     code = HEAD + [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3), ('pushnull',), ('coerce_a',), ('setlocal', 4)]
@@ -313,22 +321,49 @@ def hotbar(data):
             ('getlocal', 2), ('pushbyte', k), ('ifne', 'j%d' % k), ('pop',), ('pushbyte', 1), ('L', 'j%d' % k), ('setproperty', P('alpha')), ('L', 'i%d' % k)]
     d.method('dmTick', 1, code + [('L', 'end'), ('returnvoid',)])
     # dmHook(): once. locals 1 object, 2 graphics
-    code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1), ('pushnull',), ('coerce_a',), ('setlocal', 2)] + d.get('dmOn') + [('iftrue', 'end'),
+    code = HEAD + [('pushnull',), ('coerce_a',), ('setlocal', 1), ('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3),
+                   ('pushnull',), ('coerce_a',), ('setlocal', 4)] + d.get('dmOn') + [('iftrue', 'end'),
         ('getlocal0',), ('pushtrue',), ('setproperty', P('dmOn'))]
     code += d.get('hotbar_mc', 'slotholder_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'ns'),
         ('getlocal', 1), ('pushstring', S('mouseDown')), ('getlocal0',), ('getproperty', P('dmSwDown')), ('callpropvoid', P('addEventListener'), 2), ('L', 'ns')]
-    # a finger-sized transparent hit area on each deck arrow: own px x DECK_HIT (phone 23.11: 50 x 47 screen px was hard to hit -> 66 x 56,
-    # wider to the right (the slot row's gap) more than to the left (the lock button), taller away from the other arrow)
-    for k, (btn, ry, rh) in enumerate((('upBtn_mc', -20, 36), ('downBtn_mc', 0, 36))):
-        code += d.get('hotbar_mc', 'cycleHotBar_mc', btn) + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'h%d' % k),
-            ('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
-            ('getlocal', 2), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2),
-            ('getlocal', 2)] + num(DECK_HIT[0]) + num(ry) + num(DECK_HIT[1]) + num(rh) + [('callpropvoid', P('drawRect'), 4),
-            ('getlocal', 2), ('callpropvoid', P('endFill'), 0), ('L', 'h%d' % k)]
+    # the iPad's deck button (DECK_PAD): the PC number cycleHotBar_mc, arrows hidden, a plate under the number = its hit area, a tap = 30
+    # (the list). Bounds are read before the arrows go (they are the number's column). locals 1 the number, 2 graphics, 3 bounds, 4 the lock
+    def bx(f): return [('getlocal', 3), ('getproperty', P(f))]
+    code += d.get('hotbar_mc', 'cycleHotBar_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nb'),
+        ('getlocal', 1), ('getlocal', 1), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', 3),
+        ('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
+        ('getlocal', 2), ('pushbyte', 2), ('pushint', d.abc_int(0x7a5e3a)), ('callpropvoid', P('lineStyle'), 2),
+        ('getlocal', 2), ('pushint', d.abc_int(0x1e1812)), ('pushbyte', 9), ('pushbyte', 10), ('divide',), ('callpropvoid', P('beginFill'), 2),
+        ('getlocal', 2)] + bx('x') + num(DECK_PAD[0]) + [('subtract',)] + bx('y') + num(DECK_PAD[2]) + [('subtract',)] + \
+        bx('width') + num(DECK_PAD[0] + DECK_PAD[1]) + [('add',)] + bx('height') + num(2 * DECK_PAD[2]) + [('add',), ('callpropvoid', P('drawRect'), 4),
+        ('getlocal', 2), ('callpropvoid', P('endFill'), 0)]
+    for btn in ('upBtn_mc', 'downBtn_mc'):
+        code += [('getlocal', 1), ('getproperty', P(btn)), ('coerce_a',), ('setlocal', 2), ('getlocal', 2), ('iffalse', 'nv' + btn),
+                 ('getlocal', 2), ('pushfalse',), ('setproperty', P('visible')), ('L', 'nv' + btn)]
+    code += arm(d, 1, 30) + [('L', 'nb')]
+    # the PC lock into the list (the iPad's lock sits in deckSwitcher_mc): re-parented to the root (its slot hotbar_mc.lockButton_mc and its own
+    # listeners stay), scaled by its height into DECK_LOCK and centred there, a transparent hit area of the whole box; shown with the list
+    lx, ly, lsz = DECK_LOCK
+    def cx(f, half): return bx(f) + bx(half) + [('pushbyte', 2), ('divide',), ('add',)]   # the bounds' centre on axis f
+    code += d.get('hotbar_mc', 'lockButton_mc') + [('coerce_a',), ('setlocal', 4), ('getlocal', 4), ('iffalse', 'nl'),
+        ('getlocal', 4), ('getlocal', 4), ('callproperty', P('getBounds'), 1), ('coerce_a',), ('setlocal', 3),
+        ('getlocal0',), ('getlocal', 4), ('callpropvoid', P('addChild'), 1),
+        ('getlocal', 4)] + num(lsz - 4) + bx('height') + [('divide',), ('setproperty', P('scaleX')),
+        ('getlocal', 4), ('getlocal', 4), ('getproperty', P('scaleX')), ('setproperty', P('scaleY')),
+        ('getlocal', 4)] + num(lx + lsz // 2) + cx('x', 'width') + [('getlocal', 4), ('getproperty', P('scaleX')), ('multiply',), ('subtract',), ('setproperty', P('x')),
+        ('getlocal', 4)] + num(ly + lsz // 2) + cx('y', 'height') + [('getlocal', 4), ('getproperty', P('scaleY')), ('multiply',), ('subtract',), ('setproperty', P('y')),
+        ('getlocal', 4), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
+        ('getlocal', 2), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2),
+        ('getlocal', 2)] + cx('x', 'width') + num(lsz // 2) + [('getlocal', 4), ('getproperty', P('scaleX')), ('divide',), ('subtract',)] + \
+        cx('y', 'height') + num(lsz // 2) + [('getlocal', 4), ('getproperty', P('scaleY')), ('divide',), ('subtract',)] + \
+        num(lsz) + [('getlocal', 4), ('getproperty', P('scaleX')), ('divide',)] + num(lsz) + [('getlocal', 4), ('getproperty', P('scaleY')), ('divide',),
+        ('callpropvoid', P('drawRect'), 4), ('getlocal', 2), ('callpropvoid', P('endFill'), 0),
+        ('getlocal', 4), ('pushfalse',), ('setproperty', P('visible')), ('L', 'nl')]
     for k, (name, c) in enumerate((('dmConfirm_mc', 1), ('dmCancel_mc', 0))):
         code += d.child(name, 1) + [('getlocal', 1), ('iffalse', 'b%d' % k)] + arm(d, 1, c) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'b%d' % k)]
     code += d.get('hotbar_mc', 'hotkeys_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'nk'), ('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'nk')]
-    code += d.child('dmDeck_mc', 1) + [('getlocal', 1), ('iffalse', 'nd')] + arm(d, 1, 30) + [('L', 'nd')]
+    code += d.child('dmDeckBg_mc', 1) + [('getlocal', 1), ('iffalse', 'nd'), ('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')),
+             ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseChildren')), ('L', 'nd')]
     for k in range(1, 6):
         code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 'dk%d' % k)] + arm(d, 1, 30 + k) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'dk%d' % k)]
         code += d.child('dmInd%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 'ik%d' % k), ('getlocal', 1), ('pushfalse',), ('setproperty', P('mouseEnabled')),
@@ -547,7 +582,10 @@ def check(src):
             t = dis('showActiveSkill'); say('dmSasOrig' in t and "'dmAim'" in t and 'visible' in t, 'showActiveSkill: original, CONFIRM / cancel visible, dmAim(0 | 1)')
             say("'dmAimBtn'" in dis('dmBAct') and all((n.encode() + b'\0') in names for n in ('dmConfirm_mc', 'dmCancel_mc')), 'CONFIRM %s / cancel %s on the root, tap -> dmAimBtn(1 | 0)' % (CONFIRM, CANCEL))
             t = dis('dmBAct'); say('dmDeckShow' in t and 'cycleHotBar' in t and all((('dmDeck%d_mc' % k).encode() + b'\0') in names and (('dmInd%d_mc' % k).encode() + b'\0') in names for k in range(1, 6))
-                                   and (b'dmDeck_mc\0') in names and 'currentHotBarIndex' in dis('dmTick'), 'deck list (button, 5 plates -> cycleHotBar) and the deck indicator (5 bars, enterFrame)')
+                                   and (b'dmDeckBg_mc\0') in names and 'currentHotBarIndex' in dis('dmTick'), 'deck list (button, 5 plates -> cycleHotBar) and the deck indicator (5 bars, enterFrame)')
+            t = dis('dmHook'); say('cycleHotBar_mc' in t and 'upBtn_mc' in t and 'downBtn_mc' in t and 'lockButton_mc' in t and 'addChild' in t and 'getBounds' in t
+                                   and 'lockButton_mc' in dis('dmDeckShow') and 'dmDeckBg_mc' in dis('dmDeckShow'),
+                                   'iPad deck switcher: the PC number = the button (arrows hidden, plate), the lock moved into the list %s, shown with it' % (DECK_BG,))
             say('dmSetButtonOrig' in dis('setButton') and "''" in dis('setButton') and 'dmSetTextOrig' not in dis('setText').split('returnvoid')[0] and 'hotkeys_mc' in dis('dmHook'),
                 'no PC keyboard labels: slot numbers hidden (hotkeys_mc), setText / setAllText dropped, setButton with an empty letter')
             t = dis('showActiveSkill'); say('dmPlate' in t and str(PLATE_BASE) in t and str(PLATE_HIDE) in t, 'action plate: showActiveSkill(%d + x * %d + y) puts CONFIRM %d px above the point, %d hides' % (PLATE_BASE, PLATE_MUL, PLATE_UP, PLATE_HIDE))
@@ -603,7 +641,9 @@ def mock(src, path, W=2400, F=None, made=None):
     hb = Swf(made['hotBar_p.swf']); ids = root_ids(hb)
     put(hb, ids['hotbar_mc'], hx(HB_X), hy(HB_Y), _s * f, crop=(CROP, 0, CROP + VISW, VISH))
     put(hb, ids['showLog_mc'], hx(LOG_X), hy(LOG_Y), LOG_S[0] / LOG_S[1] * f)
-    put(hb, ids['dmDeck_mc'], hx(DECK_BTN[0]), hy(DECK_BTN[1]), f)
+    if F.get('decks'):
+        put(hb, ids['dmDeckBg_mc'], hx(DECK_BG[0]), hy(DECK_BG[1]), f)
+        for k in range(1, 6): put(hb, ids['dmDeck%d_mc' % k], hx(DECK_LIST[0] + DECK_LIST[3] * (k - 1)), hy(DECK_LIST[1]), f)
     for k in range(1, 6): put(hb, ids['dmInd%d_mc' % k], hx(IND[0] + IND[4] * (k - 1)), hy(IND[1]), f)
     if F.get('aim', True):
         put(hb, ids['dmConfirm_mc'], hx(CONFIRM[0] - CONFIRM[2] / 2.0), hy(CONFIRM[1] - CONFIRM[2] / 2.0), f)
