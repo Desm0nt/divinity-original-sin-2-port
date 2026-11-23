@@ -922,8 +922,8 @@ static void hu_tell_cell(uint8_t *mgr) {   // inventory / sheet: dmSetCell(cell)
                 if (ox != sent_ox[bit] && ox > -OX_BIAS && ox < 90000) {
                     dm_ei_val v; memset(&v, 0, sizeof v); v.type = 4; v.d = (double)(1000000 + OX_CMD + OX_BIAS + ox);
                     if (dm_dos2_touchui_invoke(fp, name, &v, 1)) {
-                        static unsigned n; if (g_dbg || n++ < 16) LOG("[scale] %s: the engine put the movie at x %d (stage px; screen %d px wide in stage px): told, it centres its window itself",
-                                                                      bit == 2 ? "characterSheet_p" : "partyInventory_p", ox, dw);
+                        static unsigned n; if (g_dbg || n++ < 16) LOG("[scale] %s: the engine put the movie at x %d (stage px; screen %d px wide in stage px; FlashPlayer rect %d,%d %dx%d): told, it centres its window itself",
+                                                                      bit == 2 ? "characterSheet_p" : "partyInventory_p", ox, dw, r[0], r[1], r[2], r[3]);
                         sent_ox[bit] = ox;
                     }
                 }

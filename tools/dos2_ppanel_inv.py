@@ -9,7 +9,7 @@ the screen; 76 = the iPad's), dmState (0 = the plain window, 1 = its half of the
 1080, from onEventResolution). The layout is written once, as data (Spec / Ex below): this tool evaluates it (the placements baked into the
 movie = dmLay at cell 76 on a 16:9 screen, the checks, the pictures) and compiles the same statements to AVM2 (dmLay at run time). The host
 sets the cell with dmSetCell(px), or through an invoke name the engine class registers: setAnchor(1000000 + px) for the inventory,
-setHelmetOptionState(1000000 + px) for the sheet; 1000000 + 0 / 1 = the state. dmLay ends with setMcSize(w, 1080) + setPosition(center).
+setHelmetOptionState(1000000 + px) for the sheet; 1000000 + 0 / 1 = the state. dmLay ends with setMcSize(w, 1080) + setPosition(topleft) (phone 23.11: 'center' cut the window).
 
   partyInventory_p   the window clip x S = cell / 50 (cell 76: x 1.52). 13 columns of pitch 56 own px (the iPad's 13 x 86 px; the engine reads
                      the grid from the movie once: inventory_mc.invColW / cSpacing / cSize, main+0x13aa5b0), so the window is 770 own px wide
@@ -604,7 +604,10 @@ def inv_spec(k):
     # keepCustomInScreen: the part of the stage the engine keeps on the screen (PC: uiLeft 0, uiRight 680, uiTop 45, uiMinHeight 190, uiMinWidth 150)
     for prop, e in (('uiLeft', X0), ('uiRight', X0 + INV_W * S), ('uiTop', Y0 + 45 * SH), ('uiMinHeight', 190 * SH), ('uiMinWidth', 150 * SH)): s.root(prop, ffloor(e + R(1, 2)))
     s.let('DX', X0 - V('X0'))
-    s.ei('setMcSize', SW, 1080); s.ei('setPosition', 'center', 'screen', 'center')
+    # phone 23.11 (run1123): with 'center' the engine still put both movies at x 881 (its centring does not use setMcSize), the window shifted
+    # left inside the movie (X1 < 0) and Iggy cut it at the movie's left edge; the inventory also sat ~70 px too high. 'topleft' = origin 0, 0
+    # whatever size the engine believes; the window centres itself inside (dmOX still corrects a non-zero origin)
+    s.ei('setMcSize', SW, 1080); s.ei('setPosition', 'topleft', 'screen', 'topleft')
     return s
 
 
@@ -727,7 +730,7 @@ def cs_spec(k, glow=None):
         s.on(w + (h, 'bgGlow_mc'), [('scaleY', sy * PB / CS_PB0)])
     s.on((('nm', INV_BTN),), [('x', DX + (CS_BTN_AT[0] - RX) * S), ('y', Y0 + (EY - 45) * S), ('scaleX', CS_BTN_AT[1] * S / BTN_ART), ('scaleY', CS_BTN_AT[1] * S / BTN_ART)])
     for prop, e in (('uiLeft', DX), ('uiRight', DX + RW * S), ('uiTop', Y0 + 45 * S), ('uiMinHeight', 190 * S), ('uiMinWidth', 150 * S)): s.root(prop, ffloor(e + R(1, 2)))
-    s.ei('setMcSize', SW, STAGE_H); s.ei('setPosition', 'center', 'screen', 'center')
+    s.ei('setMcSize', SW, STAGE_H); s.ei('setPosition', 'topleft', 'screen', 'topleft')   # phone 23.11: see inv_spec ('center' put it at x 881, cut)
     return s
 
 
@@ -903,7 +906,7 @@ def check(o, data, out, rep, say):
     c = dis('MainTimeline', cmd); l = dis('MainTimeline', 'dmLay')
     say('dmInitOrig' in t and 'dmHook' in t and 'dmLay' in t and 'dmResOrig' in r and 'dmLay' in r and 'dmW' in r, 'onEventInit = original + dmHook + dmLay; onEventResolution(w, h) = original + dmW (w * 1080 / h) + dmLay')
     say('dmSetCell' in c and 'dmSetState' in c and 'dmAnchorOrig' in c and str(CMD) in c, '%s(%d + n) = dmSetState(n < 40) / dmSetCell(n): the host\'s way in through a name the engine class registers; below %d the original' % (cmd, CMD, CMD))
-    say("'center'" in l and 'setMcSize' in l and 'scrollbarVisible' in l or ("'center'" in l and 'setLength' in l), 'dmLay: computes the layout from dmCell / dmState / dmW, then setMcSize + setPosition(center, screen, center)')
+    say("'topleft'" in l and "'center'" not in l and 'setMcSize' in l and ('scrollbarVisible' in l or 'setLength' in l), 'dmLay: computes the layout from dmCell / dmState / dmW, then setMcSize + setPosition(topleft, screen, topleft): origin 0, the window centres itself (phone 23.11)')
     # every path of the layout exists on the timeline (or is a member the PC code makes)
     bad = []
     for path in rep['spec'].paths():

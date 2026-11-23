@@ -147,6 +147,12 @@ static inline int dt_t1_state(float moved, uint64_t held_ms, float slop, int slo
     if (slong_ms > 0 && held_ms >= (uint64_t)slong_ms) return DT_T1_SLONG;
     return DT_T1_WAIT;
 }
+// UI mode TOUCH (owner 23.11: "no Move for an item on the ground, no way to put it elsewhere"): a one-finger world move that would be the
+// camera pan is the PC's own item drag (left held on the item, the cursor follows, the release places it) when the finger was held still for
+// the short long press first and the picking had an ITEM under it. 1 = drag the item, 0 = the pan as before.
+static inline int dt_t1_item_drag(int state, uint64_t held_ms, int slong_ms, int item_under) {
+    return state == DT_T1_PAN && item_under && slong_ms > 0 && held_ms >= (uint64_t)slong_ms;
+}
 enum { DT_REL_TAP = 0 /* a click */, DT_REL_TIP = 1 /* a short long press ended: tooltip only, no click */, DT_REL_NONE = 2 /* moved: nothing */ };
 // What the release of a still one-finger touch (no pan, no long press fired) is.
 static inline int dt_t1_release(float moved, uint64_t held_ms, float slop, int slong_ms) {

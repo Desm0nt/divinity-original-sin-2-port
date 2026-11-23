@@ -22,6 +22,12 @@ int main(void) {
     assert(dt_t1_state(28, 450, slop, slong, lng) == DT_T1_PAN);              // after the tooltip time a move still pans (the iPad's pan)
     assert(dt_t1_state(28, 600, slop, slong, lng) == DT_T1_LONG);             // the long press came first
     assert(dt_t1_state(10, 5000, slop, 0, 0) == DT_T1_WAIT);                  // times off: never
+    // owner 23.11: held on an ITEM for the short long press, then moved = the PC item drag; a quick move or no item = the pan as before
+    assert(dt_t1_item_drag(DT_T1_PAN, 450, slong, 1) == 1);
+    assert(dt_t1_item_drag(DT_T1_PAN, 349, slong, 1) == 0);                   // moved before the hold: the pan
+    assert(dt_t1_item_drag(DT_T1_PAN, 450, slong, 0) == 0);                   // nothing / a character under the finger: the pan
+    assert(dt_t1_item_drag(DT_T1_LONG, 650, slong, 1) == 0);                  // the long press came first (context menu)
+    assert(dt_t1_item_drag(DT_T1_PAN, 450, 0, 1) == 0);                       // times off
     // the release: a tap before the short long press, a tooltip only after it, nothing after a move
     assert(dt_t1_release(5, 100, slop, slong) == DT_REL_TAP);
     assert(dt_t1_release(5, 349, slop, slong) == DT_REL_TAP);

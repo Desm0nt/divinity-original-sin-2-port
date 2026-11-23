@@ -153,6 +153,12 @@ int dm_dos2_touch_world_obj_under(void) {
     const char *k = tw_kind(h);
     return k[0] == 'C' || k[0] == 'I';   // CHARACTER / ITEM
 }
+// UI mode TOUCH, the item drag (hle_dos2_touch.c dt_t1_item_drag): an ITEM (not a character) under the finger in the last 400 ms
+int dm_dos2_touch_world_item_under(void);
+int dm_dos2_touch_world_item_under(void) {
+    const uint64_t h = g_pick_obj;
+    return h && tw_ms() - g_pick_ms <= 400 && tw_kind(h)[0] == 'I';
+}
 // hle_dos2_touchui_hud.c, the action plate's second source: the engine's own PC pick under the cursor right now. 1 a character / item, 0 none,
 // -1 = the helper's ray set-up has not run with the mode byte 0 in the last second (hooks off, or not the PC input mode)
 int dm_dos2_touch_world_obj_live(void);

@@ -88,6 +88,8 @@ DECK_BTN = (396 + ROW_DX, 836, 44)        # dmDeck_mc: x, y, size (just above th
 DECK_LIST = (396 + ROW_DX, 778, 52, 58)   # dmDeck1..5_mc: x of the first, y, size, pitch
 IND = (750 + ROW_DX, 988, 80, 5, 82)      # dmInd1..5_mc: x of the first, y, bar w, h, pitch (hotBar_t indicator_mc: 5 bars 80 x 5 every 82)
 ROW_HALF, HB_FRAME_TOP, HB_END_TOP = 695, 875, 849   # the row's half width, its frame's top, the log button's top (stage px): hle_dos2_touch_scale.h
+ACT_FOOT = HB_FRAME_TOP - 2      # stage px: dmTick keeps the actions list's foot on the bar frame's top whatever its height (phone 23.11)
+DECK_HIT = (-18, 42)             # own x, width of the deck arrows' hit areas (x1.56: 66 screen px; was -16, 32 = 50 px; phone 23.11 'hard to hit')
 PLATE_UP = 110                   # the action plate's centre above the tapped point
 PLATE_BASE, PLATE_HIDE, PLATE_MUL = 2000000, 1999999, 2000
 # ---- minimap (PC stage 420 x 2000, anchored topright)
@@ -296,7 +298,14 @@ def hotbar(data):
         code += d.child('dmDeck%d_mc' % k, 1) + [('getlocal', 1), ('iffalse', 's%d' % k), ('getlocal', 1)] + d.get('dmDeckOpen') + [('convert_b',), ('setproperty', P('visible')), ('L', 's%d' % k)]
     d.method('dmDeckShow', 0, code + [('returnvoid',)])
     # dmTick(e): the indicator follows the PC's current deck. locals 2 current, 3 mc
-    code = HEAD + [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3)] + d.get('hotbar_mc') + [('iffalse', 'end')] + d.get(
+    code = HEAD + [('pushbyte', 0), ('convert_i',), ('setlocal', 2), ('pushnull',), ('coerce_a',), ('setlocal', 3), ('pushnull',), ('coerce_a',), ('setlocal', 4)]
+    # phone 23.11: the actions list (attack / weapon / sneak) covered its own button and could not be closed - the PC's
+    # actionSkillHolder_31.positionElements puts its foot at originalPosY + hotbar_mc.y - (bottom_mc.y + height) in its OWN px, so at our scale
+    # x1.56 the list hung ~100 px lower, over the bar. Every frame its foot is put back on the bar's top: y = ACT_FOOT - (bottom.y + h) x scaleY
+    code += d.get('actionSkillHolder_mc') + [('coerce_a',), ('setlocal', 4), ('getlocal', 4), ('iffalse', 'af'), ('getlocal', 4)] + num(ACT_FOOT) + [
+        ('getlocal', 4), ('getproperty', P('bottom_mc')), ('getproperty', P('y')), ('getlocal', 4), ('getproperty', P('bottom_mc')), ('getproperty', P('height')), ('add',),
+        ('getlocal', 4), ('getproperty', P('scaleY')), ('multiply',), ('subtract',), ('setproperty', P('y')), ('L', 'af')]
+    code += d.get('hotbar_mc') + [('iffalse', 'end')] + d.get(
         'hotbar_mc', 'cycleHotBar_mc') + [('iffalse', 'end')] + idx + [('convert_i',), ('setlocal', 2), ('getlocal', 2)] + d.get('dmIndCur') + [('ifstricteq', 'end'),
         ('getlocal0',), ('getlocal', 2), ('setproperty', P('dmIndCur'))]
     for k in range(1, 6):
@@ -308,11 +317,13 @@ def hotbar(data):
         ('getlocal0',), ('pushtrue',), ('setproperty', P('dmOn'))]
     code += d.get('hotbar_mc', 'slotholder_mc') + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'ns'),
         ('getlocal', 1), ('pushstring', S('mouseDown')), ('getlocal0',), ('getproperty', P('dmSwDown')), ('callpropvoid', P('addEventListener'), 2), ('L', 'ns')]
-    for k, (btn, ry) in enumerate((('upBtn_mc', -14), ('downBtn_mc', 0))):   # a finger-sized (50 x 47 screen px) transparent hit area on each deck arrow
+    # a finger-sized transparent hit area on each deck arrow: own px x DECK_HIT (phone 23.11: 50 x 47 screen px was hard to hit -> 66 x 56,
+    # wider to the right (the slot row's gap) more than to the left (the lock button), taller away from the other arrow)
+    for k, (btn, ry, rh) in enumerate((('upBtn_mc', -20, 36), ('downBtn_mc', 0, 36))):
         code += d.get('hotbar_mc', 'cycleHotBar_mc', btn) + [('coerce_a',), ('setlocal', 1), ('getlocal', 1), ('iffalse', 'h%d' % k),
             ('getlocal', 1), ('getproperty', P('graphics')), ('coerce_a',), ('setlocal', 2),
             ('getlocal', 2), ('pushbyte', 0), ('pushbyte', 0), ('callpropvoid', P('beginFill'), 2),
-            ('getlocal', 2)] + num(-16) + num(ry) + num(32) + num(30) + [('callpropvoid', P('drawRect'), 4),
+            ('getlocal', 2)] + num(DECK_HIT[0]) + num(ry) + num(DECK_HIT[1]) + num(rh) + [('callpropvoid', P('drawRect'), 4),
             ('getlocal', 2), ('callpropvoid', P('endFill'), 0), ('L', 'h%d' % k)]
     for k, (name, c) in enumerate((('dmConfirm_mc', 1), ('dmCancel_mc', 0))):
         code += d.child(name, 1) + [('getlocal', 1), ('iffalse', 'b%d' % k)] + arm(d, 1, c) + [('getlocal', 1), ('pushfalse',), ('setproperty', P('visible')), ('L', 'b%d' % k)]
