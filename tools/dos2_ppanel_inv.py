@@ -11,7 +11,7 @@ movie = dmLay at cell 76 on a 16:9 screen, the checks, the pictures) and compile
 sets the cell with dmSetCell(px), or through an invoke name the engine class registers: setAnchor(1000000 + px) for the inventory,
 setHelmetOptionState(1000000 + px) for the sheet; 1000000 + 0 / 1 = the state. dmLay ends with setMcSize(w, 1080) + setPosition(topleft) (phone 23.11: 'center' cut the window).
 
-  partyInventory_p   the window clip x S = cell / 50 (cell 76: x 1.52). 13 columns of pitch 56 own px (the iPad's 13 x 86 px; the engine reads
+  partyInventory_p   the window clip x S = cell / 50 x INV_K (0.88, owner 23.11: the window 12 % smaller; rows still from the full cell). 13 columns of pitch 56 own px (the iPad's 13 x 86 px; the engine reads
                      the grid from the movie once: inventory_mc.invColW / cSpacing / cSize, main+0x13aa5b0), so the window is 770 own px wide
                      (PC 680: the background gets a stretched plain band, the bag header grows) = 1170 px (iPad 1160). Rows: as many as fit
                      1080 (7 at cell 76; the list scrolls); the background's body is one plain piece stretched to the list. A bigger cell =
@@ -56,10 +56,13 @@ INV_HEAD_ART, INV_BODY_SRC, INV_BODY_ART, INV_BOT_ART = 235, 400, 56, 100   # ba
 INV_SORT_BOT = 612               # the sort popup's own bottom (its y + 607 + 5)
 INV_HEAD_S = 1.19                # the header's scale cap (dm/host/hle_dos2_touch_scale.h TS_INV_HEAD_S): 202 own px -> 240 px, so 7 rows of 76 make the iPad's
                                  # 968 px window (was 1.52: 1035 px; owner 21.11 'header lower, like the iPad'); the list takes the cell's scale
+INV_K = 0.88                     # owner 23.11 (phone shot_inv2, cell 102 on 20:9: 1571 x 989 px, the title cut at the top): the whole window
+                                 # 10-15 % smaller. The rows are still decided at the full cell (the host's rule, hle_dos2_touch_scale.h
+                                 # ts_inv_rows, stays exact), then everything - bag cells, header, buttons, background - is drawn x INV_K
 INV_RIGHT = ('close_mc', 'minimise_mc', 'autosortBtn_mc', 'sortByBtn_mc', 'allBtn_mc', 'totalGold_mc')   # stand at the header's right end
 TOP_M = 8                        # screen px kept free above the window
 COL_RES = 40                     # the equipment view: px kept free at each side beyond MARGIN (the right column at the iPad's place: 92 x 1.2 + a gap)
-INV_CLOSE = 50                   # screen px of the close button at the iPad's cell (iPad mcBtnCloseTouch 50 x 50)
+INV_CLOSE = 50                   # screen px of the close button at the header's scale (iPad mcBtnCloseTouch 50 x 50), also after INV_K
 INV_BTN, INV_BTN_AT = 'dmDoll_mc', (20, 84, 61)        # the doll button: own x, y, size (x 1.19 = 73 px, the iPad's)
 BTN_ART = 148.0                  # px of our plate drawing (set from the asset when it is embedded)
 # ---- characterSheet (PC: stats_mc at 0,20 on a 680 x 1152 stage; the window = bg_mc 680 x 1056, one bitmap with holes for the two halves). Own px of the clip:
@@ -84,7 +87,7 @@ def eq_block(a, C, DW, BT):
     """the equipment view's shared numbers, the SAME statements in both movies (so the two halves are one block): DP the doll panel's width
     (its height = the band above dmB, 21.11: it went under the hot bar), SQ the bag's scale, MQ the block's width"""
     DP = a.let('DP', CS_DOLL_W * fmax(600, fmin(1080, BT)) / CS_DOLL_H)
-    SQ = a.let('SQ', fmin(C / 50, (DW - 2 * MARGIN - 2 * COL_RES - DP) / INV_W))
+    SQ = a.let('SQ', fmin(C / 50, (DW - 2 * MARGIN - 2 * COL_RES - DP) / INV_W) * INV_K)   # = the inventory's S in state 1 (INV_K: owner 23.11)
     a.let('MQ', ffloor(DP + INV_W * SQ + R(999, 1000)))
 CS_TITLE_X = (42, CS_SPLIT + CS_DOLL_W // 2 - 299)             # title_txt.x (a 598 px centred field): on the sheet / centred in the doll panel
 CS_BTN_AT = (626, 40)            # the doll button: own x, size (on the equipment title bar)
@@ -170,6 +173,9 @@ def bitmap_of(swf, shape, first=False):
 HEAD = [('getlocal0',), ('pushscope',)]
 def num(v):
     v = int(v)
+    # pushshort is sign-extended from 16 bits by the player (phone 23.11, shot_inv2: close_mc.x 718.5 compiled as pushshort 718500 / 1000 ran as
+    # -2.396, the close button stood at the header's middle): bigger values go through the int pool (Ex.asm)
+    assert -32767 <= v <= 32767, 'num(%d): out of pushshort range' % v
     if -128 <= v <= 127: return [('pushbyte', v & 0xff)]
     return [('pushshort', v)] if v >= 0 else [('pushshort', -v), ('negate',)]
 def frac(f): return num(f[0]) + num(f[1]) + [('divide',)]
@@ -257,9 +263,11 @@ class Ex:
     def asm(s, cx):
         if s.op == 'n':
             v = s.a[0]
-            if isinstance(v, tuple): return num(v[0]) + num(v[1]) + [('divide',)]
-            if float(v) == int(v): return num(v)
-            return num(round(v * 1000)) + num(1000) + [('divide',)]
+            def lit(i):   # an integer literal: pushbyte / pushshort while it fits 16 bits, else the int pool (pushshort is sign-extended: see num)
+                i = int(i); return num(i) if abs(i) <= 32767 else [('pushint', _int(cx._c, i))]
+            if isinstance(v, tuple): return lit(v[0]) + lit(v[1]) + [('divide',)]
+            if float(v) == int(v): return lit(v)
+            return lit(round(v * 1000)) + num(1000) + [('divide',)]
         if s.op == 'v': return [('getlocal', cx.var(s.a[0]))]
         if s.op == 'floor': return s.a[0].asm(cx) + [('convert_i',), ('convert_d',)]
         if s.op in ('min', 'max'):
@@ -414,8 +422,8 @@ INPUTS = [('C', 'dmCell'), ('ST', 'dmState'), ('DW', 'dmW'), ('BT', 'dmB'), ('OX
 OX_CMD, OX_BIAS, DW_CMD = 100000, 5000, 200000
 BOTTOM0 = 967          # dmB: the bottom limit the host sets (the hot bar's top; `cmd`(CMD + n) with n >= 400); default = the iPad's hot bar top
                        # (21.11: with it the baked inventory is the iPad's 1170 x 968, 7 rows; 1080 = no limit)
-HEAD_PADS = [(('inventory_mc', 'autosortBtn_mc'), 42), (('inventory_mc', 'sortByBtn_mc'), 42), (('inventory_mc', 'allBtn_mc'), 42), (('inventory_mc', 'view_mc'), 42)]
-                       # header buttons (own px at the header's scale 1.19: 28..31 own = 33..37 px): invisible pads 42 own = 50 px tall (LSButton hits its own graphics)
+HEAD_PADS = [(('inventory_mc', 'autosortBtn_mc'), 48), (('inventory_mc', 'sortByBtn_mc'), 48), (('inventory_mc', 'allBtn_mc'), 48), (('inventory_mc', 'view_mc'), 48)]
+                       # header buttons (own px at the header's scale 1.19 x INV_K = 1.05: 28..31 own = 29..33 px): invisible pads 48 own = 50 px tall (LSButton hits its own graphics)
 def window_doc(code, spec, off, btn=None, back=0, cmd='setAnchor', ctx=None, pads=()):
     """the document class of a `_p` window: vars dmCell (cell px, CELL0 = the iPad's), dmState, dmW (the screen width in stage px, height 1080);
     dmLay() = `spec`; dmSetCell(px) / dmSetState(n) for the host; `cmd`(CMD + n) = the same two through a name the engine class registers;
@@ -559,14 +567,17 @@ def inv_spec(k):
     # <= 1.2 from the right edge), on both sides because the block is centred
     eq_block(s, C, DW, BT)
     s.state('ST', lambda a: a.let('AV', DW - 2 * MARGIN - 2 * COL_RES - V('DP')), lambda a: a.let('AV', DW - 2 * MARGIN))
-    S = s.let('S', fmin(C / 50, V('AV') / INV_W))
-    SH = s.let('SH', fmin(S, INV_HEAD_S))
+    S0 = s.let('S0', fmin(C / 50, V('AV') / INV_W))                        # the full cell's scale: decides the rows (= the host's ts_inv_rows)
+    SH0 = s.let('SH0', fmin(S0, INV_HEAD_S))
+    S = s.let('S', S0 * INV_K)                                               # owner 23.11: the window drawn INV_K smaller, header and all
+    SH = s.let('SH', SH0 * INV_K)
     RR = s.let('RR', S / SH)
     EX = s.let('EX', INV_W * (RR - 1))
     B = s.let('B', fmax(600, fmin(1080, BT)))
-    # rows: the cells end above B, the whole window (with its bottom edge INV_BOT) inside the screen
-    rows = s.let('ROWS', fmax(1, fmin(INV_ROWS_MAX, ffloor(fmin(B - TOP_M - INV_LIST_Y * SH - (INV_BAG_HEAD + INV_LIST_REST) * S,
-                                                                1080 - TOP_M - INV_LIST_Y * SH - (INV_BAG_HEAD + INV_LIST_REST + INV_BOT) * S) / (INV_PITCH * S)))))
+    # rows: the cells end above B, the whole window (with its bottom edge INV_BOT) inside the screen - at the full cell, so the smaller
+    # window keeps them and gets ~(1 - INV_K) of its height free: its title stays on the screen (phone 23.11: Y0 clamped to 0, title cut)
+    rows = s.let('ROWS', fmax(1, fmin(INV_ROWS_MAX, ffloor(fmin(B - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST) * S0,
+                                                                1080 - TOP_M - INV_LIST_Y * SH0 - (INV_BAG_HEAD + INV_LIST_REST + INV_BOT) * S0) / (INV_PITCH * S0)))))
     LH = s.let('LH', INV_BAG_HEAD + INV_LIST_REST + rows * INV_PITCH)
     H = s.let('H', INV_LIST_Y + (LH + INV_BOT) * RR)                        # clip px (at SH)
     HS = s.let('HS', H * SH)                                                 # screen px
@@ -646,7 +657,7 @@ def party(data, env=None):
         elif name == 'sortByBg_mc': _set(rec, sx=sx * (INV_LIST_W + 15) / (INV_LIST_W0 + 15.0))
     edit_places(swf, win, fix)
     kids = _kids(swf, win)
-    cs = INV_CLOSE / (INV_HEAD_S * 23.0)   # the close button: INV_CLOSE screen px at the iPad's cell (the header's scale)
+    cs = INV_CLOSE / (INV_HEAD_S * INV_K * 23.0)   # the close button: INV_CLOSE screen px at the header's scale (every cell >= 60), centred on the PC one
     edit_places(swf, win, lambda name, rec: _set(rec, x=kids['close_mc'][1] + 11.5 - 11.5 * cs, y=kids['close_mc'][2] + 11.5 - 11.5 * cs, sx=cs, sy=cs) if name == 'close_mc' else None)
     # a bag's header (playerInventory): its frame, body and drop mark grow with the grid, gold / weight / the fold mark stay at the right end
     bag = [c for c, n in mv.classes.items() if n == 'playerInventory']; assert len(bag) == 1
@@ -919,8 +930,8 @@ def check(o, data, out, rep, say):
         bgb = w['inventory_mc.bgFrame_mc']['stage']
         say(max(abs(u - v) for u, v in zip(bgb, rep['window'])) < 1.6, 'baked (cell %d): window %.0f,%.0f..%.0f,%.0f = %.0f x %.0f px, x %.2f; iPad -3,0..1165,968 (1160 x 968); PC 680 x 1056 at the screen corner' % (
             env['C'], bgb[0], bgb[1], bgb[2], bgb[3], bgb[2] - bgb[0], bgb[3] - bgb[1], S))
-        say(abs(50 * S - CELL0) < 0.01, 'cell 50 -> %.0f px, pitch %d -> %.1f (iPad 76 / 86); %d columns (iPad 13; the engine reads invColW / cSpacing from the movie: main+0x13aa5b0) x %d rows visible (iPad 8)' % (
-            50 * S, INV_PITCH, INV_PITCH * S, INV_COLS, env['ROWS']))
+        say(abs(50 * S - CELL0 * INV_K) < 0.01, 'cell 50 -> %.0f px = the cell asked x INV_K %.2f (owner 23.11: window 12 %% smaller), pitch %d -> %.1f (iPad 76 / 86); %d columns (iPad 13; the engine reads invColW / cSpacing from the movie: main+0x13aa5b0) x %d rows visible (iPad 8)' % (
+            50 * S, INV_K, INV_PITCH, INV_PITCH * S, INV_COLS, env['ROWS']))
         cl = w['inventory_mc.close_mc']['stage']; bt = w[INV_BTN]['stage']
         say(abs((cl[2] - cl[0]) - INV_CLOSE) < 1 and abs((bt[2] - bt[0]) - INV_BTN_AT[2] * env['SH']) < 1, 'close button %.0f px (iPad 50), the doll button %.0f px at %.0f,%.0f (iPad 73)' % (cl[2] - cl[0], bt[2] - bt[0], bt[0], bt[1]))
         sizes = [(n, w['inventory_mc.' + n]['stage']) for n in ('autosortBtn_mc', 'sortByBtn_mc', 'view_mc', 'allBtn_mc')]
