@@ -141,6 +141,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     private AlertDialog inputDialog;
 
     private SurfaceView view;
+    android.view.View gameSurfaceView() { return view; }   // [DOS2] issue #9: D3PadView maps touches to the game surface's rect
     private FrameLayout gameFrame;
     private TouchOverlay touchOverlay;
     private boolean started;

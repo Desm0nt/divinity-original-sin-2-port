@@ -141,6 +141,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     static final int GEAR_NORMAL = DoomPadView.GEAR_NORMAL, GEAR_FADED = DoomPadView.GEAR_FADED;
     private int gearMode = GEAR_NORMAL, gearAlpha = DoomPadView.GEAR_ALPHA_DEFAULT;
     private boolean controllerMode, menuMode, editMode;
+    private boolean userHidden;   // [DOS2] issue #9: ⚙ -> on-screen gamepad -> "Show the gamepad" off (doom_controls "shown", as DoomPadView)
     // Skill icons (D3SkillIcons): sampled only while the pad is visible in play mode, the option is on and the activity is resumed.
     private final D3SkillIcons icons;
     private boolean iconsOn = true, padVisible = true, hostResumed = true, hideSticks = true;
@@ -292,6 +293,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
         menuLabel = ui.getString(R.string.d3_pad_menu); editHint = ui.getString(R.string.d3_pad_edit_hint);
         resetLabel = ui.getString(R.string.d3_pad_reset); doneLabel = ui.getString(R.string.d3_pad_done);
         deadzone = p.getFloat("move_dz", 0f);
+        boolean hide = !p.getBoolean("shown", true); if (hide != userHidden) { userHidden = hide; if (hide) releaseAll(); iconGate(); }
         boolean fps = p.getBoolean("fps", true); if (fps && !showFps) postDelayed(fpsTick, 500); showFps = fps;
         gearMode = p.getInt("gear_mode", GEAR_NORMAL) == GEAR_NORMAL ? GEAR_NORMAL : GEAR_FADED;
         gearAlpha = clamp(p.getInt("gear_alpha", DoomPadView.GEAR_ALPHA_DEFAULT), 1, 100);
@@ -335,7 +337,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     }
 
     // ---------------- skill icons ----------------
-    private void iconGate() { if (icons != null && !tl2()) icons.setGate(iconsOn && padVisible && hostResumed && !menuMode && !controllerMode && !editMode); }
+    private void iconGate() { if (icons != null && !tl2()) icons.setGate(iconsOn && padVisible && hostResumed && !menuMode && !controllerMode && !userHidden && !editMode); }
     // DmActivity.onResume / onPause: no read-back of a surface that is going away; a resume samples again soon.
     void setHostResumed(boolean on) { hostResumed = on; iconGate(); }
     @Override public void onVisibilityAggregated(boolean visible) { super.onVisibilityAggregated(visible); padVisible = visible; iconGate(); }
@@ -375,7 +377,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
 
     private boolean shown(Btn b) {
         if (editMode) return true;
-        if (controllerMode || dos2TouchUi()) return b.key == SETTINGS;   // [DOS2] UI mode touch: only the gear button
+        if (controllerMode || dos2TouchUi() || userHidden) return b.key == SETTINGS;   // [DOS2] UI mode touch: only the gear button
         if (off(b)) return false;
         return !menuMode || b.menu;
     }
@@ -451,8 +453,21 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
         }
         return hudLive;
     }
+    // [DOS2] issue #9 (alex-panch, Fold7): the game surface's rect inside this view. With "16:9 with black side bars" GearDisplay.fitSurface
+    // makes the SurfaceView a centred 16:9 box while this view fills the frame, so touches and the HUD rects are measured against that box.
+    private float[] gameRect() {
+        float w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0) return null;
+        android.view.View sv = getContext() instanceof DmActivity ? ((DmActivity) getContext()).gameSurfaceView() : null;
+        if (sv != null && sv.getWidth() > 0 && sv.getHeight() > 0) {
+            int[] a = new int[2], b = new int[2]; sv.getLocationInWindow(a); getLocationInWindow(b);
+            return new float[] {a[0] - b[0], a[1] - b[1], sv.getWidth(), sv.getHeight()};
+        }
+        return new float[] {0, 0, w, h};
+    }
     private boolean hudHit(float x, float y) {
-        float w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0) return false;
+        float[] gr = gameRect(); if (gr == null) return false;
+        x -= gr[0]; y -= gr[1];
+        float w = gr[2], h = gr[3];
         float[] live = hudLive();
         boolean useLive = live != null && live.length >= 4;
         if (useLive) {
@@ -709,8 +724,9 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
     // DmActivity: the UI mode changed (the start's environment or the gear): let go of everything held, redraw
     void dos2UiModeChanged() { post(() -> { releaseAll(); if (menuMode && dos2TouchUi()) setMenuMode(false); lw = -1; invalidate(); }); }
     private void mouse(int phase, int id, float x, float y) {
-        int w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0) return;
-        boolean taken = DmActivity.nativeDos2Touch(phase, id, x / w, y / h);
+        float[] g = gameRect(); if (g == null) return;
+        float nx = Math.max(0f, Math.min(1f, (x - g[0]) / g[2])), ny = Math.max(0f, Math.min(1f, (y - g[1]) / g[3]));
+        boolean taken = DmActivity.nativeDos2Touch(phase, id, nx, ny);
         if (phase == 0 && taken) mousePtr.put(id, true); else if (phase >= 2) mousePtr.delete(id);
     }
     @Override public boolean onTouchEvent(MotionEvent e) {
@@ -719,7 +735,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
         float x = e.getX(i), y = e.getY(i);
         if (editMode && ed()) { editor.touch(e); return true; }   // [DOS2]
         if (editMode) { editTouch(e, a, id, x, y); return true; }
-        if (dos2TouchUi()) {   // [DOS2] UI mode touch: the gear button, else the game's mouse (the pad's buttons and sticks are not there)
+        if (dos2TouchUi() || (userHidden && dos2Mouse())) {   // [DOS2] UI mode touch (or the pad hidden in the gear): the gear button, else the game's mouse
             if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); else mouse(0, id, x, y); }
             else if (a == MotionEvent.ACTION_MOVE) { for (int k = 0; k < e.getPointerCount(); k++) { int pid = e.getPointerId(k); if (mousePtr.get(pid)) mouse(1, pid, e.getX(k), e.getY(k)); } }
             else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_POINTER_UP || a == MotionEvent.ACTION_CANCEL) {
@@ -729,7 +745,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
             }
             return true;
         }
-        if (controllerMode) {   // a real controller drives the game: only the settings button, and no axes from this pad
+        if (controllerMode || userHidden) {   // a real controller drives the game (or the pad is hidden in the gear): only the settings button, no axes
             if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN) { Btn b = hit(x, y); if (b != null && b.key == SETTINGS) openSettings(); }
             return true;
         }
@@ -808,7 +824,7 @@ public class D3PadView extends View implements FrontMenu.Pad, PadSurface.Painter
             } else drawEditPanel(c);
             return;
         }
-        if (!controllerMode && !menuMode && !dos2TouchUi()) {   // [DOS2] UI mode touch: no sticks
+        if (!controllerMode && !menuMode && !dos2TouchUi() && !userHidden) {   // [DOS2] UI mode touch: no sticks
             drawStick(c, left); if (right != null) drawStick(c, right);
             if (worldPtr >= 0) {   // where the hero is walking to
                 line.setColor(0xffffffff); line.setAlpha(Math.round(0x90 * op)); c.drawCircle(worldX, worldY, 22 * dp, line);
