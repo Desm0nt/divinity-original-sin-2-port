@@ -114,6 +114,9 @@ int main(void) {
         assert(v[0] == 1001300 && v[1] == 2000000 + 906 && v[2] == 3000000 + 2240);
         { const hu_tip_fit u = hu_tip_numbers(1.3f, 0.9f, 2400, 1080); assert(near(u.f, 1.3f / 0.9f) && u.max_h == (int)floorf(1080.0f / 0.9f - 174)); }   // S 0.9
         { const hu_tip_fit u = hu_tip_numbers(1.3f, 0, 0, 0); assert(near(u.f, 1.3f) && u.max_h == 906 && u.max_w == 1920 - 160); }             // no S / no screen yet
+        // owner 23.11: skills x0.9, inventory x0.75 of the window factor; nonsense factors = 1
+        assert(near(hu_tip_kind_f(1.3f, 0, HU_TIP_K_SKILL, HU_TIP_K_ITEM), 1.17f) && near(hu_tip_kind_f(1.3f, 1, HU_TIP_K_SKILL, HU_TIP_K_ITEM), 0.975f));
+        assert(near(hu_tip_kind_f(1.3f, 1, 0.9f, 7.0f), 1.3f) && near(hu_tip_numbers(hu_tip_kind_f(1.3f, 1, 0.9f, 0.75f), 1.0f, 2400, 1080).f, 0.975f));
         { const hu_tip_fit u = hu_tip_numbers(99, 1, 2400, 1080); assert(near(u.f, 1)); }                                                      // a nonsense factor = 1
         // the run's two tooltips: an inventory item (~254 stage px at factor 1), a hot bar skill (~460); a long weapon ~800; huge ones
         const float hs[] = {120, 254, 460, 700, 800, 1200, 1800};

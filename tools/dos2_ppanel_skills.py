@@ -449,6 +449,13 @@ def apply_els(lay, els, pads, win):
         w, h = pad_own(p, win, els); lay.pad(list(p[0]), w, h)
 
 
+# Phone run 23.11 13:0x (build 66b3b2d6; owner: "lists and text scroll only by a finger on the scroll bar, not on the list or the text itself"):
+# the press and the moves reached journal_p (Iggy button handled 1, mouse moves counted), yet nothing scrolled. Two causes: (1) the handlers
+# waited for MOUSE_MOVE on the stage - the touch HUD never relies on that (hotBar_p's deck swipe samples stage.mouseX every frame in dmTick, the
+# hover needs a move over the element itself); now the scroll follows the finger on ENTER_FRAME of this movie while the press is down (mouseUp on
+# the stage still ends it, as the deck swipe); (2) the journal's dmScMove called scrollbar.getContDiff, which is PROTECTED in LS_Classes.scrollbar
+# (a public name does not find it: a ReferenceError on the first move, swallowed by Iggy) - now the bar's public scrollTo(y, false, false), which
+# clamps to 0..its content difference itself (as tools/dos2_ppanel_trade.py finger_scroll and dos2_cc_touch.py).
 def doc_text_scroll(doc):
     """document methods dmTxDown(e) / dmTxMove(e) / dmTxUp(e): a finger on a long TextField (not in a scroll list) scrolls it line by line
     (scrollV = the line under the press - the finger's travel / the line height, clamped 1..maxScrollV) - owner 21.11: "the text scrolls by a
@@ -458,8 +465,8 @@ def doc_text_scroll(doc):
     c = list(HEAD) + [('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('setproperty', P('dmTxT')),
         ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('mouseY')), ('setproperty', P('dmTxY')),
         ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('scrollV')), ('setproperty', P('dmTxV'))]
-    for ev, fn in (('mouseMove', 'dmTxMove'), ('mouseUp', 'dmTxUp')):
-        c += stage + [('pushstring', S(ev)), ('getlocal0',), ('getproperty', P(fn)), ('callpropvoid', P('addEventListener'), 2)]
+    c += [('getlocal0',), ('pushstring', S('enterFrame')), ('getlocal0',), ('getproperty', P('dmTxMove')), ('callpropvoid', P('addEventListener'), 2)]
+    c += stage + [('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmTxUp')), ('callpropvoid', P('addEventListener'), 2)]
     doc.method('dmTxDown', 1, c + [('returnvoid',)])
     # dmTxMove: locals 2 the field, 3 the line height, 4 the new line
     c = list(HEAD) + [('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushbyte', 0), ('convert_d',), ('setlocal', 3), ('pushbyte', 0), ('convert_d',), ('setlocal', 4),
@@ -472,15 +479,14 @@ def doc_text_scroll(doc):
         ('getlocal', 2), ('getlocal', 4), ('convert_i',), ('setproperty', P('scrollV')),
         ('L', 'end'), ('returnvoid',)]
     doc.method('dmTxMove', 1, c)
-    c = list(HEAD)
-    for ev, fn in (('mouseMove', 'dmTxMove'), ('mouseUp', 'dmTxUp')):
-        c += stage + [('pushstring', S(ev)), ('getlocal0',), ('getproperty', P(fn)), ('callpropvoid', P('removeEventListener'), 2)]
+    c = list(HEAD) + [('getlocal0',), ('pushstring', S('enterFrame')), ('getlocal0',), ('getproperty', P('dmTxMove')), ('callpropvoid', P('removeEventListener'), 2)]
+    c += stage + [('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmTxUp')), ('callpropvoid', P('removeEventListener'), 2)]
     doc.method('dmTxUp', 1, c + [('getlocal0',), ('pushnull',), ('setproperty', P('dmTxT')), ('returnvoid',)])
 
 
 def doc_scroll(doc):
     """document methods: dmScDown(e) / dmScMove(e) / dmScUp(e): a press on a list that travels > SCROLL_SLOP list px vertically scrolls it
-    (scrollbar.scrolledY, clamped to getContDiff); while scrolling the list takes the mouse from its rows (mouseChildren off) so the release
+    (scrollbar.scrollTo, which clamps; followed on ENTER_FRAME - see the note above doc_text_scroll); while scrolling the list takes the mouse from its rows (mouseChildren off) so the release
     does not click the row under the finger; given back at the release"""
     mv = doc.mv; P, S = mv.P, mv.S
     stage = [('getlocal0',), ('getproperty', P('stage'))]
@@ -488,8 +494,8 @@ def doc_scroll(doc):
         ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('mouseY')), ('setproperty', P('dmScY')),
         ('getlocal0',), ('getlocal1',), ('getproperty', P('currentTarget')), ('getproperty', P('m_scrollbar_mc')), ('getproperty', P('scrolledY')), ('setproperty', P('dmScS')),
         ('getlocal0',), ('pushfalse',), ('setproperty', P('dmScOn'))]
-    for ev, fn in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
-        c += stage + [('pushstring', S(ev)), ('getlocal0',), ('getproperty', P(fn)), ('callpropvoid', P('addEventListener'), 2)]
+    c += [('getlocal0',), ('pushstring', S('enterFrame')), ('getlocal0',), ('getproperty', P('dmScMove')), ('callpropvoid', P('addEventListener'), 2)]
+    c += stage + [('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmScUp')), ('callpropvoid', P('addEventListener'), 2)]
     doc.method('dmScDown', 1, c + [('returnvoid',)])
     # dmScMove: locals 2 list, 3 dy, 4 target, 5 max
     c = list(HEAD) + [('pushnull',), ('coerce_a',), ('setlocal', 2), ('pushbyte', 0), ('convert_d',), ('setlocal', 3), ('pushbyte', 0), ('convert_d',), ('setlocal', 4),
@@ -501,15 +507,11 @@ def doc_scroll(doc):
         ('getlocal0',), ('pushtrue',), ('setproperty', P('dmScOn')), ('getlocal', 2), ('pushfalse',), ('setproperty', P('mouseChildren')),
         ('L', 'go'),
         ('getlocal0',), ('getproperty', P('dmScS')), ('getlocal', 3), ('subtract',), ('convert_d',), ('setlocal', 4),
-        ('getlocal', 2), ('getproperty', P('m_scrollbar_mc')), ('callproperty', P('getContDiff'), 0), ('convert_d',), ('setlocal', 5),
-        ('getlocal', 4), ('getlocal', 5), ('ifngt', 'nmax'), ('getlocal', 5), ('setlocal', 4), ('L', 'nmax'),
-        ('getlocal', 4), ('pushbyte', 0), ('ifnlt', 'nmin'), ('pushbyte', 0), ('convert_d',), ('setlocal', 4), ('L', 'nmin'),
-        ('getlocal', 2), ('getproperty', P('m_scrollbar_mc')), ('getlocal', 4), ('setproperty', P('scrolledY')),
+        ('getlocal', 2), ('getproperty', P('m_scrollbar_mc')), ('getlocal', 4), ('pushfalse',), ('pushfalse',), ('callpropvoid', P('scrollTo'), 3),
         ('L', 'end'), ('returnvoid',)]
     doc.method('dmScMove', 1, c)
-    c = list(HEAD)
-    for ev, fn in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
-        c += stage + [('pushstring', S(ev)), ('getlocal0',), ('getproperty', P(fn)), ('callpropvoid', P('removeEventListener'), 2)]
+    c = list(HEAD) + [('getlocal0',), ('pushstring', S('enterFrame')), ('getlocal0',), ('getproperty', P('dmScMove')), ('callpropvoid', P('removeEventListener'), 2)]
+    c += stage + [('pushstring', S('mouseUp')), ('getlocal0',), ('getproperty', P('dmScUp')), ('callpropvoid', P('removeEventListener'), 2)]
     c += [('getlocal0',), ('getproperty', P('dmScL')), ('iffalse', 'end'), ('getlocal0',), ('getproperty', P('dmScL')), ('pushtrue',), ('setproperty', P('mouseChildren')),
           ('getlocal0',), ('pushnull',), ('setproperty', P('dmScL')), ('L', 'end'), ('returnvoid',)]
     doc.method('dmScUp', 1, c)

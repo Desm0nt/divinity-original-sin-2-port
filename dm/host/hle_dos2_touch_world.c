@@ -85,7 +85,7 @@
 enum { TW_INPUT = 0xe13830, TW_INPUT_EV = 0xe13860, TW_INPUT_DOWN = 0xe1386c, TW_INPUT_A1 = 0xe13908, TW_UPDATE = 0xe11f40, TW_UPDATE_MODE = 0xe121e4,
        TW_PICK = 0xfab260, TW_PICK_MODE = 0xfab2c4, TW_PICKC = 0xfa9f50, TW_PICKC_MODE = 0xfa9fd8, TW_PICKC_CUR = 0xfaa494, TW_TASK_CTOR = 0xe198c0,
        TW_CURSOR = 0xe151f0, TW_MOVE_GATE = 0xe187c8, TW_PAD_GATE = 0xe40cd8, TW_PAD_CTOR = 0xe16b04, TW_TASK_MOVE = 0, TW_TASK_PAD = 25,
-       TW_MODE_INIT = 0x8a8eb8, TW_MODE = 0x2bb8918, TW_CHAR_TYPE = 0x32bb8d8, TW_ITEM_TYPE = 0x32bba10, TW_EV_ACTION1 = 4,
+       TW_MODE_INIT = 0x8a8eb8, TW_MODE = 0x2bb8918, TW_CURSOR_PTR = 0x2bb88e8 /* -> the UI cursor float2 (main+0xfaa494 reads it) */, TW_CHAR_TYPE = 0x32bb8d8, TW_ITEM_TYPE = 0x32bba10, TW_EV_ACTION1 = 4,
        TW_IC_PAD = 0x50, TW_IC_PRESS = 0x48, TW_IC_TASK = 0x58, TW_IC_PREVIEW = 0x60, TW_TASK_TYPE = 0x10, TW_TASK_FLAGS = 0x14,
        TW_H_POS = 0x08, TW_H_WALK = 0x50, TW_H_WALK_OK = 0xa0, TW_H_CHAR = 0x70, TW_H_ITEM = 0x78, TW_H_OBJ = 0x80, TW_H_FLAGS = 0xa0, TW_H_PLAYER = 0xb0, TW_H_SCREEN = 0xe4 };
 static const uint32_t k_tw_input[6] = {0xd10183ff /* sub sp,sp,#0x60 */, 0xa9025ff8, 0xa90357f6, 0xa9044ff4, 0xa9057bfd, 0x910143fd};
@@ -179,6 +179,60 @@ static int tw_task_type(const uint8_t *task) { return task ? *(const volatile in
 static const char *tw_task_name(int t) {   // what run tw2 showed for a type (the rest are numbers only)
     return t < 0 ? "none" : t == TW_TASK_MOVE ? "move to the point" : t == TW_TASK_PAD ? "the pad's stick movement" : t == 4 ? "character: talk" : t == 6 ? "item: use / pick up / open" : "?";
 }
+// ---- UI mode TOUCH (owner 23.11, "a tap only picks the target, the confirm button casts"): is a skill / target mode prepared, and the aim ----
+// point the picking is held at. The rules are hle_dos2_touch_gesture.h dt_aim_latch / dt_aim_frame (the evidence is written there); tw_update
+// feeds them one controller frame at a time (game thread). hle_dos2_touchui_hud.c asks dm_dos2_touch_world_aiming() and shows CONFIRM / cancel.
+// The hold: once the player aimed (a world tap / drag while prepared) the engine's own preview (target outline, area, AP cost, path) must stay
+// at that point while the finger goes to CONFIRM - but a UI touch moves the one UI cursor, and the PC picking ray starts at it (main+0xfaa494:
+// [[main+0x2bb88e8]] -> helper+0xe4). So for the length of each ray set-up call the cursor reads the aim point and gets its own value back on
+// return (the game thread does both; the movies keep the real cursor). DM_DOS2_TOUCH_T_AIM_ENG=0: none of this (only the hot bar's own marks).
+static const uint8_t *volatile g_aim_ic;          // the controller whose frames are counted
+static volatile int g_aim_latch, g_aim_block, g_aim_eng = 1;
+static volatile uint64_t g_aim_ms;                // the last frame that showed a prepared state (0 = none)
+static volatile int g_aim_hold; static volatile uint64_t g_aim_hxy;   // the held aim point (two floats, window px)
+static unsigned g_n_aimhold, g_n_aimf;
+static int tw_obj_now(void) {   // under the cursor now: 1 a character / item, 0 nothing, -1 no pick in the last 300 ms
+    const uint64_t now = tw_ms(), pm = g_pick_ms, lm = g_live_ms;
+    const uint64_t h = pm >= lm ? g_pick_obj : g_live_obj, ms = pm >= lm ? pm : lm;
+    if (!ms || now - ms > 300) return -1;
+    if (!h) return 0;
+    const char *k = tw_kind(h);
+    return k[0] == 'C' || k[0] == 'I';
+}
+static void tw_aim_note(const uint8_t *ic, int pt, int rt) {
+    if (!g_aim_eng) return;
+    const int seen = pt == DT_TASK_SKILL || rt == DT_TASK_SKILL || pt == DT_TASK_AIM || rt == DT_TASK_AIM;
+    if (ic != g_aim_ic) { if (!seen) return; g_aim_ic = ic; g_aim_latch = 0; g_aim_block = 0; }   // another controller with the facts: count that one
+    int blocked = g_aim_block;
+    const int latch = blocked ? 0 : dt_aim_latch(g_aim_latch, pt, tw_obj_now());
+    const int on = dt_aim_frame(pt, rt, latch, &blocked);
+    const int was = g_aim_ms && tw_ms() - g_aim_ms < 250;
+    g_aim_latch = latch; g_aim_block = blocked;
+    if (on) g_aim_ms = tw_ms();
+    if (on != was && (g_dbg || g_n_aimf++ < 40)) LOG("[world] TOUCH aim: input controller %p previews task type %d, runs %d (object under the cursor %d): %s", (const void *)ic, pt, rt, tw_obj_now(),
+                                                    on ? (pt == DT_TASK_SKILL || rt == DT_TASK_SKILL ? "a SKILL is prepared (task 3): a world tap aims, CONFIRM casts" :
+                                                          "a TARGET MODE (task 2 over the ground: attack ground / throw): a world tap aims, CONFIRM acts") : "nothing prepared any more");
+}
+int dm_dos2_touch_world_aiming(void);   // hle_dos2_touchui_hud.c (game thread): 1 = the engine shows a prepared skill / target mode (last 250 ms)
+int dm_dos2_touch_world_aiming(void) { return g_on && g_aim_eng && g_aim_ms && tw_ms() - g_aim_ms < 250; }
+void dm_dos2_touch_world_aim_used(void);   // the host sent CONFIRM / cancel: the facts count again only after a frame without them
+void dm_dos2_touch_world_aim_used(void) { g_aim_block = 1; g_aim_latch = 0; g_aim_ms = 0; }
+void dm_dos2_touch_world_aim_hold(int on, float x, float y);   // hle_dos2_touch.c (an aim tap / drag) and hle_dos2_touchui_hud.c (aim over: 0)
+void dm_dos2_touch_world_aim_hold(int on, float x, float y) {
+    if (on) { uint32_t a, b; memcpy(&a, &x, 4); memcpy(&b, &y, 4); g_aim_hxy = (uint64_t)a << 32 | b; }
+    if (g_dbg && (on != 0) != (g_aim_hold != 0)) LOG("[world] TOUCH aim: the picking %s", on ? "is HELD at the aim point (the preview stays there while a finger is on the UI)" : "follows the cursor again");
+    g_aim_hold = on && g_aim_eng;
+}
+static uint64_t tw_pickc_orig(uint64_t helper, uint64_t a1) {   // the ray set-up, with the cursor at the held aim point for the call
+    float *c = g_aim_hold && g_main ? *(float *volatile *)(g_main->base + TW_CURSOR_PTR) : NULL;
+    if (!c) return g_o_pickc(helper, a1);
+    const uint64_t v = g_aim_hxy; const uint32_t a = (uint32_t)(v >> 32), b = (uint32_t)v;
+    const float s0 = c[0], s1 = c[1];
+    memcpy(&c[0], &a, 4); memcpy(&c[1], &b, 4);
+    const uint64_t r = g_o_pickc(helper, a1);
+    c[0] = s0; c[1] = s1; g_n_aimhold++;
+    return r;
+}
 static void tw_pc_enter(void) { if (g_floor) { g_pc_thr = pthread_self(); g_pc_in++; } }
 static void tw_pc_leave(void) { if (g_floor) g_pc_in--; }
 static uint64_t tw_cursor(uint64_t ic, uint64_t a1) {   // main+0xe151f0: "this input controller targets with a cursor now" (wisp mode, skill, combat)
@@ -236,12 +290,12 @@ static uint64_t tw_pickc(uint64_t helper, uint64_t a1) {   // main+0xfa9f50: the
                 (unsigned long long)*(const volatile uint64_t *)(h + TW_H_OBJ)); }
     }
     if (!g_hover) {
-        const uint64_t r0 = g_o_pickc(helper, a1);
+        const uint64_t r0 = tw_pickc_orig(helper, a1);
         if (helper && *g_mode == 0) { g_live_obj = *(const volatile uint64_t *)((const uint8_t *)(uintptr_t)helper + TW_H_OBJ); g_live_ms = tw_ms(); }   // PC input mode: the engine's own pick under the UI cursor
         return r0;
     }
     const uint8_t old = *g_mode; *g_mode = 0;
-    const uint64_t r = g_o_pickc(helper, a1);
+    const uint64_t r = tw_pickc_orig(helper, a1);
     *g_mode = old; g_n_pick++;
     if (helper) { g_pick_obj = *(const volatile uint64_t *)((const uint8_t *)(uintptr_t)helper + TW_H_OBJ); g_pick_ms = tw_ms(); }   // pack 3y: what is under the finger
     if (g_dbg && helper) {
@@ -287,6 +341,7 @@ static uint64_t tw_update(uint64_t ic, uint64_t tm) {   // main+0xe11f40: previe
         // not as the running one; take either. Point 6 (dos2-touch6): the throw / aim task types the same way (dt_target_task).
         const int pt = tw_task_type(*(const uint8_t *const volatile *)((const uint8_t *)(uintptr_t)ic + TW_IC_PREVIEW));
         const int tt = dt_target_task(pt, rt, g_place_on, g_aim_on ? g_aim_mask : 0);
+        tw_aim_note((const uint8_t *)(uintptr_t)ic, pt, rt);   // UI mode TOUCH: a prepared skill / target mode (above)
         if (dt_is_placing(pt) && !dt_is_placing(rt)) rt = pt;
         if (rt >= 0 || tt >= 0) {
             if (g_dbg && rt != g_run_type) { g_run_type = rt; g_run_ms = tw_ms(); } else if (g_dbg) g_run_ms = tw_ms();
@@ -321,6 +376,58 @@ static uint64_t tw_update(uint64_t ic, uint64_t tm) {   // main+0xe11f40: previe
 static volatile uint64_t g_ctx_ms;   // pack 3z: a long press on an object sent a right click (ContextMenu <- mouse:right, Default/inputconfig.json)
 void dm_dos2_touch_world_ctx(void);   // hle_dos2_touch.c, right before it sends the right click records
 void dm_dos2_touch_world_ctx(void) { g_ctx_ms = tw_ms(); }
+// UI mode TOUCH, phone run 23.11 12:36 (build 66b3b2d6; owner: "a tap on the ground still casts the skill at once instead of only aiming it"):
+// the host did aim (no click of its own: "world tap at 471,601: AIM"), yet the prepared skill (input controller task 3) was gone right after
+// the finger's lift and the hot bar dropped its mark (dmAim(0)) at the probe press's release. The probe press (the left down / up every world
+// finger sends first, to learn whether a UI object takes it) never reached the input controller: its Action1 counters (kept away 27, passed 0)
+// did not move for that tap, while they did for every tap with nothing prepared. So with a skill prepared another input listener, earlier in
+// the manager's list, takes Action1 (mouse:left) and casts. The listener dispatch: main+0x843f80(out, mgr, queue) - the events of one binding
+// (queue +8 = array, stride 0x40; +0x10 bits 24..47 = count; event +0xc = the InputEvent the listeners get: +0 id, Action1 = 4; +0x20 pressed;
+// +0x38 u16 device), listener by listener ([mgr+0x1a0], vt+0x38 OnInputEvent) until one takes one; out +0x40 = taken, +0x48 = the listener that
+// captured the event (0 = no capture). Called from ProcessInputEvent (main+0x84590c / 0x84591c / 0x845934) and the manager's update (main+0xb07938 /
+// 0xb07950); the callers empty the queue after it. While a skill / target mode is prepared (hle_dos2_touchui_hud.c dm_dos2_touchui_hud_aiming)
+// the Action1 events of a probe press / UI gesture (kind 1 of dm_dos2_touch_world_left) are left out of the queue for the call (a copy without
+// them; the array and the count are put back on return): no listener of the game sees them, the UI still gets FlashLeftMouse (event 1, the same
+// mouse:left). The host's own world click (kind 2: CONFIRM, a tap with nothing prepared) passes as before. DM_DOS2_TOUCH_T_AIMPROBE=0: the probe's
+// Action1 goes to the game as before. DM_DBG: one line per Action1 queue (who took it: out +0x40 / +0x48, the listener's vtable) - names the caster.
+enum { TW_DISPATCH = 0x843f80, TW_Q_ARR = 8, TW_Q_CNT = 0x10, TW_Q_EV = 0x40, TW_Q_ID = 0xc, TW_Q_DOWN = 0x2c, TW_Q_MAX = 32 };
+static const uint32_t k_tw_dispatch[4] = {0xd10443ff /* sub sp,sp,#0x110 */, 0xa90b6ffc, 0xa90c67fa, 0xa90d5ff8};
+typedef uint64_t (*tw_fn3)(uint64_t, uint64_t, uint64_t);
+static tw_fn3 g_o_disp;
+static int g_aim_probe = 1; static unsigned g_n_aimdrop, g_n_a1q;
+int dm_dos2_touchui_hud_aiming(void);   // hle_dos2_touchui_hud.c (game thread)
+static uint64_t tw_dispatch(uint64_t out, uint64_t mgr, uint64_t queue) {
+    uint8_t *q = (uint8_t *)(uintptr_t)queue;
+    uint8_t *arr = q ? *(uint8_t *volatile *)(q + TW_Q_ARR) : NULL;
+    const uint64_t cw = q ? *(volatile uint64_t *)(q + TW_Q_CNT) : 0; const unsigned n = (unsigned)((cw >> 24) & 0xffffffu);
+    if (!g_on || !arr || !n || n > TW_Q_MAX) return g_o_disp(out, mgr, queue);
+    unsigned a1 = 0, drop = 0, keep = 0; int down = 0, kind = 0;
+    for (unsigned i = 0; i < n; i++) if (*(const uint32_t *)(arr + i * TW_Q_EV + TW_Q_ID) == TW_EV_ACTION1) {
+        a1++; down = arr[i * TW_Q_EV + TW_Q_DOWN] != 0; kind = down ? g_kind_dn : g_kind_up;
+        if (tw_ms() - (down ? g_kind_dn_ms : g_kind_up_ms) > 700) kind = 0; }
+    if (!a1) return g_o_disp(out, mgr, queue);
+    const int aiming = dm_dos2_touchui_hud_aiming();
+    uint64_t r;
+    if (g_aim_probe && kind == 1 && aiming) {
+        uint8_t buf[TW_Q_MAX * TW_Q_EV];
+        for (unsigned i = 0; i < n; i++) { const uint8_t *e = arr + i * TW_Q_EV;
+            if (*(const uint32_t *)(e + TW_Q_ID) == TW_EV_ACTION1) { drop++; continue; }
+            memcpy(buf + keep * TW_Q_EV, e, TW_Q_EV); keep++; }
+        *(uint8_t *volatile *)(q + TW_Q_ARR) = buf;
+        *(volatile uint64_t *)(q + TW_Q_CNT) = (cw & ~(0xffffffull << 24)) | ((uint64_t)keep << 24);
+        r = g_o_disp(out, mgr, queue);
+        *(uint8_t *volatile *)(q + TW_Q_ARR) = arr; *(volatile uint64_t *)(q + TW_Q_CNT) = cw;
+        g_n_aimdrop++;
+    } else r = g_o_disp(out, mgr, queue);
+    if (g_dbg && g_n_a1q++ < 300) {
+        const uint8_t *o = (const uint8_t *)(uintptr_t)out; const uint64_t L = o ? *(const volatile uint64_t *)(o + 0x48) : 0;
+        const uint64_t vt = L ? *(const volatile uint64_t *)(uintptr_t)L : 0, b = (uint64_t)(uintptr_t)g_main->base;
+        LOG("[world] Action1 %s (touch kind %d: 1 probe / UI gesture, 2 the host's world click, 0 not ours), prepared %d: %s; %u of %u event(s) left -> taken %d, "
+            "captured by listener %#llx (vtable main+%#llx)", down ? "down" : "up", kind, aiming, drop ? "LEFT OUT of the dispatch (nothing of the game sees it)" : "dispatched",
+            n - drop, n, o ? (int)o[0x40] : -1, (unsigned long long)L, vt >= b && vt - b < 0x4000000ull ? (unsigned long long)(vt - b) : 0ull);
+    }
+    return r;
+}
 static uint64_t tw_input(uint64_t ic, uint64_t ev) {   // main+0xe13830
     const uint8_t *e = (const uint8_t *)(uintptr_t)ev;
     if (e && *(const uint32_t *)e != TW_EV_ACTION1 && g_ctx_ms && tw_ms() - g_ctx_ms < 500) {   // pack 3z: the right click's events run as the PC does
@@ -405,9 +512,10 @@ void dm_dos2_touch_world_kinds_clear(void);   // the pad's own Action1 (pad A of
 void dm_dos2_touch_world_kinds_clear(void) { g_kind_dn = g_kind_up = 0; }
 void dm_dos2_touch_world_summary(void);
 void dm_dos2_touch_world_summary(void) {
+    if (g_on && g_n_aimdrop) LOG("[world] TOUCH aim: %u Action1 queue(s) of a probe press left out while a skill was prepared (DM_DOS2_TOUCH_T_AIMPROBE=1)", g_n_aimdrop);
     if (g_on) LOG("[world] Action1: world clicks %u (down + up), kept away %u (probe / UI gesture), passed untouched %u; picks with the cursor %u, controller updates in a window %u; window %s; "
-                  "floor: cursor-targeting answers forced %u, walks started by a click %u, kept updates %u (DM_DOS2_TOUCH_WORLD_FLOOR=%d _KEEP=%d)",
-                  g_n_click, g_n_swallow, g_n_pass, g_n_pick, g_n_upd, g_hover ? "open" : "closed", g_n_cur, g_n_walk, g_n_keep, g_floor, g_keep);
+                  "floor: cursor-targeting answers forced %u, walks started by a click %u, kept updates %u (DM_DOS2_TOUCH_WORLD_FLOOR=%d _KEEP=%d); TOUCH aim: picks held at the aim point %u",
+                  g_n_click, g_n_swallow, g_n_pass, g_n_pick, g_n_upd, g_hover ? "open" : "closed", g_n_cur, g_n_walk, g_n_keep, g_floor, g_keep, g_n_aimhold);
 }
 
 static int tw_patch(module_t *m, uint32_t off, const uint32_t *jump) {
@@ -428,6 +536,7 @@ void dm_dos2_touch_world_install(void) {
     g_floor = !((v = getenv("DM_DOS2_TOUCH_WORLD_FLOOR")) && *v == '0'); g_keep = (v = getenv("DM_DOS2_TOUCH_WORLD_KEEP")) && atoi(v) > 0;
     g_place_on = (v = getenv("DM_DOS2_TOUCH_PLACE")) && *v ? (*v == '0' ? 0 : *v == '2' ? 2 : 1) : 1;
     g_aim_on = !((v = getenv("DM_DOS2_TOUCH_AIM")) && *v == '0');
+    g_aim_eng = !((v = getenv("DM_DOS2_TOUCH_T_AIM_ENG")) && *v == '0');
     if ((v = getenv("DM_DOS2_TOUCH_AIM_TYPES"))) g_aim_mask = dt_aim_mask(v) & ~(1u << DT_TASK_ITEMMOVE) & ~(1u << TW_TASK_MOVE) & ~(1u << TW_TASK_PAD);   // never the walk / the stick
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) g_main = &g_mod[i];
     module_t *m = g_main;
@@ -481,6 +590,14 @@ void dm_dos2_touch_world_install(void) {
         if (!tw_patch(m, tw_at[i], jump)) { LOG("【红】[world] mprotect RW failed at main+%#x (%d hook(s) already in: they only pass through): DM_DOS2_TOUCH_WORLD=3 falls back to =1", tw_at[i], i); return; }
     }
     g_on = 1;
+    {   // the probe's Action1 while a skill is prepared (tw_dispatch above)
+        int dn_words_ok(module_t *mm, uint32_t off, const uint32_t pro[4]); int dn_hook(module_t *mm, uint32_t off, const uint32_t pro[4], void *hook, void **orig);
+        g_aim_probe = !((v = getenv("DM_DOS2_TOUCH_T_AIMPROBE")) && *v == '0') && !((v = getenv("DM_DOS2_TOUCH_T_AIMTAP")) && atoi(v) <= 0);
+        if (!g_aim_probe) LOG("[world] DM_DOS2_TOUCH_T_AIMPROBE=0 (or T_AIMTAP=0): the probe press's Action1 reaches the game while a skill is prepared");
+        else if (!dn_words_ok(m, TW_DISPATCH, k_tw_dispatch)) { g_aim_probe = 0; LOG("【红】[world] main+%#x differs (the input listener dispatch of build 4979b200): a probe press may cast a prepared skill", TW_DISPATCH); }
+        else if (dn_hook(m, TW_DISPATCH, k_tw_dispatch, (void *)tw_dispatch, (void **)(void *)&g_o_disp)) { g_aim_probe = 0; LOG("【红】[world] main+%#x: no hook (mmap / mprotect): a probe press may cast a prepared skill", TW_DISPATCH); }
+        else LOG("[world] input listener dispatch main+%#x hooked: while a skill / target mode is prepared the probe press's Action1 is left out (a world tap only aims, CONFIRM casts; DM_DOS2_TOUCH_T_AIMPROBE=0 off)", TW_DISPATCH);
+    }
     LOG("[world] DM_DOS2_TOUCH_WORLD=3: PC world clicks by touch in controller mode: input controller OnInputEvent main+%#x and Update main+%#x, picking main+%#x / main+%#x "
         "hooked; while a world finger is down / a world click is in flight these run with the mode byte main+%#x = 0 (ray from the UI cursor = the finger), "
         "Action1 of a probe press / UI gesture is kept away from the world", TW_INPUT, TW_UPDATE, TW_PICK, TW_PICKC, TW_MODE);

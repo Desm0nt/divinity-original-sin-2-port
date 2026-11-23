@@ -184,6 +184,16 @@ static inline hu_tip_fit hu_tip_numbers(float F, float s, unsigned sw, unsigned 
     r.max_w = (int)floorf(uw - 2 * HU_TIP_SIDE);
     return r;
 }
+// owner 23.11 (build 66b3b2d6 on the phone): "the description is fine now, but it can be 10 % smaller on skills and 25 % smaller in the
+// inventory". The movie gets one factor at a time, so the host picks it by what is on the screen: an item window (partyInventory 0x74,
+// characterSheet 0x77 - the game opens both together -, trade 0x2e, containers 9 / 0x25) visible = an item tooltip (x HU_TIP_K_ITEM), else
+// the hot bar / skill book / world ones (x HU_TIP_K_SKILL). DM_DOS2_TOUCH_TIP_K=<skill>,<item> (0.3..1.5) overrides, for A/B only.
+#define HU_TIP_K_SKILL 0.90f
+#define HU_TIP_K_ITEM 0.75f
+static inline float hu_tip_kind_f(float F, int item_window, float k_skill, float k_item) {
+    const float k = item_window ? k_item : k_skill;
+    return F * (k >= 0.3f && k <= 1.5f ? k : 1.0f);
+}
 // the three setAnchor values (each < HU_TIP_CMD apart: f 0.5..3 -> 500..3000)
 static inline void hu_tip_cmds(const hu_tip_fit *t, double out[3]) {
     out[0] = HU_TIP_CMD + floor(t->f * 1000.0f + 0.5f); out[1] = 2.0 * HU_TIP_CMD + t->max_h; out[2] = 3.0 * HU_TIP_CMD + t->max_w;

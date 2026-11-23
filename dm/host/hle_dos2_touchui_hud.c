@@ -982,6 +982,19 @@ static void hu_tell_cell(uint8_t *mgr) {   // inventory / sheet: dmSetCell(cell)
 // DM_DOS2_TOUCH_TIP_FIT=0: the movie is not told (tooltip.swf's own size, f = 1, still at class scale 1 = placed right); DM_DOS2_TOUCH_TIP_HOLD=0:
 // the tooltip of a HUD hold goes when the finger is lifted (as before 23.11)
 static int g_tip_fit = 1, g_tip_hold = 1;
+static float g_tip_k_skill = HU_TIP_K_SKILL, g_tip_k_item = HU_TIP_K_ITEM;   // hle_dos2_touchui_hud.h hu_tip_kind_f (DM_DOS2_TOUCH_TIP_K)
+static int hu_item_window(uint8_t *mgr) {   // an item window on the screen (hu_tip_kind_f): the tooltip shown now is an item's
+    static const uint32_t k[] = {0x74, 0x77, 0x2e, 0x09, 0x25};
+    const uint32_t n = *(volatile uint32_t *)(mgr + HU_OBJS_N); uint8_t **objs = *(uint8_t **volatile *)(mgr + HU_OBJS);
+    if (!objs || n > 4096) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint8_t *o = objs[i];
+        if (!o || !(o[HU_OBJ_FLAGS] & HU_F_VISIBLE)) continue;
+        const uint32_t t = *(const volatile uint32_t *)(o + HU_OBJ_TYPE);
+        for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (t == k[j]) return 1;
+    }
+    return 0;
+}
 static struct { void *fp; double v[3]; } g_tip_told;
 static unsigned g_tip_nfit, g_tip_nset, g_tip_nheld, g_tip_nfree;
 static void hu_tip_unit(uint8_t *mgr, uint64_t h, const char *why) {   // class scale 1 for the tooltip object (game thread)
@@ -1003,7 +1016,9 @@ static void hu_tip_tell(uint8_t *ui, uint8_t *mgr) {   // every pad poll (game t
     if (!fp) return;
     hu_tip_unit(mgr, *(volatile uint64_t *)(ui + HU_TIP_SLOT), "kept at 1");   // the engine's own set-up might give it another class scale later
     if (!g_tip_fit) return;
-    const float F = g_win_scale && g_scale_ok && g_tune != 0 ? g_ts.tooltip : 1.0f;
+    const float F0 = g_win_scale && g_scale_ok && g_tune != 0 ? g_ts.tooltip : 1.0f;
+    const int item = hu_item_window(mgr);
+    const float F = hu_tip_kind_f(F0, item, g_tip_k_skill, g_tip_k_item);
     void dm_dos2_wide_size(unsigned *w, unsigned *h); unsigned sw = 0, sh = 0; dm_dos2_wide_size(&sw, &sh);
     const float s = hu_cfg_s();
     const hu_tip_fit t = hu_tip_numbers(F, s, sw, sh);
@@ -1012,8 +1027,9 @@ static void hu_tip_tell(uint8_t *ui, uint8_t *mgr) {   // every pad poll (game t
     int ok = 1;
     for (int k = 0; k < 3; k++) { dm_ei_val e; memset(&e, 0, sizeof e); e.type = 4; e.d = v[k]; ok &= dm_dos2_touchui_invoke(fp, "setAnchor", &e, 1) != 0; }
     g_tip_told.fp = fp; memcpy(g_tip_told.v, v, sizeof v);   // not again every poll when the name is missing (logged)
-    LOG("%s[hud] tooltip size: factor %.3f (window factor %.3f / UI scale S %.3f), at most %d x %d stage px (screen %ux%u, the hot bar branch's %d and margins "
-        "kept): setAnchor(%.0f / %.0f / %.0f) %s", ok ? "" : "【红】", (double)t.f, (double)F, (double)s, t.max_w, t.max_h, sw, sh, HU_TIP_HB, v[0], v[1], v[2],
+    LOG("%s[hud] tooltip size (%s tooltip, x %.2f of the window factor %.3f): factor %.3f (window factor %.3f / UI scale S %.3f), at most %d x %d stage px (screen %ux%u, the hot bar branch's %d and margins "
+        "kept): setAnchor(%.0f / %.0f / %.0f) %s", ok ? "" : "【红】", item ? "an item window is open: item" : "skill / hot bar",
+        (double)(item ? g_tip_k_item : g_tip_k_skill), (double)F0, (double)t.f, (double)F, (double)s, t.max_w, t.max_h, sw, sh, HU_TIP_HB, v[0], v[1], v[2],
         ok ? "sent; tooltip_p answers dmTipSet" : "NOT sent: the tooltip class has no setAnchor invoke - the tooltip keeps tooltip.swf's size");
 }
 static int hu_ei_tipfit(void *ctx, void *player, void *ui, const char *name, unsigned n, const dm_ei_val *a) {   // tooltip_p's log calls
@@ -1241,6 +1257,7 @@ void dm_dos2_touchui_hud_install(void) {
         dm_dos2_touchui_ei_register("dmSide", hu_ei_side, NULL); dm_dos2_touchui_ei_register("dmAim", hu_ei_aim, NULL); dm_dos2_touchui_ei_register("dmAimBtn", hu_ei_aimbtn, NULL);
         dm_dos2_touchui_ei_register("dmKey", hu_ei_key, NULL);
         // the PC tooltip window (phone 23.11): its log calls; the hover-out calls a HUD hold's lift keeps until the next finger
+        if ((v = getenv("DM_DOS2_TOUCH_TIP_K"))) { float a = 0, b = 0; if (sscanf(v, "%f,%f", &a, &b) == 2 && a >= 0.3f && a <= 1.5f && b >= 0.3f && b <= 1.5f) { g_tip_k_skill = a; g_tip_k_item = b; } }
         g_tip_fit = !((v = getenv("DM_DOS2_TOUCH_TIP_FIT")) && *v == '0'); g_tip_hold = !((v = getenv("DM_DOS2_TOUCH_TIP_HOLD")) && *v == '0');
         dm_dos2_touchui_ei_register("dmTipFit", hu_ei_tipfit, NULL); dm_dos2_touchui_ei_register("dmTipSet", hu_ei_tipfit, NULL);
         if (g_tip_hold) { dm_dos2_touchui_ei_register("hideTooltip", hu_ei_pin, NULL); dm_dos2_touchui_ei_register("SlotHoverOut", hu_ei_pin, NULL); }

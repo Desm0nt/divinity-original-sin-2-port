@@ -531,8 +531,10 @@ def finger_scroll(c, lst, area, xr):
            ('getlocal', mx), *num(xr[0]), ('lessthan',), ('iftrue', k), ('getlocal', mx), *num(xr[1]), ('greaterthan',), ('iftrue', k))
     b.set_this('dmScY', b.path(('mouseY',))); b.set_this('dmScS', b.path(('m_scrollbar_mc', 'scrolledY'), l))
     b.set_this('dmScOn', [('pushfalse',)]); b.set_this('dmScMoved', [('pushfalse',)])
-    for ev, h in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
-        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('addEventListener'), 2))
+    # phone run 23.11 (66b3b2d6): the dialog text did not follow the finger - stage MOUSE_MOVE is not relied on any more (tools/dos2_ppanel_skills.py,
+    # the note above doc_text_scroll): the scroll follows the finger on this movie clip's ENTER_FRAME while the press is down; mouseUp (stage) ends it
+    b.emit(('getlocal0',), ('pushstring', b.S('enterFrame')), ('getlocal0',), ('getproperty', b.P('dmScMove')), ('callpropvoid', b.P('addEventListener'), 2),
+           ('getlocal', st), ('pushstring', b.S('mouseUp')), ('getlocal0',), ('getproperty', b.P('dmScUp')), ('callpropvoid', b.P('addEventListener'), 2))
     b.emit(('L', k)); c.method('dmScDown', 1, b.code())
     b = B(c, 1); l, dy, sb = b.loc(), b.loc(), b.loc(); k, go = b.lab(), b.lab()
     b.emit(*b.path(lst), ('coerce_a',), ('setlocal', l), ('getlocal', l), ('iffalse', k),
@@ -546,9 +548,9 @@ def finger_scroll(c, lst, area, xr):
            ('callpropvoid', b.P('scrollTo'), 3), ('L', k))
     c.method('dmScMove', 1, b.code())
     b = B(c, 1); st, l = b.loc(), b.loc(); k, k2 = b.lab(), b.lab()
+    b.emit(('getlocal0',), ('pushstring', b.S('enterFrame')), ('getlocal0',), ('getproperty', b.P('dmScMove')), ('callpropvoid', b.P('removeEventListener'), 2))
     b.emit(('getlocal0',), ('getproperty', b.P('stage')), ('coerce_a',), ('setlocal', st), ('getlocal', st), ('iffalse', k))
-    for ev, h in (('mouseMove', 'dmScMove'), ('mouseUp', 'dmScUp')):
-        b.emit(('getlocal', st), ('pushstring', b.S(ev)), ('getlocal0',), ('getproperty', b.P(h)), ('callpropvoid', b.P('removeEventListener'), 2))
+    b.emit(('getlocal', st), ('pushstring', b.S('mouseUp')), ('getlocal0',), ('getproperty', b.P('dmScUp')), ('callpropvoid', b.P('removeEventListener'), 2))
     b.emit(('L', k), ('getlocal0',), ('getproperty', b.P('dmScOn')), ('iffalse', k2))
     b.set_this('dmScUpT', [('findpropstrict', gt), ('callproperty', gt, 0)])
     b.emit(*b.path(lst), ('coerce_a',), ('setlocal', l), ('getlocal', l), ('iffalse', k2), ('getlocal', l), ('pushtrue',), ('setproperty', b.P('mouseChildren')),
