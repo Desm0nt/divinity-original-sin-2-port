@@ -135,10 +135,14 @@ OUT.update({n + '_p.swf': n + '.swf' for n in PANEL_CLOSE})
 EI_NEW = ['dmSide', 'dmAim', 'dmAimBtn', 'dmKey']   # ExternalInterface names the host implements (hle_dos2_touchui_hud.c)
 
 
+SW_PAK = None   # the Switch Game.pak sources() read (romfs/Data of the game folder)
+
+
 def sources(path):
     """name -> bytes of the PC movies this pass needs (a Switch Game.pak or a directory of extracted movies)"""
     need = sorted(set(OUT.values()))
     if os.path.isdir(path): return {n: (Path(path) / n).read_bytes() for n in need}
+    global SW_PAK; SW_PAK = path   # the checks of the tutorial / loading-tip movies read Shared.pak, Localization next to it
     import lspk
     pak = lspk.Pak(path); by = {e[0]: e for e in pak.entries}
     miss = [n for n in need if GUI + n not in by]

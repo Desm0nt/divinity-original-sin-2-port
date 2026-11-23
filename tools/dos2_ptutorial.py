@@ -283,6 +283,16 @@ def install(host):
 
 
 # ---------------------------------------------------------------- data
+def _romfs(rel):
+    """a file next to the Switch Game.pak setup gave (romfs/Data/<rel>: the player's game folder), else the dev tree's work/romfs/Data/<rel>"""
+    try:
+        import dos2_pchud_touch
+        sw = getattr(dos2_pchud_touch, 'SW_PAK', None)
+    except ImportError: sw = None
+    if sw and Path(sw).is_file() and (Path(sw).parent / rel).exists(): return Path(sw).parent / rel
+    return _find('work/romfs/Data/' + rel)
+
+
 def _find(rel):
     for d in Path(__file__).resolve().parents:
         p = d / rel
@@ -406,9 +416,9 @@ def check(src, main_raw=None, ipad=None):
     say(len(off) == len(set(off)) == N_OFF and len(pc_off) == N_PC, 'host list hle_dos2_touch_tuts.h k_tu_off: %d keys, unique (%d PC keys, %d console keys the client may name itself)' % (
         len(off), len(pc_off), len(off) - len(pc_off)))
     # the engine's table and the shipped texts
-    sp = Path(src['_shared_pak']) if '_shared_pak' in src else _find('work/romfs/Data/Shared.pak')
+    sp = Path(src['_shared_pak']) if '_shared_pak' in src else _romfs('Shared.pak')
     tab = tut_table(sp) if sp else None
-    ld = _find('work/romfs/Data/Localization/English.pak')
+    ld = _romfs('Localization/English.pak')
     if tab is None or ld is None: say(False, 'Switch Shared.pak with %s or Localization/English.pak not found' % TUT_LSB)
     else:
         base, shown = base_keys(tab), shown_keys(tab)
@@ -560,7 +570,7 @@ def main():
         d = make(sources(a[1]))[OUT]; (out / OUT).write_bytes(d); print('%s: %d B' % (out / OUT, len(d))); return
     if a and a[0] == 'list':
         sys.stdout.reconfigure(encoding='utf-8')
-        tab = tut_table(a[1] if len(a) > 1 else _find('work/romfs/Data/Shared.pak'))
+        tab = tut_table(a[1] if len(a) > 1 else _romfs('Shared.pak'))
         for k in host_keys(): print('%-36s %s' % (k, re.sub(r'<[^>]+>', '', tab.get(k, ('?',))[0])))
         return
     sys.exit(__doc__)

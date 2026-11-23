@@ -228,6 +228,16 @@ def install(host):
 
 
 # ---------------------------------------------------------------- checks
+def _romfs(rel):
+    """a file next to the Switch Game.pak setup gave (romfs/Data/<rel>: the player's game folder), else the dev tree's work/romfs/Data/<rel>"""
+    try:
+        import dos2_pchud_touch
+        sw = getattr(dos2_pchud_touch, 'SW_PAK', None)
+    except ImportError: sw = None
+    if sw and Path(sw).is_file() and (Path(sw).parent / rel).exists(): return Path(sw).parent / rel
+    return _find('work/romfs/Data/' + rel)
+
+
 def _find(rel):
     for d in Path(__file__).resolve().parents:
         p = d / rel
@@ -285,7 +295,7 @@ def check(src, main_raw=None, ipad=None):
     say(len(off) == len(set(off)) and set(off) <= froms | set(NO_TWIN) and set(NO_TWIN) <= set(off) and not set(NO_TWIN) & froms,
         'every keyboard-only key of the host (%d, hle_dos2_touch_tips.h) has a touch tip or a reason (%d without: %s)' % (len(off), len(NO_TWIN), ' '.join(sorted(NO_TWIN))))
     # the engine's table
-    gp = Path(src['_game_pak']) if '_game_pak' in src else _find('work/romfs/Data/Game.pak')
+    gp = Path(src['_game_pak']) if '_game_pak' in src else _romfs('Game.pak')
     rows = _hints_lsx(gp) if gp else None
     if rows is None: print('skip Switch Hints.lsx not found (give the Switch Game.pak as the source): table checks skipped')
     else:
