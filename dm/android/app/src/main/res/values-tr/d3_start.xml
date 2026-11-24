@@ -6,4 +6,5 @@
     <string name="d3_start_missing_data">Oyun dosyaları Download/DivinityOriginalSin2Mobile içinde bulunamadı. Bilgisayarda kendi oyun dosyalarınızla setup\'ı çalıştırın ve oluşturduğu \"DivinityOriginalSin2Mobile\" klasörünü telefonun Download klasörüne kopyalayın.</string>
     <string name="d3_start_missing_modules">Yamalı oyun modülleri eksik (Download/DivinityOriginalSin2Mobile/dm/out). Bilgisayarda setup\'ı yeniden çalıştırın ve \"DivinityOriginalSin2Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
     <string name="d3_start_missing_shaders">Gölgelendiriciler eksik (Download/DivinityOriginalSin2Mobile/dm/shaders). Bilgisayarda setup\'ı yeniden çalıştırın ve \"DivinityOriginalSin2Mobile\" klasörünün tamamını telefonun Download klasörüne yeniden kopyalayın.</string>
+    <string name="d3_start_damaged_archives" formatted="true">Bazı oyun dosyaları eksik (telefona kopyalama yarıda kesildi):\n\n%1$s\n\nBu dosyaları PC\'den Download/DivinityOriginalSin2Mobile içindeki aynı yere yeniden kopyalayın (üzerine yazın), sonra oyunu başlatın.</string>
 </resources>

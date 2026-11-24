@@ -6,4 +6,5 @@
     <string name="d3_start_missing_data">Nie znaleziono plików gry w Download/DivinityOriginalSin2Mobile. Na komputerze uruchom setup z własnymi plikami gry i skopiuj utworzony folder „DivinityOriginalSin2Mobile” do folderu Download w telefonie.</string>
     <string name="d3_start_missing_modules">Brak spatchowanych modułów gry (Download/DivinityOriginalSin2Mobile/dm/out). Uruchom ponownie setup na komputerze i skopiuj jeszcze raz cały folder „DivinityOriginalSin2Mobile” do folderu Download w telefonie.</string>
     <string name="d3_start_missing_shaders">Brak shaderów (Download/DivinityOriginalSin2Mobile/dm/shaders). Uruchom ponownie setup na komputerze i skopiuj jeszcze raz cały folder „DivinityOriginalSin2Mobile” do folderu Download w telefonie.</string>
+    <string name="d3_start_damaged_archives" formatted="true">Niektóre pliki gry są niekompletne (kopiowanie na telefon zostało przerwane):\n\n%1$s\n\nSkopiuj te pliki ponownie z komputera w to samo miejsce w Download/DivinityOriginalSin2Mobile (zastąp je), a potem uruchom grę.</string>
 </resources>

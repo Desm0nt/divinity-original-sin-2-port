@@ -344,13 +344,97 @@ static int vk_fallback_to_system(const char *shaders, char *error, size_t bytes,
     return r;
 }
 
+// [port-common start-files-check] (KB APP-12 + HLE-36; reference D3 d3_pick_shader_dir / d3_check_archives) The start checks the files
+// setup made and the player copied, before the game runs: GitHub issues #8 / #10 (Mali-G615 phones) booted with no
+// dm/shaders/shaders.xgspack and drew nothing (every draw skipped: a black screen at 60 fps with sound). g_shaders = the shader folder
+// the Vulkan start uses (a misplaced copy is used when dm/shaders has no pack). nativeStartDetail = the start screen's file names.
+static char g_shaders[1200];
+static char g_start_detail[2048];
+JNIEXPORT jstring JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStartDetail(JNIEnv *env, jclass cls) { (void)cls; return (*env)->NewStringUTF(env, g_start_detail); }
+#ifdef DM_GAME_DOS2
+#include "dm_start_check.h"
+#define DOS2_SHADER_BUNDLES 12329   // setup stage 7 on update v786432 (docs/INSTALL.md)
+typedef struct { char (*path)[1400]; int n, cap; uint64_t sig; } dos2_files;
+static void dos2_files_add(const char *p, const struct stat *st, void *u) {
+    dos2_files *f = u; sc_sig_add(&f->sig, p, st);
+    if (f->n == f->cap) { int c = f->cap ? f->cap * 2 : 128; void *q = realloc(f->path, (size_t)c * sizeof *f->path); if (!q) return; f->path = q; f->cap = c; }
+    snprintf(f->path[f->n++], sizeof f->path[0], "%s", p);
+}
+static int dos2_has_pack(const char *dir) { char p[1300]; snprintf(p, sizeof p, "%s/shaders.xgspack", dir); return !access(p, R_OK); }
+// DM_SHADER_CHECK: 1 (default) = no shaders.xgspack in dm/shaders -> the usual misplaced copies, else the missing-shaders screen (-4);
+//   0 = log only and start (the old way: a black screen). DM_PAK_CHECK: 1 (default) = a damaged package / shader pack stops the start
+//   with a screen naming it (-11); 0 = log only. A set of files that passed is remembered (files/start-check.ok: name / size / mtime).
+static int dos2_check_files(const char *romfs) {
+    const char *m = getenv("DM_SHADER_CHECK"), *pm = getenv("DM_PAK_CHECK");
+    const int shader_check = !(m && *m == '0'), stop = !(pm && *pm == '0');
+    snprintf(g_shaders, sizeof g_shaders, "%s/shaders", g_runtime); g_start_detail[0] = 0;
+    if (!dos2_has_pack(g_shaders)) {
+        char names[512] = {0};
+        { DIR *d = opendir(g_shaders); int k = 0; struct dirent *e;
+          if (d) { while ((e = readdir(d))) if (e->d_name[0] != '.' && k++ < 8) { size_t u = strlen(names); snprintf(names + u, sizeof names - u, "%s%s", u ? ", " : "", e->d_name); } closedir(d); } }
+        LOG("【红】boot: shaders: no shaders.xgspack in %s (folder %s; entries: %s)", g_shaders, access(g_shaders, F_OK) ? "missing" : "present", names[0] ? names : "none");
+        if (!shader_check) LOG("【红】boot: shaders: starting anyway (DM_SHADER_CHECK=0): every draw will be skipped (black screen)");
+        else {
+            char parent[1100]; snprintf(parent, sizeof parent, "%s", g_src); { char *sl = strrchr(parent, '/'); if (sl && sl != parent) *sl = 0; }
+            char cand[8][1300]; int nc = 0;
+            snprintf(cand[nc++], sizeof cand[0], "%s/shaders/shaders", g_runtime);                      // shaders copied into an existing shaders folder
+            snprintf(cand[nc++], sizeof cand[0], "%s/shaders", g_src);                                  // DivinityOriginalSin2Mobile/shaders (next to dm)
+            snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_src);                               // the resource folder's own dm (runtime elsewhere)
+            snprintf(cand[nc++], sizeof cand[0], "%s/DivinityOriginalSin2Mobile/dm/shaders", g_src);    // the folder copied into itself
+            snprintf(cand[nc++], sizeof cand[0], "%s/dm/dm/shaders", g_src);                            // dm copied into dm
+            snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", parent);                              // dm copied to Download/ itself
+            snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_ext);                               // app-specific folder (debug imports)
+            snprintf(cand[nc++], sizeof cand[0], "%s/dm/shaders", g_files);                             // internal folder (run-as imports)
+            int found = 0;
+            for (int i = 0; i < nc && !found; i++) if (strcmp(cand[i], g_shaders) && dos2_has_pack(cand[i])) {
+                LOG("boot: shaders: using the shaders.xgspack found in %s (a misplaced copy; DM_SHADER_CHECK)", cand[i]);
+                snprintf(g_shaders, sizeof g_shaders, "%s", cand[i]); found = 1;
+            }
+            if (!found) { LOG("【红】boot: shaders: no shaders.xgspack in dm/shaders or a misplaced copy: the game would draw nothing; stopping with the missing-shaders screen (DM_SHADER_CHECK=0 starts anyway)"); return -4; }
+        }
+    }
+    static const char *const native_packs[] = {"native-post.xgspack", "native-nr.xgspack", "native-nr33b.xgspack", "native-nr33c.xgspack"};
+    for (unsigned i = 0; i < sizeof native_packs / sizeof native_packs[0]; i++) {
+        char p[1300]; snprintf(p, sizeof p, "%s/%s", g_shaders, native_packs[i]);
+        if (access(p, F_OK)) LOG("【红】boot: shaders: %s is missing (setup stage 8): the techniques that need it stay off", native_packs[i]);
+    }
+    dos2_files fl = {0};
+    sc_walk(g_shaders, ".xgspack", 0, dos2_files_add, &fl);
+    char data[1200]; snprintf(data, sizeof data, "%s/Data", romfs); sc_walk(data, ".pak", 4, dos2_files_add, &fl);
+    char want[40], have[40], okf[1100]; sc_sig_text(fl.sig, fl.n, want); snprintf(okf, sizeof okf, "%s/start-check.ok", g_files); sc_read_line(okf, have, sizeof have);
+    if (fl.n && !strcmp(have, want)) { LOG("boot: files: %d packages / shader packs unchanged since they last passed the check", fl.n); free(fl.path); return 0; }
+    sc_list bad = {g_start_detail, sizeof g_start_detail, 0, 0};
+    const uint64_t t0 = now_ns(); int unread = 0, parts = 0; const size_t sl = strlen(g_src);
+    for (int i = 0; i < fl.n; i++) {
+        const char *p = fl.path[i]; const size_t l = strlen(p); char why[256], badp[1400]; int r;
+        if (l > 8 && !strcmp(p + l - 8, ".xgspack")) {
+            unsigned count = 0; r = sc_xgspack_check(p, 0, &count, why, sizeof why); snprintf(badp, sizeof badp, "%s", p);
+            const char *b = strrchr(p, '/'); b = b ? b + 1 : p;
+            if (!r && !strcmp(b, "shaders.xgspack") && count < DOS2_SHADER_BUNDLES)
+                LOG("【红】boot: shaders: shaders.xgspack holds %u of %u bundles (setup's shader step did not finish?): draws of the missing ones are skipped", count, DOS2_SHADER_BUNDLES);
+        } else {
+            if (sc_lspk_is_part(p)) { parts++; continue; }
+            r = sc_lspk_check(p, why, sizeof why, badp, sizeof badp);
+        }
+        const char *rel = !strncmp(badp, g_src, sl) && badp[sl] == '/' ? badp + sl + 1 : badp;
+        if (r == 1) { LOG("【红】boot: files: %s is damaged: %s", rel, why); sc_list_add(&bad, rel); }
+        else if (r < 0) { unread++; LOG("boot: files: %s: %s (not judged)", rel, why); }
+    }
+    LOG("boot: files: %d packages / shader packs checked in %.0f ms (%d part files through their first part): %d damaged, %d not readable", fl.n - parts, (now_ns() - t0) / 1e6, parts, bad.count, unread);
+    if (!bad.count && !unread && fl.n) sc_write_line(okf, want);
+    free(fl.path);
+    if (bad.count && !stop) { LOG("【红】boot: files: starting anyway (DM_PAK_CHECK=0): the game may crash or miss data where it reads a damaged one"); return 0; }
+    return bad.count ? -11 : 0;
+}
+#endif
+
 static void *host_thread(void *arg) {
     (void)arg;
     char out[1200]; snprintf(out, sizeof out, "%s/out", g_runtime);
     // 图形初始化在宿主线程进行；着色器由玩家在包外提供，失败时停止启动。
     // Initialize graphics on the host thread; shaders stay external, and failure stops startup.
     char shaders[1200], error[512] = {0};
-    snprintf(shaders, sizeof shaders, "%s/shaders", g_runtime);
+    if (g_shaders[0]) snprintf(shaders, sizeof shaders, "%s", g_shaders); else snprintf(shaders, sizeof shaders, "%s/shaders", g_runtime);   // [port-common start-files-check] a misplaced copy found at start
     uint64_t t0 = now_ns(); LOG("boot: Vulkan initialization (shaders %s)", shaders);
 #ifdef DM_GAME_DOS2
     // [DOS2] VK-NATIVE: DM_VK_NATIVE=1 turns the old layers' switches off BEFORE the translator's init reads them (family defaults such as
@@ -682,6 +766,9 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     snprintf(required, sizeof required, "%s/data/.build.config", romfs);
     if (access(required, R_OK)) { LOG("boot: missing build configuration"); return -5; }
 #endif
+#ifdef DM_GAME_DOS2
+    { const int rc = dos2_check_files(romfs); if (rc) return rc; }   // [port-common start-files-check] shaders + packages (issues #8 / #10)
+#else
     snprintf(required, sizeof required, "%s/shaders", g_runtime);
     DIR *shaders = opendir(required); int have_shader = 0;
     if (shaders) { struct dirent *entry; while ((entry = readdir(shaders))) {
@@ -694,6 +781,7 @@ JNIEXPORT jint JNICALL Java_com_xiaoboluo_d2r_DmActivity_nativeStart(JNIEnv *env
     if (!have_shader) { LOG("boot: no shader bundles in %s", required); return -4; }
 #endif
     LOG("boot: shader bundles found in %s", required);
+#endif   // DM_GAME_DOS2
 #ifndef DM_GAME_DOOM   // [DOOM] no D2R touch overlay / overlay contract
     snprintf(required, sizeof required, "%s/overlay", g_runtime);
     // 启动前核必需覆盖层；旧资源不能自动补指纹，也不能带着错误资源进入游戏。

@@ -61,6 +61,7 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
     private DoomPadView doomPad;
     private D3PadView d3Pad;   // [D3] its own on-screen controls (touch / gamepad layouts) instead of doomPad
     static native int nativeStart(String filesDir, String extDir, String romfsSrc, String lang);
+    static native String nativeStartDetail();   // [port-common start-files-check] start code -11: the damaged files, one per line (jni_android.c)
     static native void nativeSurface(Object surface, int w, int h);
     static native void nativeRefresh(float hz);
     static native void nativeFrameStats(float[] out);   // [DOOM] {fps, mean ms, max ms, GPU ms} over the last 0.5 s
@@ -786,6 +787,9 @@ public class DmActivity extends Activity implements SurfaceHolder.Callback, Disp
         if (DOS2) applyAspectLayout();   // [DOS2] dm/env's DM_DOS2_NARROW / DM_DOS2_FAKE_SCREEN are known from here (issue #9)
         if (DOS2) { dos2TouchUiEnv(); if (result >= 0) { dos2ColumnApply(); Tl2Gear.dos2FpsApply(this); Tl2Gear.dos2SustainedApply(this); } }   // [DOS2] ... and the frame rate target's display mode + boot line   // [DOS2] the column's state with the pad known by now
         if (result < 0) {
+            // [port-common start-files-check] (D3 issue #26 -> DOS2 issues #8 / #10): packages / shader packs cut short by the copy, named on the start screen
+            if (DOS2 && result == -11) { String files = ""; try { files = nativeStartDetail(); } catch (Throwable t) { /* older native */ }
+                showStartError(d3Ui().getString(R.string.d3_start_damaged_archives, files)); return; }
             int resource = switch (result) {
                 // [D3] its own texts (from the DOOM 2016 port, d89997e): the shared ones name d2r's Download/S2X/D2R Mobile and d2rm_android.py
                 case -2 -> D3 ? R.string.d3_start_missing_data : R.string.dmAndroidMissingData;
