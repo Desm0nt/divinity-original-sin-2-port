@@ -204,7 +204,8 @@ data* option turned on (and keep the ticket).
 **I already set up an older version (0.1.x / 0.2.x / 0.3.x)** — run setup again in the same folder after downloading the new
 version: it skips everything that is still current and makes only what changed (a few minutes). Then copy what it made to
 the phone again, over the old files, and install the new APK over the old one (saves stay):
-- from **0.3.x** to 0.3.3: nothing, just install the new APK (no setup run needed);
+- from **0.3.x** to 0.3.4: install the new APK; for the new health bars of the Touch mode also run setup again and copy
+  `romfs/Data/TouchUI.pak` (without it everything works, the bars just stay as they were);
 - from **0.2.x** to 0.3.x: only `romfs/Data/TouchUI.pak` (the touch interface package, now with the Touch mode);
 - from **0.1.x**: `romfs/Data/TouchUI.pak` and the whole `dm/shaders` folder.
 
