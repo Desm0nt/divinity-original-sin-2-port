@@ -49,9 +49,11 @@ DM_DOS2_TOUCH_HUD_SCALE screen px on a 1080-high screen. So every number below i
                        The stage grows MM_GROW to the left (root children shifted at init). The host tells the toggles' state through
                        setBtnVisible(MM_STATE + bits) (an "on" ring + full glyph); showMiniMap hides our buttons with the map
   statusConsole_p.swf  statusConsole.swf: console / fight buttons / turn notice / GM button raised by SC_UP more (the hot bar is taller);
-                       the iPad's combat row (SC_*): grey | red | blue bars (iPad 309 / 505 / 309) flush on the hot bar's frame and as wide
-                       as it (dmScBars, again after every updateArmourBar: the PC forces the armour holders' scaleX -1 / 1); out of combat
-                       the host shows the object again and setBtnVisible(SC_EXPLORE) = bars only (the PC frame hidden), Wait /
+                       the iPad's combat row (SC_*); the bars in the CONSOLE HUD's art (CB_*, owner 24.11: "as in Hybrid"): the PC
+                       holders re-skinned with bottomBar_c.swf's physBar | HPbarMC | magicBar + its spiked copper frame (cb_skin: the PC
+                       classes and code kept), as wide as the hot bar's frame and standing on it, the numbers always on the bars
+                       (dmScBars, again after every updateArmourBar: the PC forces the armour holders' scaleX -1 / 1); out of combat
+                       the host shows the object again and setBtnVisible(SC_EXPLORE) = bars only, Wait /
                        Flee as text plates dmWait_mc / dmFlee_mc (the PC End turn plate art + the game's words; they follow the PC duo
                        buttons' visible / disabled, call GuardPressed / FleePressed), the PC End turn plate in their row; finger pads
   combatLog_p.swf      combatLog.swf opened at the screen centre as the iPad's (setPosition center / screen / center in onEventInit and
@@ -190,50 +192,59 @@ MM_HIT_VIEW = 130                # the view button's square while the menu is cl
 SC_UP = 33                       # health bar 1043 - 67 - 33 = 943 (statusConsole_t: 943)
 SC_MOVE = ['console_mc', 'fightButtons_mc', 'turnNotice_mc', 'toGM_mc']
 # The iPad's combat row (owner 23.11 "these combat buttons too", iPad shot: Wait / Flee text plates left, the turn plaque and the AP dots in the
-# middle, End turn right; the health bar and the two armour bars long and thin right on the hot bar's frame; statusConsole_t, TOUCH_LAYOUT 2.5).
+# middle, End turn right; statusConsole_t, TOUCH_LAYOUT 2.5); the bars on the hot bar's frame, as wide as it (owner 23.11, phone: "the red one
+# floats, the grey one is short and off to the left, the blue one is not seen"), since 24.11 in the console HUD's art (CB_*).
 # Stage = statusConsole's 1920 x 1080 (anchor bottom: screen x = x - (1920 - W) / 2); console_mc / fightButtons_mc stand at y 980 after
-# bottomBarHeight 67 + SC_UP (their own px below). The bars: the PC holders scaled to the iPad's lengths, their tops on screen y 940 / 942.
+# bottomBarHeight 67 + SC_UP (their own px below).
 SC_ORG = (960, 1080 - 67 - SC_UP)                    # console_mc / fightButtons_mc origin on the stage
-# The bars sit FLUSH on the hot bar's frame, together as wide as it (owner 23.11, phone: "the red one floats, the grey one is short and off to
-# the left, the blue one is not seen"): grey (physical armour) | red (health) | blue (magic armour) in the iPad's 309 / 505 / 309, SC_BAR_INSET
-# from the frame's ends and SC_BAR_GAP apart. Both movies are anchored bottom-centre with the same factor (the host: 0x28 and 0x75 alike),
-# so stage numbers hold on every screen width: status stage x = hot bar stage x + SC_DX, y = hot bar stage y + 80.
 HB_FRAME_ART = 57                # hotbar_mc own px of the frame's top line (its first opaque row: measured on the rendered symbol)
 SC_DX = 960 - 974
 SC_FOOT = HB_Y + HB_FRAME_ART * _s + 80                        # 960: the frame's top on the status stage (phone 23.11: ~960)
 SC_SPAN = (HB_X + SC_DX, HB_X + VISW * _s + SC_DX)             # the frame's ends (377 .. 1542)
-SC_BAR_INSET, SC_BAR_GAP = 6, 6
-SC_BAR_K = (SC_SPAN[1] - SC_SPAN[0] - 2 * SC_BAR_INSET - 2 * SC_BAR_GAP) / float(309 + 505 + 309)
-SC_GREY = (SC_SPAN[0] + SC_BAR_INSET, SC_SPAN[0] + SC_BAR_INSET + 309 * SC_BAR_K)
-SC_RED = (SC_GREY[1] + SC_BAR_GAP, SC_GREY[1] + SC_BAR_GAP + 505 * SC_BAR_K)
-SC_BLUE = (SC_RED[1] + SC_BAR_GAP, SC_RED[1] + SC_BAR_GAP + 309 * SC_BAR_K)
-SC_HB = (SC_RED[0], SC_FOOT - 16, (SC_RED[1] - SC_RED[0]) / 476.0, 1.0)    # hbHolder_mc: left, top, scaleX, scaleY (its drawing 476 x 16)
-# the armour holders (drawing 198 x 12): Console_1.setLeftArmourBar forces leftArmourBarHolder_mc.scaleX = -1 (the PC draws it mirrored,
-# growing leftwards from its origin) and setRightArmourBar the right one's = 1 on every update - so the origin of the left one is the RIGHT
-# end of its span, and dmScBars puts the scale back after every updateArmourBar (the engine's only path to those setters)
-SC_ARM = [('leftArmourBarHolder_mc', SC_GREY[1], -1), ('rightArmourBarHolder_mc', SC_BLUE[0], 1)]   # name, origin x, scaleX sign
-BAR_TRACK = (0x1e0c0c, 0.9)              # owner 23.11: a dark track under the health / armour bars, their own size (the lost part shows; at full it is covered)
-SC_ARM_S = (309 * SC_BAR_K / 198.0, 1.0)
-SC_ARM_TOP = SC_FOOT - 12
+# The bars AS THE CONSOLE HUD'S (owner 24.11, Hybrid mode: "the bars above the skill panel are nice - move them into the touch interface"):
+# the player's Switch bottomBar_c.swf barHolder_mc = physBar | HPbarMC | magicBar (236 / 460 / 236 own px, no gaps) under one copper frame with
+# spikes over the armour parts (an unnamed shape: -466..466 x 0..36, the bars at y 17 / 18), the numbers on the bars ($Title_Bold 20, stroke).
+# Their sprites have the PC holders' own structure (Larian's LS_Classes.larHealthbar: masks hBar2_mc / hBar_mc over the colour art, the
+# health art 2 frames: red / purple), so the PC holders are RE-SKINNED (cb_skin): healthBarHolder / armourBarHolderPhys / armourBarHolder /
+# hpBG_9 get the console's children (the PC names kept: the console's hb_mc / hb2_mc = the PC's bg_mc / lightBG_mc), the PC frame_mc gets
+# the console frame. The PC code is untouched: setHealth / updateArmourBar / setHPColour tween and colour the console art.
+# One scale CB_K: the console frame as wide as the hot bar's frame, its foot on that frame (as the console's: its bars' frame stands on the
+# bottom panel). Both movies are anchored bottom-centre with the same factor (the host: 0x28 and 0x75 alike), so stage numbers hold on every
+# screen width: status stage x = hot bar stage x + SC_DX, y = hot bar stage y + 80.
+CB_SRC = 'bottomBar_c.swf'       # the art source (the player's Game.pak, as the movies this pass rebuilds)
+CB_BOX = (-466, 0, 466, 36)      # the console frame shape's extent in barHolder_mc px (the bars' origin 0)
+CB_K = (SC_SPAN[1] - SC_SPAN[0]) / float(CB_BOX[2] - CB_BOX[0])         # 1.25 (the console draws it at 1.2)
+CB_X, CB_Y = (SC_SPAN[0] + SC_SPAN[1]) / 2.0, SC_FOOT - CB_BOX[3] * CB_K  # barHolder_mc's origin on the status stage: 959.5, 915
+# PC holder, PC class, console class, its x / y in barHolder_mc px, its drawing w x h (the console's barHolder_mc places)
+CB_BARS = [('hbHolder_mc', 'healthBarHolder', 'HPbarMC', -230, 17, 460, 16), ('leftArmourBarHolder_mc', 'armourBarHolderPhys', 'physBar', -466, 18, 236, 12),
+           ('rightArmourBarHolder_mc', 'armourBarHolder', 'magicBar', 231, 18, 236, 12)]
+# the PC number fields on their bars where the console's text holders are: field, centre x / y in barHolder_mc px (hp_txt_holder 0,8 + its
+# field 28 high at -1.55; phys / magic_txt_holder -344 / 357, 7 + 2), the PC field's font px (scaled to the console's 20 x CB_K)
+CB_TXT = [('hbTxt_mc', 0, 20.5, 16), ('abTxt_mc', -344, 23, 12), ('mabTxt_mc', 357, 23, 12)]
+CB_FONT = 20
+CB_TIP = CB_Y + 3 * CB_K         # 918.75: the spikes' tips over the armour parts (the frame's highest opaque row, 3 own px: measured)
+CB_HPTOP = CB_Y + 13 * CB_K      # 931.25: the health part's frame top (13 own px)
+BAR_TRACK = (0x1e0c0c, 0.9)      # owner 23.11: a dark track under the health / armour bars in their own shape (the lost part shows; at full it is covered)
 SC_EXPLORE = 100                 # setBtnVisible(SC_EXPLORE, ..) from the host (hle_dos2_touchui_hud.c HU_SC_EXPLORE): out of combat, bars only
-# One vertical stack above the bars, even gaps (owner 23.11, phone: "the turn plaque runs over the action points"): the PC resets the plaque
-# to its class const originalNotificationPosY (873) on every notice - our SC_UP raise was lost and the plaque's foot (873 + 22) covered the
-# dots (ap_mc at 888). Now: bars (top SC_HB[1]) - gap - ap_mc (its drawing 0..36: dots, studs, glow, the 7+ overflow 0..31) - gap - the plaque
-# (centred on its y, 43 high on the phone) with the const patched to SC_NOTICE_Y; the text plates' row ends with the AP row (the iPad: at the
-# dots' height). The PC's dark backing behind its old bar place (Console_1's unnamed shape #94, child 0: 500 x 35 at -250..250 x -54..-19 of
-# console_mc) was the black band above the red bar: hidden. The PC number fields go ON their bars (shown by the PC hover only).
-SC_STACK_GAP, SC_AP_H, SC_NOTICE_HALF = 8, 36, 22
-SC_AP_Y = SC_HB[1] - SC_STACK_GAP - SC_AP_H                 # 900
+# One vertical stack above the bars (owner 23.11, phone: "the turn plaque runs over the action points"): the PC resets the plaque to its class
+# const originalNotificationPosY (873) on every notice - our SC_UP raise was lost and the plaque's foot (873 + 22) covered the dots (ap_mc at
+# 888). Now: the health part's frame top (CB_HPTOP) - 1 - ap_mc (its drawing 0..36: dots, studs, glow, the 7+ overflow 0..31) - gap - the
+# plaque (centred on its y, 43 high on the phone) with the const patched to SC_NOTICE_Y (870 as before the console bars: its top stays at the
+# aim hint banner's foot 850). The text plates (Wait / Flee / End turn) stand over the armour parts: their feet 1 px over the spikes' tips.
+# The PC's dark backing behind its old bar place (Console_1's unnamed shape #94, child 0: 500 x 35 at -250..250 x -54..-19 of console_mc) was
+# the black band above the red bar: hidden.
+SC_STACK_GAP, SC_AP_H, SC_NOTICE_HALF = 2, 36, 22
+SC_AP_Y = int(CB_HPTOP) - 1 - SC_AP_H                       # 894
 SC_NOTICE_Y = SC_AP_Y - SC_STACK_GAP - SC_NOTICE_HALF       # 870: the plaque 848..892
 SC_BTN_H = 52                                               # the PC End turn plate's own 52 (iPad 879..923, 44 high)
-SC_BTN_Y = SC_AP_Y + SC_AP_H - SC_BTN_H                     # 884: the plates' feet on the AP row's foot (936)
-SC_TXT = [('hbTxt_mc', SC_RED, 470, SC_FOOT - 8), ('abTxt_mc', SC_GREY, 225, SC_FOOT - 6), ('mabTxt_mc', SC_BLUE, 225, SC_FOOT - 6)]   # field, its bar, width, centre y
+SC_BTN_Y = int(CB_TIP) - 1 - SC_BTN_H                       # 865: the plates 865..917 over the spikes (918.75)
 SC_END_X = 1272                                      # endBtn_mc (204 x 52, the engine's caption): iPad endBtn_mc 1272..1478
 SC_PLATES = [('dmWait_mc', 1, 328, 'Delay Turn', 'Отложить ход'), ('dmFlee_mc', 2, 528, 'Flee', 'Бежать')]   # name, code, x; captions: the game's
 SC_PLATE_W, SC_FONT = 192, 22                        # own words (english.xml h157c01cd.. "Delay Turn", russian.xml hcf2cc556.. "Отложить ход", hb399d83e.. Flee / Бежать)
 SC_FIT_MIN = 14                  # captions shrink (TextFormat size) until they fit the plate's inner width, not below this
-SC_PAD = (8, 24, 6)                                 # the plates' finger pads: px past the drawing left / right, above, below (90 high: ~7.4 mm at the
-                                                     # phone's x1.26; never over the hot bar 955 below, under the hint banner's foot 850 above)
+SC_PAD = (8, 15, 30)                                # the plates' finger pads: px past the drawing left / right, above, below (97 high: ~8 mm at the
+                                                     # phone's x1.26): from the hint banner's foot 850 down over the bars (they take no taps: console_mc
+                                                     # mouse off) to 947, short of the hot bar's frame (960)
 # ---- the right side (rightSideButtons_t: stage 1440 x 1080 anchored right; here the last SIDE_W px of it)
 SIDE_W, SIDE_H = 140, 1080       # frame, anchored topright (the physical scale grows it from the corner: the iPad's places, owner 20.11)
 _sx = lambda x: x - (1440 - SIDE_W)
@@ -253,7 +264,7 @@ EI_NEW = ['dmSide', 'dmAim', 'dmAimBtn', 'dmKey']   # ExternalInterface names th
 
 
 SW_PAK = None   # the Switch Game.pak sources() read (romfs/Data of the game folder)
-EXTRA = ['notification.swf']   # art sources only (not rebuilt): the hint banner of hotBar_p (HINT_SRC)
+EXTRA = ['notification.swf', CB_SRC]   # art sources only (not rebuilt): the hint banner of hotBar_p (HINT_SRC), the console bars of statusConsole_p (cb_skin)
 SRC_EXTRA = {}
 
 
@@ -1087,8 +1098,93 @@ def combatlog(data):
     d.inst['traits'].append(Trait(P('dmHook'), 1, 0, d.add('dmHook', 0, HEAD + [('returnvoid',)])))
     d.done()
     return swf.write(), dict(placed=[], defs=0, methods=d.made)
+def _sprite_find(swf, mv, pred):
+    """character ids of the DefineSprites one of whose PlaceObjects satisfies pred(record)"""
+    out = []
+    for cid, n in mv.defs.items():
+        code, d, _ = swf.tags[n]
+        if code == gr.T_SPRITE and any(pred(gr.place_parse(c, t)) for c, t in gr.subtags(d) if c in (gr.T_PLACE2, gr.T_PLACE3)): out.append(cid)
+    return out
+
+
+def _resprite(d, cid, chars, names=None, under=None):
+    """a DefineSprite payload: the console sprite payload d under the id cid, its characters mapped (chars), named children renamed (names);
+    under = (char, cxform bytes): one more child at depth 1 under everything (the masks of depth 1 move to depth 2, still clipping to theirs)"""
+    names = names or {}; out = bytearray(struct.pack('<HH', cid, gr.frames_of(d)))
+    if under: out += gr.tag_bytes(*gr.place_build(dict(depth=1, char=under[0], matrix=gr.matrix_bytes(0, 0), cx=under[1], ratio=None, name=None, clip=None,
+                                                      cls=None, f2=0, rest3=b'', move=False, v3=False, actions=None)))
+    for c, t in gr.subtags(d):
+        if c in (gr.T_PLACE2, gr.T_PLACE3):
+            r = gr.place_parse(c, t)
+            if r['char'] is not None: r['char'] = chars[r['char']]
+            if r['name'] is not None: r['name'] = names.get(r['name'][:-1].decode(), r['name'][:-1].decode()).encode() + b'\0'
+            if under and r['depth'] == 1:
+                assert r['clip'] is not None and struct.unpack('<H', r['clip'])[0] >= 3, 'depth 1 of a bar is not its first mask'
+                r['depth'] = 2
+            c2, t2 = gr.place_build(r)
+            if r['move']: t2 = bytes([t2[0] | 1]) + t2[1:]   # a later frame's change of a child (place_build writes no move flag)
+            out += gr.tag_bytes(c2, t2)
+        elif c == gr.T_END: break
+        else: out += gr.tag_bytes(c, t)
+    return bytes(out + gr.tag_bytes(gr.T_END, b''))
+
+
+def _track_cx():
+    """CXFORMWITHALPHA: colour = BAR_TRACK, alpha x its own (the bar's art as a dark silhouette)"""
+    rgb, a = BAR_TRACK; mult = (0, 0, 0, int(round(a * 256))); add = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 0)
+    return gr.wbits([(1, 1), (1, 1), (10, 4)] + [(v, 10) for v in mult + add])
+
+
+def cb_skin(swf):
+    """the console bars (CB_*) on the PC holders: the colour art, masks and frame of the player's bottomBar_c.swf grafted, then the PC holder
+    sprites (classes and child names kept), hpBG_9 (2 frames, kept) and Console_1's frame_mc rewritten to place them; each bar gets its own
+    art as a dark track under it (BAR_TRACK). The grafted definitions go before the first definition (they use nothing of the PC movie), so the
+    rewritten PC sprites use them after their definitions. -> {PC id: original payload} of the rewritten sprites (the checks put them back)"""
+    if CB_SRC not in SRC_EXTRA: sys.exit('statusConsole_p: no %s in the source (the console bars art, Public/Game/GUI of Game.pak)' % CB_SRC)
+    cs = Swf(SRC_EXTRA[CB_SRC]); cm = gr.Movie(cs); pm = gr.Movie(swf)
+    hold = _sprite_find(cs, cm, lambda r: r.get('name') == b'hpBar_mc\0'); assert len(hold) == 1, 'console barHolder_mc: %r' % hold
+    frame = [gr.place_parse(c, t) for c, t in gr.subtags(cs.tags[cm.defs[hold[0]]][1]) if c in (gr.T_PLACE2, gr.T_PLACE3)]
+    frame = [r['char'] for r in frame if r['name'] is None and r['char'] is not None and cs.tags[cm.defs[r['char']]][0] in gr.T_SHAPES]
+    assert len(frame) == 1, 'console bars frame shape: %r' % frame
+    g = gr.Graft(swf, cs); kids = {}
+    def body(cid): return cs.tags[cm.defs[cid]][1]
+    def places(cid): return [gr.place_parse(c, t) for c, t in gr.subtags(body(cid)) if c in (gr.T_PLACE2, gr.T_PLACE3) and gr.place_parse(c, t)['char'] is not None]
+    hp_art = cm.resolve('bottomBar_c_fla.healthBar_27')
+    for _, _, ccls, *_ in CB_BARS:
+        for r in places(cm.resolve(ccls)):
+            if r['char'] != hp_art: kids[r['char']] = g.copy(r['char'])   # the masks and the armour colour art (whole trees)
+    for r in places(hp_art): kids[r['char']] = g.copy(r['char'])         # the health colour art: red / purple
+    kids[frame[0]] = g.copy(frame[0])
+    assert not g.new_imports and not g.dropped, 'console bars art: imports %r, class links %r' % (g.new_imports, g.dropped)
+    new = [[c, d, False] for c, d in g.new_defs]
+    first = min(n for n, t in enumerate(swf.tags) if t[0] in gr.DEFS)
+    swf.tags[first:first] = new
+    pm = gr.Movie(swf); orig = {}
+    def put(cid, payload): orig[cid] = swf.tags[pm.defs[cid]][1]; swf.tags[pm.defs[cid]][1] = payload
+    hpbg = pm.resolve('statusConsole_fla.hpBG_9')
+    assert gr.frames_of(swf.tags[pm.defs[hpbg]][1]) == gr.frames_of(body(hp_art)) == 2, 'hpBG_9 / healthBar_27 frames'
+    put(hpbg, _resprite(body(hp_art), hpbg, kids))
+    cx = _track_cx()
+    for name, pcls, ccls, *_ in CB_BARS:
+        pc = pm.resolve(pcls); cc = cm.resolve(ccls); ch = dict(kids); ch[hp_art] = hpbg
+        col = [r['char'] for r in places(cc) if r['clip'] is None]   # the colour art (its two copies: light under the lost part, normal)
+        track = kids[places(hp_art)[0]['char']] if col[0] == hp_art else kids[col[0]]
+        put(pc, _resprite(body(cc), pc, ch, {'hb_mc': 'bg_mc', 'hb2_mc': 'lightBG_mc'}, under=(track, cx)))
+    con = pm.resolve('statusConsole_fla.Console_1')
+    fr = [r['char'] for c, t in gr.subtags(swf.tags[pm.defs[con]][1]) if c in (gr.T_PLACE2, gr.T_PLACE3) for r in [gr.place_parse(c, t)] if r['name'] == b'frame_mc\0']
+    assert len(fr) == 1 and swf.tags[pm.defs[fr[0]]][0] == gr.T_SPRITE, 'Console_1.frame_mc'
+    put(fr[0], struct.pack('<HH', fr[0], 1) + gr.tag_bytes(*gr.place_build(dict(depth=1, char=kids[frame[0]], matrix=gr.matrix_bytes(0, 0), cx=None, ratio=None,
+        name=None, clip=None, cls=None, f2=0, rest3=b'', move=False, v3=False, actions=None))) + gr.tag_bytes(gr.T_SHOW, b'') + gr.tag_bytes(gr.T_END, b''))
+    return orig, len(new)
+
+
+CB_ORIG = {}   # 'ids': the PC sprites cb_skin rewrote in the last statusConsole_p build (the check puts the originals back)
+
+
 def sc_art(swf):
-    """Wait / Flee as the iPad's text plates: the PC End turn plate's own background (EndTurnBackground_28 of this movie) at SC_PLATE_W, a caption"""
+    """the console bars (cb_skin), then Wait / Flee as the iPad's text plates: the PC End turn plate's own background (EndTurnBackground_28 of
+    this movie) at SC_PLATE_W, a caption"""
+    orig, ncb = cb_skin(swf); CB_ORIG['ids'] = sorted(orig)
     g = gr.Graft(swf); placed = []
     bgc = gr.Movie(swf).resolve('EndTurnBackground_28'); bw = 204.0
     for name, code, x, en, ru in SC_PLATES:
@@ -1096,28 +1192,42 @@ def sc_art(swf):
         g.place(g.sprite([(bgc, 1, (0, 0, SC_PLATE_W / bw, 1.0), None), (txt, 2, (0, 0), 'txt')]), x, SC_BTN_Y, name)
         placed.append((name, (x, SC_BTN_Y, x + SC_PLATE_W, SC_BTN_Y + SC_BTN_H)))
     g.finish()
-    return placed, len(g.new_defs)
+    return placed, len(g.new_defs) + ncb
 
 
-def _sc_code():
+def cb_fields(swf):
+    """{PC number field: (its drawing's centre x, y in its own px)} (Console_1's hbTxt_mc / abTxt_mc / mabTxt_mc)"""
+    mv = gr.Movie(swf); con = mv.resolve('statusConsole_fla.Console_1'); want = [n for n, *_ in CB_TXT]; out = {}
+    for c, t in gr.subtags(swf.tags[mv.defs[con]][1]):
+        if c in (gr.T_PLACE2, gr.T_PLACE3):
+            r = gr.place_parse(c, t); n = r['name'][:-1].decode() if r['name'] else None
+            if n in want: b = gr.bounds(swf, r['char'], 1, mv); out[n] = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
+    assert sorted(out) == sorted(want), 'Console_1 number fields: %r' % sorted(out)
+    return out
+
+
+def cb_places(fields):
+    """the stage geometry dmScBars gives: [(name, x, y, scale)] for frame_mc, the three holders, the three number fields (status stage px)"""
+    out = [('frame_mc', CB_X, CB_Y, CB_K)] + [(n, CB_X + x * CB_K, CB_Y + y * CB_K, CB_K) for n, _, _, x, y, _, _ in CB_BARS]
+    for n, cx, cy, px in CB_TXT:
+        s = CB_FONT * CB_K / px; fx, fy = fields[n]
+        out.append((n, CB_X + cx * CB_K - fx * s, CB_Y + cy * CB_K - fy * s, s))
+    return out
+
+
+VIS_LINE = '''
+        a.visible = True'''
+
+
+def _sc_code(fields):
     ox, oy = SC_ORG
-    arm = ''.join('''
+    bars = ''.join('''
     a = c.%s
-    if a:
+    if a:%s
         a.x = %r
         a.y = %r
         a.scaleX = %r
-        a.scaleY = %r
-        g = a.graphics
-        g.clear()
-        g.beginFill(%d, %r)
-        g.drawRect(0, 0, %d, %d)
-        g.endFill()''' % (n, x - ox, SC_ARM_TOP - oy, sg * SC_ARM_S[0], SC_ARM_S[1], BAR_TRACK[0], BAR_TRACK[1], 198, 12) for n, x, sg in SC_ARM)
-    txt = ''.join('''
-    f = c.%s
-    if f:
-        f.x = %r
-        f.y = %r''' % (n, (bar[0] + bar[1]) / 2.0 - w / 2.0 - ox, cy - 11 - oy) for n, bar, w, cy in SC_TXT)
+        a.scaleY = %r''' % (n, VIS_LINE if n.endswith('Txt_mc') or n == 'frame_mc' else '', x - ox, y - oy, k, k) for n, x, y, k in cb_places(fields))
     fit = ''.join('''
     m = this.getChildByName('%s')
     if m:
@@ -1161,21 +1271,9 @@ def dmScBars():
     c = this.console_mc
     if not c:
         return
-    c.frame_mc.visible = False
     b = c.getChildAt(0)
     if b:
         b.visible = False%s
-    h = c.hbHolder_mc
-    if h:
-        h.x = %r
-        h.y = %r
-        h.scaleX = %r
-        h.scaleY = %r
-        g = h.graphics
-        g.clear()
-        g.beginFill(%d, %r)
-        g.drawRect(0, 0, 476, 16)
-        g.endFill()%s
 def dmFit(f, w):
     i = 0
     while i < 12:
@@ -1257,7 +1355,7 @@ def dmScLang(t):
         i = i + 1
     if not ru:
         return%s
-''' % (txt, SC_HB[0] - ox, SC_HB[1] - oy, SC_HB[2], SC_HB[3], BAR_TRACK[0], BAR_TRACK[1], arm, SC_FIT_MIN, SC_AP_Y - oy, SC_NOTICE_Y, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
+''' % (bars, SC_FIT_MIN, SC_AP_Y - oy, SC_NOTICE_Y, fit, SC_END_X - ox, SC_BTN_Y - oy, -SC_PAD[0], -SC_PAD[1], 204 + 2 * SC_PAD[0],
        SC_BTN_H + SC_PAD[1] + SC_PAD[2], hook, vis, lang)
 
 
@@ -1269,7 +1367,7 @@ def status(data):
         assert struct.unpack('<d', d.abc.doubles[tc.vindex])[0] == 873.0, 'originalNotificationPosY is not 873'
         d.abc.doubles.append(struct.pack('<d', float(SC_NOTICE_Y))); tc.vindex = len(d.abc.doubles) - 1
         press_code(d, [('getlocal0',), ('getlocal1',), ('callpropvoid', P('dmScAct'), 1)])   # the plates: press dims, release on the plate acts
-        d.kc(_sc_code())
+        d.kc(_sc_code(cb_fields(d.swf)))
         # the PC's own visibility / disabled calls drive the plates (combat only, as the PC duo buttons); setBtnText(0, caption) -> language
         d.wrap('setBtnDisabled', 'dmSbdOrig', lambda n: HEAD + d.call_orig('dmSbdOrig', n) + [('getlocal0',), ('callpropvoid', P('dmScVis'), 0), ('returnvoid',)])
         # setBtnVisible(i, on): the host's SC_EXPLORE (the engine hid the object out of combat, the host shows it again for the bars) =
@@ -1345,6 +1443,51 @@ def build(src):
     return {o: MAKE[o](src[OUT[o]])[0] for o in OUT}
 
 
+def cb_putback(data, out):
+    """the built statusConsole_p with the sprites cb_skin rewrote given back their payloads of the source movie (for the tag-for-tag check)"""
+    a = Swf(data); am = gr.Movie(a); b = Swf(out); bm = gr.Movie(b)
+    for cid in CB_ORIG['ids']: b.tags[bm.defs[cid]][1] = a.tags[am.defs[cid]][1]
+    return b.write()
+
+
+def cb_check(data, b, t, say):
+    """the console bars of statusConsole_p: the re-skinned sprites against the console's (names, masks, art), dmScBars' geometry"""
+    bm = gr.Movie(b); cs = Swf(SRC_EXTRA[CB_SRC]); cm = gr.Movie(cs)
+    def kids(swf, mv, cid, frame=1): return gr.frame_state(swf.tags[mv.defs[cid]][1], frame)
+    def norm(swf, mv, c):   # a definition with its own id and the ids it uses zeroed (the art itself, wherever it was grafted)
+        code, d, _ = swf.tags[mv.defs[c]]; o = bytearray(d); o[0:2] = b'  '
+        for k in gr.ids_of(code, d)[1]: o[k:k + 2] = b'  '
+        return (code, bytes(o))
+    def art(swf, mv, cid):   # the shapes and bitmaps a character draws
+        return sorted(norm(swf, mv, c) for c in mv.tree(cid) if c in mv.defs and swf.tags[mv.defs[c]][0] != gr.T_SPRITE)
+    ok = True; why = []
+    hp, ch = bm.resolve('statusConsole_fla.hpBG_9'), cm.resolve('bottomBar_c_fla.healthBar_27')
+    for name, pcls, ccls, *_ in CB_BARS:
+        pc, cc = bm.resolve(pcls), cm.resolve(ccls); pk, ck = kids(b, bm, pc), kids(cs, cm, cc)
+        ren = {'hb_mc': 'bg_mc', 'hb2_mc': 'lightBG_mc'}
+        pn = sorted((r['name'] or b'\0')[:-1].decode() for r in pk.values())
+        cn = sorted([ren.get(x, x) for x in ((r['name'] or b'\0')[:-1].decode() for r in ck.values())] + [''])
+        pa = sorted(art(b, bm, pc)); ca = sorted(set(art(cs, cm, cc)) | set(art(cs, cm, ch)) if pcls == 'healthBarHolder' else set(art(cs, cm, cc)))
+        masks = sorted(r['depth'] for r in pk.values() if r['clip'] is not None); track = pk.get(1)
+        if pn != cn or sorted(set(pa)) != ca or len(masks) != 2 or not track or track['clip'] is not None or track['cx'] is None or track['name']:
+            ok = False; why.append('%s (names %r / %r, art %d / %d, masks %r)' % (pcls, pn, cn, len(set(pa)), len(ca), masks))
+    for f in (1, 2):
+        if [art(b, bm, r['char']) for r in kids(b, bm, hp, f).values()] != [art(cs, cm, r['char']) for r in kids(cs, cm, ch, f).values()]:
+            ok = False; why.append('hpBG_9 frame %d' % f)
+    say(ok and len(CB_ORIG['ids']) == 5, 'console bars re-skin: healthBarHolder / armourBarHolderPhys / armourBarHolder = HPbarMC / physBar / magicBar of %s (masks, colour art, the PC '
+        'names: hb_mc / hb2_mc -> bg_mc / lightBG_mc) + a dark track (their own art, %06x x %.2f) under each; hpBG_9 = healthBar_27 (red / purple: setHPColour); '
+        'Console_1.frame_mc = the console frame%s' % (CB_SRC, BAR_TRACK[0], BAR_TRACK[1], '' if ok else ': DIFFERS ' + '; '.join(why)))
+    pl = cb_places(cb_fields(b))
+    say(all(n in t for n, *_ in pl) and 'getChildAt' in t and 'scaleX' in t and abs(CB_K - 1.25) < 0.01 and abs(CB_X - 960) < 1
+        and abs(CB_Y + CB_BOX[3] * CB_K - SC_FOOT) < 0.01 and abs(SC_FOOT - 960) < 1,
+        'dmScBars: the console frame x%.3f at %.1f..%.1f x %.2f..%.2f of the status stage (the hot bar frame %.0f..%.0f, its foot on its top %.0f); %s' % (
+            CB_K, CB_X + CB_BOX[0] * CB_K, CB_X + CB_BOX[2] * CB_K, CB_Y, SC_FOOT, SC_SPAN[0], SC_SPAN[1], SC_FOOT,
+            ', '.join('%s %.0f..%.0f x %.1f..%.1f' % (n, CB_X + x * CB_K, CB_X + (x + w) * CB_K, CB_Y + y * CB_K, CB_Y + (y + h) * CB_K) for n, _, _, x, y, w, h in CB_BARS)))
+    say(all(n in t for n, *_ in CB_TXT) and t.count('visible') >= 5,
+        "the numbers always shown on their bars, as the console's: %s ($Title_Bold %d px x %.2f = %.0f px on a 1080 screen)" % (
+            ', '.join('%s centre %.0f,%.1f x%.3f' % (n, CB_X + cx * CB_K, CB_Y + cy * CB_K, CB_FONT * CB_K / px) for n, cx, cy, px in CB_TXT), CB_FONT, CB_K, CB_FONT * CB_K))
+
+
 def check(src):
     bad = 0
     def say(ok, text):
@@ -1361,7 +1504,10 @@ def check(src):
         say(not errs, 'ABC verifies: %d method bodies' % len(B.bodies))
         say(Swf(Swf(out).write()).body() == b.body(), 'the movie parses and round-trips')
         g = pps.tag_filter(o, gr.check(data, out, quiet=True)); want = ['header / tail differ'] if o in ('dmSide_p.swf', 'minimap_p.swf') else []   # uiCraft_p: widened art (dos2_ppanel_skills)
-        say(g == want, 'every original tag kept, ids unique, uses after definitions%s' % ('' if g == want else ': ' + str(g)))
+        if o == 'statusConsole_p.swf':   # the re-skinned PC bar sprites (cb_skin): compared with their originals put back; order / ids on the real result
+            g = [m for m in g if not m.startswith('original tag #')] + gr.check(data, cb_putback(data, out), quiet=True)
+        say(g == want, 'every original tag kept%s, ids unique, uses after definitions%s' % (' (the %d re-skinned bar sprites put back)' % len(CB_ORIG.get('ids', ())) if o == 'statusConsole_p.swf' else '',
+            '' if g == want else ': ' + str(g)))
         ib = {v: k for k, v in B.owners().items()}; doc = [B.mname(c['name']) for c in B.instances if B.mname(c['name']).endswith('.MainTimeline')][0]
         dis = lambda m: '\n'.join(B.dis(B.methods[ib[doc + '::' + m]].body))
         names = {gr.place_parse(c, t)['name'] for c, t, _ in b.tags if c in (4, 26, 70)}
@@ -1467,28 +1613,20 @@ def check(src):
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n, _, _ in MM_MOVE) and "'dmSide'" in dis('dmBAct'), 'onEventInit = original + %d moves; ring tap -> dmSide(2)' % len(MM_MOVE))
         elif o == 'statusConsole_p.swf':
             t = dis('onEventInit'); say('dmInitOrig' in t and all(n in t for n in SC_MOVE), 'onEventInit = original + console / fight buttons / turn notice / GM button raised by %d' % SC_UP)
-            t = dis('dmScBars'); tl = dis('dmScLay')
-            spans = [SC_GREY, SC_RED, SC_BLUE]; widths = [s2[1] - s2[0] for s2 in spans]
-            say('dmScBars' in tl and 'dmScLay' in dis('onEventInit') and 'hbHolder_mc' in t and all(n in t for n, _, _ in SC_ARM) and 'frame_mc' in t
-                and abs(SC_GREY[0] - SC_SPAN[0] - SC_BAR_INSET) < 0.01 and abs(SC_SPAN[1] - SC_BLUE[1] - SC_BAR_INSET) < 0.01
-                and abs(SC_RED[0] - SC_GREY[1] - SC_BAR_GAP) < 0.01 and abs(SC_BLUE[0] - SC_RED[1] - SC_BAR_GAP) < 0.01
-                and abs(widths[0] / widths[1] - 309 / 505.0) < 1e-3 and abs(widths[2] - widths[0]) < 0.01,
-                'bars flush on the hot bar frame %.0f..%.0f (status stage; the frame top %.0f): grey %.0f..%.0f | red %.0f..%.0f | blue %.0f..%.0f (309 / 505 / 309 x %.3f, inset %d, gaps %d)' % (
-                    SC_SPAN[0], SC_SPAN[1], SC_FOOT, SC_GREY[0], SC_GREY[1], SC_RED[0], SC_RED[1], SC_BLUE[0], SC_BLUE[1], SC_BAR_K, SC_BAR_INSET, SC_BAR_GAP))
-            say(abs(SC_HB[1] + 16 - SC_FOOT) < 0.01 and abs(SC_ARM_TOP + 12 - SC_FOOT) < 0.01 and abs(SC_FOOT - 960) < 1,
-                'feet on the frame: health %.0f..%.0f, armour %.0f..%.0f (screen at factor 1; phone 23.11: the frame top ~960)' % (SC_HB[1], SC_HB[1] + 16, SC_ARM_TOP, SC_ARM_TOP + 12))
+            t = dis('dmScBars'); tl = dis('dmScLay'); cb_check(data, b, t, say)
             t = dis('updateArmourBar'); say('dmUabOrig' in t and 'dmScBars' in t and 'leftArmourBarHolder_mc' in dis('dmScBars') and 'rightArmourBarHolder_mc' in dis('dmScBars'),
-                'updateArmourBar: the original (Console_1 forces scaleX -1 / 1), then dmScBars: left x%.3f mirrored with its origin at the right end %.0f, right x%.3f from %.0f' % (
-                    -SC_ARM_S[0], SC_GREY[1], SC_ARM_S[0], SC_BLUE[0]))
+                'updateArmourBar: the original (Console_1 forces scaleX -1 / 1), then dmScBars: both armour bars x%.3f from their left ends (the console art grows left to right)' % CB_K)
             t = dis('setBtnVisible'); tm = dis('dmScMode')
             say(str(SC_EXPLORE) in t and 'dmExplore' in t and 'dmScMode' in t and 'dmExplore' in dis('setCombatTurnNotification') and 'fightButtons_mc' in tm and 'ap_mc' in tm
                 and 'turnNotice_mc' in tm and 'dmExplore' in dis('dmScVis'),
                 'out of combat: the host shows the object again and sends setBtnVisible(%d) = bars only (fight buttons, AP, turn plaque, plates hidden); a fight button shown / a turn notice = combat' % SC_EXPLORE)
             t = dis('dmScBars'); tl = dis('dmScLay'); tc = B.trait(ib[doc] if False else [i for i, c2 in enumerate(B.instances) if B.mname(c2['name']) == doc][0], 'originalNotificationPosY')
-            say('getChildAt' in t and all(n in t for n, *_ in SC_TXT) and 'ap_mc' in tl and 'turnNotice_mc' in tl and struct.unpack('<d', B.doubles[tc.vindex])[0] == SC_NOTICE_Y
-                and SC_NOTICE_Y + SC_NOTICE_HALF + SC_STACK_GAP == SC_AP_Y and SC_AP_Y + SC_AP_H + SC_STACK_GAP == SC_HB[1] and SC_BTN_Y + SC_BTN_H == SC_AP_Y + SC_AP_H,
-                'one stack, gaps %d: plaque %d..%d (originalNotificationPosY 873 -> %d) | AP row %d..%d (overflow inside) | bars %d..%d; plates %d..%d (feet on the AP row); the dark backing (child 0) hidden, the numbers on their bars' % (
-                    SC_STACK_GAP, SC_NOTICE_Y - SC_NOTICE_HALF, SC_NOTICE_Y + SC_NOTICE_HALF, SC_NOTICE_Y, SC_AP_Y, SC_AP_Y + SC_AP_H, SC_HB[1], SC_FOOT, SC_BTN_Y, SC_BTN_Y + SC_BTN_H))
+            hint_foot = HINT[1] + 64 * HINT[3] + 80
+            say('getChildAt' in t and all(n in t for n, *_ in CB_TXT) and 'ap_mc' in tl and 'turnNotice_mc' in tl and struct.unpack('<d', B.doubles[tc.vindex])[0] == SC_NOTICE_Y
+                and SC_NOTICE_Y + SC_NOTICE_HALF + SC_STACK_GAP == SC_AP_Y and 0 < CB_HPTOP - (SC_AP_Y + SC_AP_H) <= 2 and 0 < CB_TIP - (SC_BTN_Y + SC_BTN_H) <= 2
+                and SC_NOTICE_Y - SC_NOTICE_HALF >= hint_foot - 2,
+                'one stack: plaque %d..%d (originalNotificationPosY 873 -> %d; the aim hint banner ends %.0f) | gap %d | AP row %d..%d (overflow inside) | the health frame %.2f; plates %d..%d over the spikes (%.2f); the bars\' frame %.0f..%.0f; the dark backing (child 0) hidden' % (
+                    SC_NOTICE_Y - SC_NOTICE_HALF, SC_NOTICE_Y + SC_NOTICE_HALF, SC_NOTICE_Y, hint_foot, SC_STACK_GAP, SC_AP_Y, SC_AP_Y + SC_AP_H, CB_HPTOP, SC_BTN_Y, SC_BTN_Y + SC_BTN_H, CB_TIP, CB_Y, SC_FOOT))
             say(SC_PLATES[1][2] + SC_PLATE_W + 10 <= 960 - 230, 'the plates end at %d, 10+ px left of the turn plaque (ВАШ ХОД: ~460 wide on the phone 23.11, from %d)' % (SC_PLATES[1][2] + SC_PLATE_W, 960 - 230))
             t = dis('dmFit'); say('textWidth' in t and 'setTextFormat' in t and 'dmFit' in dis('dmScLay') and 'dmFit' in dis('dmScLang'),
                 'captions shrink to the plate inner width %d (TextFormat size, not below %d)' % (SC_PLATE_W - 16, SC_FIT_MIN))
@@ -1499,9 +1637,10 @@ def check(src):
                 'the plates follow the PC duo buttons (setBtnVisible / setBtnDisabled: combat only; disabled = 45 % and no action)')
             t = dis('dmScLang'); say('dmScLang' in dis('setBtnText') and all(ru in t for *_, ru in SC_PLATES) and SC_FONT >= 22,
                 'captions: %s (English) / %s (a Cyrillic letter in the engine\'s End turn caption), %d px' % (' / '.join(p2[3] for p2 in SC_PLATES), ' / '.join(p2[4] for p2 in SC_PLATES), SC_FONT))
-            say(SC_BTN_Y + SC_BTN_H + SC_PAD[2] < SC_HB[1] and SC_BTN_Y - SC_PAD[1] >= HINT[1] + 64 * HINT[3] + 80 and SC_PLATES[0][2] + SC_PLATE_W + 8 <= SC_PLATES[1][2],
-                'finger pads %d x %d (plates) / %d x %d (End turn): screen y %d..%d, between the hint banner (foot %.0f) and the bars (%.0f)' % (
-                    SC_PLATE_W + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], 204 + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], SC_BTN_Y - SC_PAD[1], SC_BTN_Y + SC_BTN_H + SC_PAD[2], HINT[1] + 64 * HINT[3] + 80, SC_HB[1]))
+            say(SC_BTN_Y + SC_BTN_H + SC_PAD[2] < SC_FOOT and SC_BTN_Y - SC_PAD[1] >= HINT[1] + 64 * HINT[3] + 80 and SC_PLATES[0][2] + SC_PLATE_W + 8 <= SC_PLATES[1][2]
+                and SC_BTN_H + SC_PAD[1] + SC_PAD[2] >= 90,
+                'finger pads %d x %d (plates) / %d x %d (End turn): screen y %d..%d, from the hint banner (foot %.0f) over the bars (no taps there) to short of the hot bar frame (%.0f)' % (
+                    SC_PLATE_W + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], 204 + 2 * SC_PAD[0], SC_BTN_H + SC_PAD[1] + SC_PAD[2], SC_BTN_Y - SC_PAD[1], SC_BTN_Y + SC_BTN_H + SC_PAD[2], HINT[1] + 64 * HINT[3] + 80, SC_FOOT))
         elif o in pps.MAKE: pps.check_one(o, data, out, say)   # tools/dos2_ppanel_skills.py
         elif o[:-6] in PANEL_CLOSE:
             import dos2_layout as lay, tempfile
@@ -1537,8 +1676,17 @@ def mock(src, path, W=2400, F=None, made=None):
     import dos2_swf_render as rn
     F = dict(dict(hb=1.0, mm=1.0, side=1.0, pi=1.0), **(F or {}))
     canvas = Image.new('RGBA', (W, 1080), (38, 44, 40, 255))
-    def put(swf, what, x, y, sx=1.0, sy=None, crop=None, flip=False):
+    def put(swf, what, x, y, sx=1.0, sy=None, crop=None, flip=False, frame_fill=None):
         sy = sx if sy is None else sy
+        if frame_fill is not None and frame_fill < 1:   # a larHealthbar at this fill: its masks hBar_mc / hBar2_mc scaled as setBar leaves them
+            swf = Swf(swf.write()); cid = gr.Movie(swf).resolve(what); k = gr.Movie(swf).defs[cid]; d = swf.tags[k][1]; o = d[:4]
+            for c, t in gr.subtags(d):
+                if c in (gr.T_PLACE2, gr.T_PLACE3):
+                    r = gr.place_parse(c, t)
+                    if r['name'] in (b'hBar_mc\0', b'hBar2_mc\0'):
+                        m = gr.Bits(r['matrix'], 0).matrix(); r['matrix'] = gr.matrix_bytes(m[4] / 20.0, m[5] / 20.0, m[0] * frame_fill, m[3]); c, t = gr.place_build(r)
+                o += gr.tag_bytes(c, t)
+            swf.tags[k][1] = o; what = cid
         img, org = rn.render(swf, what, 1.0)
         if flip: bb = img.getbbox(); img = img.crop(bb).transpose(Image.FLIP_LEFT_RIGHT); org = (0, org[1] + bb[1])   # the drawing only (its 0.. box), mirrored
         if crop:   # (x0, y0, x1, y1) in the character's own px
@@ -1598,9 +1746,15 @@ def mock(src, path, W=2400, F=None, made=None):
     sc = Swf(made['statusConsole_p.swf']); ids = root_ids(sc); mv = gr.Movie(sc)
     sx = lambda x: W / 2.0 + (x - 960) * f; sy = lambda y: 1080 - (1080 - y) * f
     ox, oy = SC_ORG
-    put(sc, mv.resolve('healthBarHolder'), sx(SC_HB[0]), sy(SC_HB[1]), SC_HB[2] * f, SC_HB[3] * f)
-    for (nm, x, sg), cls in zip(SC_ARM, ('armourBarHolderPhys', 'armourBarHolder')):
-        put(sc, mv.resolve(cls), sx(x - (198 * SC_ARM_S[0] if sg < 0 else 0)), sy(SC_ARM_TOP), SC_ARM_S[0] * f, SC_ARM_S[1] * f, flip=sg < 0)
+    # the console bars (cb_skin / dmScBars): the re-skinned holders, the console frame (Console_1.frame_mc), the numbers (F['bars']: fill 0..1 each)
+    fr = [gr.place_parse(c, t2)['char'] for c, t2 in gr.subtags(sc.tags[mv.defs[mv.resolve('statusConsole_fla.Console_1')]][1]) if c in (gr.T_PLACE2, gr.T_PLACE3)
+          and gr.place_parse(c, t2)['name'] == b'frame_mc\0'][0]
+    fill = F.get('bars', (0.8, 0.62, 1.0)); nums = F.get('nums', ('42/42', '230/371', '58/58'))
+    for (n, pcls, _, x, y, w, h), v in zip(CB_BARS, (fill[1], fill[0], fill[2])):
+        put(sc, mv.resolve(pcls), sx(CB_X + x * CB_K), sy(CB_Y + y * CB_K), CB_K * f, frame_fill=v)
+    put(sc, fr, sx(CB_X), sy(CB_Y), CB_K * f)
+    for (n, cx, cy, px), s2 in zip(CB_TXT, (nums[1], nums[0], nums[2])):
+        text((sx(CB_X + (cx - 120) * CB_K), sy(CB_Y + (cy - 12) * CB_K), sx(CB_X + (cx + 120) * CB_K), sy(CB_Y + (cy + 12) * CB_K)), s2, CB_FONT * CB_K * f)
     if F.get('combat', True):   # out of combat (explore: the host's setBtnVisible(SC_EXPLORE)) the bars only
         put(sc, mv.resolve('apBar_10'), sx(ox - 81), sy(SC_AP_Y), f)
         # the turn plaque: its art is attached at run time (scalableBG_22.setMovieClips) - an approximation of its box (43 high, centred on its y)
