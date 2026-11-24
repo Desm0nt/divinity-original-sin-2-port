@@ -201,10 +201,10 @@ data* option turned on (and keep the ticket).
 **"not enough free space"** — free some space, or put the work folder on another disk: `setup.bat --work D:\dos2-work`
 (Windows) or `bash setup.sh --work /mnt/big/dos2-work`.
 
-**I already set up an older version (0.1.x / 0.2.x / 0.3.0)** — run setup again in the same folder after downloading the new
+**I already set up an older version (0.1.x / 0.2.x / 0.3.x)** — run setup again in the same folder after downloading the new
 version: it skips everything that is still current and makes only what changed (a few minutes). Then copy what it made to
 the phone again, over the old files, and install the new APK over the old one (saves stay):
-- from **0.3.0** to 0.3.1: nothing, just install the new APK (no setup run needed);
+- from **0.3.0 / 0.3.1** to 0.3.2: nothing, just install the new APK (no setup run needed);
 - from **0.2.x** to 0.3.x: only `romfs/Data/TouchUI.pak` (the touch interface package, now with the Touch mode);
 - from **0.1.x**: `romfs/Data/TouchUI.pak` and the whole `dm/shaders` folder.
 
@@ -218,6 +218,10 @@ updating: it remakes only the touch interface package (stage 9); copy `romfs/Dat
 
 **Where is the language setting?** — gear button → *Game settings…* → *Game language*; restart the game afterwards.
 The languages are built in.
+
+**The game says the shaders are missing or some files are damaged** — the start checks the files on the phone (since 0.3.2). Run
+`setup.bat check` (or `bash setup.sh check`) on the PC, then copy the files the message names (or the whole `dm/shaders` folder) to
+the same place on the phone again, replacing the old ones.
 
 **Black screen or the app closes** — open the gear dialog → *Vulkan driver* → try *System*, restart the app. Then open an
 issue on this repository with the phone model, Android version and what happened, and attach the whole
