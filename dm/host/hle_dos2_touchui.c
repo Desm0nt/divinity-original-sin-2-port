@@ -284,6 +284,16 @@ typedef struct {
 } tu_map;
 static tu_map g_map[TU_MAX];
 static int g_nmap, g_on, g_log, g_dbg, g_applied, g_nocheck, g_pcwin = 1, g_filter_any, g_watch_ok, g_mode_ok;
+// GitHub issue #12 (OnePlus 12R; reproduced on a Mi 14 Ultra 24.11): UI mode TOUCH runs with the mode byte main+0x2bb8918 = 0 (PC UI,
+// DM_DOS2_TOUCH_PCUI). The options class (types 0x58..0x5b, one class with the PC ids 0x01 0x11 0x23 0x2d) then fills its console movie
+// optionsSettings_d (or the stock optionsSettings_c) the PC way: addCheckBoxOptions, then parseUpdateArray -> Iggy writes an element into an
+// object without slot storage: sig 11 at main+0x3c56b4 (lr main+0x3b19f8), the moment a settings page opens. In UI mode HYBRID the byte is 1
+// and the same movie works. DM_DOS2_TOUCHUI_OPTMODE=1 (default): in TOUCH the byte is 1 from the creation of an options page (before the
+// class fills it) while one is on screen, back to 0 once none was visible for 20 pad polls (so the main menu and the HUD built at the next
+// load stay PC). Only the host's own flip is undone. 0 = as before (the crash).
+static int g_optmode = 1, g_optflip, g_optidle;
+static int tu_is_opt(uint32_t t) { return t >= 0x58 && t <= 0x5b; }
+static void tu_opt_mode(int one, const char *why);   // below (needs g_main)
 static int g_ui = UI_HYBRID, g_modal_ok;   // the UI mode whose path table is written now (hle_dos2_uimode.c); [uimgr+0x220] checked (dm_dos2_touchui_ui_busy)
 static uint32_t g_deny[32]; static int g_ndeny;
 // TU-04: the substituted objects the host saw created (handle, type), polled for visibility from hle_dos2_touch.c (game thread)
@@ -555,7 +565,7 @@ int dm_dos2_touchui_poll(int *pc_shown) {
     if (pthread_mutex_trylock(&g_lock)) return -1;   // creation in flight: the caller keeps its last state
     uint8_t *const *objs = *(uint8_t *const *volatile *)(mgr + TU_MGR_OBJS);
     const uint32_t nobj = *(volatile uint32_t *)(mgr + TU_MGR_NOBJ);
-    int up = 0, pcn = 0, vt = 0, vtm = 0, vb = 0, vbm = 0;
+    int up = 0, pcn = 0, vt = 0, vtm = 0, vb = 0, vbm = 0, optv = 0;
     for (int i = 0; i < g_nlive; i++) {
         tu_live *l = &g_live[i];
         const uint32_t idx = (uint32_t)l->h;
@@ -576,12 +586,17 @@ int dm_dos2_touchui_poll(int *pc_shown) {
         if (vis) { vt++; vtm += (fl & TU_F_MODAL) != 0; }
         if (vis && (g_filter_any || (fl & TU_F_MODAL))) up++;
         if (vis && l->asked != l->type) pcn++;
+        if (vis && tu_is_opt(l->type)) optv++;
     }
     g_vis_touch = vt; g_vis_touch_modal = vtm; g_vis_block = vb; g_vis_block_modal = vbm;
     int bb_vis = 0; for (int i = 0; i < g_nlive; i++) if (g_live[i].type == TU_BB_TYPE && g_live[i].vis > 0) bb_vis = 1;
     pthread_mutex_unlock(&g_lock);
     if (g_col_h) tu_col_mirror(mgr, bb_vis);
     if (pc_shown) *pc_shown = pcn;
+    if (g_optmode && g_mode_ok && g_ui == UI_TOUCH) {   // issue #12: see g_optmode
+        if (optv) { g_optidle = 0; tu_opt_mode(1, "an options page is on screen"); }
+        else if (g_optflip && ++g_optidle >= 20) tu_opt_mode(0, "no options page on screen for 20 polls");
+    }
     // DM_DOS2_TOUCHUI_PCWIN=2: the mode byte 0 while a retyped window is on screen, back to 1 when none (only the host's own flips)
     static int g_flipped;
     if (g_pcwin == 2 && g_mode_ok) {
@@ -652,6 +667,12 @@ static void tu_col_mirror(uint8_t *mgr, int bb_vis) {   // game thread, g_lock N
         LOG("[touchui] column movie %s with bottomBar (flags now %#x)%s%d,%d %dx%d", bb_vis ? "SHOWN" : "hidden", *(const volatile uint32_t *)(o + TU_OBJ_FLAGS),
             f ? "; its FlashPlayer rect " : "", f ? f[0] : 0, f ? f[1] : 0, f ? f[2] : 0, f ? f[3] : 0); }
 }
+static void tu_opt_mode(int one, const char *why) {
+    volatile uint8_t *mode = (volatile uint8_t *)(g_main->base + TU_MODE);
+    static unsigned n;
+    if (one && !g_optflip && *mode == 0) { *mode = 1; g_optflip = 1; if (n++ < 200) LOG("[touchui] options (issue #12): mode byte main+%#x 0 -> 1 (%s; DM_DOS2_TOUCHUI_OPTMODE)", TU_MODE, why); }
+    else if (!one && g_optflip) { if (*mode == 1) *mode = 0; g_optflip = 0; if (n++ < 200) LOG("[touchui] options (issue #12): mode byte main+%#x -> 0 (%s)", TU_MODE, why); }
+}
 static uint64_t tu_create_hook(uint64_t mgr, uint64_t layer, uint64_t type, uint64_t flags, uint64_t a4, uint64_t player) {
     const uint32_t asked = (uint32_t)type;
     uint32_t id = asked;
@@ -664,6 +685,7 @@ static uint64_t tu_create_hook(uint64_t mgr, uint64_t layer, uint64_t type, uint
         if (re && !hit) { re = NULL; id = asked; }
         pthread_mutex_unlock(&g_lock);
     }
+    if (g_optmode && g_on && g_mode_ok && g_main && g_ui == UI_TOUCH && tu_is_opt(asked)) { g_optidle = 0; tu_opt_mode(1, "an options page is created"); }
     uint64_t h = g_create_orig(mgr, layer, id, flags, a4, player);
     int ok = (h & 0x3fffff00000000ull) != 0;
     const unsigned n = atomic_fetch_add(&g_ncalls, 1);
@@ -836,6 +858,7 @@ void dm_dos2_touchui_install(void) {
         if ((v = getenv("DM_DOS2_TOUCHUI_PAK")) && *v && strlen(v) < sizeof g_pak_name && !strchr(v, '/')) strcpy(g_pak_name, v);
         g_nocheck = (v = getenv("DM_DOS2_TOUCHUI_NOCHECK")) && atoi(v) > 0;
         if ((v = getenv("DM_DOS2_TOUCHUI_PCWIN")) && *v) g_pcwin = atoi(v) < 0 ? 0 : atoi(v) > 2 ? 2 : atoi(v);
+        if ((v = getenv("DM_DOS2_TOUCHUI_OPTMODE")) && *v) g_optmode = atoi(v) != 0;
         g_filter_any = (v = getenv("DM_DOS2_TOUCHUI_FILTER")) && atoi(v) > 0;
         if ((v = getenv("DM_DOS2_TOUCHUI_DENY")) && *v) {
             char *dup = strdup(v), *save = NULL;
