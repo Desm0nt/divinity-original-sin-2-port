@@ -59,6 +59,12 @@ typedef struct vkn_ui_draw_in {
     const void *verts; const uint16_t *idx;   // CPU vertices / indices (copied into the ring) when vb is NULL
     const vkn_block *vb; uint64_t vb_off, ib_off;   // or an arena block (GDraw vertex buffer): byte offsets of vertices / indices
     uint32_t nverts, nidx;
+    // A special blend (GDraw blend 5) reads the destination as unit 1 at the pixel it writes: dst_read 1 = this module copies the pixels
+    // the draw can write (scissor x viewport, +2) of the current colour target into a texture of its own and binds it as unit 1 (Vulkan
+    // cannot sample the target it draws into; NVN did). dst_uv (the quad's uv) is only logged. DM_VK_NATIVE_UIDST=0: the placeholder as before,
+    // 2 the whole target. Issue: the
+    // white selection square of the console inventories (Reddit 24.11, AYN Thor; reproduced on a Mi 14 Ultra).
+    uint8_t dst_read; float dst_uv[4];
 } vkn_ui_draw_in;
 // Records the draw (pass opened by vkn_pass_ready, textures made sampleable by vkn_pass_sample first). 0 = drawn; 1 = dropped
 // (counted by reason; the first 16 of each reason print a red line).
@@ -70,6 +76,7 @@ typedef struct vkn_ui_stats {
     uint64_t drop_cb, drop_pass, drop_shader, drop_bind, drop_pipe, drop_set, drop_ring, drop_vb, drop_empty, drop_prog;
 } vkn_ui_stats;
 void vkn_ui_stats_get(vkn_ui_stats *s);
+void vkn_ui_dst_stats(uint64_t *copied, uint64_t *fallback);   // special-blend destination copies made / draws left on the placeholder
 
 // ==== [stage 5.2 B2] the UI pass on tile GPUs (DM_VK_NATIVE_UIPASS; replaces DM_NR_UIX_DS / DM_NR_UIX_AREA of the old path) ====
 // Port of NB-18b-6 + NR-UIX (xbg_nb_uiarea.inc, xbg_nr_uix.inc, docs/dos2/nr/NR-UIX.md) with their pure parts as they are

@@ -1221,7 +1221,54 @@ static void fc_fx(const vkn_draw_in *in, const vkn_fx_ctx *ctx, vkn_fx_out *out,
     uint32_t n = 0; vkn_tex *c[VKN_PASS_COLORS], *d = NULL; vkn_pass_cur_get(&n, c, NULL, NULL, &d);
     for (uint32_t i = 0; i < n; i++) if (c[i] && c[i]->ui_tgt) { fc_own_write(c[i], 1); g_ups.fc_engine_writes++; }
 }
+// ---- special-blend destination (vkn_ui.h dst_read): one texture of this module per target shape, the uv rectangle copied in ----
+static vkn_tex *g_dstc; static uint64_t g_dstc_gen, g_dst_copied, g_dst_fallback; static int g_dst_mode = -1;
+void vkn_ui_dst_stats(uint64_t *copied, uint64_t *fallback) { if (copied) *copied = g_dst_copied; if (fallback) *fallback = g_dst_fallback; }
+static vkn_tex *ui_dst_copy(const float uv[4]) {
+    if (g_dst_mode < 0) { const char *e = getenv("DM_VK_NATIVE_UIDST"); g_dst_mode = e && *e ? atoi(e) : 1;
+        vkn_logf("ui: DM_VK_NATIVE_UIDST=%d (special blends read a copy of the destination: 1 the pixels the draw can write = scissor x viewport, 2 the whole target; 0 = the placeholder as before)", g_dst_mode); }
+    vkn_tex *o = g_color;
+    if (!g_dst_mode || !o || o->dead || (o->samples && o->samples != 1)) { g_dst_fallback++; return NULL; }
+    if (g_dstc && (g_dstc->dead || g_dstc->w != o->w || g_dstc->h != o->h || g_dstc->format != o->format || g_dstc->nvn_fmt != o->nvn_fmt)) {
+        if (!g_dstc->dead) vkn_tex_destroy_cookie(1ull << 63 | 1ull << 62 | g_dstc_gen << 8);
+        g_dstc = NULL;
+    }
+    if (!g_dstc) {
+        vkn_tex_desc d; memset(&d, 0, sizeof d);
+        d.nvn_fmt = o->nvn_fmt; d.efmt = o->efmt; d.nvn_target = 1; d.w = o->w; d.h = o->h; d.depth = d.mips = d.layers = d.samples = 1; d.cls = VKN_TC_COLOR;
+        d.pool_id = ~0u; for (int i = 0; i < VKN_TEX_LAYER_IDS; i++) d.layer_ids[i] = ~0u; d.sampler_id = ~0u;
+        d.cookie = 1ull << 63 | 1ull << 62 | (++g_dstc_gen) << 8;   // (never an engine object's address; not a spare's cookie: bit 62)
+        const vkn_tex_src src = {.kind = VKN_SRC_NONE};
+        const char *why = NULL;
+        vkn_tex *s = vkn_tex_create(1ull << 32 | 0xffffffffull, &d, &src, &why);
+        if (!s || s->format != o->format) { if (s) vkn_tex_destroy_cookie(d.cookie);
+            static int noted; if (noted++ < 4) vkn_logf(RED "ui: no destination copy texture (%s): special blends keep the placeholder", why ? why : "format"); g_dst_fallback++; return NULL; }
+        snprintf(s->sname, sizeof s->sname, "ui-dst-copy"); s->ui_tgt = 1;
+        g_dstc = s;
+        vkn_logf("ui: destination copy texture %ux%u (format %d) made for special blends", o->w, o->h, (int)o->format);
+    }
+    // The special programs read the destination at the pixel they write (phone 24.11: GDraw's tile viewport 380,0 1160x1080 and the quad
+    // 585..640 in tile space wrote 965..1020; a copy of the uv rectangle 585..640 left the hole): the copy = the pixels the draw can write,
+    // scissor x viewport (the whole target where neither is set), +2. DM_VK_NATIVE_UIDST=2: the whole target.
+    int32_t x0 = 0, y0 = 0, x1 = (int32_t)o->w, y1 = (int32_t)o->h;
+    if (g_dst_mode != 2) {
+        if (g_vp_set) { const int32_t a = (int32_t)g_vp.x, b = (int32_t)g_vp.y, c = a + (int32_t)(g_vp.width + 0.999f), e = b + (int32_t)(g_vp.height + 0.999f);
+            if (a > x0) x0 = a; if (b > y0) y0 = b; if (c < x1) x1 = c; if (e < y1) y1 = e; }
+        if (g_sc_set) { const int32_t a = g_sc.offset.x, b = g_sc.offset.y, c = a + (int32_t)g_sc.extent.width, e = b + (int32_t)g_sc.extent.height;
+            if (a > x0) x0 = a; if (b > y0) y0 = b; if (c < x1) x1 = c; if (e < y1) y1 = e; }
+        x0 -= 2; y0 -= 2; x1 += 2; y1 += 2;
+        if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > (int32_t)o->w) x1 = (int32_t)o->w; if (y1 > (int32_t)o->h) y1 = (int32_t)o->h;
+    }
+    { static int n; if (n++ < 8) vkn_logf("ui: special blend #%d: uv %.4f,%.4f..%.4f,%.4f on target %ux%u (fmt %d) -> copy %d,%d..%d,%d; viewport %s %.0f,%.0f %.0fx%.0f, scissor %s %d,%d %ux%u",
+        n, uv[0], uv[1], uv[2], uv[3], o->w, o->h, (int)o->format, x0, y0, x1, y1, g_vp_set ? "set" : "unset", g_vp.x, g_vp.y, g_vp.width, g_vp.height,
+        g_sc_set ? "set" : "unset", g_sc.offset.x, g_sc.offset.y, g_sc.extent.width, g_sc.extent.height); }
+    if (x1 <= x0 || y1 <= y0) { g_dst_fallback++; return NULL; }
+    if (vkn_pass_copy_rect(g_dstc, x0, y0, o, x0, y0, (uint32_t)(x1 - x0), (uint32_t)(y1 - y0))) { g_dst_fallback++; return NULL; }
+    g_dst_copied++;
+    return g_dstc;
+}
 static int ui_draw_x(const vkn_ui_draw_in *in) {
+    if (in->dst_read && fc_holding()) fc_flush(FCF_OTHER);   // a special blend reads the target as it is now: nothing held before it
     if (fc_holding()) { fc_put_draw(in); return 0; }   // [mgpu P2] held (drawn at the epoch's end, or replaced by the cached region)
     ui_bind_now();   // [mgpu P7c]
     fc_own_write(g_color, 1);   // [mgpu P7f]
@@ -1232,11 +1279,12 @@ static int ui_draw_x(const vkn_ui_draw_in *in) {
     uint32_t pair = 0;
     const vkn_shader *s = pair_get(in->vs, in->fs, &pair);
     if (!s) { g_st.drop_shader++; return 1; }
+    vkn_tex *const dstc = in->dst_read ? ui_dst_copy(in->dst_uv) : NULL;   // (first: the copy ends the open pass, the UI pass rules then see a closed one)
     if (g_ep.on) up_event(up_draw_rect(), in->ds != 0, in->fs, 0);   // [stage 5.2 B2] decisions / re-attach / restart before the pass opens
     // textures first (layouts; a pass is ended where needed), then the pass
     vkn_tex *tex[VKN_UI_UNITS];
     for (int u = 0; u < VKN_UI_UNITS; u++) {
-        vkn_tex *t = fc_rd(in->tex[u]);   // [mgpu P7c] (a cache hit kept in a page)
+        vkn_tex *t = u == 1 && dstc ? dstc : fc_rd(in->tex[u]);   // [mgpu P7c] (a cache hit kept in a page)
         if (t && (t->dead || !t->view)) { t = NULL; g_st.placeholder++; }
         if (t && g_ep.on && g_ep.detached && t == g_ep.d) { t = NULL; g_st.feedback++; }   // [stage 5.2 B2] NVN has it bound: as vkn_pass_sample answers
         if (t && vkn_pass_sample(t)) { t = NULL; g_st.feedback++; }
@@ -2453,7 +2501,8 @@ void vkn_ui_pass_fence(void) { LH_T0(); if (g_lh.hold && !g_lh.replay) lh_fence(
 int vkn_ui_draw(const vkn_ui_draw_in *in) {
     int r = 0;
     LH_T0();
-    if (in && lh_want()) lh_draw(in); else r = ui_draw_x(in);
+    if (in && in->dst_read) { if (g_lh.hold && !g_lh.replay) lh_flush(VKN_UILF_OTHER); r = ui_draw_x(in); }   // special blend: in order, never held
+    else if (in && lh_want()) lh_draw(in); else r = ui_draw_x(in);
     LH_T1();
     return r;
 }

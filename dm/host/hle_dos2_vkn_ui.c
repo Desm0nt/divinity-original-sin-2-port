@@ -559,7 +559,7 @@ VKN_HOOK h_filter(VKN_A) {
         wr32(ctx + 0x10c, saved);
         return 0;
     }
-    if (blend == 5) { g_unit[1] = 0; g_n_special_dst++; }   // the destination as unit 1: a feedback loop in Vulkan (placeholder)
+    if (blend == 5) { g_unit[1] = 0; g_n_special_dst++; }   // the destination as unit 1: a feedback loop in Vulkan -> vkn_ui copies it (d.dst_read below)
     float vsc[32], fsc[12]; memset(vsc, 0, sizeof vsc); memset(fsc, 0, sizeof fsc);
     rs_apply(ctx, r, vsc, fsc);
     memset(vsc, 0, sizeof vsc); vsc[0] = 1.0f; vsc[5] = 1.0f;   // the original overwrites the vertex block after the state function
@@ -569,6 +569,10 @@ VKN_HOOK h_filter(VKN_A) {
     draw_state(ctx, &d);
     d.vs = vkn_rd64(ctx + 0x23e8); d.vfmt = VKN_UI_VF_V2TC2; d.quads = 1; d.verts = q; d.nverts = 4;
     d.vsc = vsc; d.vsc_bytes = sizeof vsc; d.fsc = fsc; d.fsc_bytes = sizeof fsc;
+    if (blend == 5) { d.dst_read = 1; d.dst_uv[0] = u0; d.dst_uv[1] = v0; d.dst_uv[2] = u1; d.dst_uv[3] = v1; }   // the white selection square (Reddit 24.11)
+    if (blend == 5) { static int n; if (n++ < 8) vkn_logf("ui host: special blend #%d: mode %u (special %u), quad %d,%d..%d,%d, frame origin %d,%d size %.0fx%.0f, tile %ux%u, units %llx %llx %llx %llx",
+        n, blend, vkn_rd8(r + 0xd), X0, Y0, X1, Y1, ox, oy, fw, fh, vkn_rd32(ctx + 0xe0), vkn_rd32(ctx + 0xe4),
+        (unsigned long long)g_unit[0], (unsigned long long)g_unit[1], (unsigned long long)g_unit[2], (unsigned long long)g_unit[3]); }
     if (ui_draw(&d)) g_n_fq_drop++;
     wr32(ctx + 0x10c, saved);
     return 0;
@@ -878,14 +882,15 @@ static void ui_pass_census(void) {
 static void ui_census(void) {
     vkn_ui_stats s; vkn_ui_stats_get(&s);
     vkn_tex_update_stats u; vkn_tex_update_stats_get(&u);
+    uint64_t dst_cp = 0, dst_ph = 0; vkn_ui_dst_stats(&dst_cp, &dst_ph);
     vkn_logf("ui: draws %llu (dropped here %llu; vkn_ui: %llu drawn = quads %llu + indexed %llu, %llu vertices, ring %.1f MB), filter quads %llu (dropped %llu), "
-             "filters (blur %llu: passes %llu, dropped %llu; colour matrix %llu, bevel %llu, drop shadow %llu: composites %llu, dropped %llu; other %llu), special blends without the destination %llu; "
+             "filters (blur %llu: passes %llu, dropped %llu; colour matrix %llu, bevel %llu, drop shadow %llu: composites %llu, dropped %llu; other %llu), special blends %llu (destination copied %llu, placeholder %llu); "
              "targets %llu (unknown texture %llu; push %llu / fail %llu, pop %llu), RenderingBegin %llu / End %llu (table %llu), clears %llu (depth-stencil %llu, masked %llu, colour %llu), custom draws %llu",
              (unsigned long long)g_n_draws, (unsigned long long)g_n_draw_drop, (unsigned long long)s.draws, (unsigned long long)s.quads, (unsigned long long)s.indexed,
              (unsigned long long)s.vertices, s.ring_bytes / 1048576.0, (unsigned long long)g_n_fq, (unsigned long long)g_n_fq_drop, (unsigned long long)g_n_filter[0],
              (unsigned long long)g_n_blur, (unsigned long long)g_n_blur_drop, (unsigned long long)g_n_filter[1], (unsigned long long)g_n_filter[2], (unsigned long long)g_n_filter[3], (unsigned long long)g_n_comp, (unsigned long long)g_n_comp_drop,
              (unsigned long long)g_n_filter[4],
-             (unsigned long long)g_n_special_dst, (unsigned long long)s.targets, (unsigned long long)g_n_tgt_unknown, (unsigned long long)g_n_tdb, (unsigned long long)g_n_tdb_fail, (unsigned long long)g_n_tde,
+             (unsigned long long)g_n_special_dst, (unsigned long long)dst_cp, (unsigned long long)dst_ph, (unsigned long long)s.targets, (unsigned long long)g_n_tgt_unknown, (unsigned long long)g_n_tdb, (unsigned long long)g_n_tdb_fail, (unsigned long long)g_n_tde,
              (unsigned long long)g_n_rb, (unsigned long long)g_n_re, (unsigned long long)g_n_table, (unsigned long long)g_n_clear, (unsigned long long)s.clears_ds,
              (unsigned long long)s.clears_masked, (unsigned long long)s.clears_color, (unsigned long long)g_n_cdb);
     if (g_ui_off) vkn_logf("ui: DM_VK_NATIVE_UI=0: %llu GDraw draws not recorded", (unsigned long long)g_n_ui_off);
