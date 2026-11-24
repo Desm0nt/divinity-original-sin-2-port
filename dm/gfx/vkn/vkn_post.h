@@ -85,6 +85,12 @@ int vkn_post_level(void);        // DM_VK_NATIVE_POST in effect (env read once; 
 int vkn_post_mobile(void);       // 1 = the NR-04 post entries may be replaced (level >= 1): asked by vkn_shlib_named.cpp (weak there)
 void vkn_post_install(void);     // mode 1, level >= 2: registers the chain function (order 400). Idempotent; any thread.
 void vkn_post_census(void);      // one line (also printed by the module itself every 10 s)
+// A copy is about to read t (vkn_pass_copy / vkn_pass_copy_rect: the engine's screenshot / save-thumbnail copy 0x920b00 reads
+// ScreenshotBackBuffer = HalfWidthBackBuffer, whose write the fused chain skipped - route A's console FXAA target - so the thumbnail was
+// all zeros, reproduced 24.11 on a Mi 14 Ultra and an S25 Ultra, DM_VK_NATIVE_POST=0 fixed it): a watched t gets the content it should hold first
+// (ALIAS copy of the holder / STALE replay), its watch ends. Recording thread. Weak in vkn_pass.c (tests without this module).
+struct vkn_tex;
+void vkn_post_before_read(struct vkn_tex *t);
 
 // ---- the pure parts (host test: vkn_stage3_test.c test_post) ----
 enum { VKN_PC_OTHER = 0, VKN_PC_LUT, VKN_PC_SIGHT, VKN_PC_VIG, VKN_PC_COMB, VKN_PC_FXAA, VKN_PC_COPY, VKN_PC_FOG, VKN_PC_OUTLINE, VKN_PC_N };
@@ -105,6 +111,7 @@ typedef struct vkn_post_stats {
     uint64_t recovered, recovered_close, materialized, overwritten, late_aa, violations;
     uint64_t armed_frames[4], refused_total;                                   // armed now [F1, F2, route A, -]
     uint64_t dump_reads;                                                       // watched images copied out by DM_VK_NATIVE_DUMP (not violations)
+    uint64_t ext_reads;                                                        // copies out of watched images, content put back first (vkn_post_before_read)
     uint64_t cleared;                                                          // [mgpu P4] watches ended by a whole clear the engine asked for after them
     // [VK-LOWRES] DM_VK_NATIVE_POST_PART (a 3D scale below 100 %: the chain draws a part of its targets)
     int part;                                                                  // the switch in effect

@@ -346,6 +346,17 @@ static int materialize(uint32_t i, const vkn_fx_ctx *outer) {
     }
     return -1;
 }
+void vkn_post_before_read(struct vkn_tex *t) {
+    if (!t || !g.nw) return;
+    const int i = watch_find(t);
+    if (i < 0 || g.w[i].kind == W_PROBE) return;
+    const int kind = g.w[i].kind;
+    if (!materialize((uint32_t)i, NULL)) { g.s.ext_reads++; return; }
+    g.s.violations++;
+    static int noted; if (noted++ < 8) vkn_logf("ãçº¢ãpost: a copy reads %s image %s %ux%u whose content could not be put back (the read sees what is there)",
+        kind == W_ALIAS ? "alias" : "stale", t->sname[0] ? t->sname : "?", t->w, t->h);
+    const int j = watch_find(t); if (j >= 0) watch_end((uint32_t)j);
+}
 static void violation(uint32_t i, int why, const vkn_fx_ctx *c, const char *what) {
     watch *w = &g.w[i];
     if (w->kind == W_PROBE) {   // probation: nothing was skipped, the shape of this window is bad (counted, not a violation)
@@ -934,10 +945,10 @@ void vkn_post_census(void) {
 #define D(f) (unsigned long long)(s.f - last.f)
     vkn_logf("post: level %d%s: post draws %llu; skipped %llu (would %llu), fused F1 %llu / F1A %llu / F2 %llu (would %llu); AA steps skipped %llu (would %llu), carried %llu; "
              "alias reads redirected %llu, twins %u; recovered %llu (at close %llu), materialised %llu, watches ended by an overwrite %llu, double AA frames %llu, "
-             "violations %llu, dump reads %llu; armed F1 %d F2 %d route A %d; watches ended by an engine clear %llu; refusals %s",
+             "violations %llu, dump reads %llu, copies out %llu; armed F1 %d F2 %d route A %d; watches ended by an engine clear %llu; refusals %s",
              s.level, s.verify == 1 ? " verify" : s.verify == 2 ? " poison" : "", D(draws_post), D(skipped), D(would_skip), D(fused[0]), D(fused[1]), D(fused[2]), D(would_fuse),
              D(step_skipped), D(step_would), D(carried), D(redirected), (unsigned)s.twins, D(recovered), D(recovered_close), D(materialized), D(overwritten),
-             D(late_aa), D(violations), D(dump_reads), g.arm[PR_F1].armed, g.arm[PR_F2].armed, g.arm[PR_RA].armed, D(cleared), k ? by : "none");
+             D(late_aa), D(violations), D(dump_reads), D(ext_reads), g.arm[PR_F1].armed, g.arm[PR_F2].armed, g.arm[PR_RA].armed, D(cleared), k ? by : "none");
     // [VK-LOWRES] a line of its own (the one above is near the 1024-byte log line already)
     vkn_logf("post part (10 s): DM_VK_NATIVE_POST_PART=%d: watches ended by a part overwrite %llu (would %llu), F1A on a part %llu, "
              "FSR pre passes left out %llu (would %llu)", s.part, D(overwritten_part), D(part_would), D(f1a_part), D(stretch_pre_skipped), D(stretch_would));

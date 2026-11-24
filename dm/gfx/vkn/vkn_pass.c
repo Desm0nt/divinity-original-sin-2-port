@@ -1903,8 +1903,10 @@ static int blit_ok(VkFormat f) {
     const VkFormatFeatureFlags want = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
     return (p.optimalTilingFeatures & want) == want;
 }
+struct vkn_tex; void vkn_post_before_read(struct vkn_tex *t) __attribute__((weak));   // vkn_post.c: a watched source gets its content first (save thumbnails)
 void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
     vkn_pass_init();
+    if (vkn_post_before_read && src) vkn_post_before_read(src);
     BEFORE_EV(VKN_PBE_COPY, dst, src);   // [mgpu P2]
     disarm();   // [stage 5.2 B1]
     if (g_dump.active && dst && src) { dump_note(src); dump_note(dst); }
@@ -1975,6 +1977,7 @@ void vkn_pass_copy(vkn_tex *dst, vkn_tex *src) {
 // ==== [mgpu P2] a region copy (vkn_pass.h vkn_pass_copy_rect) ====
 int vkn_pass_copy_rect(vkn_tex *dst, int32_t dx, int32_t dy, vkn_tex *src, int32_t sx, int32_t sy, uint32_t w, uint32_t h) {
     vkn_pass_init();
+    if (vkn_post_before_read && src) vkn_post_before_read(src);
     BEFORE_EV(VKN_PBE_COPY, dst, src);
     disarm();
     if (!dst || !src || dst == src || dst->dead || src->dead || dst->format != src->format || dst->samples != src->samples || is_depth(dst) || is_depth(src)) return -1;
